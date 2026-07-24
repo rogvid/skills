@@ -58,3 +58,14 @@ never sees it. This is the whole mechanism:
   `*.seg.mp4` (see `.gitignore`).
 - Keep the README catalog tables in sync whenever you add, promote, or remove a
   skill.
+
+## Skill scripts
+
+Skills in this repo ship executables as self-contained PEP 723 scripts run by
+`uv`, alongside a copied-in `ensure.sh`. Never add a `requirements.txt`, a
+`.venv/`, a `pip install` step, or a first-run marker file to a skill — uv's
+cache already handles once-only setup.
+
+Before writing, editing, or debugging any script inside a skill, read
+`skills/script-conventions/SKILL.md` and follow it. Templates to copy live in
+`skills/script-conventions/templates/`.

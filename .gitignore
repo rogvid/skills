@@ -1,5 +1,5 @@
 # Design docs — kept local while the repo's home is still being decided
-docs/
+.scratch/
 
 # Node / TypeScript build artifacts (bundled skill CLIs)
 node_modules/
@@ -12,3 +12,6 @@ __pycache__/
 # demo-video working files (only demo.mp4 belongs in history)
 .tts/
 *.seg.mp4
+
+# Best practice
+.env

@@ -1,19 +1,31 @@
 # demo-video
 
-An agent skill that records **self-explanatory demo videos of web apps**
-— scripted, deterministic screen recordings with a visible cursor, burned-in
-captions, and optional spoken narration. Built for agents (Claude Code and
-compatible harnesses) that can't watch video: demos are storyboarded in
-code, verified from stills and extracted frames, and reviewed by a
-context-free agent before shipping.
+An agent skill that records **self-explanatory demo videos of web apps and
+terminal programs** — scripted, deterministic screen recordings with
+burned-in captions and optional spoken narration. A web app is driven
+through a browser (`Recorder`); a CLI, REPL, or full-screen TUI runs in a
+real terminal (`TerminalRecorder`) — same recording engine, captions,
+narration, and verification. Built for agents (Claude Code and compatible
+harnesses) that can't watch video: demos are storyboarded in code, verified
+from stills and extracted frames, and reviewed by a context-free agent
+before shipping.
+
+## See it in action
+
+A demo made *with* demo-video — one narrated video spanning a live web app
+and a real terminal session (voice on):
+
+<video src="https://github.com/rogvid/skills/raw/main/skills/demo-video/examples/showcase.mp4" controls muted width="100%"></video>
+
+<sub>If the player doesn't load in your viewer, [watch/download the mp4 directly](examples/showcase.mp4).</sub>
 
 ## What you get
 
-- **`demo.mp4`** — 30–60 s screen recording of a feature in use: smooth
-  cursor motion, caption bar narrating every beat, spotlight rings on the
-  evidence, an on-screen terminal card for off-browser actions, and
-  interlude cards that bridge long waits (recorded as segments, stitched
-  losslessly).
+- **`demo.mp4`** — 30–60 s screen recording: for web, smooth cursor motion,
+  spotlight rings, and a decorative terminal card for off-browser actions;
+  for terminals, a real CLI/TUI session in an in-browser terminal. Both get
+  a caption bar narrating every beat and interlude cards that bridge long
+  waits (recorded as segments, stitched losslessly).
 - **`images/*.png`** — stills captured at key moments, ready for a written
   guide.
 - **`record.py`** — the storyboard that produced the media, committed next
@@ -33,14 +45,17 @@ context-free agent before shipping.
   `uv run --with playwright playwright install chromium`
 - Optional: an ElevenLabs API key for narration (free tier works — the
   default voice is a premade one, and rate limits are retried).
+- Terminal demos (`TerminalRecorder`) are **Unix-only** (they use a PTY).
+  Web demos run anywhere Playwright does.
 
 ## Install
 
-Copy this folder into a project or your user skills directory:
+Install with the [`skills`](https://github.com/vercel-labs/skills) CLI —
+into the current project, or globally with `-g`:
 
 ```sh
-cp -r demo-video <project>/.claude/skills/demo-video   # one project
-cp -r demo-video ~/.claude/skills/demo-video           # everywhere
+npx skills add https://github.com/rogvid/skills/tree/main/skills/demo-video
+npx skills add rogvid/skills --skill demo-video -g    # everywhere
 ```
 
 Then ask your agent for a demo ("record a demo of the new intake page") —
@@ -59,8 +74,10 @@ win over env vars.
 | `DEMO_VIDEO_OUT_DIR` | where demo files land | — |
 | `DEMO_VIDEO_BASE_URL` | app under demo | `http://localhost:8000` |
 | `DEMO_VIDEO_ACCENT_RGB` | cursor/spotlight color, `"235,110,20"` | orange |
-| `DEMO_VIDEO_TERMINAL_TITLE` | on-screen terminal card title | `terminal` |
-| `DEMO_VIDEO_TERMINAL_PROMPT` | terminal card prompt | `$ ` |
+| `DEMO_VIDEO_TERMINAL_TITLE` | web terminal-card title | `terminal` |
+| `DEMO_VIDEO_TERMINAL_PROMPT` | prompt (web card, and `TerminalRecorder` PS1) | `$ ` web / `❯ ` terminal |
+| `DEMO_VIDEO_TERMINAL_SHELL` | shell `TerminalRecorder` launches | `/bin/bash` |
+| `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | recording size, `"1280x720"` | 1280×720 |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
@@ -72,12 +89,18 @@ win over env vars.
 
 ```
 demo-video/
-├── SKILL.md                    # the process — agents read this
-├── README.md                   # this file — humans read this
-└── helpers/demo_recording.py   # Recorder + stitch + TTS, stdlib + Playwright only
+├── SKILL.md                       # the process — agents read this
+├── README.md                      # this file — humans read this
+└── helpers/
+    ├── demo_recording/            # package: core + web + terminal recorders
+    │   ├── __init__.py            #   exports Recorder, TerminalRecorder, stitch
+    │   ├── core.py                #   shared recording + narration + ffmpeg
+    │   ├── web.py                 #   Recorder (Playwright web apps)
+    │   └── terminal.py            #   TerminalRecorder (PTY + xterm.js)
+    └── assets/xterm/              # vendored xterm.js (terminal rendering)
 ```
 
-The helper and every generated storyboard carry PEP 723 metadata, so the
+The package and every generated storyboard carry PEP 723 metadata, so the
 dependency declaration travels with the files. Each storyboard embeds
 the skill's location as a constant written when the storyboard is
 created, with `DEMO_VIDEO_SKILL_DIR` taking precedence at runtime — so

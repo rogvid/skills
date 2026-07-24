@@ -1,9 +1,9 @@
 ---
 name: demo-video
-description: Use when a web app feature or flow needs a screen-recorded demo video and/or an illustrated step-by-step guide — "record a demo of X", "make a video walkthrough", "show the feature in action", "document this with a recording". Works on any web app reachable at a URL; needs Playwright and ffmpeg.
+description: Use when a web app, CLI, or TUI needs a screen-recorded demo video and/or an illustrated step-by-step guide — "record a demo of X", "make a video walkthrough", "show the feature in action", "demo my command-line tool", "document this with a recording". Records web apps (via Playwright) and terminal programs (CLIs, REPLs, full-screen TUIs, via an in-browser terminal); needs Playwright and ffmpeg.
 ---
 
-# demo-video — self-explanatory recorded demos of a web app
+# demo-video — self-explanatory recorded demos of a web app or terminal program
 
 ## Overview
 
@@ -13,6 +13,21 @@ no narration track, no insider knowledge. You never watch the video; you
 it captures, and have a context-free agent *read* extracted frames to
 verify the story lands. The storyboard is committed next to the media, so
 anyone can re-record after the UI changes.
+
+Two subjects, one engine. **`Recorder`** drives a **web app** through a
+Playwright page. **`TerminalRecorder`** runs a **CLI or TUI** in a real PTY
+rendered by an in-browser terminal — so captions, narration, stills,
+segments, and verification all work identically. This document leads with
+the web recorder; the **Terminal demos** section below covers what differs.
+Terminal recording is **Unix-only** (it uses a PTY).
+
+Both record into a **framed window on a soft pastel background** (rounded
+window, title bar, traffic-light buttons) so the eye has an obvious focus —
+the caption sits as a lower-third. The terminal frames itself in-page; the
+web recording is composited into the window by ffmpeg on exit, which scales
+it down (hence the larger web caption). One consequence: web `shot()` stills
+are captured full-bleed (no window frame) — good for embedding in a guide,
+but they will not match the windowed video exactly.
 
 Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 
@@ -71,17 +86,19 @@ from pathlib import Path
 # DEMO_VIDEO_SKILL_DIR takes precedence.
 _DEFAULT_SKILL_DIR = <the demo-video skill folder, as known when writing this file>
 SKILL_DIR = Path(os.environ.get("DEMO_VIDEO_SKILL_DIR") or _DEFAULT_SKILL_DIR)
-if not (SKILL_DIR / "helpers" / "demo_recording.py").exists():
+if not (SKILL_DIR / "helpers" / "demo_recording" / "__init__.py").exists():
     sys.exit(f"demo-video skill not found at {SKILL_DIR} — set DEMO_VIDEO_SKILL_DIR")
 sys.path.insert(0, str(SKILL_DIR / "helpers"))
-from demo_recording import Recorder  # noqa: E402
+from demo_recording import Recorder  # noqa: E402   (or TerminalRecorder)
 
 with Recorder(Path(__file__).parent) as rec:
     rec.goto("/")
     ...
 ```
 
-Run it with `uv run <demo folder>/record.py`.
+Run it with `uv run <demo folder>/record.py`. For a terminal demo, the only
+change is `from demo_recording import TerminalRecorder` and the verbs you
+call — see **Terminal demos** below.
 
 ## Configuration
 
@@ -95,14 +112,19 @@ clean:
 | `DEMO_VIDEO_OUT_DIR` | where demo files land (`out_dir`) | — (required one way or the other) |
 | `DEMO_VIDEO_BASE_URL` | app under demo | `http://localhost:8000` |
 | `DEMO_VIDEO_ACCENT_RGB` | cursor/spotlight color, `"235,110,20"` | orange |
-| `DEMO_VIDEO_TERMINAL_TITLE` | terminal card title | `terminal` |
-| `DEMO_VIDEO_TERMINAL_PROMPT` | terminal card prompt | `$ ` |
+| `DEMO_VIDEO_TERMINAL_TITLE` | web `terminal()` card title | `terminal` |
+| `DEMO_VIDEO_TERMINAL_PROMPT` | prompt string — web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
+| `DEMO_VIDEO_TERMINAL_SHELL` | shell `TerminalRecorder` launches | `/bin/bash` |
+| `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | recording size, `"1280x720"` | 1280×720 |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
 | `DEMO_VIDEO_SKILL_DIR` | where storyboards find this skill | the constant baked into each storyboard |
 | `ELEVENLABS_API_KEY` | enables speech narration | off |
+
+`DEMO_VIDEO_BASE_URL` applies to the web `Recorder` only; the terminal
+`*` variables to `TerminalRecorder`. All the rest apply to both.
 
 ## Speech narration (optional)
 
@@ -149,14 +171,139 @@ mp4 conversion happens on clean exit.
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
 | `caption(text)` | Narrator line at the bottom; `""` clears; dies on full page loads, survives SPA routing — clear before navigating either way |
+| `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception**. |
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
 | `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search) |
 | `wait_for(selector)` | Wait for something the app does on its own |
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears |
-| `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | On-screen terminal card for off-browser actions |
-| `interlude(text)` | Full-screen card bridging skipped real-world time |
+| `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
+| `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4 |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
+
+## Pacing and perception
+
+A demo is watched by a human, and human vision has fixed limits. Pace to
+those limits, not to how fast the machine can drive the app. The defaults
+below are encoded in the recorder; the point is to *not fight them*.
+
+- **A change needs ~1.5 s to register.** After something appears (a spotlight,
+  a new panel), the eye takes a saccade (~200 ms) plus a fixation to notice and
+  recognise it. Anything shown for under a second reads as a flicker — the
+  viewer sees *that* something flashed, not *what*. So emphasis has a floor of
+  ~1.5 s (`hold()`'s `min_s`). A spotlight you clear a moment after setting it
+  is the classic mistake.
+- **Reading takes time too.** People read burned-in captions at roughly
+  3–4 words per second, plus ~0.5 s to start. A caption must stay up long
+  enough to read *and* watch at once — with narration off, captions hold for
+  about `0.6 + 0.34·words` seconds automatically.
+- **Sync emphasis to the sentence.** With narration on, the spoken clause is
+  already paced for comprehension — so keep the highlight up for the whole
+  line. The pattern:
+
+  ```python
+  rec.caption("It points the eye at exactly what matters,")
+  rec.spotlight("#kpi")
+  rec.hold()          # stays highlighted until the line finishes speaking
+  rec.spotlight()     # then clear
+  ```
+
+  `hold()` waits for the current narration line to finish (or `min_s` when
+  silent). Without it, a short `pause()` can clear the highlight while the
+  narrator is still talking about it — exactly the flicker above.
+- **One salient change at a time.** The eye can track one moving/appearing
+  thing. Don't navigate, spotlight, and type in the same instant; sequence
+  them, caption first (it tells the eye where to look), then the visual.
+- **Never dwell on a static frame with a stale caption** (see Common mistakes)
+  — during unavoidable waits, tour what's on screen or swap the caption.
+
+## Terminal demos (CLI / TUI)
+
+`TerminalRecorder` records a **real terminal program** — a CLI, an
+interactive prompt/REPL, or a full-screen TUI. It launches the program
+under a PTY and renders it with an in-browser terminal (vendored xterm.js),
+so it records to demo.mp4 through the same headless Chromium the web
+recorder uses. **Everything shared works identically**: `caption`,
+`interlude`, `pause`, `shot`, speech/narration, segments + `stitch`. Only
+the interaction verbs differ. **Unix-only** (PTY). No new install
+prerequisites beyond the web path (`uv` + `ffmpeg` + Chromium).
+
+The recorder launches an interactive shell whose prompt (`PS1`) it sets to
+`terminal_prompt` (default `❯ `), giving `wait_for_prompt()` a reliable
+marker. The recording size drives the terminal grid; the resulting
+cols/rows are pushed to the PTY so TUIs lay out correctly (`font_size`
+tunes how much fits — default 15 px).
+
+Storyboard — identical template as above, swapping the import and verbs:
+
+```python
+from demo_recording import TerminalRecorder  # noqa: E402
+
+with TerminalRecorder(Path(__file__).parent) as rec:
+    rec.caption("Scaffold a project in one command.")
+    rec.run("mytool init my-app")       # types visibly, presses Enter
+    rec.wait_for_prompt()               # waits for the command to finish
+    rec.shot("01-done")
+
+    rec.caption("Answer the prompts it asks.")
+    rec.run("mytool config")
+    rec.wait_for_text(r"Environment\?")  # a regex, matched per screen line
+    rec.send("production")               # types a response + Enter
+
+    rec.caption("Drive a full-screen TUI with keys.")
+    rec.run("mytool dashboard")
+    rec.wait_for_text(r"CPU|MEM")
+    rec.key("Down", "Down", "Enter")     # arrows, Enter, Tab, "q", "C-c", …
+    rec.shot("02-dashboard")
+    rec.key("q")
+    rec.wait_for_prompt()
+```
+
+### TerminalRecorder verbs (plus the shared ones above)
+
+| Verb | Use |
+|---|---|
+| `run(command)` | Type a shell command visibly, press Enter. Pair with `wait_for_prompt()`. |
+| `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). |
+| `key(*names)` | Send keys: `"Up" "Down" "Left" "Right" "Enter" "Tab" "Escape" "Home" "End" "PageUp" "PageDown" "Backspace" "Delete" "Space"`, `"C-<letter>"` (e.g. `"C-c"`), or any single literal char (`"q"`, `"/"`). |
+| `wait_for_prompt(timeout_s=60)` | Wait until the shell prompt returns — i.e. the command finished. |
+| `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI-stripped) matches `pattern`; `^`/`$` anchor to screen lines. |
+| `rec.page` | The live Playwright page (escape hatch). `rec._write(str)` sends raw bytes to the PTY. |
+
+### Driving the four patterns
+
+- **Non-interactive CLI:** `run(cmd)` → `wait_for_prompt()`.
+- **Interactive prompt / REPL:** `run(cmd)` → `wait_for_text(prompt)` →
+  `send(answer)` → repeat.
+- **Full-screen TUI:** `key(...)` → `wait_for_text(a marker on the new
+  screen)` or `pause(...)` → `shot(...)`; quit, then `wait_for_prompt()`.
+- **Long-running / streaming:** `run(server)` → `wait_for_text("Listening…")`,
+  tour the output; skip big waits with the same `segment=` + `interlude` +
+  `stitch` machinery the web path uses. Output streams into the recording
+  live, so you see it scroll.
+
+### Terminal gotchas
+
+- **Sync on the *rendered screen*, not a guessed delay.** `wait_for_text`
+  reads what xterm.js actually displays (scrollback included), so it
+  survives TUIs that repaint continuously and never print a clean "done".
+- **`wait_for_prompt` keys on an *idle* prompt** — the last screen line
+  being exactly the prompt marker. Programs that clear the screen (`top`,
+  `clear`, most TUIs) erase earlier prompt lines, which is why counting
+  prompts does not work and this does.
+- **Typing is real echo.** `run`/`send` write to the PTY; the terminal
+  echoes each key, so it appears typed. Programs that turn echo off
+  (password prompts, raw-mode TUIs) correctly show nothing.
+- **Keep the prompt distinctive.** The default `❯ ` rarely collides with
+  output. If you theme it via `terminal_prompt`, keep it a string unlikely
+  to appear as the last line of a command's output.
+- **A program that never returns** (a server) needs `wait_for_text`, not
+  `wait_for_prompt` — there is no prompt until it exits.
+- **Pagers are disabled by default.** A real PTY makes `git`, `man`,
+  `systemctl`, etc. pipe through `less`, which holds the terminal and hangs
+  `wait_for_prompt`. The recorder sets `PAGER`/`GIT_PAGER`/`SYSTEMD_PAGER` to
+  `cat` so commands print inline. To demo a pager on purpose, launch it and
+  drive it with `key` (`"Space"`, `"q"`).
 
 ## Process
 
@@ -259,7 +406,8 @@ mp4 conversion happens on clean exit.
 
 ## Sharing this skill
 
-The skill is self-contained: this file, `helpers/demo_recording.py`, and
+The skill is self-contained: this file, the `helpers/demo_recording/`
+package, the vendored `helpers/assets/xterm/` terminal assets, and
 `README.md`. Install it with the `skills` CLI — into the current project:
 
 ```sh

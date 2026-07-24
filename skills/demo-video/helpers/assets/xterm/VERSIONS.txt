@@ -1,0 +1,5 @@
+Vendored from npm (UMD builds attach Terminal / FitAddon / SerializeAddon to window):
+  @xterm/xterm            6.0.0   -> xterm.js, xterm.css
+  @xterm/addon-fit        0.11.0  -> addon-fit.js
+  @xterm/addon-serialize  0.14.0  -> addon-serialize.js
+Refresh: npm pack @xterm/xterm @xterm/addon-fit @xterm/addon-serialize
