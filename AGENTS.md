@@ -1,0 +1,60 @@
+# Working in this skills repo
+
+This repo holds reusable agent skills, installed by the
+[`skills`](https://github.com/vercel-labs/skills) CLI (`npx skills add`).
+
+## Layout
+
+- `skills/` — **finished, shareable** skills. Everything here is discoverable and
+  gets installed by `npx skills add rogvid/skills`.
+- `wip/` — **in-development** skills. Not installed by anyone.
+- `docs/` — design docs. Currently gitignored (the repo's permanent home is still
+  being decided); do not `git add` it.
+
+Each skill is a directory with a `SKILL.md` at its root.
+
+## Why `wip/` stays hidden — do not "tidy" it into `skills/`
+
+The `skills` CLI discovers skills by walking the **repo root only one level
+deep**, plus a few known container dirs (`skills/`, `skills/.curated/`,
+`skills/.experimental/`, `skills/.system/`, `.claude/skills/`, …) two levels deep.
+A `SKILL.md` under `wip/<name>/` sits two levels below the root, so discovery
+never sees it. This is the whole mechanism:
+
+- Do **not** move `wip/` skills into `skills/` or any `skills/.experimental/`
+  subdir to "make them findable" — `.experimental/` **is** a discovery path, so
+  that would ship unfinished work to everyone running `--all`.
+- Keep **at least one** skill in `skills/`. If `skills/` is ever empty the CLI
+  falls back to a recursive search that would surface `wip/`. `demo-video`
+  currently holds this invariant.
+
+## Authoring a new skill
+
+1. Create it under `wip/<name>/SKILL.md`. **Never** create a skill directly in
+   `skills/`.
+2. Frontmatter needs `name` and `description`. `name` must equal the directory
+   name. Write `description` as a **trigger condition** ("Use when …") — that text
+   is what an agent matches against to decide whether to invoke the skill.
+3. If the skill needs a companion executable, bundle its source under
+   `<skill>/cli/` and invoke it from `SKILL.md` (e.g. via `npx tsx
+   <skill>/cli/src/index.ts`) so `npx skills add` carries it along. Do not rely
+   on a globally-installed binary.
+
+## Promoting a skill (`wip/` → `skills/`)
+
+1. `name` matches the directory name.
+2. `description` states **when to use** the skill, not only what it does.
+3. It has been run end-to-end in a real project at least once, not just written.
+4. Prerequisites are bundled in the skill directory, or stated explicitly in
+   `SKILL.md`.
+5. `git mv wip/<name> skills/<name>`.
+6. Update the README: add a row to the **Skills** table, remove it from
+   **In development**.
+7. Verify the per-skill install command against the pushed commit.
+
+## Housekeeping
+
+- Never commit `node_modules/`, `dist/`, `build/`, `__pycache__/`, `.tts/`, or
+  `*.seg.mp4` (see `.gitignore`).
+- Keep the README catalog tables in sync whenever you add, promote, or remove a
+  skill.
