@@ -130,6 +130,26 @@ _KEYMAP = {
     "Home": "\x1b[H", "End": "\x1b[F", "PageUp": "\x1b[5~", "PageDown": "\x1b[6~",
 }
 
+# Exit-status side channel.
+#
+# `run()` cannot know how its command ended: the command is still running when
+# the verb returns, and there is exactly one pipe out of the PTY — the same one
+# the recording is made of. Asking (`echo $?`) would type a line the viewer can
+# see, which is a demo artifact nobody asked for.
+#
+# So the shell says it in its prompt, invisibly. PS1 is prefixed with an OSC
+# escape carrying `$?`, which bash expands per prompt, wraps in \[...\] so
+# readline still measures the prompt correctly, and emits before every prompt
+# it draws. _pump() strips the sequence out of the byte stream before xterm.js
+# ever sees it, so nothing about the recording changes.
+#
+# Bash-shaped, like the rest of this recorder (`--norc --noprofile -i`, PS1/PS2
+# from the environment). A shell that does not expand `$?` in its prompt simply
+# never emits a marker, and every `exit_code` stays null rather than wrong.
+_EXIT_PS1 = "\\[\\e]777;demo-video-exit;$?\\a\\]"
+_EXIT_OSC = "\x1b]777;demo-video-exit;"
+_EXIT_RE = re.compile(re.escape(_EXIT_OSC) + r"(-?\d+)\x07")
+
 
 class TerminalRecorder(_DemoBase):
     """Records a terminal session (CLI, REPL, or full-screen TUI).
@@ -158,6 +178,7 @@ class TerminalRecorder(_DemoBase):
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        strict: bool | None = None,
         type_delay_ms: int = 45,
     ) -> None:
         # A branded, distinctive default prompt so wait_for_prompt's marker
@@ -167,7 +188,7 @@ class TerminalRecorder(_DemoBase):
             out_dir, segment=segment, accent_rgb=accent_rgb,
             terminal_title=terminal_title, terminal_prompt=prompt,
             viewport=viewport, speech=speech, voice_id=voice_id,
-            speech_model=speech_model,
+            speech_model=speech_model, strict=strict,
         )
         # Match the web recorder's effective caption height. Web composites
         # its page into a scaled, centered window, lifting its bottom:44px
@@ -186,6 +207,11 @@ class TerminalRecorder(_DemoBase):
         self._proc: subprocess.Popen | None = None
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._child_done = False
+        # Exit-status side channel: the run() beat still waiting for its
+        # command's status, and any half-arrived marker held back between
+        # reads (a 65 KB read can split the escape sequence anywhere).
+        self._pending_run: dict | None = None
+        self._exit_tail = ""
 
     # -- setup / teardown ---------------------------------------------------
 
@@ -205,7 +231,7 @@ class TerminalRecorder(_DemoBase):
         master, slave = pty.openpty()
         self._fd = master
         env = os.environ.copy()
-        env["PS1"] = self._terminal_prompt
+        env["PS1"] = _EXIT_PS1 + self._terminal_prompt
         env["PS2"] = "> "
         env["TERM"] = "xterm-256color"
         env.setdefault("LANG", "C.UTF-8")
@@ -297,9 +323,58 @@ class TerminalRecorder(_DemoBase):
             if not data:
                 self._child_done = True
                 return
-            text = self._decoder.decode(data)
+            text = self._take_exit_markers(self._decoder.decode(data))
             if text:
                 self.page.evaluate("d => window.__termWrite(d)", text)
+
+    def _take_exit_markers(self, text: str) -> str:
+        """Strip the PS1 exit-status markers out of `text`, recording each.
+
+        The stream is chopped at arbitrary byte offsets, so a marker can span
+        two reads; anything at the tail that could still become one is held
+        back rather than passed through to the terminal.
+        """
+        text = self._exit_tail + text
+        self._exit_tail = ""
+        if _EXIT_OSC[0] not in text:
+            return text
+        kept: list[str] = []
+        cut = 0
+        for match in _EXIT_RE.finditer(text):
+            kept.append(text[cut:match.start()])
+            cut = match.end()
+            self._record_exit_code(int(match.group(1)))
+        rest = text[cut:]
+        start = rest.rfind(_EXIT_OSC[0])
+        if start != -1:
+            candidate = rest[start:]
+            unfinished = _EXIT_OSC.startswith(candidate) or (
+                candidate.startswith(_EXIT_OSC) and "\x07" not in candidate
+            )
+            if unfinished:
+                self._exit_tail = candidate
+                rest = rest[:start]
+        kept.append(rest)
+        return "".join(kept)
+
+    def _record_exit_code(self, code: int) -> None:
+        """Attribute a status to the run() beat that is waiting for one.
+
+        The shell prints a prompt (and so a marker) for its own startup and
+        after anything else that returns to it, so a marker with no run()
+        outstanding is not this recorder's business and is dropped.
+        """
+        beat, self._pending_run = self._pending_run, None
+        if beat is None:
+            return
+        beat["exit_code"] = code
+        if code != 0:
+            command = beat.get("selector")
+            self._note_issue(
+                "nonzero_exit",
+                f"{command!r} exited {code}",
+                beat=beat, exit_code=code, command=command,
+            )
 
     def _idle(self, seconds: float) -> None:
         """Hold the frame while pumping program output, so long-running
@@ -341,8 +416,20 @@ class TerminalRecorder(_DemoBase):
     @_beat_verb("run")
     def run(self, command: str) -> None:
         """Type a shell command visibly and press Enter. Pair with
-        wait_for_prompt() to wait for it to finish."""
+        wait_for_prompt() to wait for it to finish.
+
+        The beat this records gains an `exit_code` once the shell's prompt
+        comes back — usually during the following wait_for_prompt(), which is
+        why the pairing is not merely a suggestion. A command that exits
+        non-zero also logs a `nonzero_exit` issue, and fails the take under
+        strict=True."""
         self._type(command)
+        # Claimed after typing, never before: the echo of the command itself
+        # draws no prompt, but anything left over from before it might.
+        beat = self._beats[-1] if self._beats else None
+        if beat is not None:
+            beat["exit_code"] = None
+        self._pending_run = beat
         self._write("\r")
         self._idle(0.2)
 

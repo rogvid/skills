@@ -209,6 +209,9 @@ def tts_clip(
 #   media         str    — the mp4 this timeline describes, e.g. "demo.mp4"
 #   duration      float? — that mp4's real duration (ffprobe), null if absent
 #   beats         list   — the beats, in the order they ran
+#   strict        bool   — whether strict mode was on for this take
+#   issues        list   — the problems the take recorded (see "take issues")
+#   issue_count   int    — how many were seen; > len(issues) only if capped
 #
 # Beat
 #   index     int    — position in `beats`, 0-based
@@ -225,11 +228,77 @@ def tts_clip(
 #   still     str?   — for `shot` beats, the still's path relative to the
 #                      timeline file ("images/01-dashboard.png"); else null
 #   segment   str?   — the segment this beat was recorded in, or null
+#   exit_code int?   — TerminalRecorder `run` beats only: the shell's status
+#                      for that command, or null if it could not be read
 #
 # Only the verb a storyboard calls becomes a beat. The verbs recorders build
 # out of other verbs (`click` glides with `move_to`, `type_into` clicks first)
 # record one beat spanning the whole call, not one per internal step.
 TIMELINE_SCHEMA = 1
+
+# -- take issues -------------------------------------------------------------
+#
+# A demo that looks perfect while the app throws on every render passes any
+# review that only watches pixels. So the recorders also watch the *app*: the
+# browser console, uncaught page exceptions, requests that never completed,
+# responses that came back >= 400, and — for TerminalRecorder — the exit status
+# of every command `run()` typed. Each becomes an issue on the timeline, and
+# each is attributed to the beat that was open when it fired, so a reviewer
+# reads "the take broke during `click('#refresh')`" instead of "the take broke".
+#
+# Issue (part of the envelope's `issues`, same append-only rules as a beat)
+#   kind     str   — one of ISSUE_KINDS below
+#   t        float — seconds from the start of `media` to *observing* it
+#   beat     int?  — index of the beat it is attributed to, null if none was
+#                    open yet (setup, or a page event before the first verb)
+#   verb     str?  — that beat's verb, denormalized so the list reads alone
+#   caption  str   — the caption on screen at the time, same reason
+#   message  str   — one human-readable line
+#   plus kind-specific keys: `url`/`line` (console), `url`/`method`
+#   (request_failed), `url`/`status` (http_error), `exit_code`/`command`
+#   (nonzero_exit)
+#
+# `t` is when the problem was *observed*, which is not always when it happened:
+# Playwright's sync API only delivers page events while it is being called, and
+# a command's exit status is only knowable once the prompt comes back. `beat`
+# is the attribution to trust; `t` is a hint.
+ISSUE_KINDS = (
+    "console_error",    # console.error(...) from the page
+    "console_warning",  # console.warn(...) from the page
+    "page_error",       # an uncaught exception / unhandled rejection
+    "request_failed",   # a request that never got a response at all
+    "http_error",       # a response with status >= 400
+    "nonzero_exit",     # a TerminalRecorder run() whose command failed
+)
+
+# What `strict=True` refuses to pass: the app saying, in its own voice, that it
+# is broken. `console_warning`, `request_failed` and `http_error` are recorded
+# but not fatal on their own — a warning is not a failure, and a request the
+# storyboard never depended on is the recorder's business to report, not to
+# veto.
+#
+# In practice that distinction is narrower than it looks, and deliberately so:
+# Chromium writes its own "Failed to load resource: …" line to the console for
+# every request that fails or comes back >= 400, and that line is a genuine
+# console error. So a strict take *does* fail on a 404 — including a favicon
+# — because the browser complained about it out loud. Strict means strict; a
+# demo of an app that cannot load its own assets is a demo of a broken app.
+# Anything less deterministic than that belongs in the log, not in the verdict.
+STRICT_KINDS = ("console_error", "page_error", "nonzero_exit")
+
+# A page that throws on every render can throw thousands of times. Record the
+# first MAX_ISSUES in full and keep counting the rest — `issue_count` in the
+# envelope stays honest, and timeline.json stays a file somebody can open.
+MAX_ISSUES = 200
+
+
+class StrictTakeFailed(RuntimeError):
+    """A strict take finished, but recorded a problem it refuses to pass.
+
+    Raised out of `__exit__` *after* the mp4, the stills and the timeline have
+    been written — a broken take is exactly the one somebody wants to look at,
+    so failing it must not also destroy the evidence.
+    """
 
 
 def timeline_paths(out_dir: Path | str, segment: str | None = None) -> tuple[Path, Path]:
@@ -298,6 +367,35 @@ def render_timeline_md(doc: dict) -> str:
                 _md_cell(beat.get("caption")),
             )
         )
+    issues = doc.get("issues") or []
+    if issues:
+        total = doc.get("issue_count", len(issues))
+        out += [
+            "",
+            "## Issues",
+            "",
+            f"{total} recorded while this take ran — console errors, failed "
+            f"requests, and non-zero exit codes, each attributed to the beat "
+            f"it fired during. A demo can look perfect and still be a "
+            f"recording of a broken app.",
+            "",
+        ]
+        # A bullet list rather than a table on purpose: a table row starting
+        # `| 0 |` is indistinguishable from a beat row to anything counting
+        # the beat table above.
+        for issue in issues:
+            where = (
+                "before the first beat"
+                if issue.get("beat") is None
+                else f"beat {issue['beat']} (`{_md_cell(issue.get('verb'))}`)"
+            )
+            out.append(
+                f"- **{_md_cell(issue.get('kind'))}** — {where} at "
+                f"{_fmt_t(issue.get('t'))}s: {_md_cell(issue.get('message'))}"
+            )
+        if total > len(issues):
+            out.append(f"- …and {total - len(issues)} more, not recorded.")
+        out.append("")
     stills = [b for b in beats if b.get("still")]
     if stills:
         out += ["", "## Stills", ""]
@@ -382,6 +480,7 @@ class _DemoBase:
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        strict: bool | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
         # > built-in default (see SKILL.md for the variable names).
@@ -455,6 +554,13 @@ class _DemoBase:
         self._beats: list[dict] = []
         self._caption = ""
         self._in_beat = False
+        # The problem log (see "take issues" above). `strict` decides whether
+        # a take that recorded a fatal one is allowed to succeed.
+        if strict is None:
+            strict = _env_flag("STRICT")
+        self._strict = bool(strict)
+        self._issues: list[dict] = []
+        self._issue_count = 0
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
         # env) is otherwise a confusing surprise only noticed after the fact.
@@ -517,6 +623,9 @@ class _DemoBase:
             # the medium's setup takes (~250 ms for the web recorder's
             # window-frame render, and it is not a constant).
             self._t0 = time.monotonic()
+            # Before _start(), so the very first navigation is watched too —
+            # a page that throws on load is the whole point of this.
+            self._watch_page(self.page)
             self._start()
         except Exception:
             # __exit__ never runs when __enter__ raises — don't leak the
@@ -558,6 +667,150 @@ class _DemoBase:
             for leftover in self._video_dir.glob("*"):
                 leftover.unlink()
             self._video_dir.rmdir()
+            # Always, strict or not, crashed or not: the problems a take
+            # recorded are the one thing nobody thinks to go looking for, so
+            # they have to arrive unasked.
+            self._print_issue_summary()
+        if exc_type is None and self._strict:
+            fatal = [i for i in self._issues if i["kind"] in STRICT_KINDS]
+            if fatal:
+                raise StrictTakeFailed(self._strict_message(fatal))
+
+    # -- take issues --------------------------------------------------------
+
+    def _note_issue(
+        self,
+        kind: str,
+        message: str,
+        beat: dict | None = None,
+        **extra: object,
+    ) -> None:
+        """Log one problem, attributed to `beat` (default: the open one).
+
+        Never raises: it runs inside Playwright event callbacks, where an
+        exception would surface somewhere unrelated and kill a take over a
+        diagnostic.
+        """
+        self._issue_count += 1
+        if len(self._issues) >= MAX_ISSUES:
+            return
+        if beat is None and self._beats:
+            beat = self._beats[-1]
+        record: dict = {
+            "kind": kind,
+            "t": round(time.monotonic() - self._t0, 3),
+            "beat": None if beat is None else beat.get("index"),
+            "verb": None if beat is None else beat.get("verb"),
+            "caption": "" if beat is None else beat.get("caption", ""),
+            "message": message,
+        }
+        record.update(extra)
+        self._issues.append(record)
+
+    def _watch_page(self, page: Page) -> None:
+        """Subscribe to everything the page can say about being broken."""
+        page.on("console", self._on_console)
+        page.on("pageerror", self._on_page_error)
+        page.on("requestfailed", self._on_request_failed)
+        page.on("response", self._on_response)
+
+    def _on_console(self, message) -> None:
+        try:
+            kind = {
+                "error": "console_error",
+                "warning": "console_warning",
+            }.get(message.type)
+            if kind is None:
+                return  # log/info/debug is an app talking, not an app failing
+            where = message.location or {}
+            self._note_issue(
+                kind, message.text,
+                url=where.get("url") or None, line=where.get("lineNumber"),
+            )
+        except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
+            pass
+
+    def _on_page_error(self, error) -> None:
+        try:
+            text = getattr(error, "message", None) or str(error)
+            self._note_issue("page_error", str(text).strip().split("\n")[0])
+        except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
+            pass
+
+    def _on_request_failed(self, request) -> None:
+        try:
+            self._note_issue(
+                "request_failed",
+                f"{request.failure or 'request failed'} — {request.url}",
+                url=request.url, method=request.method,
+            )
+        except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
+            pass
+
+    def _on_response(self, response) -> None:
+        try:
+            # >= 400, not "non-2xx": 3xx is a redirect the browser follows and
+            # is not a fault, and counting it would flag every canonical URL.
+            if response.status < 400:
+                return
+            self._note_issue(
+                "http_error", f"HTTP {response.status} {response.url}",
+                url=response.url, status=response.status,
+            )
+        except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
+            pass
+
+    def _issue_where(self, issue: dict) -> str:
+        if issue.get("beat") is None:
+            return "before the first beat"
+        return f"beat {issue['beat']} ({issue.get('verb')})"
+
+    def _print_issue_summary(self) -> None:
+        """One end-of-take report, on stderr, whether or not anything broke."""
+        if not self._issue_count:
+            print(
+                "demo-video: no console errors, failed requests or non-zero "
+                "exits recorded",
+                file=sys.stderr,
+            )
+            return
+        counts: dict[str, int] = {}
+        for issue in self._issues:
+            counts[issue["kind"]] = counts.get(issue["kind"], 0) + 1
+        tally = ", ".join(f"{k} x{n}" for k, n in sorted(counts.items()))
+        print(
+            f"demo-video: {self._issue_count} problem(s) recorded during this "
+            f"take ({tally})",
+            file=sys.stderr,
+        )
+        for issue in self._issues:
+            print(
+                f"  [{issue['t']:.2f}s] {issue['kind']} in "
+                f"{self._issue_where(issue)}: {issue['message']}",
+                file=sys.stderr,
+            )
+        if self._issue_count > len(self._issues):
+            print(
+                f"  …and {self._issue_count - len(self._issues)} more, over "
+                f"the {MAX_ISSUES}-issue cap",
+                file=sys.stderr,
+            )
+
+    def _strict_message(self, fatal: list[dict]) -> str:
+        shown = fatal[:5]
+        lines = [
+            f"  {i['kind']} in {self._issue_where(i)}: {i['message']}"
+            for i in shown
+        ]
+        if len(fatal) > len(shown):
+            lines.append(f"  …and {len(fatal) - len(shown)} more")
+        return (
+            f"strict=True and this take recorded {len(fatal)} problem(s) the "
+            "app should not have produced:\n" + "\n".join(lines) + "\n"
+            "The recording, its stills and its timeline were still written — "
+            "read timeline.md's Issues section. Pass strict=False (or unset "
+            "DEMO_VIDEO_STRICT) to record anyway."
+        )
 
     # -- beat log -----------------------------------------------------------
 
@@ -622,6 +875,9 @@ class _DemoBase:
             "media": mp4.name,
             "duration": duration,
             "beats": self._beats,
+            "strict": self._strict,
+            "issues": self._issues,
+            "issue_count": self._issue_count,
         }
 
     # -- shared storyboard verbs -------------------------------------------

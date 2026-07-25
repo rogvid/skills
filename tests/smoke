@@ -20,6 +20,13 @@ short web demo against it with `Recorder`, records a short terminal demo with
 3. **Behaviour** — the storyboard's verbs had their effect. Every
    `caption`/`click`/`type_into`/`spotlight`/`move_to` is followed by a check
    of the observable post-condition it should have caused.
+4. **Problems** — the recorder noticed the app was broken. The web take is
+   recorded against a page that throws on load and fires two doomed requests;
+   the terminal take runs a command that exits 3. None of that is visible in
+   the other three axes — a demo of a broken app is pixel-for-pixel a demo of
+   a working one — so `timeline.json`'s `issues` are graded on their own, and
+   two extra short takes check that `strict=True` refuses what the default
+   tolerates.
 
     tests/smoke                 # both takes
     tests/smoke --web-only
@@ -159,6 +166,68 @@ PROBE_QUIET_S = 2.0
 
 SERVER_START_TIMEOUT_S = 15.0
 
+# -- problems the take should notice (timeline.json `issues`) ----------------
+#
+# The web storyboard records a *deliberately broken* page. `?console-error=1`
+# makes the fixture log a console error and throw an uncaught one while staying
+# usable, and the storyboard then fires two requests that cannot succeed. All
+# four are things a demo can sail past while looking perfect, which is the
+# failure mode this axis exists to catch.
+WEB_PATH = "/?console-error=1"
+MISSING_PATH = "/definitely-missing.json"
+
+# Fired from one page.evaluate() straight after the `wait_for` beat, so both
+# land in a beat this file can name — see WEB_ISSUES. `Promise.all` on two
+# caught fetches: the call returns only once both have failed, so the events
+# are delivered while Playwright is still inside that beat.
+PROBE_FETCH_JS = """(url) => Promise.all([
+  fetch('__MISSING__').catch(() => {}),
+  fetch(url).catch(() => {}),
+])""".replace("__MISSING__", MISSING_PATH)
+
+# The terminal storyboard runs one command that fails. `(exit 3)` is a subshell
+# so the recorder's own shell survives it, and 3 rather than 1 because it
+# proves the *status* was read rather than "something went wrong" inferred
+# from any other signal.
+TERMINAL_FAILING_COMMAND = "(exit 3)"
+
+# Exit status every run() in the terminal storyboard must have logged on its
+# beat. Hand-written, like the beat list: derived from the log it grades, it
+# would agree with the log no matter what the log said.
+TERMINAL_EXIT_CODES = {
+    "echo hello from demo-video": 0,
+    "ls -1": 0,
+    TERMINAL_FAILING_COMMAND: 3,
+}
+
+# (kind, a substring of the message, the verb of the beat it must be
+# attributed to). Each expectation must match at least one issue; `beat` is
+# then checked against the beat list itself, so the attribution has to be a
+# real index and not just a denormalized string that happens to agree.
+#
+# "At least one", not "exactly the set": Chromium adds its own "Failed to load
+# resource" console error for each of the two probe requests, and pinning an
+# exact issue list would make this a test of Chromium's console wording.
+WEB_ISSUES = [
+    ("console_error", "fixture: deliberate console error", "goto"),
+    ("page_error", "fixture: deliberate uncaught error", "goto"),
+    ("http_error", MISSING_PATH, "wait_for"),
+    ("request_failed", "ERR_CONNECTION_REFUSED", "wait_for"),
+]
+TERMINAL_ISSUES = [
+    ("nonzero_exit", f"{TERMINAL_FAILING_COMMAND!r} exited 3", "run"),
+]
+
+# The strict takes are separate and deliberately tiny — a few seconds each
+# against the same broken fixture, recording nothing worth grading. They exist
+# to answer one question the takes above cannot: does `strict=True` actually
+# refuse the take? The takes above answer the other half, by carrying fatal
+# issues through to a clean exit under the default.
+STRICT_CAPTION = "A broken page."
+# The acceptance criterion of issue #3, as a pattern: the failure has to name
+# the beat the problem fired during, not merely that something went wrong.
+STRICT_BEAT_RE = re.compile(r"beat \d+ \((\w+)\)")
+
 # -- timeline (timeline.json / timeline.md) ----------------------------------
 
 # Every beat each storyboard below performs, as (verb, target), in order. It
@@ -167,7 +236,7 @@ SERVER_START_TIMEOUT_S = 15.0
 # taken from the log it is checking would agree with the log no matter what
 # the log said. Editing a storyboard means editing this list.
 WEB_BEATS = [
-    ("goto", "/"),
+    ("goto", WEB_PATH),
     ("wait_for", "#kpi-rev"),
     ("pause", None),
     ("caption", None),
@@ -206,6 +275,9 @@ TERMINAL_BEATS = [
     ("pause", None),
     ("shot", "02-listing"),
     ("caption", None),
+    ("run", TERMINAL_FAILING_COMMAND),
+    ("wait_for_prompt", None),
+    ("caption", None),
     ("shot", "90-caption-off"),
     ("pause", None),
     ("caption", None),
@@ -227,6 +299,7 @@ WEB_CAPTIONS = [
 TERMINAL_CAPTIONS = [
     "A real shell, recorded.",
     "Any command works.",
+    "A failing one is caught.",
     "",
     PROBE_CAPTION,
     "",
@@ -677,13 +750,20 @@ _TRAIL_JS = """() => {
 
 
 def record_web(
-    out_dir: Path, base_url: str
+    out_dir: Path, base_url: str, refused_url: str
 ) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
-    """Land, read a KPI, filter the table, refresh it.
+    """Land, read a KPI, filter the table, refresh it — on a broken page.
 
     Returns the post-condition failures plus two content rects: where the app
     sits inside the composited video, and where it sits in a still (stills are
     captured full-bleed, before compositing).
+
+    The page is loaded with `?console-error=1` and two doomed requests are
+    fired at it, so the take is also the fixture for the problem log: a demo
+    that looks perfect over an app that is throwing. Everything else here still
+    has to pass, because the *default* recorder tolerates all of it — that half
+    of the strict-mode assertion lives in this take, and only the other half
+    needs a take of its own.
     """
     from demo_recording import Recorder
 
@@ -692,16 +772,24 @@ def record_web(
     bg = "el => getComputedStyle(el).backgroundColor"
 
     with Recorder(out_dir, base_url=base_url, speech=False) as rec:
-        rec.goto("/")
+        rec.goto(WEB_PATH)
         rec.wait_for("#kpi-rev")
+        # Not a verb, so no beat of its own: both failures are attributed to
+        # the `wait_for` beat still standing as the most recent one, which is
+        # what WEB_ISSUES asserts.
+        rec.page.evaluate(PROBE_FETCH_JS, refused_url)
         start_ticker(b, rec.page)
         # Doubles as the run-up for the *early* timing probe: the page has
         # finished painting and the caption band does not move until the
         # first caption. See MAX_CAPTION_SKEW_S.
         rec.pause(PROBE_QUIET_S)
-        b.expect("goto('/'), #rows row count", rec.page.locator("#rows tr").count(), 5)
         b.expect(
-            "goto('/'), #status text",
+            f"goto({WEB_PATH!r}), #rows row count",
+            rec.page.locator("#rows tr").count(),
+            5,
+        )
+        b.expect(
+            f"goto({WEB_PATH!r}), #status text",
             rec.page.locator("#status").inner_text(),
             "snapshot 1 of 3",
         )
@@ -709,7 +797,7 @@ def record_web(
         # legible-ish, which the luma metric scores around 10 — above its
         # floor. This resolves that case exactly, with no pixel threshold.
         b.expect(
-            "goto('/'), #refresh background (did the stylesheet apply?)",
+            "goto(…), #refresh background (did the stylesheet apply?)",
             rec.page.eval_on_selector("#refresh", bg),
             "rgb(235, 110, 20)",
         )
@@ -858,6 +946,14 @@ def record_terminal(
         expect_screen(rec, "run('ls -1')", r"^skills$")
         rec.pause(0.8)
         rec.shot("02-listing")
+
+        # A command that fails. The shell survives it (subshell), the screen
+        # shows nothing unusual, and the only evidence anywhere is the exit
+        # status the recorder reads off the prompt — which is the point.
+        rec.caption("A failing one is caught.")
+        check_caption(b, rec.page, "A failing one is caught.")
+        rec.run(TERMINAL_FAILING_COMMAND)
+        expect_prompt(rec, f"run({TERMINAL_FAILING_COMMAND!r})")
 
         rec.caption("")
         check_caption(b, rec.page, "")
@@ -1435,6 +1531,145 @@ def _first_difference(actual: list, expected: list) -> object:
     return f"{min(len(actual), len(expected))} (one list simply ends)"
 
 
+def check_issues(
+    label: str,
+    out_dir: Path,
+    expected: list[tuple[str, str, str]],
+    exit_codes: dict[str, int] | None = None,
+) -> list[str]:
+    """The problems the take noticed, as `timeline.json` records them.
+
+    A recording is not evidence that the thing being recorded works: a demo of
+    an app throwing `TypeError` on every render looks exactly like a demo of a
+    healthy one. This axis grades what the recorder saw *behind* the pixels —
+    the console, the network, and the exit status of every command it typed —
+    and, as much as any of it, whether each problem is attributed to the beat
+    that was running when it fired. "The take broke" is not a bug report; "the
+    take broke during `click('#refresh')`" is.
+    """
+    from demo_recording import ISSUE_KINDS, STRICT_KINDS
+
+    failures: list[str] = []
+    json_path = out_dir / "timeline.json"
+    if not json_path.is_file():
+        return [f"{label}: {json_path} was never written"]
+    try:
+        doc = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [f"{label}: {json_path} is not valid JSON: {exc}"]
+
+    beats = doc.get("beats") or []
+    issues = doc.get("issues")
+    if not isinstance(issues, list):
+        return [
+            f"{label}: timeline.json has no `issues` list ({issues!r}) — the "
+            f"take recorded nothing about whether the app was working"
+        ]
+    if doc.get("strict") is not False:
+        failures.append(
+            f"{label}: timeline.json says strict={doc.get('strict')!r}; this "
+            f"take is recorded with the default, which is off"
+        )
+    if doc.get("issue_count") != len(issues):
+        failures.append(
+            f"{label}: timeline.json counts {doc.get('issue_count')!r} issues "
+            f"but lists {len(issues)} — nothing here should hit the cap, so "
+            f"the two disagreeing means one of them is wrong"
+        )
+    for issue in issues:
+        if issue.get("kind") not in ISSUE_KINDS:
+            failures.append(
+                f"{label}: timeline.json records an issue of unknown kind "
+                f"{issue.get('kind')!r}, not in the package's ISSUE_KINDS"
+            )
+            break
+
+    # -- the problems the storyboard deliberately caused ---------------------
+    for kind, needle, verb in expected:
+        found = [
+            i
+            for i in issues
+            if i.get("kind") == kind and needle in str(i.get("message"))
+        ]
+        if not found:
+            failures.append(
+                f"{label}: nothing in timeline.json records the {kind} the "
+                f"storyboard deliberately caused ({needle!r}). Logged: "
+                f"{[(i.get('kind'), i.get('message')) for i in issues]!r}"
+            )
+            continue
+        issue = found[0]
+        index = issue.get("beat")
+        # Both halves matter. `verb` alone is a string the recorder could have
+        # copied from anywhere; `beat` alone is an integer that means nothing
+        # on its own. Together they say the issue points at a real beat, and
+        # that it is the right one.
+        if not isinstance(index, int) or not 0 <= index < len(beats):
+            failures.append(
+                f"{label}: the {kind} {needle!r} is attributed to beat "
+                f"{index!r}, which is not a beat of this take — the problem "
+                f"is logged but not placed in the story"
+            )
+            continue
+        if beats[index].get("verb") != verb or issue.get("verb") != verb:
+            failures.append(
+                f"{label}: the {kind} {needle!r} fired during {verb!r} but is "
+                f"attributed to beat {index} "
+                f"({beats[index].get('verb')!r}/{issue.get('verb')!r})"
+            )
+
+    # -- every command's exit status, on the beat that ran it ----------------
+    if exit_codes is not None:
+        logged = {
+            str(beat.get("selector")): beat.get("exit_code")
+            for beat in beats
+            if beat.get("verb") == "run"
+        }
+        if logged != exit_codes:
+            failures.append(
+                f"{label}: run() beats logged exit codes {logged!r}, the "
+                f"storyboard's commands exit {exit_codes!r} — a command that "
+                f"failed is indistinguishable from one that worked"
+            )
+        if "nonzero_exit" not in STRICT_KINDS:
+            failures.append(
+                f"{label}: the package's STRICT_KINDS is {STRICT_KINDS!r}, "
+                f"which does not include 'nonzero_exit' — a failing command "
+                f"is recorded but would not fail a strict take"
+            )
+
+    # -- the same problems, readable, in timeline.md -------------------------
+    md_path = out_dir / "timeline.md"
+    markdown = md_path.read_text() if md_path.is_file() else ""
+    if issues and "## Issues" not in markdown:
+        failures.append(
+            f"{label}: timeline.json records {len(issues)} problem(s) but "
+            f"timeline.md has no Issues section — the human-readable half of "
+            f"the log says the take was fine"
+        )
+    for _, needle, _ in expected:
+        if needle not in markdown:
+            failures.append(f"{label}: timeline.md does not mention {needle!r}")
+
+    fatal = [i for i in issues if i.get("kind") in STRICT_KINDS]
+    if not fatal:
+        failures.append(
+            f"{label}: this take is supposed to carry problems a strict take "
+            f"would refuse, and carries none — so it proves nothing about the "
+            f"default tolerating them"
+        )
+    if not failures:
+        # Reaching here at all is the assertion: the take completed, wrote
+        # every artifact, and passed every other axis, while holding problems
+        # that STRICT_KINDS calls fatal. That is the default-mode half of
+        # "strict fails the take and the default does not".
+        print(
+            f"smoke: {label} timeline.json records {len(issues)} problem(s), "
+            f"{len(fatal)} of them fatal under strict — take still passed"
+        )
+    return failures
+
+
 def check_take(
     label: str,
     out_dir: Path,
@@ -1558,9 +1793,14 @@ def check_take(
 def run_web(out_root: Path) -> list[str]:
     out_dir = fresh_take_dir(out_root, "web")
     started = time.time()
+    # Nothing is listening here: free_port() binds only long enough to be told
+    # a number and lets go, so a request to it is refused rather than answered.
+    refused_url = f"http://127.0.0.1:{free_port()}/refused"
     with fixture_server() as base_url:
         try:
-            problems, video_rect, still_rect, size = record_web(out_dir, base_url)
+            problems, video_rect, still_rect, size = record_web(
+                out_dir, base_url, refused_url
+            )
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
     return (
@@ -1576,7 +1816,118 @@ def run_web(out_root: Path) -> list[str]:
             size,
         )
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
+        + check_issues("web", out_dir, WEB_ISSUES)
     )
+
+
+def check_strict_failure(
+    label: str, out_dir: Path, exc: BaseException | None, kinds: list[str]
+) -> list[str]:
+    """What a refused take must have done besides refusing.
+
+    Three things, and the last two are the ones worth having. It has to raise
+    — but it also has to say *which beat* the problem fired during, which is
+    issue #3's acceptance criterion verbatim, and it has to leave the mp4, the
+    stills and the timeline on disk. A broken take is precisely the one
+    somebody wants to look at; failing it by destroying the evidence would be
+    worse than not failing it.
+    """
+    from demo_recording import STRICT_KINDS, StrictTakeFailed
+
+    failures: list[str] = []
+    if exc is None:
+        return [
+            f"{label}: strict=True recorded a storyboard written to break in a "
+            f"way STRICT_KINDS calls fatal, and the take succeeded — strict "
+            f"mode does not fail anything"
+        ]
+    if not isinstance(exc, StrictTakeFailed):
+        return [
+            f"{label}: strict=True raised {type(exc).__name__} rather than "
+            f"StrictTakeFailed: {exc}"
+        ]
+
+    message = str(exc)
+    for kind in kinds:
+        if kind not in message:
+            failures.append(
+                f"{label}: the strict failure does not mention the {kind} the "
+                f"storyboard caused. It said: {' '.join(message.split())[:300]}"
+            )
+    named = STRICT_BEAT_RE.search(message)
+    if named is None:
+        failures.append(
+            f"{label}: the strict failure never names the beat the problem "
+            f"fired during — 'the take broke' is not a bug report. It said: "
+            f"{' '.join(message.split())[:300]}"
+        )
+
+    json_path = out_dir / "timeline.json"
+    if not (out_dir / "demo.mp4").is_file():
+        failures.append(
+            f"{label}: strict failed the take and no demo.mp4 was written — "
+            f"the recording of the failure is the thing worth keeping"
+        )
+    if not json_path.is_file():
+        failures.append(f"{label}: strict failed the take and wrote no timeline.json")
+        return failures
+    doc = json.loads(json_path.read_text())
+    if doc.get("strict") is not True:
+        failures.append(
+            f"{label}: the refused take's timeline.json says "
+            f"strict={doc.get('strict')!r}"
+        )
+    fatal = [i for i in (doc.get("issues") or []) if i.get("kind") in STRICT_KINDS]
+    if not fatal:
+        failures.append(
+            f"{label}: the take was refused but its timeline.json lists no "
+            f"issue of a kind in STRICT_KINDS — the verdict and the log "
+            f"disagree about why"
+        )
+    if not failures:
+        print(
+            f"smoke: {label} strict=True refused the take, naming "
+            f"{named.group(0) if named else '?'} ({len(fatal)} fatal issues, "
+            f"artifacts kept)"
+        )
+    return failures
+
+
+def run_strict_web(out_root: Path) -> list[str]:
+    """strict=True over the page that throws: the take must not pass."""
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "web-strict")
+    raised: BaseException | None = None
+    with fixture_server() as base_url:
+        try:
+            with Recorder(out_dir, base_url=base_url, speech=False, strict=True) as rec:
+                rec.goto(WEB_PATH)
+                rec.wait_for("#kpi-rev")
+                rec.caption(STRICT_CAPTION)
+        except Exception as exc:  # noqa: BLE001 - the raise is the assertion
+            raised = exc
+    return check_strict_failure(
+        "web-strict", out_dir, raised, ["console_error", "page_error"]
+    )
+
+
+def run_strict_terminal(out_root: Path) -> list[str]:
+    """strict=True over a command that exits 3: the take must not pass."""
+    if os.name != "posix":
+        return []
+    from demo_recording import TerminalRecorder
+
+    out_dir = fresh_take_dir(out_root, "terminal-strict")
+    raised: BaseException | None = None
+    try:
+        with TerminalRecorder(out_dir, speech=False, strict=True) as rec:
+            rec.caption(STRICT_CAPTION)
+            rec.run(TERMINAL_FAILING_COMMAND)
+            rec.wait_for_prompt(timeout_s=15)
+    except Exception as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    return check_strict_failure("terminal-strict", out_dir, raised, ["nonzero_exit"])
 
 
 def run_terminal(out_root: Path) -> list[str]:
@@ -1613,6 +1964,9 @@ def run_terminal(out_root: Path) -> list[str]:
         )
         + check_timeline(
             "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
+        )
+        + check_issues(
+            "terminal", out_dir, TERMINAL_ISSUES, exit_codes=TERMINAL_EXIT_CODES
         )
     )
 
@@ -1677,6 +2031,13 @@ def main() -> int:
             failures += run_web(out_root)
         if not args.web_only:
             failures += run_terminal(out_root)
+        # After the graded takes, never instead of them: these two record
+        # nothing worth looking at, and if a recorder is broken the messages
+        # above are the ones that say how.
+        if not args.terminal_only:
+            failures += run_strict_web(out_root)
+        if not args.web_only:
+            failures += run_strict_terminal(out_root)
     except SmokeFailure as exc:
         failures.append(str(exc))
 

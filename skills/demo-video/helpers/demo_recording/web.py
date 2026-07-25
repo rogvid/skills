@@ -203,12 +203,13 @@ class Recorder(_DemoBase):
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        strict: bool | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
             terminal_title=terminal_title, terminal_prompt=terminal_prompt,
             viewport=viewport, speech=speech, voice_id=voice_id,
-            speech_model=speech_model,
+            speech_model=speech_model, strict=strict,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")
