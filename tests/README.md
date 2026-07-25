@@ -31,9 +31,12 @@ fresh Linux box). A pass looks like this, and takes about half a minute:
 
 ```
 smoke: serving …/tests/fixture at http://127.0.0.1:36321
-smoke: web demo.mp4 ok (16.2s, 244 kB, content 16.0)
+smoke: web demo.mp4 ok (18.0s, 244 kB, content 16.0)
 smoke: web still 01-dashboard.png ok (77 kB, content 16.9)
 smoke: web caption is visible on screen (delta 25.6)
+smoke: web first caption 'A small dashboard.' logged at 3.00s, on screen at 2.92s (-80 ms, bar 200 ms)
+smoke: web closing caption 'Recorded end to end.' logged at 17.04s, on screen at 16.96s (-80 ms, bar 800 ms)
+smoke: web timeline.json ok (23 beats)
 …
 smoke: PASSED
 ```
@@ -63,8 +66,8 @@ test measures.
 
 ## What it asserts
 
-Three independent axes, because a recorder can fail on any one of them while
-looking perfect on the other two.
+Four independent axes, because a recorder can fail on any one of them while
+looking perfect on the other three.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -128,6 +131,45 @@ All post-condition failures are collected, never raised, in both takes. A take
 that aborts writes no mp4, and CI's failure-only artifact upload then has
 nothing to upload at exactly the moment somebody wants to look at it.
 
+**Timeline** — the beat log the recorder writes as `timeline.json` and
+`timeline.md` says what actually happened, and points at the right frames.
+
+The beats are checked against `WEB_BEATS` / `TERMINAL_BEATS`, a hand-written
+`(verb, target)` sequence per storyboard. That duplication is the point: a
+count or a sequence derived from the log being graded agrees with that log no
+matter what it says, which is how a dropped beat would pass. `WEB_CAPTIONS` /
+`TERMINAL_CAPTIONS` do the same for the caption text, separately, so a
+missing beat and a wrong caption fail independently. Alongside them:
+`schema` matches the `TIMELINE_SCHEMA` the package exports, indices match
+positions, timestamps are monotonic and inside the mp4's duration, the
+recorder's own `duration` matches ffprobe, every `still` a beat names is a
+file on disk *and* every file in `images/` is named by a beat, and
+`timeline.md` embeds each of them.
+
+**Where the timestamps point** is the assertion worth having, and it is
+measured rather than computed: both takes set a caption after two seconds of
+nothing at all happening, then the caption band is sampled every frame around
+what `timeline.json` claims and the first frame that has travelled a quarter
+of the way to the caption's final state is taken as when it appeared. A
+quarter, not "any change at all", because the bar fades in over 0.3 s and
+those two definitions are a third of a second apart. If the band never gets
+anywhere the run *fails* rather than reporting a timestamp — a caption that
+was never drawn has no appearance to time.
+
+Two bars, because the honest answer depends on where in the take you look:
+
+| | measured | bar |
+|---|---|---|
+| first caption, ~3 s in | -40 to -120 ms, both media, every take | 200 ms |
+| closing caption, ~17 s in | -40 to -680 ms depending on the take | 800 ms |
+
+The first bar is the one that grades the beat log — it fails if `_t0` moves
+off the start of the recording (the pre-fix placement measured **+280 ms**),
+if elapsed time comes off a steppable clock, or if a beat is stamped anywhere
+other than where its verb ran. The second has to tolerate Chromium's
+screencast losing ~0.6 s of wall time mid-take, which is a property of the
+capture and not of the log — see Known gaps.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -154,11 +196,35 @@ knows is missing is worse than one that is openly absent.
   the attribute while moving the app elsewhere would silently score the wrong
   pixels. Tracked in [#17](https://github.com/rogvid/skills/issues/17), which
   proposes the recorder expose its geometry as public API.
+- **Late beat timestamps drift from the video by up to ~0.6 s.** Chromium's
+  screencast intermittently stalls during an idle stretch and Playwright's webm
+  does not pad the gap, so every frame after the stall sits that much earlier
+  in the video than the clock says (`demo.mp4`'s duration shrinks by exactly
+  that much). Measured across ten takes: five stalled once, five did not. The
+  recorder cannot see it happen, which is why the closing-caption bar is 800 ms
+  rather than 200. Consequence: a frame extracted at a beat timestamp late in a
+  stalled take can show the wrong beat. Tracked in
+  [#18](https://github.com/rogvid/skills/issues/18), which matters most to
+  [#8](https://github.com/rogvid/skills/issues/8).
+- **Nothing reads the caption text off the video.** The timing check proves the
+  caption *band* changed when `timeline.json` says it did; that the words are
+  the right words is a DOM assertion (`check_caption`) taken at record time.
+  Between them a recorder that drew the wrong caption at the right moment would
+  be caught, but only because two separate checks happen to overlap — no single
+  assertion reads pixels back as text, and none is going to without OCR.
+- **The wall-clock regression cannot be fault-injected.** The recorders time
+  beats with `time.monotonic()`; using `time.time()` only misreports when the
+  system clock actually steps, which no assertion here can provoke. It is not
+  hypothetical — a WSL2 box was measured stepping 573 ms backwards inside 8 s,
+  which is how the bug was found — but a pass does not prove the fix is still
+  in place. Reading the diff does.
 - **Nothing checks audio.** Narration is forced off and no assertion touches the
   aac track, so the whole speech path — `tts_clip`, the `.tts/` cache, the
   `adelay`/`amix` mixing in `_convert` — is untested here.
 - **Nothing checks `stitch()`, segments, or `interlude()`.** Single-segment
-  takes only.
+  takes only — so `<segment>.seg.timeline.json`, and the merge
+  [#7](https://github.com/rogvid/skills/issues/7) will build on it, are
+  unexercised.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
@@ -197,11 +263,19 @@ insurance against a future release that does start flagging it.
 ## Adding a case
 
 - **A new thing to record** — add a beat to `record_web` / `record_terminal` in
-  `tests/smoke`, and add its `shot()` name to `WEB_SHOTS` / `TERMINAL_SHOTS` so
-  the still is actually checked. Adding a beat lengthens the take; keep it
-  inside the duration window, or widen the window deliberately. **Every
-  interaction gets a `b.expect(...)` naming what it should have changed** — a
-  beat with no post-condition is a beat that passes when the verb is a no-op.
+  `tests/smoke`, add its `shot()` name to `WEB_SHOTS` / `TERMINAL_SHOTS` so the
+  still is actually checked, and add its `(verb, target)` to `WEB_BEATS` /
+  `TERMINAL_BEATS` (and its text to `WEB_CAPTIONS` / `TERMINAL_CAPTIONS` if it
+  is a caption) so the timeline check knows to expect it. Those lists are
+  deliberately hand-maintained; see **Timeline** above for why. Adding a beat
+  lengthens the take; keep it inside the duration window, or widen the window
+  deliberately. **Every interaction gets a `b.expect(...)` naming what it
+  should have changed** — a beat with no post-condition is a beat that passes
+  when the verb is a no-op.
+- **A new storyboard verb in the recorder** — decorate it with `@_beat_verb`
+  so it lands in the beat log, or the timeline stops being a full account of
+  the take. A verb built out of other verbs records one beat, not one per
+  internal step; the nesting guard in `_DemoBase._beat` handles that.
 - **A new thing for the app to do** — put it in `fixture/index.html` behind a
   stable id, and keep it deterministic. If it only matters to one future
   feature, hide it behind a query-string hook the way the two above are, so the

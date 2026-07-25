@@ -22,6 +22,7 @@ SKILL.md for the full variable list.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -30,6 +31,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
 
@@ -185,6 +188,175 @@ def tts_clip(
     raise AssertionError("unreachable")
 
 
+# -- beat timeline -----------------------------------------------------------
+#
+# Every storyboard verb the recorder runs is logged as a *beat*: what was
+# done, when, and what caption was on screen while it happened. On clean exit
+# the log lands next to the media as timeline.json (machine-readable) and
+# timeline.md (human-readable, with the stills embedded).
+#
+# This is a published contract, not a private convenience — beat-aligned frame
+# extraction, per-beat evidence capture and acceptance-criterion coverage all
+# read it. Treat it as append-only: adding a key to a beat or to the envelope
+# is fine, renaming or repurposing one is not (bump TIMELINE_SCHEMA if you
+# ever must).
+#
+# Envelope
+#   schema        int    — TIMELINE_SCHEMA, bumped on any breaking change
+#   generated_by  str    — always "demo-video"
+#   recorder      str    — "Recorder" | "TerminalRecorder" (which medium)
+#   segment       str?   — the segment name, or null for a whole demo
+#   media         str    — the mp4 this timeline describes, e.g. "demo.mp4"
+#   duration      float? — that mp4's real duration (ffprobe), null if absent
+#   beats         list   — the beats, in the order they ran
+#
+# Beat
+#   index     int    — position in `beats`, 0-based
+#   t_start   float  — seconds from the start of `media` to the verb starting
+#   t_end     float  — seconds from the start of `media` to the verb returning
+#   caption   str    — the caption text on screen during the beat (the new
+#                      text for a `caption` beat, the line shown for an
+#                      `interlude` beat); "" when no caption is up
+#   verb      str    — the storyboard verb: "caption", "click", "run", ...
+#   selector  str?   — what the verb acted on, as a string: a CSS selector for
+#                      the web verbs, the command / keys / pattern for the
+#                      terminal ones, the path for `goto`. Null when the verb
+#                      has no target (`pause`, `hold`, a cleared `spotlight`).
+#   still     str?   — for `shot` beats, the still's path relative to the
+#                      timeline file ("images/01-dashboard.png"); else null
+#   segment   str?   — the segment this beat was recorded in, or null
+#
+# Only the verb a storyboard calls becomes a beat. The verbs recorders build
+# out of other verbs (`click` glides with `move_to`, `type_into` clicks first)
+# record one beat spanning the whole call, not one per internal step.
+TIMELINE_SCHEMA = 1
+
+
+def timeline_paths(out_dir: Path | str, segment: str | None = None) -> tuple[Path, Path]:
+    """(json, md) paths for a take's timeline.
+
+    Mirrors how the media is named: a whole demo writes timeline.json next to
+    demo.mp4, a segment writes <segment>.seg.timeline.json next to
+    <segment>.seg.mp4, so segments of one demo never overwrite each other.
+    """
+    stem = f"{segment}.seg.timeline" if segment else "timeline"
+    out_dir = Path(out_dir)
+    return out_dir / f"{stem}.json", out_dir / f"{stem}.md"
+
+
+def _md_cell(value: object) -> str:
+    """A value made safe to drop into a markdown table cell."""
+    if value is None:
+        return ""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\n", " ")
+    )
+
+
+def _fmt_t(value: object) -> str:
+    return "" if value is None else f"{float(value):.2f}"
+
+
+def render_timeline_md(doc: dict) -> str:
+    """Render a timeline document as markdown, stills embedded.
+
+    Pure function of the document, so anything that *builds* a document —
+    a take on exit, or a stitch that merges several — renders the same way.
+    """
+    beats = doc.get("beats") or []
+    head = [f"`{doc.get('media') or 'demo.mp4'}`"]
+    if doc.get("segment"):
+        head.append(f"segment `{doc['segment']}`")
+    if doc.get("recorder"):
+        head.append(str(doc["recorder"]))
+    if doc.get("duration") is not None:
+        head.append(f"{float(doc['duration']):.1f}s")
+    head.append(f"{len(beats)} beats")
+    out = [
+        "# Demo timeline",
+        "",
+        " · ".join(head),
+        "",
+        "Written by the demo-video recorder on every clean exit — do not edit "
+        "it by hand, re-record instead.",
+        "",
+        "| # | start | end | verb | target | caption |",
+        "|---:|---:|---:|---|---|---|",
+    ]
+    for beat in beats:
+        target = beat.get("selector")
+        out.append(
+            "| {} | {} | {} | `{}` | {} | {} |".format(
+                beat.get("index"),
+                _fmt_t(beat.get("t_start")),
+                _fmt_t(beat.get("t_end")),
+                _md_cell(beat.get("verb")),
+                f"`{_md_cell(target)}`" if target else "",
+                _md_cell(beat.get("caption")),
+            )
+        )
+    stills = [b for b in beats if b.get("still")]
+    if stills:
+        out += ["", "## Stills", ""]
+        for beat in stills:
+            rel = str(beat["still"])
+            name = rel.rsplit("/", 1)[-1].removesuffix(".png")
+            out += [f"### {name} — {_fmt_t(beat.get('t_start'))}s", ""]
+            if beat.get("caption"):
+                out += [f"> {beat['caption']}", ""]
+            out += [f"![{name}]({rel})", ""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def write_timeline(out_dir: Path | str, doc: dict) -> tuple[Path, Path]:
+    """Write a timeline document as timeline.json + timeline.md."""
+    json_path, md_path = timeline_paths(out_dir, doc.get("segment"))
+    json_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    md_path.write_text(render_timeline_md(doc))
+    return json_path, md_path
+
+
+def _verb_target(args: tuple, kwargs: dict) -> str | None:
+    """The string a verb acted on, dug out of how it happened to be called."""
+    if args and isinstance(args[0], str):
+        return args[0]
+    for name in ("selector", "path", "command", "text", "pattern", "name"):
+        value = kwargs.get(name)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _beat_verb(
+    verb: str,
+    target: Callable[[tuple, dict], str | None] = _verb_target,
+) -> Callable:
+    """Decorate a storyboard verb so calling it records one beat.
+
+    A decorator rather than a `with` block inside every verb: it keeps the
+    recorders' method bodies untouched, which is the difference between a
+    one-line diff per verb and re-indenting three files.
+
+    `target` extracts the beat's `selector` from the call; the default takes
+    the first string argument (so `click("#go")`, `run("ls")` and
+    `goto("/app")` all self-describe) and yields null for verbs called with
+    none (`pause(2)`, `spotlight()`).
+    """
+
+    def decorate(fn: Callable) -> Callable:
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            with self._beat(verb, selector=target(args, kwargs)):
+                return fn(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
 class _DemoBase:
     """Recording + narration substrate shared by every demo medium.
 
@@ -267,9 +439,20 @@ class _DemoBase:
         # the same height, keeping caption placement uniform across media.
         self._caption_bottom_px = 44
         self._lines: list[tuple[float, Path]] = []  # (video offset s, clip)
-        self._line_end = 0.0  # wall-clock time the current line stops speaking
-        self._t0 = 0.0  # wall-clock time video capture started
+        # Both are readings of time.monotonic(), never time.time(): everything
+        # here measures an *elapsed interval* against the video, and the system
+        # clock can step (NTP, a VM resuming — a WSL2 box was measured stepping
+        # 573 ms backwards inside 8 s). One such step during a take puts every
+        # beat and every narration cue after it on a different clock from the
+        # frames they describe.
+        self._line_end = 0.0  # when the current line stops speaking
+        self._t0 = 0.0  # when video capture started
         self.page: Page = None  # type: ignore[assignment]
+        # The beat log (see "beat timeline" above) and the caption currently
+        # on screen, which every beat is stamped with.
+        self._beats: list[dict] = []
+        self._caption = ""
+        self._in_beat = False
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
         # env) is otherwise a confusing surprise only noticed after the fact.
@@ -325,6 +508,13 @@ class _DemoBase:
             # Medium-specific init scripts (cursor, spotlight, ...).
             self._init_context(self._context)
             self.page = self._context.new_page()
+            # Chromium's screencast starts with the page, so this — not the
+            # end of _start() — is frame zero of the recording. Setting it
+            # any later shifts every beat timestamp and every narration
+            # offset earlier than the frame it describes, by however long
+            # the medium's setup takes (~250 ms for the web recorder's
+            # window-frame render, and it is not a constant).
+            self._t0 = time.monotonic()
             self._start()
         except Exception:
             # __exit__ never runs when __enter__ raises — don't leak the
@@ -335,7 +525,6 @@ class _DemoBase:
                 pass
             self._pw.stop()
             raise
-        self._t0 = time.time()
         return self
 
     def __exit__(
@@ -354,9 +543,80 @@ class _DemoBase:
         self._pw.stop()
         if exc_type is None and webm and webm.exists():
             self._convert(webm)
+        if exc_type is None:
+            # The beat log is the durable, diffable record of the take — it
+            # outlives the mp4, which is not committed. Written after
+            # conversion so `duration` is the encoder's answer, not a guess.
+            json_path, _ = write_timeline(self.out_dir, self._timeline_doc())
+            print(f"wrote {json_path} ({len(self._beats)} beats)")
         for leftover in self._video_dir.glob("*"):
             leftover.unlink()
         self._video_dir.rmdir()
+
+    # -- beat log -----------------------------------------------------------
+
+    @contextmanager
+    def _beat(
+        self,
+        verb: str,
+        selector: str | None = None,
+        still: str | None = None,
+        caption: str | None = None,
+        **extra: object,
+    ) -> Iterator[dict | None]:
+        """Record one beat around a storyboard verb.
+
+        Re-entrant calls are folded into the beat already open, so a verb
+        built out of other verbs (`click` glides with `move_to` first) logs
+        the call the storyboard made and not the machinery underneath it.
+        `extra` keys land on the record as-is — the seam for slices that
+        want to say more about a beat than the base schema does.
+        """
+        if self._in_beat:
+            yield None
+            return
+        self._in_beat = True
+        record: dict = {
+            "index": len(self._beats),
+            "t_start": round(time.monotonic() - self._t0, 3),
+            "t_end": None,
+            "caption": self._caption if caption is None else caption,
+            "verb": verb,
+            "selector": selector,
+            "still": still,
+            "segment": self.segment,
+        }
+        record.update(extra)
+        self._beats.append(record)
+        try:
+            yield record
+        finally:
+            record["t_end"] = round(time.monotonic() - self._t0, 3)
+            self._in_beat = False
+
+    def _media_path(self) -> Path:
+        """The mp4 this take converts to on exit."""
+        name = f"{self.segment}.seg.mp4" if self.segment else "demo.mp4"
+        return self.out_dir / name
+
+    def _timeline_doc(self) -> dict:
+        """This take's beat log as a timeline document (see TIMELINE_SCHEMA)."""
+        mp4 = self._media_path()
+        duration = None
+        if mp4.exists():
+            try:
+                duration = round(media_duration(mp4), 3)
+            except (subprocess.CalledProcessError, ValueError, OSError):
+                duration = None  # a timeline without it still beats none
+        return {
+            "schema": TIMELINE_SCHEMA,
+            "generated_by": "demo-video",
+            "recorder": type(self).__name__,
+            "segment": self.segment,
+            "media": mp4.name,
+            "duration": duration,
+            "beats": self._beats,
+        }
 
     # -- shared storyboard verbs -------------------------------------------
 
@@ -366,6 +626,7 @@ class _DemoBase:
         if seconds > 0:
             time.sleep(seconds)
 
+    @_beat_verb("pause")
     def pause(self, seconds: float) -> None:
         """Hold the frame so viewers can read what is on screen."""
         self._idle(seconds)
@@ -376,10 +637,16 @@ class _DemoBase:
         With speech enabled the line is also spoken; the previous line
         always finishes before this one starts.
         """
+        # Synthesizing and waiting out the previous spoken line happens
+        # *before* the beat opens: the beat's t_start is when this caption
+        # reaches the screen, which is what a reviewer extracting a frame at
+        # that timestamp expects to see.
         clip = self._prepare_line(text)
-        self.page.evaluate("t => window.__demoCaption(t)", text)
-        self._start_line(clip)
-        self.pause(self._caption_hold(text))
+        with self._beat("caption", caption=text):
+            self.page.evaluate("t => window.__demoCaption(t)", text)
+            self._caption = text
+            self._start_line(clip)
+            self.pause(self._caption_hold(text))
 
     def _caption_hold(self, text: str) -> float:
         """Minimum time a caption stays up. With speech on, the spoken line's
@@ -403,10 +670,12 @@ class _DemoBase:
         lighter, for short transitions where a full takeover feels heavy."""
         clip = self._prepare_line(text)
         fn = "__demoBridge" if style == "light" else "__demoInterlude"
-        self.page.evaluate(f"t => window.{fn}(t)", text)
-        self._start_line(clip)
-        self.pause(hold if text else 0.6)
+        with self._beat("interlude", selector=style, caption=text):
+            self.page.evaluate(f"t => window.{fn}(t)", text)
+            self._start_line(clip)
+            self.pause(hold if text else 0.6)
 
+    @_beat_verb("hold")
     def hold(self, min_s: float = 1.5) -> None:
         """Keep the current frame up until the narration for the current
         caption finishes speaking — so a spotlight or highlight stays on
@@ -414,13 +683,15 @@ class _DemoBase:
         `min_s` (a perception floor: ~1.5 s to notice and fixate on a change),
         which is also what governs pacing when narration is off. Use it right
         after setting a spotlight/emphasis."""
-        remaining = self._line_end - time.time()
+        remaining = self._line_end - time.monotonic()
         self._idle(max(min_s, remaining))
 
     def shot(self, name: str) -> Path:
         """Still for the written guide -> images/<name>.png."""
         path = self.images_dir / f"{name}.png"
-        self.page.screenshot(path=str(path))
+        rel = path.relative_to(self.out_dir).as_posix()
+        with self._beat("shot", selector=name, still=rel):
+            self.page.screenshot(path=str(path))
         return path
 
     # -- speech (ElevenLabs narration) --------------------------------------
@@ -441,20 +712,19 @@ class _DemoBase:
     def _start_line(self, clip: Path | None) -> None:
         """Log the line as starting now, at the current video offset."""
         if clip is not None:
-            now = time.time()
+            now = time.monotonic()
             self._lines.append((now - self._t0, clip))
             self._line_end = now + media_duration(clip)
 
     def _finish_line(self, tail: float = 0.0) -> None:
-        remaining = self._line_end - time.time()
+        remaining = self._line_end - time.monotonic()
         if remaining > 0:
             self._idle(remaining + tail)
 
     # -- media conversion ---------------------------------------------------
 
     def _convert(self, webm: Path) -> None:
-        name = f"{self.segment}.seg.mp4" if self.segment else "demo.mp4"
-        mp4 = self.out_dir / name
+        mp4 = self._media_path()
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(webm)]
         if self._speech:
             # Mix each narration clip in at the moment its line appeared.
@@ -497,6 +767,11 @@ def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None
     keep_parts=True leaves the .seg.mp4 files on disk so a single segment
     can be re-recorded and re-stitched without redoing the expensive ones
     (segments are untracked; only demo.mp4 is committed).
+
+    Note: each segment writes its own <segment>.seg.timeline.json, with
+    timestamps relative to that segment's own start. Merging them into one
+    timeline.json next to demo.mp4 — offsetting each by the real duration of
+    the segments before it — is issue #7, and belongs here.
     """
     out_dir = Path(out_dir)
     parts = [out_dir / f"{s}.seg.mp4" for s in segments]

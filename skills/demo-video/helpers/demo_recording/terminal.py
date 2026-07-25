@@ -32,7 +32,7 @@ import termios
 import time
 from pathlib import Path
 
-from .core import _DemoBase, _env
+from .core import _beat_verb, _DemoBase, _env
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
 
@@ -338,6 +338,7 @@ class TerminalRecorder(_DemoBase):
             self._write(ch)
             self._idle(self._type_delay)
 
+    @_beat_verb("run")
     def run(self, command: str) -> None:
         """Type a shell command visibly and press Enter. Pair with
         wait_for_prompt() to wait for it to finish."""
@@ -345,6 +346,7 @@ class TerminalRecorder(_DemoBase):
         self._write("\r")
         self._idle(0.2)
 
+    @_beat_verb("send")
     def send(self, text: str, enter: bool = True) -> None:
         """Type a response to the running program (an answer to a prompt, a
         REPL expression). enter=False to send the keystrokes without Return."""
@@ -353,6 +355,7 @@ class TerminalRecorder(_DemoBase):
             self._write("\r")
         self._idle(0.2)
 
+    @_beat_verb("key", lambda args, kwargs: " ".join(args) or None)
     def key(self, *names: str) -> None:
         """Send keys to a TUI. Each argument is one of: a named key ("Up"
         "Down" "Left" "Right" "Enter" "Tab" "Escape" "Home" "End" "PageUp"
@@ -373,6 +376,7 @@ class TerminalRecorder(_DemoBase):
 
     # -- synchronization ----------------------------------------------------
 
+    @_beat_verb("wait_for_text")
     def wait_for_text(self, pattern: str, timeout_s: float = 60) -> None:
         """Wait until the rendered screen (visible text + scrollback,
         ANSI-stripped) matches `pattern` (a regex, searched). `^` and `$`
@@ -393,6 +397,7 @@ class TerminalRecorder(_DemoBase):
                 )
             time.sleep(0.05)
 
+    @_beat_verb("wait_for_prompt")
     def wait_for_prompt(self, timeout_s: float = 60) -> None:
         """Wait until the shell prompt returns after a run() — i.e. the
         command finished. A special case of wait_for_text keyed on the

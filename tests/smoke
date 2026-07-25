@@ -39,6 +39,7 @@ reading a pass as proof the recorder is healthy.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import shutil
@@ -133,7 +134,144 @@ TERMINAL_SHOTS = ["01-echo", "02-listing"]
 # the duplicate-still check demands of the storyboard's own stills.
 CAPTION_PROBE = ("90-caption-off", "91-caption-on")
 
+# Both takes are timed against their own captions, at two points: the first
+# caption they set and the last. Each is preceded by PROBE_QUIET_S of nothing
+# at all happening, so the only thing that moves in the caption band around
+# the beat's `t_start` is the caption itself, and the frames just before it
+# are a clean baseline. See MAX_CAPTION_SKEW_S for why two points.
+#
+# Two seconds, not one, because a screencast stall (see MAX_CAPTION_SKEW_S)
+# slides the video under the window by up to ~0.6 s. With a one-second run-up
+# that is enough to drag the previous caption's fade-out into the frames the
+# measurement takes as its baseline, and the run reports "the window is wrong"
+# instead of a number.
+PROBE_CAPTION = "Recorded end to end."
+PROBE_QUIET_S = 2.0
+
 SERVER_START_TIMEOUT_S = 15.0
+
+# -- timeline (timeline.json / timeline.md) ----------------------------------
+
+# Every beat each storyboard below performs, as (verb, target), in order. It
+# is written out by hand rather than derived from the recording, which is the
+# only way it can catch a dropped, duplicated, or reordered beat: a count
+# taken from the log it is checking would agree with the log no matter what
+# the log said. Editing a storyboard means editing this list.
+WEB_BEATS = [
+    ("goto", "/"),
+    ("wait_for", "#kpi-rev"),
+    ("pause", None),
+    ("caption", None),
+    ("shot", "01-dashboard"),
+    ("spotlight", "#kpi-rev"),
+    ("hold", None),
+    ("spotlight", None),
+    ("caption", None),
+    ("type_into", "#search"),
+    ("pause", None),
+    ("shot", "02-filtered"),
+    ("caption", None),
+    ("move_to", "#refresh"),
+    ("click", "#refresh"),
+    ("pause", None),
+    ("shot", "03-refreshed"),
+    ("caption", None),
+    ("shot", "90-caption-off"),
+    ("pause", None),
+    ("caption", None),
+    ("shot", "91-caption-on"),
+    ("caption", None),
+]
+
+TERMINAL_BEATS = [
+    ("pause", None),
+    ("caption", None),
+    ("run", "echo hello from demo-video"),
+    ("wait_for_prompt", None),
+    ("wait_for_text", r"^hello from demo-video$"),
+    ("shot", "01-echo"),
+    ("caption", None),
+    ("run", "ls -1"),
+    ("wait_for_prompt", None),
+    ("wait_for_text", r"^skills$"),
+    ("pause", None),
+    ("shot", "02-listing"),
+    ("caption", None),
+    ("shot", "90-caption-off"),
+    ("pause", None),
+    ("caption", None),
+    ("shot", "91-caption-on"),
+    ("caption", None),
+]
+
+# Every caption each storyboard sets, in order. Separate from the beat list
+# above so a caption that goes missing and a beat that goes missing fail
+# independently — and separately breakable.
+WEB_CAPTIONS = [
+    "A small dashboard.",
+    "Filter by city.",
+    "Refresh reloads it.",
+    "",
+    PROBE_CAPTION,
+    "",
+]
+TERMINAL_CAPTIONS = [
+    "A real shell, recorded.",
+    "Any command works.",
+    "",
+    PROBE_CAPTION,
+    "",
+]
+
+# Beats are wall-clock spans, so `t_end` may land a hair before the next
+# `t_start` — but never after it, and never before its own `t_start`. The
+# slack absorbs the 3-decimal rounding the recorder writes.
+BEAT_ORDER_SLACK_S = 0.005
+
+# How far the recorder's own `duration` may sit from what ffprobe says about
+# the mp4 next to it. They are the same measurement; this is rounding.
+DURATION_TOLERANCE_S = 0.2
+
+# How far a beat's `t_start` may sit from the caption it names appearing in
+# demo.mp4. Measured, never asserted from arithmetic — see
+# caption_appearance_s(). Two bars, because the honest answer differs by where
+# in the take you look:
+#
+#   * EARLY — the take's first caption, ~2 s in. Across ten takes this landed
+#     between -20 and -120 ms in both media. This is the bar that actually
+#     grades the beat log: it fails if `_t0` moves off the start of the
+#     recording, if elapsed time is taken from a steppable clock, or if a beat
+#     is stamped somewhere other than where its verb ran.
+#
+#   * LATE — the closing caption, ~15 s in. Chromium's screencast
+#     intermittently stalls for ~0.6 s during an idle stretch, and Playwright's
+#     webm does not pad the gap, so every frame after the stall sits that much
+#     earlier in the video than the wall clock says. Measured across ten takes:
+#     five stalled once (-520 to -680 ms), five did not (-70 to -120 ms). It is
+#     a property of the capture, not of the beat log, and the recorder cannot
+#     see it happen. Hence a bar that tolerates one stall — see tests/README.md
+#     "Known gaps" and issue #18.
+MAX_CAPTION_SKEW_S = 0.20
+MAX_LATE_CAPTION_SKEW_S = 0.80
+
+# Window sampled around the probe beat, and the rate it is sampled at (the
+# recorders encode at 25 fps, so this is every frame and the measurement
+# quantises to 40 ms). The run-up is longer than the drift a stall can
+# introduce, so the baseline frames stay inside the storyboard's quiet
+# PROBE_QUIET_S however far the video has slid.
+ALIGN_PRE_S, ALIGN_POST_S, ALIGN_FPS = 1.6, 0.8, 25
+
+# The caption is counted as "on screen" once the band has travelled this far
+# toward its final state. The bar fades in over 0.3 s, so "appears" needs a
+# definition; a fraction of the run's own final delta is one that does not
+# depend on how much contrast the medium happens to offer.
+ALIGN_ARRIVAL_FRACTION = 0.25
+
+# ...and the band must actually get somewhere for the measurement to mean
+# anything. Below this the probe caption was never drawn in the video, and the
+# right answer is a failure, not a timestamp. Same per-medium reasoning (and
+# the same numbers) as MIN_CAPTION_BAND_DIFF above.
+MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0}
 
 # Written into each take directory so a later run can tell "a directory this
 # harness owns and may delete" from "somebody's source tree".
@@ -262,7 +400,11 @@ _GRAY_W, _GRAY_H = 160, 90
 
 
 def gray_frames(
-    path: Path, rect: Rect | None = None, sample_fps: int | None = None
+    path: Path,
+    rect: Rect | None = None,
+    sample_fps: int | None = None,
+    start: float | None = None,
+    duration: float | None = None,
 ) -> list[bytes]:
     """Decode an mp4 or png into 160x90 grayscale frames.
 
@@ -270,6 +412,11 @@ def gray_frames(
     region the app actually occupies is the whole point: the recorder's chrome
     is high-contrast and static, so a whole-frame score is dominated by it and
     cannot tell a blank app from a working one.
+
+    `start`/`duration` cut a window out of the video first. Both are input
+    options, so the seek is accurate and the returned frames start at the
+    first one at or after `start` — with `sample_fps` set, frame *i* is at
+    `start + i / sample_fps`, give or take that one frame.
     """
     chain = []
     if sample_fps:
@@ -278,11 +425,17 @@ def gray_frames(
         x, y, w, h = rect
         chain.append(f"crop={w}:{h}:{x}:{y}")
     chain += [f"scale={_GRAY_W}:{_GRAY_H}", "format=gray"]
+    window: list[str] = []
+    if start is not None:
+        window += ["-ss", f"{start:.3f}"]
+    if duration is not None:
+        window += ["-t", f"{duration:.3f}"]
     proc = subprocess.run(
         [
             "ffmpeg",
             "-v",
             "error",
+            *window,
             "-i",
             str(path),
             "-vf",
@@ -426,7 +579,10 @@ def record_web(
     with Recorder(out_dir, base_url=base_url, speech=False) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
-        rec.pause(0.6)
+        # Long enough to double as the run-up for the *early* timing probe:
+        # the page has finished painting and nothing moves until the first
+        # caption. See MAX_CAPTION_SKEW_S.
+        rec.pause(PROBE_QUIET_S)
         b.expect("goto('/'), #rows row count", rec.page.locator("#rows tr").count(), 5)
         b.expect(
             "goto('/'), #status text",
@@ -509,12 +665,15 @@ def record_web(
 
         # Two stills back to back with the page frozen and only the caption
         # changing. Their difference in the caption band is pixel proof that
-        # the bar was actually drawn — see MIN_CAPTION_BAND_DIFF.
+        # the bar was actually drawn — see MIN_CAPTION_BAND_DIFF. The quiet
+        # second in the middle is what makes the same moment usable as the
+        # timing probe — see caption_appearance_s().
         rec.caption("")
         check_caption(b, rec.page, "")
         rec.shot(CAPTION_PROBE[0])
-        rec.caption("Recorded end to end.")
-        check_caption(b, rec.page, "Recorded end to end.")
+        rec.pause(PROBE_QUIET_S)
+        rec.caption(PROBE_CAPTION)
+        check_caption(b, rec.page, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
         rec.caption("")
 
@@ -561,6 +720,10 @@ def record_terminal(
             b.fail_if(True, f"after {after}, the shell prompt never came back — {tail}")
 
     with TerminalRecorder(out_dir, speech=False) as rec:
+        # Let xterm.js settle, and give the early timing probe below a
+        # baseline that is not the browser's first paint. See
+        # MAX_CAPTION_SKEW_S.
+        rec.pause(PROBE_QUIET_S)
         rec.caption("A real shell, recorded.")
         check_caption(b, rec.page, "A real shell, recorded.")
         rec.run("echo hello from demo-video")
@@ -582,8 +745,9 @@ def record_terminal(
         rec.caption("")
         check_caption(b, rec.page, "")
         rec.shot(CAPTION_PROBE[0])
-        rec.caption("Recorded end to end.")
-        check_caption(b, rec.page, "Recorded end to end.")
+        rec.pause(PROBE_QUIET_S)
+        rec.caption(PROBE_CAPTION)
+        check_caption(b, rec.page, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
         rec.caption("")
 
@@ -667,6 +831,288 @@ def _check_video(
             f"content {score:.1f})"
         )
     return failures
+
+
+def caption_appearance_s(
+    label: str, mp4: Path, band: Rect, t_start: float
+) -> tuple[float | None, str]:
+    """When the probe caption really shows up in the video, in seconds.
+
+    Returns (seconds, note) — seconds is None when the measurement could not
+    be made, and `note` says why, or reports the numbers behind the answer.
+
+    The storyboard leaves PROBE_QUIET_S of nothing happening before the probe
+    caption, so within this window the caption band changes for one reason
+    only. Sample it every frame from before the beat to after it, and take the
+    first frame that has travelled ALIGN_ARRIVAL_FRACTION of the way from the
+    quiet baseline to where the band ends up. Deliberately *not* "the first
+    frame that differs at all": the bar fades in over 0.3 s, so the first
+    perturbed frame and the fully-drawn one are a third of a second apart and
+    only one of them is a defensible answer.
+    """
+    start = max(0.0, t_start - ALIGN_PRE_S)
+    span = (t_start - start) + ALIGN_POST_S
+    try:
+        frames = gray_frames(
+            mp4, band, sample_fps=ALIGN_FPS, start=start, duration=span
+        )
+    except RuntimeError as exc:
+        return None, str(exc)
+    if len(frames) < ALIGN_FPS // 2:
+        return None, f"only {len(frames)} frames could be sampled around {t_start:.2f}s"
+
+    baseline = frames[0]
+    travel = [frame_difference(baseline, f) for f in frames]
+    settled = sum(travel[-3:]) / 3
+    floor = MIN_ALIGN_BAND_DELTA[label]
+    if settled < floor:
+        return None, (
+            f"the caption band never changed around {t_start:.2f}s — it moved "
+            f"{settled:.2f} mean luma by the end of the window, under the "
+            f"{floor} floor. The probe caption is not in the video at all, so "
+            f"there is no appearance to time."
+        )
+    # Noise floor from the quiet run-up, so encoder dither cannot be mistaken
+    # for the caption arriving; ALIGN_ARRIVAL_FRACTION dominates in practice.
+    quiet = int(ALIGN_FPS * 0.3)
+    noise = max(travel[1:quiet]) if len(travel) > quiet else 0.0
+    threshold = max(settled * ALIGN_ARRIVAL_FRACTION, noise * 4)
+    arrived = next((i for i, d in enumerate(travel) if d > threshold), None)
+    if arrived is None:
+        return None, (
+            f"the caption band settles at {settled:.2f} but no frame in the "
+            f"window crossed {threshold:.2f} — the window is wrong"
+        )
+    if arrived == 0:
+        return None, (
+            f"the caption band was already changed at the very first sampled "
+            f"frame ({start:.2f}s), {ALIGN_PRE_S}s before the beat says the "
+            f"caption was set — nothing about this window is a baseline"
+        )
+    return start + arrived / ALIGN_FPS, (
+        f"band travelled {settled:.1f}, noise {noise:.2f}, "
+        f"arrival threshold {threshold:.2f}"
+    )
+
+
+def check_timeline(
+    label: str,
+    out_dir: Path,
+    started_at: float,
+    expected_beats: list[tuple[str, str | None]],
+    expected_captions: list[str],
+    frame_size: tuple[int, int],
+) -> list[str]:
+    """The beat log the take left behind: timeline.json and timeline.md.
+
+    Graded on the same three axes as everything else here. That it exists and
+    parses is the cheap part; that its beats are the beats the storyboard
+    actually performed, and that its timestamps point at the right frames of
+    demo.mp4, is the part worth having.
+    """
+    from demo_recording import TIMELINE_SCHEMA, media_duration
+
+    failures: list[str] = []
+    json_path = out_dir / "timeline.json"
+    md_path = out_dir / "timeline.md"
+
+    if not json_path.is_file():
+        return [f"{label}: {json_path} was never written"]
+    if json_path.stat().st_mtime < started_at - 1:
+        return [f"{label}: {json_path} is stale — it predates this run"]
+    try:
+        doc = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [f"{label}: {json_path} is not valid JSON: {exc}"]
+
+    if doc.get("schema") != TIMELINE_SCHEMA:
+        failures.append(
+            f"{label}: timeline.json says schema {doc.get('schema')!r}, but the "
+            f"recorder package exports TIMELINE_SCHEMA {TIMELINE_SCHEMA!r}"
+        )
+    if doc.get("media") != "demo.mp4":
+        failures.append(
+            f"{label}: timeline.json describes media {doc.get('media')!r}, "
+            f"expected 'demo.mp4'"
+        )
+    if doc.get("segment") is not None:
+        failures.append(
+            f"{label}: timeline.json says segment {doc.get('segment')!r}; these "
+            f"takes are single-segment, so it should be null"
+        )
+
+    beats = doc.get("beats")
+    if not isinstance(beats, list):
+        return failures + [f"{label}: timeline.json has no `beats` list"]
+
+    # -- the beats are the beats the storyboard performed --------------------
+    actual = [(b.get("verb"), b.get("selector")) for b in beats]
+    if actual != expected_beats:
+        counts = (
+            ""
+            if len(actual) == len(expected_beats)
+            else (
+                f" ({len(actual)} beats logged against the "
+                f"{len(expected_beats)} the storyboard performs)"
+            )
+        )
+        failures.append(
+            f"{label}: timeline.json does not log the beats the storyboard "
+            f"performs{counts} — first difference at index "
+            f"{_first_difference(actual, expected_beats)}. Logged {actual!r}. "
+            f"Either a verb stopped recording a beat, or record_{label}() "
+            f"changed and WEB_BEATS/TERMINAL_BEATS is stale."
+        )
+    captions = [b.get("caption") for b in beats if b.get("verb") == "caption"]
+    if captions != expected_captions:
+        failures.append(
+            f"{label}: the captions in timeline.json are {captions!r}, the "
+            f"storyboard sets {expected_captions!r}"
+        )
+
+    # -- indices and timestamps ---------------------------------------------
+    previous_end = 0.0
+    for position, beat in enumerate(beats):
+        where = f"{label}: beat {position} ({beat.get('verb')!r})"
+        if beat.get("index") != position:
+            failures.append(
+                f"{where} carries index {beat.get('index')!r}, but sits at "
+                f"position {position} in the list"
+            )
+        t_start, t_end = beat.get("t_start"), beat.get("t_end")
+        if not isinstance(t_start, (int, float)) or not isinstance(t_end, (int, float)):
+            failures.append(f"{where} has non-numeric timestamps {t_start!r}/{t_end!r}")
+            continue
+        if t_start < 0:
+            failures.append(f"{where} starts at {t_start:.3f}s, before the video does")
+        if t_end < t_start - BEAT_ORDER_SLACK_S:
+            failures.append(
+                f"{where} ends at {t_end:.3f}s, before it starts ({t_start:.3f}s)"
+            )
+        if t_start < previous_end - BEAT_ORDER_SLACK_S:
+            failures.append(
+                f"{where} starts at {t_start:.3f}s, before the previous beat "
+                f"ended ({previous_end:.3f}s) — the log is not monotonic"
+            )
+        previous_end = max(previous_end, t_end)
+        if beat.get("segment") is not None:
+            failures.append(f"{where} claims segment {beat.get('segment')!r}")
+
+    # -- the mp4 the timestamps are relative to ------------------------------
+    mp4 = out_dir / "demo.mp4"
+    duration = doc.get("duration")
+    if not mp4.is_file():
+        failures.append(f"{label}: timeline.json describes {mp4}, which is not there")
+    elif not isinstance(duration, (int, float)):
+        failures.append(
+            f"{label}: timeline.json has no numeric duration ({duration!r})"
+        )
+    else:
+        try:
+            probed = media_duration(mp4)
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the run
+            failures.append(f"{label}: ffprobe could not read {mp4}: {exc}")
+            probed = None
+        if probed is not None and abs(probed - duration) > DURATION_TOLERANCE_S:
+            failures.append(
+                f"{label}: timeline.json says demo.mp4 is {duration}s, ffprobe "
+                f"says {probed:.3f}s"
+            )
+        if previous_end > (probed or duration) + DURATION_TOLERANCE_S:
+            failures.append(
+                f"{label}: the last beat ends at {previous_end:.3f}s, past the "
+                f"end of a {duration}s demo.mp4 — the timestamps are not on "
+                f"the same clock as the video"
+            )
+
+    # -- every still a beat names is on disk ---------------------------------
+    logged_stills = [b["still"] for b in beats if b.get("still")]
+    for rel in logged_stills:
+        if not (out_dir / rel).is_file():
+            failures.append(
+                f"{label}: beat still {rel!r} does not exist — timeline.json "
+                f"points a reviewer at a file that was never written"
+            )
+    on_disk = sorted(p.name for p in (out_dir / "images").glob("*.png"))
+    named = sorted(Path(rel).name for rel in logged_stills)
+    if named != on_disk:
+        failures.append(
+            f"{label}: timeline.json names stills {named!r}, but images/ holds "
+            f"{on_disk!r} — a shot() happened without a beat, or the other way"
+        )
+
+    # -- timeline.md is rendered from the same beats -------------------------
+    if not md_path.is_file():
+        failures.append(f"{label}: {md_path} was never written")
+    elif md_path.stat().st_mtime < started_at - 1:
+        failures.append(f"{label}: {md_path} is stale — it predates this run")
+    else:
+        markdown = md_path.read_text()
+        for rel in logged_stills:
+            if f"]({rel})" not in markdown:
+                failures.append(
+                    f"{label}: timeline.md does not embed the still {rel!r} that "
+                    f"timeline.json records"
+                )
+        for text in (c for c in expected_captions if c):
+            if text not in markdown:
+                failures.append(f"{label}: timeline.md does not mention {text!r}")
+
+    # -- the acceptance criterion: timestamps point at the right frames ------
+    spoken = [b for b in beats if b.get("verb") == "caption" and b.get("caption")]
+    probes: list[tuple[str, dict, float]] = []
+    if spoken:
+        probes.append(("first caption", spoken[0], MAX_CAPTION_SKEW_S))
+    last = next(
+        (b for b in reversed(spoken) if b.get("caption") == PROBE_CAPTION), None
+    )
+    if last is None:
+        failures.append(
+            f"{label}: no beat logs the closing caption {PROBE_CAPTION!r}, so "
+            f"the end of the timeline cannot be checked against the video"
+        )
+    elif last is not spoken[0]:
+        probes.append(("closing caption", last, MAX_LATE_CAPTION_SKEW_S))
+    if not spoken:
+        failures.append(f"{label}: no caption beats at all to time against")
+
+    for what, probe, bar in probes:
+        if not mp4.is_file() or not isinstance(probe.get("t_start"), (int, float)):
+            continue
+        text = probe["caption"]
+        t_start = float(probe["t_start"])
+        seen_at, note = caption_appearance_s(
+            label, mp4, caption_band(frame_size), t_start
+        )
+        if seen_at is None:
+            failures.append(
+                f"{label}: the {what} could not be timed against demo.mp4 — {note}"
+            )
+            continue
+        skew = seen_at - t_start
+        if abs(skew) > bar:
+            failures.append(
+                f"{label}: timeline.json puts the {what} {text!r} at "
+                f"{t_start:.2f}s, but demo.mp4 shows it at {seen_at:.2f}s — "
+                f"{skew * 1000:+.0f} ms, over the {bar * 1000:.0f} ms bar. The "
+                f"beat log and the video are on different clocks ({note})."
+            )
+        else:
+            print(
+                f"smoke: {label} {what} {text!r} logged at {t_start:.2f}s, on "
+                f"screen at {seen_at:.2f}s ({skew * 1000:+.0f} ms, bar "
+                f"{bar * 1000:.0f} ms)"
+            )
+    if not failures:
+        print(f"smoke: {label} timeline.json ok ({len(beats)} beats)")
+    return failures
+
+
+def _first_difference(actual: list, expected: list) -> object:
+    for i, (a, e) in enumerate(zip(actual, expected, strict=False)):
+        if a != e:
+            return f"{i} ({a!r} vs expected {e!r})"
+    return f"{min(len(actual), len(expected))} (one list simply ends)"
 
 
 def check_take(
@@ -797,8 +1243,19 @@ def run_web(out_root: Path) -> list[str]:
             problems, video_rect, still_rect, size = record_web(out_dir, base_url)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
-    return problems + check_take(
-        "web", out_dir, WEB_SHOTS, WEB_DURATION_S, started, video_rect, still_rect, size
+    return (
+        problems
+        + check_take(
+            "web",
+            out_dir,
+            WEB_SHOTS,
+            WEB_DURATION_S,
+            started,
+            video_rect,
+            still_rect,
+            size,
+        )
+        + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
     )
 
 
@@ -822,15 +1279,21 @@ def run_terminal(out_root: Path) -> list[str]:
         return [f"terminal: TerminalRecorder raised {type(exc).__name__}: {exc}"]
     finally:
         os.chdir(previous)
-    return problems + check_take(
-        "terminal",
-        out_dir,
-        TERMINAL_SHOTS,
-        TERMINAL_DURATION_S,
-        started,
-        video_rect,
-        still_rect,
-        size,
+    return (
+        problems
+        + check_take(
+            "terminal",
+            out_dir,
+            TERMINAL_SHOTS,
+            TERMINAL_DURATION_S,
+            started,
+            video_rect,
+            still_rect,
+            size,
+        )
+        + check_timeline(
+            "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
+        )
     )
 
 
