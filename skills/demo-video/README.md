@@ -28,8 +28,9 @@ and a real terminal session (voice on):
   waits (recorded as segments, stitched losslessly).
 - **`images/*.png`** — stills captured at key moments, ready for a written
   guide.
-- **`record.py`** — the storyboard that produced the media, committed next
-  to it and re-runnable after the UI changes.
+- **`record.py`** — the storyboard that produced the media, and the thing
+  that actually gets committed: re-runnable after the UI changes, so the
+  video stays out of git history and is regenerated rather than archived.
 - **Spoken narration (optional)** — with `ELEVENLABS_API_KEY` set, every
   caption line is synthesized via ElevenLabs and mixed onto the mp4 at the
   moment it appears. Clips are cached; pacing self-adjusts so speech is

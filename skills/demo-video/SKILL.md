@@ -31,12 +31,15 @@ but they will not match the windowed video exactly.
 
 Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 
-| File | What it is |
-|---|---|
-| `record.py` | The storyboard that produced the media (re-runnable) |
-| `demo.mp4` | The recording (mp4 only — gifs get too big) |
-| `images/*.png` | Stills captured at key moments |
-| `guide.md` | Optional written guide embedding the stills, linking the video |
+| File | What it is | In git? |
+|---|---|---|
+| `record.py` | The storyboard that produced the media (re-runnable) | yes |
+| `images/*.png` | Stills captured at key moments | yes |
+| `guide.md` | Optional written guide embedding the stills | yes |
+| `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
+
+The storyboard is the durable artifact, not the video. See **Commit the
+storyboard, not the media** in the Process section.
 
 ## Setup (once per project)
 
@@ -371,12 +374,26 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    feature demoed are future demos, not blockers.
 7. **Write `guide.md`** (when a written guide is wanted): what the feature
    is, how to use it step by step — each step referencing a still —
-   opening with a still that links to the video
-   (`[![Watch the demo](images/01-home.png)](demo.mp4)`). End with a
-   "Re-recording this demo" section giving the exact command.
-8. **Commit** the whole folder including the mp4 — it is the point of the
-   exercise. Gitignore the working files: `.tts/` narration caches and
-   `*.seg.mp4` segment parts (only demo.mp4 belongs in history).
+   opening with the strongest still. Don't link `demo.mp4` from it: the
+   video is not committed (step 8), so a repo-relative link to it is dead
+   in a fresh clone. End with a "Re-recording this demo" section giving the
+   exact command — that is how a reader gets the video.
+8. **Commit the storyboard, not the media.** `record.py`, `guide.md`, and
+   the `images/*.png` stills go into git — they are small, diffable, and
+   the guide needs the stills to render. **`demo.mp4` does not.** A video
+   is stale by the next change to the feature and bloats history
+   permanently, and anyone with the skill installed can regenerate it with
+   `uv run <demo folder>/record.py`. Gitignore `demo.mp4`, `*.seg.mp4`
+   segment parts, and `.tts/` narration caches.
+
+   To put the demo in front of a reviewer, drag `demo.mp4` into a PR
+   comment box — GitHub hosts it and renders a real player. That upload has
+   no public API, so it stays a manual step.
+
+   The exception is a video that is itself permanent documentation: a
+   hand-authored showcase for a stable feature, recorded once and not
+   per-change. Commit that one deliberately, knowing the repo carries it
+   forever.
 
 ## Common mistakes
 
@@ -402,7 +419,10 @@ with TerminalRecorder(Path(__file__).parent) as rec:
   mid-recording, elements move but the cursor doesn't — re-`move_to` the
   target after any wait that can reflow the page.
 - **Embedding video in markdown.** Repo-relative mp4s don't play inline in
-  rendered markdown — embed a still that links to `demo.mp4` instead.
+  rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
+  with a still and point at the re-record command instead. GitHub plays only
+  video it hosts itself, so an mp4 linked from anywhere else renders as a
+  bare link, not a player.
 
 ## Sharing this skill
 
