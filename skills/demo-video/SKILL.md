@@ -35,7 +35,7 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 |---|---|---|
 | `record.py` | The storyboard that produced the media (re-runnable) | yes |
 | `images/*.png` | Stills captured at key moments | yes |
-| `timeline.json` | The beat log — every verb, when it ran, what caption was up | yes |
+| `timeline.json` | The beat log — every verb, when it ran, what caption was up. For a segmented demo, the merged one `stitch()` writes | yes |
 | `timeline.md` | The same log rendered for humans, stills embedded | yes |
 | `guide.md` | Optional written guide embedding the stills | yes |
 | `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
@@ -311,7 +311,7 @@ that recorded a console error, an uncaught exception, or a non-zero exit — see
 | `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. See **Redacting secrets**. |
 | `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. |
 | `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
-| `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4 |
+| `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
 
 ## Redacting secrets
@@ -479,9 +479,17 @@ to the media. No storyboard changes are needed; it is a byproduct of recording.
 embedded under the caption it was taken during. **Commit both.** They are
 small, diffable, and unlike `demo.mp4` they survive as a record of what the
 demo showed after the video has been regenerated or thrown away — which is
-what makes them worth reviewing in a PR. Segments write
-`<segment>.seg.timeline.json` alongside `<segment>.seg.mp4`; gitignore those
-with the segment media.
+what makes them worth reviewing in a PR.
+
+**A segmented demo gets exactly the same pair, written by `stitch()`.** Each
+segment records `<segment>.seg.timeline.json` beside its `<segment>.seg.mp4`,
+with timestamps relative to that segment's own start; `stitch()` merges them
+into one `timeline.json` / `timeline.md` next to `demo.mp4`, moving each
+segment's beats by the **real duration** (ffprobe) of the parts before it.
+Commit the merged pair; gitignore the `*.seg.timeline.*` parts with the
+segment media, exactly as you gitignore `*.seg.mp4`. `stitch()` deletes them
+along with the `.seg.mp4` files unless you pass `keep_parts=True`, which keeps
+both so one expensive segment can be re-recorded and re-stitched.
 
 `timeline.json` is the machine-readable one, and a stable contract — adding a
 key is fine, renaming one is not:
@@ -493,7 +501,7 @@ key is fine, renaming one is not:
   "beats": [
     { "index": 4, "t_start": 3.02, "t_end": 3.06, "caption": "A small dashboard.",
       "verb": "shot", "selector": "01-dashboard",
-      "still": "images/01-dashboard.png", "segment": null }
+      "still": "images/01-dashboard.png", "segment": null, "segment_index": 4 }
   ],
   "issues": [
     { "kind": "console_error", "t": 0.47, "beat": 0, "verb": "goto",
@@ -518,6 +526,29 @@ key is fine, renaming one is not:
 - `issues` is what the recorder saw *behind* the pixels; `issue_count` is how
   many it saw, and is larger than `len(issues)` only when a take blew past the
   200-issue cap.
+- `index` is the beat's position **in this file**, so `stitch()` renumbers it
+  across a merged demo. `segment` and `segment_index` (its position within its
+  own segment) survive the merge untouched — use that pair, not `index`, to
+  name a beat in anything that has to line up across a re-stitch.
+
+A merged timeline says so, and says what it was built from:
+
+```json
+{ "segment": null, "media": "demo.mp4", "duration": 15.2,
+  "recorder": "Recorder",
+  "segments": [
+    { "segment": "part1", "media": "part1.seg.mp4", "duration": 6.6,
+      "offset": 0.0, "beats": 6, "recorder": "Recorder", "determinism": {…} },
+    { "segment": "part2", "media": "part2.seg.mp4", "duration": 8.6,
+      "offset": 6.6, "beats": 9, "recorder": "Recorder", "determinism": {…} }
+  ] }
+```
+
+`offset` is where each part starts inside `demo.mp4`, which is what maps a
+merged timestamp back to the file it came from. `recorder` and `determinism`
+at the top level carry the value every segment agrees on — `"mixed"`, and
+`null` per key, where they do not; the per-segment truth is in `segments`. A
+timeline a single take wrote has no `segments` key at all.
 
 ## Failing the take on a broken app
 
@@ -744,7 +775,9 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    `Recorder(out_dir, segment="part1")`, poll between segments until the
    work is done, open the next segment with `rec.interlude("…a few minutes
    later…")` on `about:blank` before navigating, and `stitch()` into
-   demo.mp4.
+   demo.mp4. `stitch()` also merges the segments' beat logs into one
+   `timeline.json` / `timeline.md`, so a segmented demo commits the same two
+   files as any other — you do not have to do anything for that.
 2. **Write `record.py`** in the demo folder as a short storyboard. Capture
    a still (`rec.shot("NN-name")`) at each moment a written guide would
    narrate. Make retakes idempotent — clean up state earlier takes created,
@@ -815,7 +848,11 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 8. **Commit the storyboard, not the media.** `record.py`, `guide.md`, the
    `images/*.png` stills, and `timeline.json` / `timeline.md` go into git —
    they are small, diffable, and between them they say what the demo showed
-   without anyone having to watch it. **`demo.mp4` does not.** A video is
+   without anyone having to watch it. For a **segmented** demo those two are
+   the merged pair `stitch()` wrote next to `demo.mp4`; the per-segment
+   `*.seg.timeline.*` are working files that go with `*.seg.mp4`, and
+   `stitch()` removes them for you unless you asked to keep the parts.
+   **`demo.mp4` does not.** A video is
    stale by the next change to the feature and bloats history permanently,
    and anyone with the skill installed can regenerate it with
    `uv run <demo folder>/record.py`. Gitignore `demo.mp4`, `*.seg.mp4`

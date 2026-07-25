@@ -13,7 +13,8 @@ __pycache__/
 .tts/
 *.seg.mp4
 # Per-segment beat logs. The merged timeline.json/timeline.md next to
-# demo.mp4 is committed; these are the parts it is built from.
+# demo.mp4 is committed; these are the parts it is built from, and stitch()
+# deletes them with their .seg.mp4 unless it was passed keep_parts=True.
 *.seg.timeline.json
 *.seg.timeline.md
 # Left behind only when a take crashes before the recorder cleans up.

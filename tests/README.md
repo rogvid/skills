@@ -18,8 +18,9 @@ tests/
 ```
 
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
-problem takes, and `redaction/` — the web recorder against a page that renders
-a secret, plus a second few-second take that must *fail*.
+problem takes, `redaction/` — the web recorder against a page that renders
+a secret, plus a second few-second take that must *fail* — and `segments/`,
+one demo recorded in two parts and joined with `stitch()`.
 
 ## Running it
 
@@ -32,6 +33,7 @@ tests/smoke                       # all three takes, output to a temp dir
 tests/smoke --web-only            # just the Playwright take
 tests/smoke --terminal-only       # just the PTY/xterm.js take
 tests/smoke --redaction-only      # just the secret-redaction take
+tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -54,6 +56,11 @@ smoke: redaction #api-key is blurred in every frame of demo.mp4 (worst 1.5 vs co
 smoke: redaction still 01-key-blurred.png ok (key 1.0, token 2.9, control 39.3)
 smoke: redaction .tts/ holds 2 clips — the narrated lines, and nothing for the refused one
 smoke: redaction no artifact holds either secret verbatim
+smoke: segments recorded 2 parts, each with its own beat log (part1 6.8s, part2 7.8s)
+smoke: segments the merge puts the second segment's closing caption +0 ms from where its own segment does (-80 ms in part2.seg.mp4, -80 ms in demo.mp4)
+smoke: segments stitched 2 parts into a 14.6s demo.mp4 and merged their beat logs (15 beats); keep_parts=True kept every part and its log, the default removed them
+smoke: segments closing caption 'Recorded end to end.' logged at 11.43s, on screen at 11.35s (-80 ms)
+smoke: segments timeline.json ok (15 beats)
 …
 smoke: web-problems timeline.json records 8 problem(s), 6 of them fatal under strict — take still passed
 smoke: web-strict strict=True refused the take, naming beat 0 (goto) (4 fatal issues, artifacts kept)
@@ -75,10 +82,10 @@ smoke: determinism ok (3 takes)
 smoke: PASSED
 ```
 
-Re-running into the same `--out-dir` is safe: the ten take subdirectories
-(`web/`, `terminal/`, `web-problems/`, `terminal-problems/`, `terminal-race/`,
-`web-strict/`, `terminal-strict/`, `determinism-a/`, `determinism-b/`,
-`determinism-off/`) are deleted before each take. Only the first two are graded
+Re-running into the same `--out-dir` is safe: the take subdirectories
+(`web/`, `terminal/`, `segments/`, `web-problems/`, `terminal-problems/`,
+`terminal-race/`, `web-strict/`, `terminal-strict/`, `determinism-a/`,
+`determinism-b/`, `determinism-off/`) are deleted before each take. Only the first two are graded
 on their video; the rest are short and exist to break, or to reproduce, in one
 specific way each. That is not tidiness — every artifact assertion works by
 path, so without it a leftover `demo.mp4` from the previous run would grade a
@@ -663,6 +670,62 @@ if the fixture ever stopped putting those elements behind a real boundary the
 take would go on passing while proving nothing: `page.locator("#sd-key")` must
 find exactly one, and `document.querySelectorAll("#sd-key")` exactly none.
 
+**Segments and the merge** — a demo recorded in two parts and joined by
+`stitch()` ([#7](https://github.com/rogvid/skills/issues/7)). `segments/`
+records the storyboard `SKILL.md` prescribes for a real time-skip: part one,
+then a second `Recorder(segment=…)` that opens with an `interlude()` on the
+blank page before navigating back. Each part writes its own `.seg.mp4` and its
+own beat log; the demo-wide `timeline.json` is assembled from them.
+
+**The merged timeline is graded by `check_timeline()` — the same function, and
+the same assertions, that grade a single take.** That is the point rather than
+an economy: the beats, the captions, the per-beat caption context, the
+monotonicity and coverage of the timestamps, `timeline.md`'s table, the stills
+on disk, and the measured "does this timestamp point at that frame" check all
+apply unchanged. A segmented demo graded more softly than a recorded one is a
+segmented demo nobody can trust. What the merge adds is a hand-written
+*segment* column — a stitch that merged part one twice produces a perfectly
+monotonic timeline of the right length, and only that column notices.
+
+The offsets are the parts' **ffprobe durations**, never the storyboard's
+nominal timing, and that distinction is load-bearing: the screencast drops
+wall time during idle stretches, so a segment's video routinely runs ~0.9 s
+shorter than its beats say it took. Injecting nominal timing here moves the
+second segment's beats 2.1 s off their frames.
+
+**How the acceptance criterion is measured, and why it can be stated at
+100 ms.** The closing caption is timed *twice* — once in `part2.seg.mp4`
+against that segment's own beat log, and once in the stitched `demo.mp4`
+against the merged one. `stitch()` copies the streams, so those are literally
+the same frames carrying the same capture loss, and the **difference** between
+the two skews is the merge's offset error with issue #18 cancelled out.
+Measured across six takes: **+0 ms**, every time, against a 100 ms bar; the
+absolute skews behind it ranged -200 to +0 ms. A bar on the absolute skew
+could not be set anywhere near that, because a segment whose capture stalled
+shows every caption early in its own video too.
+
+That cancellation is also why the sharp `MAX_SKEW_DRIFT_S` (250 ms) does *not*
+apply between the take's two probes here: they sit in different segments, so
+they rode different screencasts, each with its own ~0.7 s of untickerable
+recorder setup, and a stall in the second moves only the second. Measured
+across four takes: -80, +80, +80, and one at **-520** — a real segment-two
+stall, which would have made this axis flake. Across a boundary the bound is
+therefore one capture-loss window, and the tight claim is made by the
+differential measurement instead.
+
+The rest is what is true of a merge and of nothing else:
+
+| Checked | Why |
+|---|---|
+| before any stitch, each part has an `.seg.mp4` *and* an `.seg.timeline.json`/`.md`, and no `demo.mp4`/`timeline.json` exists yet | the cleanup assertion below is otherwise satisfied by a recorder that never wrote them, and every path assertion by a leftover |
+| each part's own log starts within `MAX_UNMERGED_FIRST_BEAT_S` of zero | "the merged timestamps are large" proves nothing if they were large before the merge |
+| `stitch(keep_parts=True)` leaves every part **and its beat log** | re-recording one expensive segment and re-stitching is the whole reason that flag exists, and it needs the logs as much as the mp4s |
+| stitching twice produces the same beats | the merge has to be a function of what is on disk |
+| the default `stitch()` leaves **no** `*.seg.*` at all | [#21](https://github.com/rogvid/skills/issues/21): a `.seg.timeline.json` outliving its `.seg.mp4` names a file that is gone, and the next stitch cannot tell it from a fresh one |
+| the merged envelope's `segments` records match ffprobe, in order, and tile `demo.mp4` | it is what maps a merged timestamp back to the file it came from |
+| `index` is renumbered to the position in the merged file, `segment_index` is **not** | [#22](https://github.com/rogvid/skills/issues/22): `(segment, segment_index)` names a beat the same way before and after a merge, which `index` alone cannot. Asserted in every take, not just this one — for a single take it is 0, 1, 2, … |
+| a take recorded in one piece carries no `segments` key | that key means "assembled by stitch()", and a reader would otherwise be told a single recording has parts |
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -812,10 +875,25 @@ knows is missing is worse than one that is openly absent.
     version of this file presented the first as tested and the second as the
     redundant one; that was wrong in a way worth stating, because it claimed
     coverage that does not exist.
-- **Nothing checks `stitch()`, segments, or `interlude()`.** Single-segment
-  takes only — so `<segment>.seg.timeline.json`, and the merge
-  [#7](https://github.com/rogvid/skills/issues/7) will build on it, are
-  unexercised.
+- **The segmented take records two parts of one storyboard, not a real
+  time-skip.** Nothing waits between them, both are the web recorder against
+  the same fixture, and no segment is re-recorded on its own — so the flow
+  `keep_parts=True` exists for (re-record one expensive part, re-stitch) is
+  exercised only as "stitch the same parts twice". A demo mixing a web and a
+  terminal segment, which the merged envelope's `"mixed"` recorder value is
+  for, is recorded nowhere.
+- **The merge's `issues` path is unexercised.** `stitch()` also offsets each
+  issue's `t` and re-points its `beat` at the merged beat list, and the
+  segmented take is a recording of a *healthy* app under `strict=True` — so it
+  records no issues at all and none of that runs. An issue attributed to the
+  wrong beat of the wrong segment would pass this suite. Tracked in
+  [#51](https://github.com/rogvid/skills/issues/51).
+- **The merge's error is measured at one beat, not all of them.** The
+  differential measurement below reads the *closing caption* out of two
+  videos. Every other beat in the second segment is carried by the same single
+  offset, so one being right makes the rest right — but a merge that moved
+  some beats and not others would be caught only by the ordering and coverage
+  checks, which are much coarser.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
@@ -899,7 +977,9 @@ the crop and looking at it before it was believed.
   `tests/smoke`, add its `shot()` name to `WEB_SHOTS` / `TERMINAL_SHOTS` so the
   still is actually checked, and add its `(verb, target)` to `WEB_BEATS` /
   `TERMINAL_BEATS` (and its text to `WEB_CAPTIONS` / `TERMINAL_CAPTIONS` if it
-  is a caption) so the timeline check knows to expect it. Those lists are
+  is a caption) so the timeline check knows to expect it. `record_segments`
+  works the same way, except that its list is `SEGMENT_BEATS_FULL` and carries
+  a third column, the segment the beat belongs to. Those lists are
   deliberately hand-maintained; see **Timeline** above for why. Adding a beat
   lengthens the take; keep it inside the duration window, or widen the window
   deliberately. **Every interaction gets a `b.expect(...)` naming what it
