@@ -19,8 +19,9 @@ tests/
 
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
 problem takes, `redaction/` — the web recorder against a page that renders
-a secret, plus a second few-second take that must *fail* — and `segments/`,
-one demo recorded in two parts and joined with `stitch()`.
+a secret, plus a second few-second take that must *fail* — `segments/`,
+one demo recorded in two parts and joined with `stitch()`, and
+`terminal-redaction/`, the redaction question asked of the PTY output path.
 
 ## Running it
 
@@ -29,10 +30,7 @@ tests/smoke                       # every take, output to a temp dir
 tests/smoke --web-only            # just the Playwright takes
 tests/smoke --terminal-only       # just the PTY/xterm.js takes
 tests/smoke --determinism-only    # just the three re-recording takes
-tests/smoke                       # all three takes, output to a temp dir
-tests/smoke --web-only            # just the Playwright take
-tests/smoke --terminal-only       # just the PTY/xterm.js take
-tests/smoke --redaction-only      # just the secret-redaction take
+tests/smoke --redaction-only      # just the secret-redaction takes
 tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
@@ -84,27 +82,19 @@ smoke: PASSED
 ```
 
 Re-running into the same `--out-dir` is safe: the take subdirectories
-(`web/`, `terminal/`, `segments/`, `web-problems/`, `terminal-problems/`,
-`terminal-race/`, `web-strict/`, `terminal-strict/`, `determinism-a/`,
-`determinism-b/`, `determinism-off/`) are deleted before each take. Only the first two are graded
+(`web/`, `terminal/`, `segments/`, `redaction/`, `terminal-redaction/`,
+`web-problems/`, `terminal-problems/`, `terminal-race/`, `web-strict/`,
+`terminal-strict/`, `determinism-a/`, `determinism-b/`, `determinism-off/`)
+are deleted before each take. Only the first two are graded
 on their video; the rest are short and exist to break, or to reproduce, in one
 specific way each. That is not tidiness — every artifact assertion works by
 path, so without it a leftover `demo.mp4` from the previous run would grade a
 recorder that produced nothing at all as a pass, and recording repeatedly into
 one directory is exactly how a change to the recorder gets verified.
-Re-running into the same `--out-dir` is safe: the `web/`, `redaction/` and
-`terminal/` subdirectories are deleted before each take. That is not tidiness — every
-artifact assertion works by path, so without it a leftover `demo.mp4` from the
-previous run would grade a recorder that produced nothing at all as a pass, and
-recording repeatedly into one directory is exactly how a change to the recorder
-gets verified.
 
 Deleting is bounded. Only those named subdirectories are ever
 removed, and only when each is absent, empty, or carries the
 `.demo-video-smoke` marker file a previous run wrote there. `--out-dir .` in a
-Deleting is bounded. Only `<out-dir>/web/`, `<out-dir>/redaction/` and
-`<out-dir>/terminal/` are ever removed, and only when each is absent, empty, or
-carries the `.demo-video-smoke` marker file a previous run wrote there. `--out-dir .` in a
 project that has its own `web/` directory gets a refusal naming the path, not a
 deleted source tree.
 
@@ -749,6 +739,154 @@ The rest is what is true of a merge and of nothing else:
 | `index` is renumbered to the position in the merged file, `segment_index` is **not** | [#22](https://github.com/rogvid/skills/issues/22): `(segment, segment_index)` names a beat the same way before and after a merge, which `index` alone cannot. Asserted in every take, not just this one — for a single take it is 0, 1, 2, … |
 | a take recorded in one piece carries no `segments` key | that key means "assembled by stitch()", and a reader would otherwise be told a single recording has parts |
 
+
+**Terminal redaction** — `terminal-redaction/`, the PTY half
+([#5](https://github.com/rogvid/skills/issues/5)). Different mechanism,
+different failure mode: there is no DOM to cover, so the only intervention is
+a scrubber between `os.read()` and `term.write()`, and everything downstream —
+the frames, the stills, and the xterm buffer `wait_for_text()` matches
+against — is drawn from what that scrubber let through.
+
+A shell script prints one tagged value per line, all 28 characters wide so
+they share a column, and the take is graded on the pixels of those rows:
+
+| row | what it is | what hides it |
+|---|---|---|
+| `key` | a registered value printed by a command | the registry |
+| `ans` | a registered value with a **colour escape inside it** | matching an escape-stripped copy |
+| `hid` | the same, cut by `ESC[?25l` — what every spinner emits mid-line | the same, once "inert" means more than SGR |
+| `osc` | the same, cut by a window-title OSC | the same |
+| `shp` | a `ghp_`-shaped token **nobody registered**, printed in one burst | shape detection alone |
+| `str` | a `ghp_`-shaped token written **one character at a time** | shape detection *across quiet boundaries* |
+| `pau` | an `sk-`-shaped token **paused 0.4 s mid-value** | the same |
+| `anc` | a `ghp_`-shaped token paused after its **first character** | the same, plus the token-boundary rule |
+| `aws` | an `AKIA`-shaped token nobody registered | shape detection alone |
+| `jwt` | a JWT nobody registered | shape detection alone |
+| `pwd` | `send(Secret(...))`, echoed back by the PTY | the registry, one character per read |
+| `ctl` | never registered, matches no shape | nothing — it is the reference |
+| `ref` | the literal string `[redacted]` | nothing — it is the reference |
+
+The `str`, `pau` and `anc` rows are the ones a scrubber that flushes on an
+idle poll gets wrong, and they are why the printer is a shell script rather
+than a `printf`.
+Capping `os.read()` cannot manufacture a *time* boundary: capped reads come
+back-to-back off a full buffer and the scrubber never sees the PTY go idle
+mid-value. `str` writes at 5 ms per character, which is slower than the
+recorder drains, so `select()` reports nothing ready between every character.
+`pau` and `anc` stop dead in the middle of a token — `anc` after one
+character, where nothing yet says "credential" and only *where it sits* does.
+
+**The split across `os.read()` boundaries is forced, not hoped for**, and that
+is the assertion the acceptance criterion turns on. `capped_pty_reads()`
+replaces the `os` module *in `demo_recording.terminal` only* with one whose
+`read()` returns at most 7 bytes and keeps every fragment. The take then
+asserts, from those fragments, that the printed key was reassembled from more
+than one of them — measured 5 — and prints the number. Without the cap this
+box hands the whole value over in a single read: injected, the assertion fires
+and says so, which is the difference between testing a carry buffer and
+hoping one was needed. The `pwd` row needs no help; the PTY echoes a typed
+character as it is typed, so it arrives in 28 fragments on any box.
+
+The ANSI case is asserted at the byte level too, over the printer's output
+only: the raw stream must contain `value-head`, `ESC[32m`, `value-tail` and
+must **not** contain the value whole — otherwise a literal substring match
+would have found it and the row proves nothing.
+
+**The pixels are graded three ways, and the second is what makes the first
+mean anything.** Every crop is the same 28 cells of one row at native
+resolution:
+
+- a masked row against the `ref` row must be **the same picture** — mean
+  absolute luma difference 0.0 in the stills, 1.2-2.4 in the mp4 (codec noise
+  on identical glyphs), bar 3.0 / 6.0;
+- the `ctl` row against the same `ref` row must **not** be: 40.6 in the
+  stills, 42.7 in the mp4, bar 12.0. That row is a 28-character key in the
+  same font at the same size in the same frame — exactly what a leak looks
+  like — so this says the comparison can tell a key from `[redacted]` at all.
+  With the scrubber taught to swallow the control too, it collapses to 0.0-1.4
+  and the take says every reading below it is vacuous;
+- the `ctl` row must be **sharp** (edge energy 28-31, floor 6.0 / 5.0). With
+  the terminal's foreground colour set to its background it scores 0.0-0.2 and
+  the take refuses to grade anything, which is the answer a blank recording
+  needs: every "these two crops match" reading is also true of two crops of
+  nothing.
+
+Not OCR, and not a claim to be. It says the pixels at that row are the mask
+and not a key; it cannot say *which* mask, and no assertion here reads text
+back out of a frame (the same gap the web half has).
+
+**Two more paths, checked without pixels.** The rendered screen — what
+`wait_for_text()` and `wait_for_prompt()` read, and the buffer every frame is
+drawn from — must hold none of the thirteen values and must hold the control
+intact. And every byte the take writes is swept for all thirteen, with no
+exemptions; the printer script lives in a temp directory of its own precisely
+so the sweep grades what the *recorder* wrote.
+
+**Two values are longer than the recorder's 4096-character fragment ceiling**,
+and they pull in opposite directions. A 4208-character JWT says a hold clamped
+mid-match must not write the head of a credential and mask the tail; a
+4208-character *registered* value says the ceiling must not bound the registry
+at all, whose hold is already bounded by the value's own length. Neither is
+graded on pixels — 4 kB of base64 wraps over fifty rows and scrolls every
+measured row away — so they go last, the video is graded only up to that
+point, and both are checked on the screen text and the byte sweep against a
+64-character witness. The whole value is the wrong needle: a clamped hold
+leaks a *prefix*, and a take rendering the first 111 characters in the clear
+was measured passing a check for the token itself.
+
+**`key()` must refuse too.** It is the one verb whose beat log a scrub cannot
+clean: the beat records the keys joined by spaces, and no literal match on the
+value can see `'s k - l i v e - …'` in `timeline.json`. So the call raises
+rather than the log leaking, and the take asserts nothing reached the screen
+first.
+
+**`run()` and `send()` must refuse.** Both are authored text echoed on camera,
+the terminal's `caption()`. Each is called with a registered value, must raise
+`SecretLeak`, must not type a character before doing so (asserted on the
+screen afterwards), and must not quote the value in the exception. The two
+refused beats are asserted to carry a `[redacted]` selector — positively,
+because "no beat holds the secret" is equally true of a log that lost the
+beats — and exactly one `send` beat must carry **no** target at all, which is
+the `Secret`: it is deliberately not a `str` so that `_verb_target` cannot
+write it into `timeline.json`, and teaching `_verb_target` to stringify it
+fails this.
+
+**The `hld` row is the other half of the carry rule, and it is timed.** The
+scrubber holds back any trailing fragment that could still complete a secret —
+which means a program whose last characters could begin a token renders short
+until it writes again, and every sync verb reads that screen. So the printer
+ends with `hld xe` and no newline, then parks on a `read`.
+
+`xe` and not `gh`, and that is the case. Both are shape fragments — `e` could
+begin a JWT — but this one sits *in the middle of a word*, where a credential
+never starts, so it must go out on the first quiet poll. The take measures how
+long it takes to appear and fails past 1.5 s. A rule that cannot tell `hld xe`
+from `hld gh` puts it on the three-second anchored clock: injected, it arrives
+at 3.9 s and this fails, which no assertion about the *final* screen can see.
+Remove the release altogether and it never arrives at all.
+
+The three arms are asserted separately and injected separately: this row (a
+fragment mid-word, released at once), the `str`/`pau`/`anc` rows (a fragment
+where a token would start, held for seconds), and the `pwd` row (a fragment of
+a *registered* value, held with no clock — the echo arrives one character per
+read with an idle pump between each, so releasing those would print a password
+one character at a time).
+
+**And a value the stream can never show contiguous must kill the take.**
+`terminal-cursor-leak/` is its own recording because it has to *die*. A
+program that writes `ESC[6;1Hcup <head>` and then `ESC[6;13H<tail>` puts the
+registered value on screen as one word while no substring of the byte stream
+contains it — the premise is asserted, not assumed, by requiring the value to
+be on the finished screen. The scrubber cannot see that; documented as
+uncovered, and uncovered has to mean *refused*, so `_verify_redaction_final()`
+reads the finished terminal buffer (visible screen *and* scrollback) before
+anything is converted and raises `SecretLeak`. The take must leave no
+`demo.mp4`, no `timeline.json`, no still and nothing in `.video/`, and the
+message must say the value was found *on screen* without quoting it. With that
+check removed the take records a normal mp4 with the key legible in every
+frame, `issues: []` and `strict=True` satisfied — the quietest failure in this
+harness, and the injection prints exactly that.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -822,11 +960,28 @@ knows is missing is worse than one that is openly absent.
   only — so the path where a fatal issue arrives past the cap and is counted
   but not recorded is unexercised, as is a `run()` whose prompt never comes
   back and therefore ends `exit_code: null`.
-- **Nothing checks that the withheld half-marker is flushed.** `_pump` holds
-  back trailing bytes that could still become an exit-status escape, and
-  `_stop` writes them to the terminal on teardown. No assertion reads the final
+- **Nothing checks what teardown flushes.** `_pump` holds back trailing bytes
+  that could still become an exit-status escape *or* the start of a secret,
+  and `_stop` writes both to the terminal on teardown — masking a dangling
+  fragment of a registered value as it goes. No assertion reads the final
   frame, so a regression there would lose the last few bytes of a program's
-  output silently.
+  output silently, and `_StreamRedactor._mask_dangling` is unexercised. Making
+  it fail needs a take that ends mid-secret and an assertion on the last
+  frames of the mp4, which is a race with the screencast.
+- **The terminal scrubber's colour bookkeeping is unasserted.** A masked run
+  swallows any SGR sequence inside it and re-emits it after the mask, so the
+  rest of the line keeps its colour. In this fixture the colour is reset
+  inside the same run, so removing that re-emission changes no pixel here.
+  It is cosmetic either way — nothing about *what* is hidden depends on it.
+- **Only SGR-interleaved secrets are caught, and only that is tested.** A
+  value broken up by a cursor movement — a redrawn progress line, a TUI
+  painting in two passes, a terminal-wrapped line — is not contiguous on
+  screen and is deliberately not matched (see SKILL.md). Nothing here records
+  such a program, so the harness does not measure how common that is.
+- **Shape detection is graded on one shape.** `ghp_` is the only one of the
+  four patterns a take actually prints; `sk-`, `AKIA` and the JWT shape are
+  exercised only as tail fragments and by the pattern list being read at all.
+  A regression in one of the other three passes.
 - **Nothing checks a non-bash shell.** The exit status arrives through `$?` and
   `\#` expanded in `PS1`, which is bash behaviour; zsh needs `PROMPT_SUBST` and
   would leave every `exit_code` null. Only `/bin/bash` is recorded here — the
@@ -1061,6 +1216,13 @@ the crop and looking at it before it was believed.
   `.gitleaks.toml`, and give it *both* a masked and an unmasked measurement.
   A redaction assertion with nothing sharp to compare against is the most
   dangerous kind of vacuous test: it passes on a black frame.
+- **A new thing the *terminal* scrubber must hide** — add a line to
+  `term_printer_script()`, a literal to the `TERM_*` constants, a row to
+  `TERM_MASKED_ROWS`, and allowlist the shape in `.gitleaks.toml`. Keep it 28
+  characters so it lands in the same columns as the `ctl` and `ref` rows,
+  which are what it is measured against. If it is meant to be caught by shape
+  rather than registration, do not register it — that separation is the only
+  thing that says the two mechanisms work apart.
 
 **Prove any new assertion can fail.** Break the thing it watches — stub the verb
 out in `skills/demo-video/helpers/`, or blank the fixture — run `tests/smoke`,

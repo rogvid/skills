@@ -382,8 +382,8 @@ with Recorder(Path(__file__).parent) as rec:
     it had already taken. A redacted take also withholds the first paint of
     each navigation until that check has passed.
 - **`register_secret(*values)`** is about *text*, not pixels. A `caption()`,
-  `interlude()`, `terminal()` or `terminal_close()` line containing a
-  registered value raises `SecretLeak` and **fails the take** — deliberately,
+  `interlude()`, `terminal()`, `terminal_close()`, `run()` or `send()` line
+  containing a registered value raises `SecretLeak` and **fails the take** — deliberately,
   rather than masking the line: captions are burned in *and* spoken *and*
   cached as audio in `.tts/`, and a secret in one is an authoring bug that
   wants rewording, not blurring. Text you did not author is scrubbed to
@@ -396,10 +396,82 @@ with Recorder(Path(__file__).parent) as rec:
   yields `[redacted]`, and it can never be logged as a beat's target by
   accident.
 
+### Redaction in a terminal demo
+
+`TerminalRecorder` has no `redact()`, and that is not an omission: a CSS
+selector means nothing to a PTY. What it has instead is a **scrubber on the
+output path**, between `os.read()` and the terminal, so a secret a program
+prints never reaches the buffer the frames are drawn from.
+
+```python
+from demo_recording import TerminalRecorder, Secret
+
+with TerminalRecorder(Path(__file__).parent) as rec:
+    rec.register_secret(os.environ["DEMO_TOKEN"])   # exact text: the guarantee
+    rec.run("./deploy --show-config")               # its output comes back masked
+    rec.run("ssh-add -l")                           # wait_for_prompt() sees the mask too
+    rec.send(Secret(os.environ["DEMO_PW"]))         # a password, at a prompt
+```
+
+- **Registered values are the guarantee.** Every occurrence in a program's
+  output becomes `[redacted]` — in the video, in the stills, and in the screen
+  text `wait_for_text()` and `wait_for_prompt()` match against. It holds when
+  the value is chopped across `os.read()` boundaries (the recorder holds back
+  any trailing fragment that could still complete one, with no time limit) and
+  when an escape sequence is printed *inside* it, as long as that sequence
+  does not move the cursor — see below.
+- **…and what the stream cannot express, the recorder refuses.** Before it
+  writes anything, the take reads the finished terminal — visible screen and
+  scrollback — and raises `SecretLeak` if a registered value is in it: no mp4,
+  no timeline, no stills. That is the backstop for the case the scrubber
+  cannot see (a value written in two pieces at two cursor positions), and it
+  is why "not covered" below means "the take dies", not "it records the key".
+- **Shape detection is a safety net under that, not a substitute for it.**
+  Four patterns are masked whether or not anyone registered them:
+
+  | | what it matches |
+  |---|---|
+  | `sk-…` | `sk-` + 16 or more of `A-Za-z0-9_-` |
+  | `ghp_…` | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 16 or more alphanumerics |
+  | `AKIA…` | `AKIA` or `ASIA` + 12 or more of `0-9A-Z` |
+  | JWT | `eyJ` + base64url, a `.`, base64url, optionally `.` and more |
+
+  They are deliberately narrow. Anything looser starts masking ordinary
+  output, and a demo with holes punched in it at random is worse than one that
+  shows a fake key. **Do not plan a demo around them**: a value that does not
+  match one of those four shapes — a database URL with a password in it, a
+  session cookie, an internal token format, a licence key — is not touched
+  unless you register it. They are also the *only* thing the final screen
+  check ignores: a registered value on screen kills the take, a shape-matched
+  one does not, because failing a recording on a heuristic is worse than the
+  heuristic missing.
+- **`run()` and `send()` refuse authored secrets.** A command line is text the
+  storyboard wrote and the PTY echoes on camera, so it is treated like a
+  caption: `run("curl -H 'x-api-key: sk-live-…'")` raises `SecretLeak` and
+  fails the take rather than typing a command the viewer cannot read. Pass the
+  value through the environment instead (`run('curl -H "x-api-key: $KEY"')`),
+  or type it with `send(Secret(...))`.
+- **`send(Secret(v))` is the password case.** It registers the value, types
+  the real thing, and the terminal's own echo of it comes back masked — one
+  character per read, which is exactly the split the carry buffer exists for.
+  Programs that turn echo off (a real `getpass`) show nothing either way.
+- **`key()` refuses one too.** `key(*value)` spells a value out one keystroke
+  at a time, and the beat it records is those keys joined by spaces — which no
+  scrub of the value can match, in a file this skill tells you to commit. So
+  the call raises rather than the log leaking.
+- **A held fragment can make the screen lag.** The recorder cannot know that
+  `sk-live-de` is the start of a registered value until the rest arrives, so
+  it withholds it. If the program then goes quiet — a prompt waiting for
+  input — those characters stay off screen, and a `wait_for_text()` looking
+  for them waits with them. After two seconds the recorder says so on stderr,
+  naming the count. Shape fragments are not held indefinitely: they go out
+  after three seconds, or immediately if they sit in the middle of a word
+  rather than where a token would start.
+
 ### What redaction does NOT cover
 
-Read this before trusting a recording to it. It closes four specific paths, and
-nothing else:
+Read this before trusting a recording to it. It closes a specific, countable
+set of paths — four on the web, one in the terminal — and nothing else:
 
 - **The cover is erasure; `style="blur"` is not.** An opaque rectangle
   removes the pixels. A blur destroys legibility, not information — a
@@ -419,10 +491,13 @@ nothing else:
   text, so the value stays *unregistered* — write it into a caption yourself
   and it will be captioned, spoken and cached without complaint. Register the
   text separately, or type it as a `Secret`.
-- **Only exact substrings match.** No shape detection, no `sk-`/`ghp_`/`AKIA`
-  patterns, no normalisation — a secret rendered with different whitespace, a
-  soft hyphen, or split across two elements is not caught. (Shape matching for
-  the terminal path is [issue #5](https://github.com/rogvid/skills/issues/5).)
+- **Only exact substrings match, on every path but one.** No normalisation —
+  a secret rendered with different whitespace, a soft hyphen, or split across
+  two elements is not caught, and a caption or a beat field is checked
+  literally. The single exception is the terminal recorder's PTY output, which
+  also runs four shape patterns over what a program prints; those are listed
+  under **Redaction in a terminal demo**, they apply nowhere else, and they
+  are a net rather than a promise.
 - **Registering late does not un-record anything.** A caption set before its
   value was registered is already burned into the frames and already spoken;
   what registration afterwards buys is only that the files the recorder writes
@@ -444,10 +519,55 @@ nothing else:
 - **Canvas: the picture is covered, the bitmap is not.** The cover is over
   the canvas element's rect, so nothing it draws is visible. Anything reading
   the bitmap back (`toDataURL`, `getImageData`) still sees the original.
-- **`TerminalRecorder` has no redaction yet.** `register_secret()` and
-  `scrub()` exist on it (it shares the base), but nothing scrubs the PTY→xterm
-  path, so a command that *prints* a secret still records it. That is
-  [issue #5](https://github.com/rogvid/skills/issues/5).
+- **The terminal scrubber has its own list, and it is not short.** Everything
+  under **Redaction in a terminal demo** above holds; here is what it does not
+  reach.
+  - **A value split by something that moves the cursor is not masked — and it
+    can be perfectly legible.** Matching runs against a copy with the *inert*
+    sequences removed: colour and style (SGR), mode set/reset (`\x1b[?25l`,
+    which every spinner emits), erase-to-end-of-line, window-title OSC,
+    charset and keypad selection. None of those moves the cursor, so a token
+    broken by one is contiguous on screen and is caught.
+
+    Cursor movement is different. `\x1b[3;1Hsk-live-` followed by
+    `\x1b[3;15HKEY…` puts the value on screen as one word while no substring
+    of the stream contains it, and masking across the jump would delete the
+    movement and corrupt the redraw. **Do not read this as "the secret comes
+    out scrambled anyway" — it comes out readable.** What saves the recording
+    is the final screen check: the take raises `SecretLeak` and keeps nothing.
+    A recording you wanted, refused. Keep such values off the screen.
+
+    (A line the *terminal* wraps at the right margin is not this case and is
+    caught: wrapping puts no escape in the stream.)
+  - **The final screen check covers registered values only.** A shape-matched
+    token written the same way is not refused and not masked. Register.
+  - **Half a secret still renders.** The recorder cannot know a run of
+    characters is the start of a key until the rest arrives, so a program
+    killed part-way through printing one leaves what it printed on screen.
+    (At teardown a dangling fragment of a registered value, or one that had
+    reached a credential anchor, is masked; up to that point it is on screen
+    because it might have been anything.)
+  - **Shape detection has a clock, and a registered value does not.** A
+    fragment that could still grow into a shape match is held across quiet
+    moments — measured, a token written at 5, 20, 100 or 400 ms per character
+    is masked — but not forever: three seconds where a token would start,
+    and not at all in the middle of a word, because a screen permanently
+    missing its last character is a `wait_for_text()` that never returns. So a
+    program that pauses **longer than three seconds inside a token** defeats
+    shape matching. Registered values have no such limit.
+  - **A shape-matched token longer than 4096 characters may have its head
+    rendered** — the fragment ceiling. A *registered* value of any length is
+    held whole.
+  - **Registering late is worse here than on the web.** The scrubber runs as
+    output arrives, so anything already on screen when you call
+    `register_secret()` stays on screen. Register before the command runs.
+  - **Scrollback is the recording.** A secret masked on screen was never in
+    the buffer at all, so scrollback holds the mask too — but anything the
+    *program* writes elsewhere (a log file, a `tee`, its own history) is
+    untouched. This hides values from the recording, not from the machine.
+  - **The PTY child is a real process.** It sees your real environment; the
+    recorder does not sanitize it. A screen recording of a shell is a
+    recording of a shell.
 - **What CSS cannot reach, the mask cannot hide**: a cross-origin iframe's
   contents, an OS-level dialog, anything drawn outside the page. A `<canvas>`
   *is* covered — `filter` on the element blurs its rendered pixels like any
@@ -732,7 +852,7 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 | Verb | Use |
 |---|---|
 | `run(command)` | Type a shell command visibly, press Enter. Pair with `wait_for_prompt()`. |
-| `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). |
+| `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). Takes a `Secret(v)` for a password: the value is registered, typed for real, and the terminal's echo of it comes back masked. |
 | `key(*names)` | Send keys: `"Up" "Down" "Left" "Right" "Enter" "Tab" "Escape" "Home" "End" "PageUp" "PageDown" "Backspace" "Delete" "Space"`, `"C-<letter>"` (e.g. `"C-c"`), or any single literal char (`"q"`, `"/"`). |
 | `wait_for_prompt(timeout_s=60)` | Wait until the shell prompt returns — i.e. the command finished. |
 | `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI-stripped) matches `pattern`; `^`/`$` anchor to screen lines. |
@@ -762,6 +882,12 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 - **Typing is real echo.** `run`/`send` write to the PTY; the terminal
   echoes each key, so it appears typed. Programs that turn echo off
   (password prompts, raw-mode TUIs) correctly show nothing.
+- **A secret a command prints is masked on the way in.** `register_secret()`
+  before the command runs, and its output — plus the screen text
+  `wait_for_text()` reads — comes back `[redacted]`. `run()` and `send()`
+  refuse a command line holding a registered value outright. Read
+  **Redacting secrets → Redaction in a terminal demo**, and the list of what
+  it does not cover, before trusting it.
 - **Keep the prompt distinctive.** The default `❯ ` rarely collides with
   output. If you theme it via `terminal_prompt`, keep it a string unlikely
   to appear as the last line of a command's output.

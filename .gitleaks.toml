@@ -57,6 +57,23 @@ The words, and what each fixture element they belong to is for:
   TKCT  #token-control     a field's control — same chrome, never redacted
   SDCT  #sd-token-control  the same, inside the shadow root
   LATE  a caption          set before the value in it was registered
+
+The terminal half of redaction (issue #5) needs four more, and they are not
+all `sk-live-` shaped because the shapes themselves are what is being tested:
+
+  PTYK  sk-live-…   registered, printed by a command under a PTY
+  ANSI  sk-live-…   the same, printed with a colour escape inside it
+  SHAP  ghp_…       registered by nobody — the shape net is all that hides it
+  SEND  pw-live-…   sent as Secret(...); deliberately matches no shape, so
+                    that what masks it can only be the registration
+  TCTL  zz-live-…   never registered and matching no shape, on purpose: it is
+                    the legible reference every masked row is measured against
+
+Same convention as above — a four-letter word and a run of zeroes — and the
+same reasoning: the default ruleset flags none of them (the GitHub rule wants
+exactly 36 characters after `ghp_`; this one has 24), and these entries exist
+so a future release that does start flagging them cannot turn the job red for
+strings that were never credentials.
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
 regexes = [
