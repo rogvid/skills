@@ -7,18 +7,22 @@
 
 Serves `tests/fixture/` with a throwaway `python3 -m http.server`, records a
 short web demo against it with `Recorder`, records a short terminal demo with
-`TerminalRecorder`, and asserts that each take produced a real mp4 of a
-plausible duration plus the stills its storyboard asked for.
+`TerminalRecorder`, and grades each take on three separate axes:
 
-The point is not to check pixels. It is to catch the failure modes that make
-the whole skill useless and that nothing else notices: a recorder that raises,
-an ffmpeg pipeline that writes a 0-byte or 0.2-second mp4, a `shot()` that
-silently stops producing files.
+1. **Artifacts** — demo.mp4 and every requested still exist, are freshly
+   written by *this* run, and are not trivially small.
+2. **Content** — the frames actually contain a picture. Measured, not assumed:
+   luma standard deviation of decoded frames, so a blank or flat recording
+   fails even when its file size looks healthy.
+3. **Behaviour** — the storyboard's interactions had their effect. Every
+   `click`/`type_into`/`spotlight`/`move_to` is followed by a check of the
+   observable post-condition it should have caused, read back out of the live
+   page, so a no-op'd verb cannot record a static page and call it a pass.
 
     tests/smoke                 # both takes
     tests/smoke --web-only
     tests/smoke --terminal-only
-    tests/smoke --out-dir /tmp/smoke --keep
+    tests/smoke --out-dir /tmp/smoke
 
 Narration is forced off (`speech=False`): CI has no ELEVENLABS_API_KEY and no
 assertion here depends on audio.
@@ -30,6 +34,7 @@ terminal recorder unconditionally.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import socket
@@ -47,12 +52,28 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixture"
 HELPERS_DIR = REPO_ROOT / "skills" / "demo-video" / "helpers"
 
-# Size floors. A recorder that fails halfway still tends to leave a file
-# behind, so "exists" alone proves nothing — these say "there are actual
-# frames in there". Both are ~an order of magnitude below what a healthy
-# take produces.
+# Size floors. Deliberately low, and deliberately *not* the blank-video check —
+# no byte count separates a blank recording from a real one (a flat white 14 s
+# 720p H.264 is ~20 kB; a real terminal take is ~110 kB). These only catch the
+# degenerate zero/near-zero-byte file. Picture content is checked by
+# frame_contrast() below.
 MIN_MP4_BYTES = 20_000
 MIN_PNG_BYTES = 5_000
+
+# Luma standard deviation floors: "is there a picture in here at all".
+# Measured over the top 80% of the frame, so the caption bar — which is drawn
+# by the recorder and would be present even over a blank app — cannot carry
+# the score on its own.
+#
+# Observed on healthy takes: web mp4 60, terminal mp4 79, web stills 18-19,
+# terminal stills 78. Observed on a flat/blank frame: 0.0. The floors sit
+# ~3x under the weakest real value and infinitely above a blank one.
+MIN_FRAME_STDDEV = 8.0
+MIN_STILL_STDDEV = 6.0
+
+# Frames sampled per second of video for the content check. One is plenty:
+# a recording either has a picture throughout or does not.
+CONTENT_SAMPLE_FPS = 1
 
 # Duration windows, in seconds. Wide on purpose: the lower bound catches a
 # take that died early, the upper one catches a hang, and everything in
@@ -84,6 +105,22 @@ def scrub_env() -> None:
     for name in [k for k in os.environ if k.startswith("DEMO_VIDEO_")]:
         del os.environ[name]
     os.environ.pop("ELEVENLABS_API_KEY", None)
+
+
+def fresh_take_dir(out_root: Path, name: str) -> Path:
+    """An empty directory for one take.
+
+    Emptying it is load-bearing, not tidiness. Every artifact assertion works
+    by path, so a leftover demo.mp4 from a previous run grades a recorder that
+    produced nothing at all as a pass — and the documented workflow for
+    verifying a change is to record repeatedly into the same --out-dir. Only
+    the per-take subdirectory is removed, never the directory the caller named.
+    """
+    take = out_root / name
+    if take.exists():
+        shutil.rmtree(take)
+    take.mkdir(parents=True)
+    return take
 
 
 # -- fixture server ----------------------------------------------------------
@@ -147,52 +184,207 @@ def fixture_server() -> Iterator[str]:
             proc.wait(timeout=5)
 
 
+# -- picture content ---------------------------------------------------------
+
+
+def _stddev(buf: bytes) -> float:
+    n = len(buf)
+    mean = sum(buf) / n
+    return math.sqrt(sum((b - mean) ** 2 for b in buf) / n)
+
+
+def frame_contrast(path: Path, sample_fps: int | None = None) -> list[float]:
+    """Luma standard deviation of each sampled frame of an mp4 or a png.
+
+    ffmpeg decodes to raw 8-bit grayscale at a small fixed size, and the
+    spread of those bytes is computed here — no image library, no new
+    dependency. A frame showing anything at all scores tens; a flat frame
+    scores 0.0, whatever the file's byte size says.
+
+    The bottom 20% is cropped away first. The recorder burns its own caption
+    bar there, and a caption over an otherwise blank app would otherwise
+    supply enough contrast to pass on its own.
+    """
+    width, height = 160, 90
+    chain = []
+    if sample_fps:
+        chain.append(f"fps={sample_fps}")
+    chain += ["crop=iw:ih*0.8:0:0", f"scale={width}:{height}", "format=gray"]
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-vf",
+            ",".join(chain),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg could not decode {path}: "
+            f"{proc.stderr.decode(errors='replace').strip()[:300]}"
+        )
+    size = width * height
+    raw = proc.stdout
+    return [_stddev(raw[i : i + size]) for i in range(0, len(raw) - size + 1, size)]
+
+
 # -- storyboards -------------------------------------------------------------
 
 
-def record_web(out_dir: Path, base_url: str) -> None:
-    """A handful of beats: land, read a KPI, filter the table, refresh it."""
+class Beats:
+    """Collects post-condition failures without aborting the take.
+
+    A storyboard that stops at the first bad assertion produces no video, and
+    the video is half of what is being tested. So record the whole thing, then
+    report every interaction that did not do what it claimed.
+    """
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.problems: list[str] = []
+
+    def expect(self, after: str, actual: object, wanted: object) -> None:
+        if actual != wanted:
+            self.problems.append(
+                f"{self.label}: after {after}, expected {wanted!r} but got "
+                f"{actual!r} — the interaction did not take effect"
+            )
+
+    def expect_true(self, after: str, ok: bool, detail: str) -> None:
+        if not ok:
+            self.problems.append(f"{self.label}: after {after}, {detail}")
+
+
+def record_web(out_dir: Path, base_url: str) -> list[str]:
+    """Land, read a KPI, filter the table, refresh it.
+
+    Every verb is followed by the observable consequence it must have had,
+    read back out of the DOM. Byte sizes cannot tell a filtered table from an
+    unfiltered one; `#rows` and `#status` can.
+    """
     from demo_recording import Recorder
+
+    b = Beats("web")
+    outline = "el => getComputedStyle(el).outlineStyle"
 
     with Recorder(out_dir, base_url=base_url, speech=False) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
         rec.pause(0.6)
+        b.expect("goto('/'), #rows row count", rec.page.locator("#rows tr").count(), 5)
+        b.expect(
+            "goto('/'), #status text",
+            rec.page.locator("#status").inner_text(),
+            "snapshot 1 of 3",
+        )
 
         rec.caption("A small dashboard.")
         rec.shot("01-dashboard")
+
         rec.spotlight("#kpi-rev")
+        b.expect(
+            "spotlight('#kpi-rev'), computed outline-style",
+            rec.page.eval_on_selector("#kpi-rev", outline),
+            "solid",
+        )
         rec.hold()
         rec.spotlight()
+        b.expect(
+            "spotlight() cleared, computed outline-style",
+            rec.page.eval_on_selector("#kpi-rev", outline),
+            "none",
+        )
 
         rec.caption("Filter by city.")
         rec.type_into("#search", "seattle")
         rec.pause(0.8)
+        b.expect(
+            "type_into('#search'), field value",
+            rec.page.input_value("#search"),
+            "seattle",
+        )
+        b.expect(
+            "type_into('#search'), #rows row count",
+            rec.page.locator("#rows tr").count(),
+            1,
+        )
         rec.shot("02-filtered")
 
         rec.caption("Refresh reloads it.")
         rec.click("#refresh")
         rec.pause(1.0)
+        b.expect(
+            "click('#refresh'), #status text",
+            rec.page.locator("#status").inner_text(),
+            "snapshot 2 of 3",
+        )
+        b.expect(
+            "click('#refresh'), #kpi-rev text",
+            rec.page.locator("#kpi-rev").inner_text(),
+            "$134,950",
+        )
+
+        # move_to has no DOM side effect of its own, so check the one thing it
+        # exists to do: park the recorder's drawn cursor on the target. click()
+        # routes through it, so this covers both.
+        box = rec.page.locator("#refresh").bounding_box()
+        cursor = rec.page.evaluate(
+            "() => { const d = document.getElementById('__demo_cursor');"
+            " return d ? [parseFloat(d.style.left), parseFloat(d.style.top)] : null; }"
+        )
+        on_target = bool(
+            box
+            and cursor
+            and box["x"] <= cursor[0] <= box["x"] + box["width"]
+            and box["y"] <= cursor[1] <= box["y"] + box["height"]
+        )
+        b.expect_true(
+            "click('#refresh'), cursor position",
+            on_target,
+            f"the drawn cursor is at {cursor}, which is outside #refresh at {box} "
+            "— move_to() never brought it there",
+        )
+
         rec.shot("03-refreshed")
         rec.caption("")
 
+    return b.problems
 
-def record_terminal(out_dir: Path) -> None:
-    """Two trivial commands — enough to exercise PTY, xterm.js, and prompt sync."""
+
+def record_terminal(out_dir: Path) -> list[str]:
+    """Two trivial commands — enough to exercise PTY, xterm.js, and prompt sync.
+
+    The waits are the assertions. Both patterns are anchored to a whole screen
+    line and match the commands' *output*, never the echoed command line, so
+    they only pass if the PTY really ran what run() typed.
+    """
     from demo_recording import TerminalRecorder
 
     with TerminalRecorder(out_dir, speech=False) as rec:
         rec.caption("A real shell, recorded.")
         rec.run("echo hello from demo-video")
         rec.wait_for_prompt()
+        rec.wait_for_text(r"^hello from demo-video$", timeout_s=10)
         rec.shot("01-echo")
 
         rec.caption("Any command works.")
         rec.run("ls -1")
         rec.wait_for_prompt()
+        rec.wait_for_text(r"^skills$", timeout_s=10)
         rec.pause(0.8)
         rec.shot("02-listing")
         rec.caption("")
+
+    return []
 
 
 # -- assertions --------------------------------------------------------------
@@ -203,15 +395,23 @@ def check_take(
     out_dir: Path,
     shots: list[str],
     duration_range: tuple[float, float],
+    started_at: float,
 ) -> list[str]:
     """Everything a healthy take leaves behind. Returns failure messages."""
     from demo_recording import media_duration
 
     failures: list[str] = []
 
+    def fresh(path: Path) -> bool:
+        # Belt and braces next to fresh_take_dir(): an artifact older than the
+        # take that supposedly produced it is somebody else's file.
+        return path.stat().st_mtime >= started_at - 1
+
     mp4 = out_dir / "demo.mp4"
     if not mp4.is_file():
         failures.append(f"{label}: {mp4} was never written")
+    elif not fresh(mp4):
+        failures.append(f"{label}: {mp4} is stale — it predates this run")
     else:
         size = mp4.stat().st_size
         if size < MIN_MP4_BYTES:
@@ -224,17 +424,36 @@ def check_take(
                 seconds = media_duration(mp4)
             except Exception as exc:  # noqa: BLE001 - report, don't crash the run
                 failures.append(f"{label}: ffprobe could not read {mp4}: {exc}")
-            else:
+                seconds = None
+            if seconds is not None:
                 low, high = duration_range
                 if not low <= seconds <= high:
                     failures.append(
                         f"{label}: {mp4.name} is {seconds:.1f}s, expected "
                         f"between {low:.0f}s and {high:.0f}s"
                     )
-                else:
+
+            try:
+                contrast = frame_contrast(mp4, sample_fps=CONTENT_SAMPLE_FPS)
+            except RuntimeError as exc:
+                failures.append(f"{label}: {exc}")
+                contrast = []
+            if not contrast:
+                failures.append(f"{label}: no frames could be sampled from {mp4.name}")
+            else:
+                best = max(contrast)
+                if best < MIN_FRAME_STDDEV:
+                    failures.append(
+                        f"{label}: {mp4.name} has no picture in it — the most "
+                        f"varied of {len(contrast)} sampled frames scores "
+                        f"{best:.1f} luma stddev, under the {MIN_FRAME_STDDEV} "
+                        "floor. A blank or flat recording looks exactly like "
+                        "this, at any file size."
+                    )
+                elif seconds is not None:
                     print(
-                        f"smoke: {label} demo.mp4 ok "
-                        f"({seconds:.1f}s, {size // 1024} kB)"
+                        f"smoke: {label} demo.mp4 ok ({seconds:.1f}s, "
+                        f"{size // 1024} kB, contrast {best:.0f})"
                     )
 
     for name in shots:
@@ -242,14 +461,34 @@ def check_take(
         if not png.is_file():
             failures.append(f"{label}: still {png} was never captured")
             continue
+        if not fresh(png):
+            failures.append(f"{label}: still {png} is stale — it predates this run")
+            continue
         size = png.stat().st_size
         if size < MIN_PNG_BYTES:
             failures.append(
                 f"{label}: still {png} is only {size} bytes "
                 f"(expected at least {MIN_PNG_BYTES})"
             )
+            continue
+        try:
+            contrast = frame_contrast(png)
+        except RuntimeError as exc:
+            failures.append(f"{label}: {exc}")
+            continue
+        if not contrast:
+            failures.append(f"{label}: still {png} decoded to no frames")
+        elif contrast[0] < MIN_STILL_STDDEV:
+            failures.append(
+                f"{label}: still {name}.png is blank — it scores "
+                f"{contrast[0]:.1f} luma stddev, under the "
+                f"{MIN_STILL_STDDEV} floor"
+            )
         else:
-            print(f"smoke: {label} still {name}.png ok ({size // 1024} kB)")
+            print(
+                f"smoke: {label} still {name}.png ok "
+                f"({size // 1024} kB, contrast {contrast[0]:.0f})"
+            )
 
     return failures
 
@@ -258,13 +497,14 @@ def check_take(
 
 
 def run_web(out_root: Path) -> list[str]:
-    out_dir = out_root / "web"
+    out_dir = fresh_take_dir(out_root, "web")
+    started = time.time()
     with fixture_server() as base_url:
         try:
-            record_web(out_dir, base_url)
+            problems = record_web(out_dir, base_url)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
-    return check_take("web", out_dir, WEB_SHOTS, WEB_DURATION_S)
+    return problems + check_take("web", out_dir, WEB_SHOTS, WEB_DURATION_S, started)
 
 
 def run_terminal(out_root: Path) -> list[str]:
@@ -275,18 +515,21 @@ def run_terminal(out_root: Path) -> list[str]:
             file=sys.stderr,
         )
         return []
-    out_dir = out_root / "terminal"
+    out_dir = fresh_take_dir(out_root, "terminal")
+    started = time.time()
     # The shell starts in the process cwd, and `ls -1` is one of the beats —
     # pin it to the repo root so the take does not depend on where it was run.
     previous = Path.cwd()
     os.chdir(REPO_ROOT)
     try:
-        record_terminal(out_dir)
+        problems = record_terminal(out_dir)
     except Exception as exc:  # noqa: BLE001 - a raising take is a failure
         return [f"terminal: TerminalRecorder raised {type(exc).__name__}: {exc}"]
     finally:
         os.chdir(previous)
-    return check_take("terminal", out_dir, TERMINAL_SHOTS, TERMINAL_DURATION_S)
+    return problems + check_take(
+        "terminal", out_dir, TERMINAL_SHOTS, TERMINAL_DURATION_S, started
+    )
 
 
 # -- entry point -------------------------------------------------------------
@@ -305,8 +548,9 @@ def main() -> int:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        help="where recordings land (default: a fresh temp dir). "
-        "Point CI at a known path so artifacts can be uploaded.",
+        help="where recordings land (default: a fresh temp dir). The web/ and "
+        "terminal/ subdirectories are emptied before each take. Point CI at a "
+        "known path so artifacts can be uploaded.",
     )
     parser.add_argument(
         "--keep",

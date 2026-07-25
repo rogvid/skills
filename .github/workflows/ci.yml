@@ -63,12 +63,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # What gitleaks scans depends on the event: for `pull_request` it is the
+      # commits in the PR, for `push` the pushed range, and only for a manual
+      # or scheduled run is it the whole repository. fetch-depth: 0 is what
+      # makes that last case possible — without it a full scan has no history
+      # to read.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # gitleaks scans history, not just the checkout
+          fetch-depth: 0
 
-      # Config is .gitleaks.toml at the repo root: the default ruleset plus a
-      # single allowlist entry for the fixture's fake API key.
+      # Config is .gitleaks.toml at the repo root: the default ruleset plus two
+      # narrow allowlist entries (vendored xterm.js, and the fixture's fake
+      # API key).
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
