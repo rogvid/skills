@@ -8,7 +8,11 @@ Storyboards import from here:
 """
 
 from .core import (
+    ISSUE_KINDS,
+    MAX_ISSUES,
+    STRICT_KINDS,
     TIMELINE_SCHEMA,
+    StrictTakeFailed,
     media_duration,
     render_timeline_md,
     stitch,
@@ -20,8 +24,12 @@ from .terminal import TerminalRecorder
 from .web import Recorder
 
 __all__ = [
+    "ISSUE_KINDS",
+    "MAX_ISSUES",
+    "STRICT_KINDS",
     "TIMELINE_SCHEMA",
     "Recorder",
+    "StrictTakeFailed",
     "TerminalRecorder",
     "media_duration",
     "render_timeline_md",

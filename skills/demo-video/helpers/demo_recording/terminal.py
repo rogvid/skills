@@ -30,6 +30,7 @@ import struct
 import subprocess
 import termios
 import time
+from collections import deque
 from pathlib import Path
 
 from .core import _beat_verb, _DemoBase, _env
@@ -130,6 +131,46 @@ _KEYMAP = {
     "Home": "\x1b[H", "End": "\x1b[F", "PageUp": "\x1b[5~", "PageDown": "\x1b[6~",
 }
 
+# Exit-status side channel.
+#
+# `run()` cannot know how its command ended: the command is still running when
+# the verb returns, and there is exactly one pipe out of the PTY — the same one
+# the recording is made of. Asking (`echo $?`) would type a line the viewer can
+# see, which is a demo artifact nobody asked for.
+#
+# So the shell says it in its prompt, invisibly. PS1 is prefixed with an OSC
+# escape carrying `$?` **and `\#`, bash's command number**, which bash expands
+# per prompt, wrapped in \[...\] so readline still measures the prompt
+# correctly. _pump() strips the sequence out of the byte stream before xterm.js
+# ever sees it, so nothing about the recording changes.
+#
+# The command number is what makes the status trustworthy rather than merely
+# usually right, and every part of it was measured against a real PTY:
+#
+#   * the shell prints a prompt at startup, before any command — that marker
+#     carries number 1 and belongs to nothing. It is discarded as the first
+#     marker seen, whenever it arrives, which is what makes a slow shell on a
+#     loaded box unable to hand its startup 0 to the first run().
+#   * a prompt redrawn without a command running — an empty Enter, a Ctrl-C at
+#     an idle prompt — repeats the previous number (measured: empty Enter stays
+#     at 2, Ctrl-C at an idle prompt stays at 4 while reporting status 130).
+#     A marker that does not advance the number is discarded.
+#   * commands the storyboard did not wait for still complete in order, so
+#     `run` beats queue and each advancing marker claims the oldest
+#     (measured: `sleep 1.2` then `(exit 9)` typed straight after yields
+#     (0, 5) then (9, 6), and the queue assigns them 0 and 9 respectively).
+#
+# Bash-shaped, like the rest of this recorder (`--norc --noprofile -i`, PS1/PS2
+# from the environment). A shell that does not expand `$?` in its prompt simply
+# never emits a marker, and every `exit_code` stays null rather than wrong.
+#
+# The namespace is not a security boundary: a program that deliberately prints
+# this exact sequence can hand the recorder any exit status it likes. It is a
+# demo recorder driving a program the storyboard chose, not a sandbox.
+_EXIT_PS1 = "\\[\\e]777;demo-video-exit;$?;\\#\\a\\]"
+_EXIT_OSC = "\x1b]777;demo-video-exit;"
+_EXIT_RE = re.compile(re.escape(_EXIT_OSC) + r"(-?\d+);(\d+)\x07")
+
 
 class TerminalRecorder(_DemoBase):
     """Records a terminal session (CLI, REPL, or full-screen TUI).
@@ -158,6 +199,7 @@ class TerminalRecorder(_DemoBase):
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        strict: bool | None = None,
         type_delay_ms: int = 45,
     ) -> None:
         # A branded, distinctive default prompt so wait_for_prompt's marker
@@ -167,7 +209,7 @@ class TerminalRecorder(_DemoBase):
             out_dir, segment=segment, accent_rgb=accent_rgb,
             terminal_title=terminal_title, terminal_prompt=prompt,
             viewport=viewport, speech=speech, voice_id=voice_id,
-            speech_model=speech_model,
+            speech_model=speech_model, strict=strict,
         )
         # Match the web recorder's effective caption height. Web composites
         # its page into a scaled, centered window, lifting its bottom:44px
@@ -186,6 +228,13 @@ class TerminalRecorder(_DemoBase):
         self._proc: subprocess.Popen | None = None
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._child_done = False
+        # Exit-status side channel: run() beats still waiting for a status, in
+        # the order they were typed; the last command number seen (None until
+        # the shell's startup prompt arrives); and any half-arrived marker held
+        # back between reads (a 65 KB read can split the sequence anywhere).
+        self._pending_runs: deque[dict] = deque()
+        self._exit_seq: int | None = None
+        self._exit_tail = ""
 
     # -- setup / teardown ---------------------------------------------------
 
@@ -193,10 +242,16 @@ class TerminalRecorder(_DemoBase):
         # Paint the background from the very first frame, so the brief
         # about:blank + xterm-injection period isn't a white flash (it would
         # otherwise show between a preceding segment and the terminal).
+        # `documentElement` is null on Chromium's initial empty document, where
+        # init scripts first run — dereferencing it there threw an uncaught
+        # TypeError on every single take, and took the background paint this
+        # exists to apply down with it (issue #25). Guarded like `body` below
+        # it, and applied again once the document is real.
         context.add_init_script(
             "(() => { const bg = '__BG__';"
-            " document.documentElement.style.background = bg;"
-            " const b = () => { if (document.body) document.body.style.background = bg; };"
+            " const paint = (el) => { if (el) el.style.background = bg; };"
+            " paint(document.documentElement);"
+            " const b = () => { paint(document.documentElement); paint(document.body); };"
             " if (document.body) b(); else addEventListener('DOMContentLoaded', b); })();"
             .replace("__BG__", _TERM_BG)
         )
@@ -205,7 +260,7 @@ class TerminalRecorder(_DemoBase):
         master, slave = pty.openpty()
         self._fd = master
         env = os.environ.copy()
-        env["PS1"] = self._terminal_prompt
+        env["PS1"] = _EXIT_PS1 + self._terminal_prompt
         env["PS2"] = "> "
         env["TERM"] = "xterm-256color"
         env.setdefault("LANG", "C.UTF-8")
@@ -249,6 +304,15 @@ class TerminalRecorder(_DemoBase):
         self._idle(0.15)
 
     def _stop(self) -> None:
+        # Whatever _take_exit_markers held back as a possible half-marker was
+        # withheld from the terminal, not dropped — flush it before the page
+        # goes away, or the last frame is missing bytes the program did write.
+        tail, self._exit_tail = self._exit_tail, ""
+        if tail:
+            try:
+                self.page.evaluate("d => window.__termWrite(d)", tail)
+            except Exception:  # noqa: BLE001 - teardown, the page may be gone
+                pass
         proc = getattr(self, "_proc", None)
         if proc is not None and proc.poll() is None:
             proc.terminate()
@@ -297,9 +361,75 @@ class TerminalRecorder(_DemoBase):
             if not data:
                 self._child_done = True
                 return
-            text = self._decoder.decode(data)
+            text = self._take_exit_markers(self._decoder.decode(data))
             if text:
                 self.page.evaluate("d => window.__termWrite(d)", text)
+
+    def _take_exit_markers(self, text: str) -> str:
+        """Strip the PS1 exit-status markers out of `text`, recording each.
+
+        The stream is chopped at arbitrary byte offsets, so a marker can span
+        two reads; anything at the tail that could still become one is held
+        back rather than passed through to the terminal.
+        """
+        text = self._exit_tail + text
+        self._exit_tail = ""
+        if _EXIT_OSC[0] not in text:
+            return text
+        kept: list[str] = []
+        cut = 0
+        for match in _EXIT_RE.finditer(text):
+            kept.append(text[cut:match.start()])
+            cut = match.end()
+            self._record_exit_code(int(match.group(1)), int(match.group(2)))
+        rest = text[cut:]
+        start = rest.rfind(_EXIT_OSC[0])
+        if start != -1:
+            candidate = rest[start:]
+            unfinished = _EXIT_OSC.startswith(candidate) or (
+                candidate.startswith(_EXIT_OSC) and "\x07" not in candidate
+            )
+            if unfinished:
+                self._exit_tail = candidate
+                rest = rest[:start]
+        kept.append(rest)
+        return "".join(kept)
+
+    def _record_exit_code(self, code: int, seq: int) -> None:
+        """Attribute a status to the oldest run() still waiting for one.
+
+        `seq` is the shell's command number, and every discard below is a
+        status that would otherwise have been written onto the wrong beat:
+
+          * the first marker of the session is the startup prompt, which
+            reports the shell's own 0 and belongs to no command;
+          * a marker that does not advance the number is a prompt redrawn
+            without a command running (empty Enter, Ctrl-C at an idle prompt),
+            and its status likewise belongs to nothing;
+          * anything else claims the oldest outstanding run(), which is the
+            right one even when the storyboard typed several commands without
+            waiting between them — the shell still executes them in order.
+
+        A marker arriving with nothing outstanding is a command the storyboard
+        did not run (a `send()` that reached the shell, say) and is dropped.
+        """
+        if self._exit_seq is None:
+            self._exit_seq = seq
+            return
+        if seq <= self._exit_seq:
+            return
+        self._exit_seq = seq
+        if not self._pending_runs:
+            return
+        beat = self._pending_runs.popleft()
+        beat["exit_code"] = code
+        if code != 0:
+            command = beat.get("selector")
+            self._note_issue(
+                "nonzero_exit",
+                f"{command!r} exited {code}",
+                beat=beat, exit_code=code, command=command,
+            )
 
     def _idle(self, seconds: float) -> None:
         """Hold the frame while pumping program output, so long-running
@@ -307,6 +437,10 @@ class TerminalRecorder(_DemoBase):
         end = time.monotonic() + seconds
         while True:
             self._pump()
+            # _pump() only reaches Playwright when the program wrote something,
+            # so a quiet hold would deliver no page events and leave issue
+            # attribution pointing at whatever beat came next.
+            self._pump_events()
             remaining = end - time.monotonic()
             if remaining <= 0:
                 return
@@ -341,8 +475,22 @@ class TerminalRecorder(_DemoBase):
     @_beat_verb("run")
     def run(self, command: str) -> None:
         """Type a shell command visibly and press Enter. Pair with
-        wait_for_prompt() to wait for it to finish."""
+        wait_for_prompt() to wait for it to finish.
+
+        The beat this records gains an `exit_code` once the shell's prompt
+        comes back — usually during the following wait_for_prompt(), which is
+        why the pairing is not merely a suggestion. A command that exits
+        non-zero also logs a `nonzero_exit` issue, and fails the take under
+        strict=True."""
         self._type(command)
+        beat = self._beats[-1] if self._beats else None
+        if beat is not None:
+            beat["exit_code"] = None
+            # A queue, not a slot: two run()s with no wait between them are
+            # legitimate (`run("sleep 5")` then `run("deploy")`), and a slot
+            # would hand the first command's status to the second beat and
+            # drop the second command's entirely.
+            self._pending_runs.append(beat)
         self._write("\r")
         self._idle(0.2)
 

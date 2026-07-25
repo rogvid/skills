@@ -1,7 +1,8 @@
 # tests
 
-One smoke test and one fixture app. Together they answer a single question:
-**does the demo-video recorder still produce a real video?**
+One smoke test and one fixture app. Together they answer two questions:
+**does the demo-video recorder still produce a real video, and does it still
+notice when the thing it recorded was broken?**
 
 They are not unit tests. The recorders' interesting behaviour is "shell out to
 ffmpeg, drive a headless browser, come back with an mp4", which nothing short
@@ -18,9 +19,9 @@ tests/
 ## Running it
 
 ```sh
-tests/smoke                       # both takes, output to a temp dir
-tests/smoke --web-only            # just the Playwright take
-tests/smoke --terminal-only       # just the PTY/xterm.js take
+tests/smoke                       # every take, output to a temp dir
+tests/smoke --web-only            # just the Playwright takes
+tests/smoke --terminal-only       # just the PTY/xterm.js takes
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -38,18 +39,28 @@ smoke: web first caption 'A small dashboard.' logged at 3.03s, on screen at 2.95
 smoke: web closing caption 'Recorded end to end.' logged at 17.03s, on screen at 16.99s (-40 ms)
 smoke: web beat clock holds across the take (+40 ms)
 smoke: web timeline.json ok (23 beats)
+smoke: web healthy app under strict=True records no problems
 …
+smoke: web-problems timeline.json records 8 problem(s), 6 of them fatal under strict — take still passed
+smoke: web-strict strict=True refused the take, naming beat 0 (goto) (4 fatal issues, artifacts kept)
+smoke: terminal-problems timeline.json records 2 problem(s), 2 of them fatal under strict — take still passed
+smoke: terminal-race exit status survives a shell that starts 1.2s late (logged 5)
+smoke: terminal-strict strict=True refused the take, naming beat 1 (run) (1 fatal issues, artifacts kept)
+
 smoke: PASSED
 ```
 
-Re-running into the same `--out-dir` is safe: the `web/` and `terminal/`
-subdirectories are deleted before each take. That is not tidiness — every
+Re-running into the same `--out-dir` is safe: the seven take subdirectories
+(`web/`, `terminal/`, `web-problems/`, `terminal-problems/`, `terminal-race/`,
+`web-strict/`, `terminal-strict/`) are deleted before each take. Only the first
+two are graded on their video; the rest are short and exist to break in one
+specific way each. That is not tidiness — every
 artifact assertion works by path, so without it a leftover `demo.mp4` from the
 previous run would grade a recorder that produced nothing at all as a pass, and
 recording repeatedly into one directory is exactly how a change to the recorder
 gets verified.
 
-Deleting is bounded. Only `<out-dir>/web/` and `<out-dir>/terminal/` are ever
+Deleting is bounded. Only those named subdirectories are ever
 removed, and only when each is absent, empty, or carries the
 `.demo-video-smoke` marker file a previous run wrote there. `--out-dir .` in a
 project that has its own `web/` directory gets a refusal naming the path, not a
@@ -67,8 +78,8 @@ test measures.
 
 ## What it asserts
 
-Four independent axes, because a recorder can fail on any one of them while
-looking perfect on the other three.
+Five independent axes, because a recorder can fail on any one of them while
+looking perfect on the other four.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -214,6 +225,87 @@ that was never drawn, a video that slid further than the search window can see,
 or a run-up that was not quiet. They look identical from inside the window, and
 only the first is the recorder losing a caption.
 
+**Problems** — what the recorder saw *behind* the pixels. This is the axis the
+other four are structurally blind to: a demo of an app throwing `TypeError` on
+every render is pixel-for-pixel a demo of a working one, scores the same luma,
+logs the same beats, and satisfies every post-condition the storyboard checks.
+
+It splits four ways, and no single take answers more than one of them — which
+is why there are seven takes and not two.
+
+**A healthy app must record nothing.** The two graded takes record the plain
+fixture, with `strict=True`, and `check_healthy()` demands an empty `issues`
+list. This is the only assertion here that can fail on **over**-reporting, and
+without it the axis is one-directional: every check below is "at least one
+issue matches", which a recorder that flagged every healthy 2xx as a fatal
+console error satisfies perfectly — while refusing every strict take of every
+working app ever recorded. That is not hypothetical; it was measured passing
+the entire suite before this existed. Recording them strict is the second half:
+over-reporting does not merely get noticed, it aborts the take.
+
+Keeping the graded takes healthy also matters for what they *are*. They are the
+reference demo a reader watches; the fixture hooks belong in takes of their
+own, the way `?secret=1` does.
+
+**A broken app must record what broke, where.** `web-problems/` loads
+`?console-error=1&bad-fetch=<url>`: the fixture logs a `console.error`, throws
+an uncaught error, and fires two doomed requests — a 404 and a connection
+refused on a port nothing is listening on. All four fire **during page load**,
+on purpose, so the recorder's `goto` beat is open and there is a real
+attribution to check. `terminal-problems/` runs `(exit 3)` — a subshell, so the
+recorder's own shell survives, and 3 rather than 1 so the assertion proves the
+*status* was read and not "something failed" inferred from elsewhere.
+
+Two cases in `web-problems/` exist because the obvious implementation of
+attribution — blame `self._beats[-1]` — is wrong in both directions:
+
+- an error thrown **one second into a three-second hold** must land on the
+  `pause`, under the caption that was on screen, not on the caption beat that
+  follows the hold. Without the recorder pumping events as it waits, it lands
+  on the later beat and gets stamped with a line that did not exist when it
+  fired. Both the beat *and* the caption are asserted.
+- an error logged **between two verbs**, where no beat is open, must come back
+  `beat: null`. A confidently wrong index is worse than no answer.
+
+These takes are graded on `timeline.json` alone — nothing about their video is
+checked. They also carry the other half of the strict assertion: the **default**
+recorder tolerates every one of these problems and still writes every artifact.
+
+| Checked | Why |
+|---|---|
+| each deliberate problem appears, by kind and message | the whole axis |
+| …attributed to the beat it fired during — `beat` indexes a real beat *and* that beat's `verb` is the expected one | `verb` alone is a string the recorder could copy from anywhere; `beat` alone is an integer that means nothing. Together they say the attribution is real and right |
+| …or to no beat at all, when none was open | the null case above |
+| …under the caption that was up when it fired | the field a reviewer reads as context; quoting a later line is the failure a wrong beat index produces |
+| `run` beats carry the exit status of their command | hand-written like the beat lists, `{echo ok: 0, (exit 3): 3, sleep 1: 0, (exit 9): 9}` |
+| `nonzero_exit` is in the package's `STRICT_KINDS` | links the recorded data to the policy: recording a failing command that strict would ignore is not catching it |
+| `issue_count` equals `len(issues)` | nothing here comes near the 200 cap, so the two disagreeing means one is wrong |
+| every `kind` is in `ISSUE_KINDS` | the published contract, not whatever the recorder felt like emitting |
+| `timeline.md` has an Issues section naming each, and an exit column | the human-readable half of the log must not say the take was fine |
+
+**An exit status must be right or absent, never wrong.** Two shapes of that,
+both found by review after the first round shipped them silently wrong:
+
+- `terminal-problems/` types `sleep 1` and `(exit 9)` with **no wait between
+  them**. The shell buffers the second and runs it after the first, so both
+  statuses arrive in order and must reach different beats. A single pending
+  slot gave `sleep`'s 0 to `(exit 9)` and dropped the 9 — a *wrong* exit code,
+  which strict passes, rather than a missing one.
+- `terminal-race/` runs against a shell that **sleeps 1.2 s before exec'ing
+  bash**, with typing instant, so `run()` finishes before the shell has printed
+  its first prompt. That prompt reports the shell's own 0, and a recorder that
+  takes the next marker it sees writes that 0 onto the command. Its own take
+  because the condition has to be manufactured: on a normal box the startup
+  prompt always wins, and removing the guard passes every other take here.
+
+**Strict mode must refuse what the default tolerates.** `web-strict/` and
+`terminal-strict/`, deliberately tiny. Each must raise `StrictTakeFailed`, the
+message must **name the beat** (issue #3's acceptance criterion verbatim,
+matched as `beat N (verb)`), it must name the kind the storyboard caused, and
+**demo.mp4 and timeline.json must still be on disk** — a broken take is
+precisely the one somebody wants to look at, so failing it by destroying the
+evidence would be worse than not failing it.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -264,6 +356,38 @@ knows is missing is worse than one that is openly absent.
   hypothetical — a WSL2 box was measured stepping 573 ms backwards inside 8 s,
   which is how the bug was found — but a pass does not prove the fix is still
   in place. Reading the diff does.
+- **Issue attribution is bounded, not exact.** Playwright's sync API delivers
+  page events only while it is inside a call, so the recorder pumps every
+  100 ms during a hold and refuses to attribute an event to a beat that has not
+  been open since the last pump. What that leaves: an event fired inside the
+  pump interval of a beat boundary can land on either side of it, and a beat
+  that blocks in a long *non*-Playwright call — narration being synthesized —
+  queues events for its whole duration and gets `beat: null` for all of them.
+  Null is the deliberate answer in both directions, but "null" and "right" are
+  not the same thing and only the second is what a reader wants.
+- **Nothing checks most of an issue's fields.** `kind`, `message`, `beat`,
+  `verb` and one `caption` are asserted; `t`, `url`, `line`, `status`, `method`
+  are not. `t` is knowingly the *observation* time and can sit outside the beat
+  it names — measured at 3.53 s for a `nonzero_exit` whose `run` beat ended at
+  3.4 s. Tracked in [#34](https://github.com/rogvid/skills/issues/34).
+- **Nothing checks popups or new tabs.** The recorder watches one page, so a
+  demo that opens a second one records nothing about it and `strict=True`
+  cannot refuse it. Tracked in
+  [#33](https://github.com/rogvid/skills/issues/33).
+- **Nothing checks the 200-issue cap, or a `run()` that is never waited on.**
+  `issue_count` is asserted equal to `len(issues)`, which is the uncapped case
+  only — so the path where a fatal issue arrives past the cap and is counted
+  but not recorded is unexercised, as is a `run()` whose prompt never comes
+  back and therefore ends `exit_code: null`.
+- **Nothing checks that the withheld half-marker is flushed.** `_pump` holds
+  back trailing bytes that could still become an exit-status escape, and
+  `_stop` writes them to the terminal on teardown. No assertion reads the final
+  frame, so a regression there would lose the last few bytes of a program's
+  output silently.
+- **Nothing checks a non-bash shell.** The exit status arrives through `$?` and
+  `\#` expanded in `PS1`, which is bash behaviour; zsh needs `PROMPT_SUBST` and
+  would leave every `exit_code` null. Only `/bin/bash` is recorded here — the
+  `terminal-race/` take's slow shell `exec`s it.
 - **Nothing checks audio.** Narration is forced off and no assertion touches the
   aac track, so the whole speech path — `tts_clip`, the `.tts/` cache, the
   `adelay`/`amix` mixing in `_convert` — is untested here.
@@ -293,13 +417,17 @@ It is deterministic on purpose — no `Math.random()`, no clock on screen, no
 animations. `#refresh` cycles three hard-coded snapshots in order, so a
 recording made today is frame-for-frame the story of one made next year.
 
-Two query-string hooks exist for the queued feature work, inert unless asked
-for:
+Two query-string hooks exist, inert unless asked for:
 
 | URL | Effect | For |
 |---|---|---|
-| `?console-error=1` | logs a `console.error` **and** throws an uncaught error (Playwright `pageerror`), while the page stays usable | issue #3, failing a take on console errors |
+| `?console-error=1` | logs a `console.error` **and** throws an uncaught error (Playwright `pageerror`), while the page stays usable | the Problems axis |
+| `?bad-fetch=<url>` | fetches `/definitely-missing.json` (404) and `<url>` (connection refused), both during load | the Problems axis — during load so the failures land inside the recorder's `goto` beat |
 | `?secret=1` | renders `#api-key` holding `sk-live-FAKE0000000000000000` | issue #4, redacting secrets from frames and stills |
+
+One hook, one take. The graded `web/` take loads none of them, so the reference
+recording stays a recording of a working app — which is also the assertion that
+the recorder does not invent problems.
 
 That key is not a credential. It is spelled `FAKE` followed by sixteen zeroes so
 both gitleaks and a human read it as scenery — the default ruleset does not flag
@@ -328,8 +456,18 @@ insurance against a future release that does start flagging it.
   stable id, and keep it deterministic. If it only matters to one future
   feature, hide it behind a query-string hook the way the two above are, so the
   default recording stays clean.
+- **A new thing for the recorder to notice** (a new issue kind, a new signal) —
+  add it to `ISSUE_KINDS` in `core.py`, decide whether it belongs in
+  `STRICT_KINDS`, make one of the storyboards cause it on purpose, and add a
+  `(kind, message substring, verb)` row to `WEB_ISSUES` / `TERMINAL_ISSUES`.
+  The verb is what makes the row worth writing: an issue that is recorded but
+  attributed nowhere is a problem report with the page number torn off.
 - **A new failure mode to catch** — prefer another assertion in `check_take()`
-  over another take. Takes cost ~15 s each in CI; assertions are free.
+  or `check_issues()` over another take. Takes cost ~15 s each in CI;
+  assertions are free. The two strict takes are the exception that proves it:
+  "the take raises" cannot be asserted about a take that has to succeed for
+  everything else to be graded, so they exist, and they are kept to a few
+  seconds each and graded on nothing else.
 
 **Prove any new assertion can fail.** Break the thing it watches — stub the verb
 out in `skills/demo-video/helpers/`, or blank the fixture — run `tests/smoke`,

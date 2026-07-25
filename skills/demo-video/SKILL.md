@@ -123,6 +123,7 @@ clean:
 | `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | recording size, `"1280x720"` | 1280×720 |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
+| `DEMO_VIDEO_STRICT` | fail the take on console errors / non-zero exits (`1`/`0`) | off |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
 | `DEMO_VIDEO_SKILL_DIR` | where storyboards find this skill | the constant baked into each storyboard |
@@ -168,8 +169,10 @@ needed; captions are the narration script.
 
 ## Recorder API (storyboard verbs)
 
-`Recorder(out_dir, base_url=..., segment=None, ...)` as a context manager;
-mp4 conversion happens on clean exit.
+`Recorder(out_dir, base_url=..., segment=None, strict=False, ...)` as a context
+manager; mp4 conversion happens on clean exit. `strict=True` refuses a take
+that recorded a console error, an uncaught exception, or a non-zero exit — see
+**Failing the take on a broken app**.
 
 | Verb | Use |
 |---|---|
@@ -206,10 +209,16 @@ key is fine, renaming one is not:
 ```json
 { "schema": 1, "generated_by": "demo-video", "recorder": "Recorder",
   "segment": null, "media": "demo.mp4", "duration": 18.04,
+  "strict": false, "issue_count": 1,
   "beats": [
     { "index": 4, "t_start": 3.02, "t_end": 3.06, "caption": "A small dashboard.",
       "verb": "shot", "selector": "01-dashboard",
       "still": "images/01-dashboard.png", "segment": null }
+  ],
+  "issues": [
+    { "kind": "console_error", "t": 0.47, "beat": 0, "verb": "goto",
+      "caption": "", "message": "Cannot read properties of undefined",
+      "url": "http://localhost:3000/app.js", "line": 412 }
   ] }
 ```
 
@@ -224,6 +233,91 @@ key is fine, renaming one is not:
   `spotlight`).
 - `still` is a path relative to the timeline file, so `timeline.md`'s embeds
   and any tooling resolve the same way.
+- `exit_code` appears on `TerminalRecorder` `run` beats — see **Failing the
+  take** below.
+- `issues` is what the recorder saw *behind* the pixels; `issue_count` is how
+  many it saw, and is larger than `len(issues)` only when a take blew past the
+  200-issue cap.
+
+## Failing the take on a broken app
+
+**A demo that looks perfect while the app throws `TypeError` on every render
+passes any review that only watches pixels.** This is the failure mode with no
+visual signature at all: the captions are right, the stills are pretty, the
+video is convincing, and the feature is broken. So every take also watches the
+app itself and writes what it saw into `timeline.json` as `issues`:
+
+| `kind` | What it is | Fatal under `strict=True`? |
+|---|---|---|
+| `console_error` | `console.error(…)` from the page | yes |
+| `console_warning` | `console.warn(…)` from the page | no |
+| `page_error` | an uncaught exception or unhandled rejection | yes |
+| `request_failed` | a request that never got a response | no |
+| `http_error` | a response with status ≥ 400 (3xx redirects are normal) | no |
+| `nonzero_exit` | a `TerminalRecorder` `run()` whose command failed | yes |
+
+Each issue is **attributed to the beat that was running when it fired** —
+`beat` (an index into `beats`), plus the beat's `verb` and `caption` copied
+alongside so the list reads on its own. "The take broke" is not a bug report;
+"the take broke during `click('#refresh')`, under the caption *Refresh reloads
+it*" is. `timeline.md` gets an **Issues** section saying the same thing in
+prose, so a reviewer reading the PR sees it without opening the JSON.
+
+**`beat` is `null` when no beat can honestly claim the problem**, and that is a
+real answer rather than a gap. Playwright hands the recorder page events only
+while it is being called, so the naive reading — blame the most recently
+started beat — invents attributions in both directions: an error thrown during
+a three-second `hold()` would be blamed on the beat *after* the hold and quoted
+under a caption that had not appeared yet. Holds therefore pump events as they
+wait, and anything still ambiguous — a problem surfacing between two verbs,
+or after a long stretch where nothing reached Playwright — records `beat: null`
+instead of a confident guess. Trust `beat`; `t` is when the problem was
+*observed*, which can lag when it happened.
+
+Nothing has to be asked for: **a summary prints on stderr at the end of every
+take**, listing each problem and its beat, or saying plainly that there were
+none.
+
+`TerminalRecorder.run()` additionally records `exit_code` on its beat, and
+`timeline.md` gets an `exit` column when any beat has one. The shell reports
+the status through an invisible escape in its own prompt, carrying `$?` and
+bash's command number, which the recorder strips before the terminal ever
+renders it — so the status is known without typing `echo $?` into the demo.
+
+The command number is what makes it trustworthy. The shell prints a prompt at
+startup before any command, and reprints one for an empty Enter or a Ctrl-C, and
+each of those reports a status belonging to no command; the number is what tells
+them apart. Two `run()`s with no wait between them queue, and each status
+reaches the beat that typed it, because the shell still runs them in order.
+
+An `exit_code` is either right or `null`, never wrong. It is `null` when the
+status never arrived: a `run()` the storyboard never waited on and the take
+ended, a program still running at the end, or a shell that does not expand `$?`
+in its prompt (zsh needs `PROMPT_SUBST`; only bash is exercised). Pair every
+`run()` with `wait_for_prompt()` and it is always there.
+
+### `strict=True`
+
+```python
+with Recorder(Path(__file__).parent, strict=True) as rec:
+    ...
+```
+
+`Recorder(..., strict=True)` / `TerminalRecorder(..., strict=True)` (or
+`DEMO_VIDEO_STRICT=1`) makes the take **raise `StrictTakeFailed` on exit** if it
+recorded any fatal issue, naming the kind, the beat and the message for each.
+Default is off, so a take that would otherwise have shipped silently still
+records everything and still succeeds.
+
+It fails *after* writing demo.mp4, the stills and the timeline. A broken take
+is exactly the one somebody wants to look at, so failing it must not also
+destroy the evidence.
+
+Strict means strict. Chromium writes its own `Failed to load resource: …` to
+the console for anything that 404s or refuses a connection, and that is a real
+console error — so a missing favicon fails a strict take too. Use it when you
+want the demo to be a check that the app works, not when you want it to be
+lenient.
 
 **Timestamps are wall-clock offsets, and the video can drift under them.**
 Chromium's screencast emits a frame when the page paints and nothing pads the
@@ -403,7 +497,11 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    to confirm the story is actually visible; check `ffprobe` duration. Read
    `timeline.md` too — it is the take's own account of what ran and when, so
    a beat that fired at the wrong moment or a caption that never changed
-   shows up there without decoding a frame.
+   shows up there without decoding a frame. **Read the problem summary the
+   recorder prints on stderr**, and the Issues section of `timeline.md`: a
+   demo of an app throwing on every render looks exactly like a demo of a
+   working one, and this is the only place it shows (see **Failing the take
+   on a broken app**).
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you:
 
