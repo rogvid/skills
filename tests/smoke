@@ -1,0 +1,916 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright>=1.40"]
+# ///
+"""End-to-end smoke test for the demo-video recorders.
+
+Serves `tests/fixture/` with a throwaway `python3 -m http.server`, records a
+short web demo against it with `Recorder`, records a short terminal demo with
+`TerminalRecorder`, and grades each take on three separate axes:
+
+1. **Artifacts** — demo.mp4 and every still exist, were written by *this* run,
+   are not trivially small, and are not repeats of each other.
+2. **Content** — the frames contain a picture, measured as luma standard
+   deviation over the region the *app* occupies. Scoring the whole frame does
+   not work: a fifth to a third of every frame is the recorder's own chrome (a
+   pastel gradient at ~230 luma against a ~35 luma window), which on its own
+   scores 60-79, so a blank recording can outscore a healthy one. The content
+   rect is read off the live recorder at record time, never hardcoded.
+3. **Behaviour** — the storyboard's verbs had their effect. Every
+   `caption`/`click`/`type_into`/`spotlight`/`move_to` is followed by a check
+   of the observable post-condition it should have caused.
+
+    tests/smoke                 # both takes
+    tests/smoke --web-only
+    tests/smoke --terminal-only
+    tests/smoke --out-dir /tmp/smoke
+
+Narration is forced off (`speech=False`): CI has no ELEVENLABS_API_KEY and no
+assertion here depends on audio.
+
+Unix only, because `demo_recording/__init__.py` imports the PTY-backed
+terminal recorder unconditionally.
+
+This harness has known gaps, listed in tests/README.md. Read them before
+reading a pass as proof the recorder is healthy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_DIR = REPO_ROOT / "tests" / "fixture"
+HELPERS_DIR = REPO_ROOT / "skills" / "demo-video" / "helpers"
+
+# x, y, width, height in source-frame pixels.
+Rect = tuple[int, int, int, int]
+
+# Size floors. Deliberately low, and deliberately *not* the blank-video check —
+# no byte count separates a blank recording from a real one (a flat white 14 s
+# 720p H.264 is ~20 kB; a real terminal take is ~117 kB). These only catch the
+# degenerate near-zero-byte file.
+MIN_MP4_BYTES = 20_000
+MIN_PNG_BYTES = 5_000
+
+# Luma standard deviation floors, applied only over the content rect. They
+# differ per medium because the media differ: a web page fills its rect with
+# light and dark, while a terminal is mostly empty dark background with a few
+# lines of text in it, and scores an order of magnitude lower while being
+# perfectly healthy.
+#
+#             healthy            blank
+#   web       15.5 - 17.0        0.1 - 1.1
+#   terminal   5.1 -  7.9        0.2 - 0.4
+#
+# Each floor sits ~2.5x under the weakest healthy value and ~5x over the
+# strongest blank one. See tests/README.md for what this metric cannot
+# resolve — notably a total stylesheet failure, which scores ~10 and is
+# therefore checked separately via getComputedStyle rather than by pixels.
+MIN_CONTENT_STDDEV = {"web": 6.0, "terminal": 2.0}
+
+# Pixel proof that the caption bar reached the screen, as the mean absolute
+# luma change in the caption band between two stills taken back to back — one
+# with the caption cleared, one with it up. Nothing else on the page moves
+# between them, so the measurement is self-calibrating: no absolute threshold
+# tied to whatever the fixture happens to render near the bottom of the frame.
+#
+# Per medium, because the contrast available differs enormously: the web
+# caption is a dark box on a light page, while the terminal's is a dark box on
+# a dark terminal where only its text carries any luma change.
+#
+#             healthy      not drawn
+#   web         25.6          0.00
+#   terminal     2.7          0.00
+#
+# The terminal margin is the thinnest number in this file — 2.7x over its
+# floor, against 4x or better for everything else. tests/README.md calls that
+# out under "Known gaps".
+MIN_CAPTION_BAND_DIFF = {"web": 8.0, "terminal": 1.0}
+
+# Consecutive stills must differ by at least this mean absolute luma, on the
+# 160x90 grayscale reduction. This detects a *duplicate* — a stale or copied
+# screenshot scores exactly 0.00 — not "changed enough to be interesting":
+# neighbouring beats in the web take legitimately differ by only 0.85, since
+# a filtered table and a refreshed one are mostly the same white page.
+MIN_STILL_DIFF = 0.25
+
+# Frames sampled per second of video for the content check.
+CONTENT_SAMPLE_FPS = 1
+
+# Fraction of the content rect kept when scoring. The recorder burns its own
+# caption bar across the bottom; including it would let the caption supply the
+# contrast for an otherwise blank app.
+CONTENT_KEEP = 0.8
+
+# Duration windows, in seconds. Wide on purpose: the lower bound catches a
+# take that died early, the upper one catches a hang, and everything in
+# between is legitimate variation between a laptop and a cold CI runner.
+WEB_DURATION_S = (6.0, 32.0)
+TERMINAL_DURATION_S = (4.0, 32.0)
+
+WEB_SHOTS = ["01-dashboard", "02-filtered", "03-refreshed"]
+TERMINAL_SHOTS = ["01-echo", "02-listing"]
+
+# Two stills every take ends with: the same frame with the caption cleared and
+# then set. Kept out of the *_SHOTS lists because they are meant to be
+# identical everywhere except the caption band, which is the opposite of what
+# the duplicate-still check demands of the storyboard's own stills.
+CAPTION_PROBE = ("90-caption-off", "91-caption-on")
+
+SERVER_START_TIMEOUT_S = 15.0
+
+# Written into each take directory so a later run can tell "a directory this
+# harness owns and may delete" from "somebody's source tree".
+MARKER_NAME = ".demo-video-smoke"
+
+
+class SmokeFailure(Exception):
+    """An assertion about a recording did not hold."""
+
+
+# -- environment -------------------------------------------------------------
+
+
+def scrub_env() -> None:
+    """Drop settings that would make the run depend on the operator's shell.
+
+    Every Recorder knob reads a DEMO_VIDEO_* variable, so a developer with a
+    sourced project .env would otherwise record at a different viewport, at a
+    different base URL, or with narration on — and the assertions below would
+    mean something different for them than for CI.
+    """
+    for name in [k for k in os.environ if k.startswith("DEMO_VIDEO_")]:
+        del os.environ[name]
+    os.environ.pop("ELEVENLABS_API_KEY", None)
+
+
+def fresh_take_dir(out_root: Path, name: str) -> Path:
+    """An empty directory for one take, or a refusal.
+
+    Emptying it is load-bearing, not tidiness. Every artifact assertion works
+    by path, so a leftover demo.mp4 from a previous run grades a recorder that
+    produced nothing at all as a pass — and recording repeatedly into one
+    --out-dir is how a change to the recorder gets verified.
+
+    But `--out-dir .` in a project that happens to have a `web/` directory
+    would then delete somebody's source tree. So: delete only a directory that
+    is absent, empty, or carries this harness's marker file. Anything else is
+    a hard error naming the path.
+    """
+    take = out_root / name
+    if take.exists():
+        if not take.is_dir():
+            raise SmokeFailure(f"{take} exists and is not a directory")
+        if list(take.iterdir()) and not (take / MARKER_NAME).is_file():
+            raise SmokeFailure(
+                f"refusing to touch {take}: it is not empty and carries no "
+                f"{MARKER_NAME} marker, so this harness did not create it. "
+                f"Each take needs its own empty directory — point --out-dir "
+                f"somewhere this run owns."
+            )
+        shutil.rmtree(take)
+    take.mkdir(parents=True)
+    (take / MARKER_NAME).write_text(
+        "Written by tests/smoke. Its presence means this directory may be "
+        "deleted and recreated by the next run.\n"
+    )
+    return take
+
+
+# -- fixture server ----------------------------------------------------------
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+@contextmanager
+def fixture_server() -> Iterator[str]:
+    """Serve tests/fixture on a free port; always shut it down."""
+    if not (FIXTURE_DIR / "index.html").is_file():
+        raise SmokeFailure(f"fixture app missing: {FIXTURE_DIR / 'index.html'}")
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            str(FIXTURE_DIR),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + SERVER_START_TIMEOUT_S
+        while True:
+            if proc.poll() is not None:
+                raise SmokeFailure(
+                    f"fixture server exited immediately (code {proc.returncode}) "
+                    f"— port {port} may already be in use"
+                )
+            try:
+                with urllib.request.urlopen(base_url, timeout=1) as resp:
+                    if resp.status == 200:
+                        break
+            except (urllib.error.URLError, OSError):
+                pass
+            if time.time() > deadline:
+                raise SmokeFailure(
+                    f"fixture server did not answer on {base_url} within "
+                    f"{SERVER_START_TIMEOUT_S:.0f}s"
+                )
+            time.sleep(0.1)
+        print(f"smoke: serving {FIXTURE_DIR} at {base_url}")
+        yield base_url
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+# -- picture content ---------------------------------------------------------
+
+# Everything below reduces frames to 160x90 8-bit grayscale via ffmpeg and
+# does the arithmetic in pure Python — no image library, no extra dependency.
+_GRAY_W, _GRAY_H = 160, 90
+
+
+def gray_frames(
+    path: Path, rect: Rect | None = None, sample_fps: int | None = None
+) -> list[bytes]:
+    """Decode an mp4 or png into 160x90 grayscale frames.
+
+    `rect` crops a region of the source frame *before* scaling. Passing the
+    region the app actually occupies is the whole point: the recorder's chrome
+    is high-contrast and static, so a whole-frame score is dominated by it and
+    cannot tell a blank app from a working one.
+    """
+    chain = []
+    if sample_fps:
+        chain.append(f"fps={sample_fps}")
+    if rect is not None:
+        x, y, w, h = rect
+        chain.append(f"crop={w}:{h}:{x}:{y}")
+    chain += [f"scale={_GRAY_W}:{_GRAY_H}", "format=gray"]
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-vf",
+            ",".join(chain),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg could not decode {path}: "
+            f"{proc.stderr.decode(errors='replace').strip()[:300]}"
+        )
+    size = _GRAY_W * _GRAY_H
+    raw = proc.stdout
+    return [raw[i : i + size] for i in range(0, len(raw) - size + 1, size)]
+
+
+def contrast(frame: bytes) -> float:
+    """Luma standard deviation. Anything visible scores tens; a flat frame 0."""
+    n = len(frame)
+    mean = sum(frame) / n
+    return math.sqrt(sum((b - mean) ** 2 for b in frame) / n)
+
+
+def frame_difference(a: bytes, b: bytes) -> float:
+    """Mean absolute luma difference between two reduced frames."""
+    return sum(abs(x - y) for x, y in zip(a, b, strict=False)) / len(a)
+
+
+def keep_top(rect: Rect, fraction: float = CONTENT_KEEP) -> Rect:
+    x, y, w, h = rect
+    return (x, y, w, max(1, int(h * fraction)))
+
+
+def caption_band(frame_size: tuple[int, int]) -> Rect:
+    """The strip of a full still that holds the burned-in caption bar.
+
+    Covers both recorders: the web caption sits 44 px off the page bottom and
+    the terminal's 88 px, and both boxes are around 70 px tall.
+    """
+    width, height = frame_size
+    return (0, max(0, height - 160), width, 140)
+
+
+# -- storyboards -------------------------------------------------------------
+
+
+class Beats:
+    """Collects post-condition failures without aborting the take.
+
+    A storyboard that stops at the first bad assertion produces no video, and
+    the video is two thirds of what is being graded — and CI's failure-only
+    artifact upload would then have nothing to upload at the moment it is most
+    wanted. So record the whole thing, then report everything that went wrong.
+    """
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.problems: list[str] = []
+
+    def expect(self, after: str, actual: object, wanted: object) -> None:
+        if actual != wanted:
+            # Deliberately does NOT conclude "the interaction did not take
+            # effect". A legitimate edit to tests/fixture/index.html trips
+            # these too, and telling a queued-PR author that their recorder
+            # change broke, when the fixture merely gained a row, is worse
+            # than saying nothing.
+            self.problems.append(
+                f"{self.label}: after {after}, expected {wanted!r} but got "
+                f"{actual!r} — either that verb had no effect, or "
+                f"tests/fixture/index.html changed and this expectation is stale"
+            )
+
+    def fail_if(self, condition: bool, message: str) -> None:
+        if condition:
+            self.problems.append(f"{self.label}: {message}")
+
+
+_CAPTION_JS = """() => {
+  const el = document.getElementById('__demo_caption');
+  if (!el) return null;
+  return [el.textContent, getComputedStyle(el).opacity];
+}"""
+
+
+def check_caption(b: Beats, page, expected: str) -> None:
+    """Assert the caption the storyboard just set actually reached the screen.
+
+    Captions are this skill's headline feature — the thing a viewer reads. A
+    recorder that silently stops drawing them still produces a video that
+    satisfies every pixel metric and explains nothing.
+    """
+    state = page.evaluate(_CAPTION_JS)
+    if state is None:
+        b.fail_if(True, "no #__demo_caption element exists — caption() drew nothing")
+        return
+    text, opacity = state
+    b.fail_if(text != expected, f"the caption reads {text!r}, expected {expected!r}")
+    # Numeric, not string equality: the bar fades over 0.3 s, so a check run
+    # right after the call legitimately catches it at 0.0017 rather than 0.
+    shown = float(opacity) > 0.5
+    b.fail_if(
+        shown != bool(expected),
+        f"the caption's computed opacity is {opacity} but its text is "
+        f"{expected!r} — it is in the DOM and not on screen"
+        if expected
+        else f"the caption's computed opacity is {opacity}; it should have "
+        f"been cleared",
+    )
+
+
+# Records every mousemove the page sees, so move_to()'s 30-step glide can be
+# told apart from the single move Playwright's own click() dispatches.
+_TRAIL_JS = """() => {
+  window.__smokeTrail = [];
+  window.addEventListener(
+    'mousemove', (e) => window.__smokeTrail.push([e.clientX, e.clientY]), true);
+}"""
+
+
+def record_web(
+    out_dir: Path, base_url: str
+) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
+    """Land, read a KPI, filter the table, refresh it.
+
+    Returns the post-condition failures plus two content rects: where the app
+    sits inside the composited video, and where it sits in a still (stills are
+    captured full-bleed, before compositing).
+    """
+    from demo_recording import Recorder
+
+    b = Beats("web")
+    outline = "el => getComputedStyle(el).outlineStyle"
+    bg = "el => getComputedStyle(el).backgroundColor"
+
+    with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        rec.pause(0.6)
+        b.expect("goto('/'), #rows row count", rec.page.locator("#rows tr").count(), 5)
+        b.expect(
+            "goto('/'), #status text",
+            rec.page.locator("#status").inner_text(),
+            "snapshot 1 of 3",
+        )
+        # A stylesheet that failed to load leaves the DOM intact and the page
+        # legible-ish, which the luma metric scores around 10 — above its
+        # floor. This resolves that case exactly, with no pixel threshold.
+        b.expect(
+            "goto('/'), #refresh background (did the stylesheet apply?)",
+            rec.page.eval_on_selector("#refresh", bg),
+            "rgb(235, 110, 20)",
+        )
+
+        rec.caption("A small dashboard.")
+        check_caption(b, rec.page, "A small dashboard.")
+        rec.shot("01-dashboard")
+
+        rec.spotlight("#kpi-rev")
+        b.expect(
+            "spotlight('#kpi-rev'), computed outline-style",
+            rec.page.eval_on_selector("#kpi-rev", outline),
+            "solid",
+        )
+        rec.hold()
+        rec.spotlight()
+        b.expect(
+            "spotlight() cleared, computed outline-style",
+            rec.page.eval_on_selector("#kpi-rev", outline),
+            "none",
+        )
+
+        rec.caption("Filter by city.")
+        check_caption(b, rec.page, "Filter by city.")
+        rec.type_into("#search", "seattle")
+        rec.pause(0.8)
+        b.expect(
+            "type_into('#search'), field value",
+            rec.page.input_value("#search"),
+            "seattle",
+        )
+        b.expect(
+            "type_into('#search'), #rows row count",
+            rec.page.locator("#rows tr").count(),
+            1,
+        )
+        rec.shot("02-filtered")
+
+        rec.caption("Refresh reloads it.")
+        check_caption(b, rec.page, "Refresh reloads it.")
+
+        # move_to() is the sole source of the 30-step cursor glide. Asserting
+        # only where the cursor ends up proves nothing, because Playwright's
+        # locator.click() dispatches its own mousemove to the target — that
+        # measures Playwright, not move_to. Count the intermediate moves
+        # instead: a glide is many, a click is one.
+        rec.page.evaluate(_TRAIL_JS)
+        rec.move_to("#refresh")
+        trail = rec.page.evaluate("() => window.__smokeTrail.length")
+        b.fail_if(
+            trail < 10,
+            f"move_to('#refresh') produced {trail} mousemove events; the glide "
+            f"is 30 steps, so this is not a glide",
+        )
+
+        rec.click("#refresh")
+        rec.pause(1.0)
+        b.expect(
+            "click('#refresh'), #status text",
+            rec.page.locator("#status").inner_text(),
+            "snapshot 2 of 3",
+        )
+        b.expect(
+            "click('#refresh'), #kpi-rev text",
+            rec.page.locator("#kpi-rev").inner_text(),
+            "$134,950",
+        )
+        rec.shot("03-refreshed")
+
+        # Two stills back to back with the page frozen and only the caption
+        # changing. Their difference in the caption band is pixel proof that
+        # the bar was actually drawn — see MIN_CAPTION_BAND_DIFF.
+        rec.caption("")
+        check_caption(b, rec.page, "")
+        rec.shot(CAPTION_PROBE[0])
+        rec.caption("Recorded end to end.")
+        check_caption(b, rec.page, "Recorded end to end.")
+        rec.shot(CAPTION_PROBE[1])
+        rec.caption("")
+
+        # Where the app lands in each medium, read off the live recorder rather
+        # than re-derived here, so a change to the window geometry carries this
+        # with it instead of silently scoring the wrong pixels.
+        g = rec._geom
+        video_rect: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
+        size = (rec._size["width"], rec._size["height"])
+        still_rect: Rect = (0, 0, size[0], size[1])
+
+    return b.problems, video_rect, still_rect, size
+
+
+def record_terminal(
+    out_dir: Path,
+) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
+    """Two trivial commands — enough to exercise PTY, xterm.js, and prompt sync."""
+    from demo_recording import TerminalRecorder
+
+    b = Beats("terminal")
+
+    # Both terminal syncs raise on timeout, which would abort the take before
+    # the mp4 was written — and then CI's failure-only artifact upload has
+    # nothing to show at exactly the moment somebody wants to look at it.
+    # Collect instead, and keep the timeouts short so a broken take fails in
+    # seconds rather than minutes.
+    def expect_screen(rec, after: str, pattern: str) -> None:
+        try:
+            rec.wait_for_text(pattern, timeout_s=10)
+        except RuntimeError as exc:
+            tail = " ".join(str(exc).split())[:200]
+            b.fail_if(
+                True,
+                f"after {after}, the rendered screen never matched /{pattern}/ "
+                f"— {tail}",
+            )
+
+    def expect_prompt(rec, after: str) -> None:
+        try:
+            rec.wait_for_prompt(timeout_s=15)
+        except RuntimeError as exc:
+            tail = " ".join(str(exc).split())[:200]
+            b.fail_if(True, f"after {after}, the shell prompt never came back — {tail}")
+
+    with TerminalRecorder(out_dir, speech=False) as rec:
+        rec.caption("A real shell, recorded.")
+        check_caption(b, rec.page, "A real shell, recorded.")
+        rec.run("echo hello from demo-video")
+        expect_prompt(rec, "run('echo …')")
+        # Anchored to a whole screen line, and matching the command's *output*
+        # rather than the echoed command line — so it only passes if the PTY
+        # really ran what run() typed.
+        expect_screen(rec, "run('echo …')", r"^hello from demo-video$")
+        rec.shot("01-echo")
+
+        rec.caption("Any command works.")
+        check_caption(b, rec.page, "Any command works.")
+        rec.run("ls -1")
+        expect_prompt(rec, "run('ls -1')")
+        expect_screen(rec, "run('ls -1')", r"^skills$")
+        rec.pause(0.8)
+        rec.shot("02-listing")
+
+        rec.caption("")
+        check_caption(b, rec.page, "")
+        rec.shot(CAPTION_PROBE[0])
+        rec.caption("Recorded end to end.")
+        check_caption(b, rec.page, "Recorded end to end.")
+        rec.shot(CAPTION_PROBE[1])
+        rec.caption("")
+
+        # The xterm.js host div — a real element with a stable id, so the
+        # content rect follows any change to the window chrome.
+        box = rec.page.locator("#__term_host").bounding_box()
+        if box is None:
+            raise SmokeFailure("#__term_host has no box — the terminal never rendered")
+        rect: Rect = (
+            int(box["x"]),
+            int(box["y"]),
+            int(box["width"]),
+            int(box["height"]),
+        )
+        size = (rec._size["width"], rec._size["height"])
+
+    # The terminal frames itself in-page and is not composited, so its video
+    # and its stills share one geometry.
+    return b.problems, rect, rect, size
+
+
+# -- assertions --------------------------------------------------------------
+
+
+def _check_video(
+    label: str,
+    mp4: Path,
+    duration_range: tuple[float, float],
+    video_rect: Rect,
+) -> list[str]:
+    from demo_recording import media_duration
+
+    failures: list[str] = []
+    size = mp4.stat().st_size
+    if size < MIN_MP4_BYTES:
+        failures.append(
+            f"{label}: {mp4} is only {size} bytes (expected at least {MIN_MP4_BYTES})"
+        )
+        return failures
+
+    seconds: float | None
+    try:
+        seconds = media_duration(mp4)
+    except Exception as exc:  # noqa: BLE001 - report, don't crash the run
+        failures.append(f"{label}: ffprobe could not read {mp4}: {exc}")
+        seconds = None
+    if seconds is not None:
+        low, high = duration_range
+        if not low <= seconds <= high:
+            failures.append(
+                f"{label}: {mp4.name} is {seconds:.1f}s, expected between "
+                f"{low:.0f}s and {high:.0f}s"
+            )
+
+    try:
+        frames = gray_frames(mp4, video_rect, sample_fps=CONTENT_SAMPLE_FPS)
+    except RuntimeError as exc:
+        failures.append(f"{label}: {exc}")
+        return failures
+    if not frames:
+        failures.append(f"{label}: no frames could be sampled from {mp4.name}")
+        return failures
+
+    # Median, not max: one good frame must not excuse a blank video. Not min
+    # either — a take legitimately opens on a frame or two of not-yet-painted
+    # page.
+    floor = MIN_CONTENT_STDDEV[label]
+    score = statistics.median(contrast(f) for f in frames)
+    if score < floor:
+        failures.append(
+            f"{label}: {mp4.name} has no picture where the app should be — the "
+            f"median of {len(frames)} sampled frames scores {score:.1f} luma "
+            f"stddev over {video_rect}, under the {floor} floor"
+        )
+    # "ok" only when nothing at all was wrong with this file. Printing it
+    # alongside a duration failure reads as a contradiction, and a log that
+    # contradicts itself is a log nobody trusts.
+    if not failures and seconds is not None:
+        print(
+            f"smoke: {label} demo.mp4 ok ({seconds:.1f}s, {size // 1024} kB, "
+            f"content {score:.1f})"
+        )
+    return failures
+
+
+def check_take(
+    label: str,
+    out_dir: Path,
+    shots: list[str],
+    duration_range: tuple[float, float],
+    started_at: float,
+    video_rect: Rect,
+    still_rect: Rect,
+    frame_size: tuple[int, int],
+) -> list[str]:
+    """Everything a healthy take leaves behind. Returns failure messages.
+
+    `video_rect`/`still_rect` are where the app itself sits; the bottom fifth
+    of each is dropped before scoring so the recorder's caption bar cannot
+    supply the contrast for a blank app.
+    """
+    failures: list[str] = []
+    video_rect = keep_top(video_rect)
+    still_rect = keep_top(still_rect)
+
+    def fresh(path: Path) -> bool:
+        # Belt and braces next to fresh_take_dir(): an artifact older than the
+        # take that supposedly produced it is somebody else's file.
+        return path.stat().st_mtime >= started_at - 1
+
+    mp4 = out_dir / "demo.mp4"
+    if not mp4.is_file():
+        failures.append(f"{label}: {mp4} was never written")
+    elif not fresh(mp4):
+        failures.append(f"{label}: {mp4} is stale — it predates this run")
+    else:
+        failures += _check_video(label, mp4, duration_range, video_rect)
+
+    reduced: dict[str, bytes] = {}
+    for name in shots:
+        png = out_dir / "images" / f"{name}.png"
+        if not png.is_file():
+            failures.append(f"{label}: still {png} was never captured")
+            continue
+        if not fresh(png):
+            failures.append(f"{label}: still {png} is stale — it predates this run")
+            continue
+        size = png.stat().st_size
+        if size < MIN_PNG_BYTES:
+            failures.append(
+                f"{label}: still {png} is only {size} bytes "
+                f"(expected at least {MIN_PNG_BYTES})"
+            )
+            continue
+        try:
+            frames = gray_frames(png, still_rect)
+        except RuntimeError as exc:
+            failures.append(f"{label}: {exc}")
+            continue
+        if not frames:
+            failures.append(f"{label}: still {png} decoded to no frames")
+            continue
+        score = contrast(frames[0])
+        if score < MIN_CONTENT_STDDEV[label]:
+            failures.append(
+                f"{label}: still {name}.png is blank — it scores {score:.1f} "
+                f"luma stddev over {still_rect}, under the "
+                f"{MIN_CONTENT_STDDEV[label]} floor"
+            )
+            continue
+        reduced[name] = frames[0]
+        print(
+            f"smoke: {label} still {name}.png ok "
+            f"({size // 1024} kB, content {score:.1f})"
+        )
+
+    # Three identical screenshots satisfy every check above. They must not.
+    ordered = [n for n in shots if n in reduced]
+    for previous, current in zip(ordered, ordered[1:], strict=False):
+        delta = frame_difference(reduced[previous], reduced[current])
+        if delta < MIN_STILL_DIFF:
+            failures.append(
+                f"{label}: stills {previous}.png and {current}.png are the "
+                f"same picture (mean luma difference {delta:.2f}, floor "
+                f"{MIN_STILL_DIFF}) — the screenshot is stale, or the beat "
+                f"between them changed nothing"
+            )
+
+    # Pixel proof that the caption bar reached the screen, not just the DOM.
+    # The two probe stills are the same frame with the caption off and on, so
+    # any change in the caption band is the caption and nothing else.
+    off, on = (out_dir / "images" / f"{n}.png" for n in CAPTION_PROBE)
+    if not (off.is_file() and on.is_file()):
+        failures.append(
+            f"{label}: the caption probe stills {CAPTION_PROBE[0]}.png and "
+            f"{CAPTION_PROBE[1]}.png were not both captured"
+        )
+    else:
+        band = caption_band(frame_size)
+        try:
+            before = gray_frames(off, band)
+            after = gray_frames(on, band)
+        except RuntimeError as exc:
+            failures.append(f"{label}: {exc}")
+        else:
+            delta = frame_difference(before[0], after[0]) if before and after else 0.0
+            if delta < MIN_CAPTION_BAND_DIFF[label]:
+                failures.append(
+                    f"{label}: setting a caption changed nothing on screen — "
+                    f"the caption band moved by {delta:.2f} mean luma between "
+                    f"{CAPTION_PROBE[0]}.png and {CAPTION_PROBE[1]}.png, under "
+                    f"the {MIN_CAPTION_BAND_DIFF[label]} floor. The bar is in "
+                    f"the DOM but is not being drawn."
+                )
+            else:
+                print(
+                    f"smoke: {label} caption is visible on screen (delta {delta:.1f})"
+                )
+
+    return failures
+
+
+# -- phases ------------------------------------------------------------------
+
+
+def run_web(out_root: Path) -> list[str]:
+    out_dir = fresh_take_dir(out_root, "web")
+    started = time.time()
+    with fixture_server() as base_url:
+        try:
+            problems, video_rect, still_rect, size = record_web(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
+    return problems + check_take(
+        "web", out_dir, WEB_SHOTS, WEB_DURATION_S, started, video_rect, still_rect, size
+    )
+
+
+def run_terminal(out_root: Path) -> list[str]:
+    if os.name != "posix":
+        print(
+            "smoke: SKIPPING the terminal take — TerminalRecorder needs a PTY "
+            f"and this is {os.name!r}, not a Unix platform.",
+            file=sys.stderr,
+        )
+        return []
+    out_dir = fresh_take_dir(out_root, "terminal")
+    started = time.time()
+    # The shell starts in the process cwd, and `ls -1` is one of the beats —
+    # pin it to the repo root so the take does not depend on where it was run.
+    previous = Path.cwd()
+    os.chdir(REPO_ROOT)
+    try:
+        problems, video_rect, still_rect, size = record_terminal(out_dir)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [f"terminal: TerminalRecorder raised {type(exc).__name__}: {exc}"]
+    finally:
+        os.chdir(previous)
+    return problems + check_take(
+        "terminal",
+        out_dir,
+        TERMINAL_SHOTS,
+        TERMINAL_DURATION_S,
+        started,
+        video_rect,
+        still_rect,
+        size,
+    )
+
+
+# -- entry point -------------------------------------------------------------
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Smoke-test the demo-video recorders against tests/fixture.",
+    )
+    parser.add_argument(
+        "--web-only", action="store_true", help="record only the web take"
+    )
+    parser.add_argument(
+        "--terminal-only", action="store_true", help="record only the terminal take"
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        help="where recordings land (default: a fresh temp dir). The web/ and "
+        "terminal/ subdirectories must be absent, empty, or created by a "
+        "previous run; each is recreated before its take.",
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep the output directory even when everything passes",
+    )
+    args = parser.parse_args()
+
+    if args.web_only and args.terminal_only:
+        parser.error("--web-only and --terminal-only are mutually exclusive")
+
+    if not HELPERS_DIR.is_dir():
+        print(f"smoke: helpers not found at {HELPERS_DIR}", file=sys.stderr)
+        return 1
+    sys.path.insert(0, str(HELPERS_DIR))
+
+    if shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None:
+        print(
+            "smoke: ffmpeg and ffprobe must be on PATH — the recorders shell "
+            "out to both.",
+            file=sys.stderr,
+        )
+        return 1
+
+    scrub_env()
+
+    if args.out_dir:
+        out_root = args.out_dir.resolve()
+        out_root.mkdir(parents=True, exist_ok=True)
+        ephemeral = False
+    else:
+        out_root = Path(tempfile.mkdtemp(prefix="demo-video-smoke-"))
+        ephemeral = True
+    print(f"smoke: output -> {out_root}")
+
+    failures: list[str] = []
+    try:
+        if not args.terminal_only:
+            failures += run_web(out_root)
+        if not args.web_only:
+            failures += run_terminal(out_root)
+    except SmokeFailure as exc:
+        failures.append(str(exc))
+
+    if failures:
+        print("\nsmoke: FAILED", file=sys.stderr)
+        for line in failures:
+            print(f"  - {line}", file=sys.stderr)
+        print(f"\nsmoke: recordings left in {out_root}", file=sys.stderr)
+        return 1
+
+    print("\nsmoke: PASSED")
+    if ephemeral and not args.keep:
+        shutil.rmtree(out_root, ignore_errors=True)
+    else:
+        print(f"smoke: recordings kept in {out_root}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

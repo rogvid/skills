@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northwind Ops — fixture app</title>
+<style>
+  :root {
+    --bg: #f5f6f9;
+    --surface: #ffffff;
+    --ink: #171c28;
+    --ink-soft: #5b6478;
+    --line: #e3e6ee;
+    --accent: #eb6e14;
+    --good: #1f8a5c;
+    --warn: #b4791a;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1040px; margin: 0 auto; padding: 34px 40px 56px; }
+
+  /* Hero ------------------------------------------------------------- */
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+  h1 { margin: 0; font-size: 30px; letter-spacing: -0.02em; font-weight: 700; }
+  .sub { margin: 6px 0 0; color: var(--ink-soft); font-size: 15px; }
+  #status {
+    font: 600 13px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: var(--ink-soft); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px;
+    white-space: nowrap;
+  }
+
+  /* KPI cards -------------------------------------------------------- */
+  .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 26px 0 22px; }
+  .kpi {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px 20px;
+  }
+  .kpi .label {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink-soft);
+  }
+  .kpi .value { margin-top: 8px; font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+  .kpi .delta { margin-top: 4px; font-size: 13px; font-weight: 600; color: var(--good); }
+  .kpi .delta.down { color: var(--warn); }
+
+  /* Toolbar ---------------------------------------------------------- */
+  .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
+  #search {
+    flex: 1; padding: 11px 14px; font: inherit; color: inherit;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; outline: none;
+  }
+  #search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(235, 110, 20, 0.14); }
+  #refresh {
+    padding: 11px 20px; font: 600 15px/1 inherit; color: #fff;
+    background: var(--accent); border: 0; border-radius: 10px; cursor: pointer;
+  }
+  #refresh:hover { filter: brightness(1.06); }
+
+  /* Table ------------------------------------------------------------ */
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 13px 20px; text-align: left; }
+  thead th {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink-soft);
+    border-bottom: 1px solid var(--line);
+  }
+  tbody tr + tr td { border-top: 1px solid var(--line); }
+  td.num { font-variant-numeric: tabular-nums; }
+  .pill {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600;
+    background: rgba(31, 138, 92, 0.12); color: var(--good);
+  }
+  .pill.hold { background: rgba(180, 121, 26, 0.14); color: var(--warn); }
+  #empty { padding: 26px 20px; color: var(--ink-soft); }
+
+  /* Secret panel (only with ?secret=1) -------------------------------- */
+  #secret-panel {
+    margin-top: 22px; padding: 16px 20px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  #secret-panel .label {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink-soft);
+  }
+  #api-key {
+    display: block; margin-top: 8px;
+    font: 15px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: var(--ink);
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>Northwind Ops</h1>
+      <p class="sub">Fulfilment overview for the western region.</p>
+    </div>
+    <div id="status">snapshot 1 of 3</div>
+  </header>
+
+  <section class="kpis">
+    <div class="kpi">
+      <div class="label">Revenue</div>
+      <div class="value" id="kpi-rev">$128,400</div>
+      <div class="delta" id="kpi-rev-delta">+4.2% vs. last week</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Open orders</div>
+      <div class="value" id="kpi-orders">42</div>
+      <div class="delta" id="kpi-orders-delta">+6 today</div>
+    </div>
+    <div class="kpi">
+      <div class="label">On-time rate</div>
+      <div class="value" id="kpi-ontime">96%</div>
+      <div class="delta" id="kpi-ontime-delta">+1 pt</div>
+    </div>
+  </section>
+
+  <div class="toolbar">
+    <input id="search" type="text" placeholder="Filter orders by customer or city…" autocomplete="off">
+    <button id="refresh" type="button">Refresh</button>
+  </div>
+
+  <div class="card">
+    <table id="table">
+      <thead>
+        <tr>
+          <th>Order</th>
+          <th>Customer</th>
+          <th>City</th>
+          <th>Status</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" hidden>No orders match that filter.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/*
+ * Fixture app for the demo-video smoke test. Deliberately dependency-free,
+ * build-step-free, and deterministic: no Math.random(), no Date.now() on
+ * screen, no animations. Every element the smoke test (and the queued
+ * feature work) drives has a stable id.
+ *
+ * Query-string hooks, inert unless asked for:
+ *   ?console-error=1  page logs a console error and throws on load (issue #3)
+ *   ?secret=1         renders #api-key holding an obviously-fake secret (issue #4)
+ */
+
+// Three fixed snapshots. #refresh cycles through them in order, so a
+// recording made today looks exactly like one made next year.
+var SNAPSHOTS = [
+  {
+    kpis: { rev: "$128,400", revDelta: "+4.2% vs. last week", revDown: false,
+            orders: "42", ordersDelta: "+6 today",
+            ontime: "96%", ontimeDelta: "+1 pt", ontimeDown: false },
+    rows: [
+      ["NW-1041", "Ferrari Logistics", "Portland", "shipped", "$4,280"],
+      ["NW-1042", "Blue Ridge Foods",  "Boise",    "shipped", "$1,915"],
+      ["NW-1043", "Harbor Supply Co.", "Seattle",  "hold",    "$8,640"],
+      ["NW-1044", "Cascade Outfitters","Portland", "shipped", "$2,370"],
+      ["NW-1045", "Pine & Poplar",     "Spokane",  "shipped", "$980"]
+    ]
+  },
+  {
+    kpis: { rev: "$134,950", revDelta: "+9.3% vs. last week", revDown: false,
+            orders: "38", ordersDelta: "-4 today",
+            ontime: "97%", ontimeDelta: "+2 pt", ontimeDown: false },
+    rows: [
+      ["NW-1046", "Harbor Supply Co.", "Seattle",  "shipped", "$6,120"],
+      ["NW-1047", "Ferrari Logistics", "Portland", "shipped", "$3,410"],
+      ["NW-1048", "Redwood Kitchens",  "Eugene",   "hold",    "$5,275"],
+      ["NW-1049", "Blue Ridge Foods",  "Boise",    "shipped", "$2,040"]
+    ]
+  },
+  {
+    kpis: { rev: "$119,180", revDelta: "-2.1% vs. last week", revDown: true,
+            orders: "51", ordersDelta: "+13 today",
+            ontime: "93%", ontimeDelta: "-3 pt", ontimeDown: true },
+    rows: [
+      ["NW-1050", "Cascade Outfitters","Portland", "hold",    "$7,860"],
+      ["NW-1051", "Pine & Poplar",     "Spokane",  "shipped", "$1,240"],
+      ["NW-1052", "Harbor Supply Co.", "Seattle",  "shipped", "$3,990"],
+      ["NW-1053", "Redwood Kitchens",  "Eugene",   "shipped", "$2,615"],
+      ["NW-1054", "Ferrari Logistics", "Portland", "hold",    "$9,105"],
+      ["NW-1055", "Blue Ridge Foods",  "Boise",    "shipped", "$1,730"]
+    ]
+  }
+];
+
+var snapshotIndex = 0;
+
+function el(id) { return document.getElementById(id); }
+
+function renderKpis(k) {
+  el("kpi-rev").textContent = k.rev;
+  el("kpi-rev-delta").textContent = k.revDelta;
+  el("kpi-rev-delta").className = k.revDown ? "delta down" : "delta";
+  el("kpi-orders").textContent = k.orders;
+  el("kpi-orders-delta").textContent = k.ordersDelta;
+  el("kpi-ontime").textContent = k.ontime;
+  el("kpi-ontime-delta").textContent = k.ontimeDelta;
+  el("kpi-ontime-delta").className = k.ontimeDown ? "delta down" : "delta";
+}
+
+function renderRows() {
+  var snap = SNAPSHOTS[snapshotIndex];
+  var needle = el("search").value.trim().toLowerCase();
+  var body = el("rows");
+  body.textContent = "";
+  var shown = 0;
+  for (var i = 0; i < snap.rows.length; i++) {
+    var r = snap.rows[i];
+    var haystack = (r[1] + " " + r[2]).toLowerCase();
+    if (needle && haystack.indexOf(needle) === -1) { continue; }
+    var tr = document.createElement("tr");
+    tr.id = "row-" + r[0].toLowerCase();
+    tr.innerHTML =
+      "<td>" + r[0] + "</td>" +
+      "<td>" + r[1] + "</td>" +
+      "<td>" + r[2] + "</td>" +
+      '<td><span class="pill' + (r[3] === "hold" ? " hold" : "") + '">' + r[3] + "</span></td>" +
+      '<td class="num">' + r[4] + "</td>";
+    body.appendChild(tr);
+    shown++;
+  }
+  el("empty").hidden = shown > 0;
+}
+
+function render() {
+  var snap = SNAPSHOTS[snapshotIndex];
+  el("status").textContent = "snapshot " + (snapshotIndex + 1) + " of " + SNAPSHOTS.length;
+  renderKpis(snap.kpis);
+  renderRows();
+}
+
+el("search").addEventListener("input", renderRows);
+el("refresh").addEventListener("click", function () {
+  snapshotIndex = (snapshotIndex + 1) % SNAPSHOTS.length;
+  render();
+});
+
+render();
+
+// -- query-string hooks -----------------------------------------------------
+
+var params = new URLSearchParams(window.location.search);
+
+if (params.has("secret")) {
+  var panel = document.createElement("div");
+  panel.id = "secret-panel";
+  var label = document.createElement("div");
+  label.className = "label";
+  label.textContent = "Integration key";
+  var code = document.createElement("code");
+  code.id = "api-key";
+  // NOT a credential. A fixture literal, spelled FAKE and all zeroes on
+  // purpose so both gitleaks and a human read it as scenery. Used by the
+  // redaction work (issue #4) to prove a secret never reaches a frame.
+  code.textContent = "sk-live-FAKE0000000000000000";
+  panel.appendChild(label);
+  panel.appendChild(code);
+  document.querySelector(".page").appendChild(panel);
+}
+
+if (params.has("console-error")) {
+  // Deliberate breakage for the console-error detection work (issue #3).
+  // Emits both shapes a detector might key on: a console.error record and
+  // an uncaught exception (Playwright's "pageerror"). Thrown from a task so
+  // the rest of this script still finishes and the page stays usable.
+  console.error("fixture: deliberate console error");
+  setTimeout(function () {
+    throw new Error("fixture: deliberate uncaught error");
+  }, 0);
+}
+</script>
+</body>
+</html>

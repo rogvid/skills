@@ -1,0 +1,30 @@
+# gitleaks configuration.
+#
+# The default ruleset, plus one narrowly-scoped allowlist. Nothing else is
+# relaxed: if a scan trips on something new, fix the leak, do not widen this.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Two narrow exemptions.
+
+paths: skills/demo-video/helpers/assets/ holds vendored xterm.js. A full-history
+scan reports two generic-api-key hits in it — both false positives in minified
+third-party code that this repo does not author and will not edit. PR-event
+scans only see the diff, so the job is green today and would go red the first
+time anyone adds a schedule or workflow_dispatch trigger. ruff.toml excludes the
+same directory for the same reason.
+
+regexes: the test fixture renders a deliberately fake API key at #api-key
+(tests/fixture/index.html, behind ?secret=1) so the redaction work in issue #4
+has something to prove it hides. Note this entry is belt-and-braces, not
+load-bearing: the default ruleset does not flag that literal with or without
+this config — it is spelled FAKE followed by sixteen zeroes precisely so no
+scanner and no human mistakes it for a credential. It is kept so that a future
+gitleaks release which does start flagging it cannot turn the job red for a
+string that was never a secret. It masks nothing else.
+"""
+paths = ['''^skills/demo-video/helpers/assets/''']
+regexes = ['''sk-live-FAKE0{16}''']

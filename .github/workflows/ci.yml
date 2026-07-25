@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a tool release never turns a green branch red on its own.
+  RUFF_VERSION: "0.14.2"
+  MYPY_VERSION: "1.18.2"
+
+jobs:
+  lint:
+    name: lint (ruff, shellcheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: ruff check
+        run: uv run --with "ruff==$RUFF_VERSION" ruff check --output-format github .
+
+      - name: ruff format --check
+        run: uv run --with "ruff==$RUFF_VERSION" ruff format --check .
+
+      # shellcheck comes from PyPI rather than apt so this is the same binary
+      # a contributor gets from the same command locally.
+      - name: shellcheck the skills' shell scripts
+        run: |
+          find skills -name '*.sh' -print0 |
+            xargs -0 -r uv run --with shellcheck-py shellcheck --severity=style
+
+  typecheck:
+    name: typecheck (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Settings live in mypy.ini and are deliberately permissive — see the
+      # comments there for what to ratchet up and when.
+      - name: mypy
+        run: uv run --with "mypy==$MYPY_VERSION" --with playwright mypy skills/demo-video/helpers/
+
+  secrets:
+    name: secrets (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # What gitleaks scans depends on the event: for `pull_request` it is the
+      # commits in the PR, for `push` the pushed range, and only for a manual
+      # or scheduled run is it the whole repository. fetch-depth: 0 is what
+      # makes that last case possible — without it a full scan has no history
+      # to read.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Config is .gitleaks.toml at the repo root: the default ruleset plus two
+      # narrow allowlist entries (vendored xterm.js, and the fixture's fake
+      # API key).
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  smoke:
+    name: smoke (record against the fixture app)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install Chromium for Playwright
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      # Writes outside the checkout, at a path the upload step below knows.
+      - name: Record web and terminal demos
+        run: tests/smoke --out-dir "$RUNNER_TEMP/smoke-out"
+
+      # Only on failure: a green run's recordings are noise, a red run's are
+      # the only way to see what the recorder actually produced.
+      - name: Upload recordings for debugging
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-recordings
+          path: ${{ runner.temp }}/smoke-out
+          if-no-files-found: warn
+          retention-days: 7
