@@ -39,6 +39,7 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 | `timeline.md` | The same log rendered for humans, stills embedded | yes |
 | `guide.md` | Optional written guide embedding the stills | yes |
 | `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
+| `frames/` | Review frames pulled out of `demo.mp4`, plus the sheet you hand a reviewer | **no** — a working file of a review; `beat_frames(out_dir)` regenerates it |
 
 The storyboard is the durable artifact, not the video. See **Commit the
 storyboard, not the media** in the Process section.
@@ -703,6 +704,78 @@ a resolution mismatch keeps the first part's dimensions, and one silent part
 makes concat drop every later part's narration. Recording every segment with
 the same `Recorder` settings is what keeps you clear of it.
 
+## Review frames (`frames/`)
+
+Nobody reviewing a demo through this skill can watch a video, so every review
+is a review of frames pulled out of it. A clean exit writes them: one PNG per
+beat under `frames/`, named `beat-NN.png` for the beat's index in
+`timeline.json`, plus `frames/frames.md` — the sheet to hand a reviewer, which
+embeds them in order — and `frames/frames.json` for anything reading them by
+machine.
+
+They are aligned to **beats, not to a clock**. The old advice was
+`ffmpeg -vf fps=1/3`, which misses a short beat entirely and photographs a long
+static one twice. Each frame is taken at its beat's **midpoint** — `t_start` is
+0% into the caption bar's fade and before the verb has done anything.
+
+**How accurate that aim is, honestly.** The beat log is wall-clock; the video
+is whatever Chromium's screencast managed to record, and it drops wall time
+during idle stretches ([#18](https://github.com/rogvid/skills/issues/18)). So a
+frame cut at a beat's midpoint shows a moment slightly *ahead* of that beat in
+the demo's own story — measured at **40–120 ms** on instrumented takes, and up
+to **~600 ms** on a take that loses the browser's start-up window whole (about
+1 in 12). The practical consequence: for a beat comfortably longer than that,
+the frame is of that beat; **for a beat shorter than the drift — a bare
+`shot()`, a `wait_for()` that returned immediately — the frame can be of the
+beat after it.** `tests/smoke` measures exactly this and shows it: with the
+drift allowance removed, the frame for a 50 ms `shot()` beat that sits against
+a caption change is already showing the next beat's screen.
+
+Read the frames as *"roughly here in the demo"*, not as *"exactly this beat"*.
+When a specific short moment matters, use `shot()` — `images/*.png` are
+Playwright screenshots taken synchronously at the beat, with no video clock
+between the moment and the file. `frames/frames.md` reports the take's own
+lower bound on how much wall time the capture lost, when it lost any.
+
+**They carry no caption, and that is deliberate.** Printing the line that was
+on screen during a frame's beat under that frame is the obvious next step and
+it is not sound: the beat log and the video run on different clocks
+([#18](https://github.com/rogvid/skills/issues/18)), so the caption under a
+frame can belong to the frame next to it — and a confident wrong caption is
+worse review material than no caption at all. An earlier version tried to
+recover the mapping by finding caption transitions in the video; it mislabelled
+frames on ordinary storyboards (two captions of the same length give it no
+signal, an app that repaints under the bar gives it a stronger edge than the
+caption does, and a mid-take `goto()` destroys the bar while logging no caption
+change at all). [#60](https://github.com/rogvid/skills/issues/60) is how the
+pairing gets earned back: have the recorder render the beat index into the
+frame so extraction reads it rather than infers it.
+
+`frames.md` also carries **no verb and no selector**, for the same reason step
+6 tells you to give the reviewer nothing else: it is the document a
+context-free reviewer reads before answering what story the pictures tell.
+
+Inside a beat long enough to hide something the storyboard never scripted (3 s
+and up) the recorder also runs scene-change detection and adds
+`beat-NN-scene-1.png` for each transition it finds. Beat alignment sees what
+the storyboard wrote down; a redirect, a toast or a load finishing mid-hold is
+invisible to it.
+
+**A stitched demo gets frames; a single segment does not.** Each segment
+numbers its beats from zero and its timeline names a `.seg.mp4` that `stitch()`
+deletes, so two segments writing into one directory would collide on
+`beat-00.png` and the sheet would embed a file that is gone — a segment take
+therefore writes no frames and says why. `stitch()` writes them instead, off
+the **merged** timeline, at the first moment a whole demo exists. Nothing extra
+to run, and it is the case that needs a sheet most: a demo long enough to
+record in parts is a demo nobody wants to review by scrubbing.
+
+`frames/` is a review artifact, not documentation: **gitignore it** along with
+`demo.mp4` — it is in the file table at the top for the same reason. Nothing
+downstream reads it; `beat_frames(out_dir)` from `demo_recording` regenerates
+it from `demo.mp4` and `timeline.json` without re-recording, and clears the
+previous run's frames first.
+
 ## Failing the take on a broken app
 
 **A demo that looks perfect while the app throws `TypeError` on every render
@@ -978,26 +1051,30 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    working one, and this is the only place it shows (see **Failing the take
    on a broken app**).
 6. **Fresh-agent review (required).** You cannot watch the video, and you
-   know too much anyway — have a context-free agent watch it for you:
+   know too much anyway — have a context-free agent watch it for you. The
+   recorder has already written what they need: `frames/`, one PNG per
+   beat, and `frames/frames.md`, which embeds them in order. **Hand them
+   `frames/frames.md`.**
 
-   ```sh
-   ffmpeg -y -i demo.mp4 -vf fps=1/3 <tmpdir>/frame-%02d.png
-   ```
+   Give them the pictures and nothing else — no storyboard, no feature
+   name, no captions. `frames.md` is built that way on purpose (see
+   **Review frames** above): a `click('#refresh')` in the margin answers
+   the question you are asking before they look at anything.
 
    Dispatch a subagent told NOTHING about the feature (any context-free
-   reviewer works: a fresh session or process fed only the frames, if the
-   harness has no subagents): read the frames in
-   order; reply with (1) NARRATION — the story as understood purely from
-   the frames, (2) CONFUSIONS — anything unclear, unreadable, or
-   contradictory, (3) VERDICT — CLEAR or UNCLEAR with the reason, plus
-   whether the demo is CONVINCING: did they see evidence of the claims on
-   screen, or take the captions' word for it. If the narration misses the
-   intended story or the verdict is UNCLEAR, fix the storyboard and
-   re-record. Each round needs a NEW subagent — the previous one is no
-   longer fresh. Ship only on CLEAR with the headline claim evidenced on
-   screen. Reviewers converge in ~2 rounds; cap at 3 and surface remaining
-   findings to the user instead of looping. Findings that need a different
-   feature demoed are future demos, not blockers.
+   reviewer works: a fresh session or process fed only `frames/`, if the
+   harness has no subagents): read the frames in order; reply with
+   (1) NARRATION — the story as understood purely from the frames,
+   (2) CONFUSIONS — anything unclear, unreadable, or contradictory, and
+   (3) VERDICT — CLEAR or UNCLEAR with the reason, plus whether the demo
+   is CONVINCING: did they see evidence of the claims on screen, or take
+   the captions' word for it. If the narration misses the intended story
+   or the verdict is UNCLEAR, fix the storyboard and re-record. Each round
+   needs a NEW subagent — the previous one is no longer fresh. Ship only
+   on CLEAR with the headline claim evidenced on screen. Reviewers
+   converge in ~2 rounds; cap at 3 and surface remaining findings to the
+   user instead of looping. Findings that need a different feature demoed
+   are future demos, not blockers.
 7. **Write `guide.md`** (when a written guide is wanted): what the feature
    is, how to use it step by step — each step referencing a still —
    opening with the strongest still. Don't link `demo.mp4` from it: the
@@ -1015,7 +1092,10 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    stale by the next change to the feature and bloats history permanently,
    and anyone with the skill installed can regenerate it with
    `uv run <demo folder>/record.py`. Gitignore `demo.mp4`, `*.seg.mp4`
-   segment parts, `*.seg.timeline.*`, and `.tts/` narration caches.
+   segment parts, `*.seg.timeline.*`, `<demo folder>/frames/` (regenerated
+   from the two by `beat_frames(out_dir)` — anchor the pattern to the demo
+   folder rather than writing a bare `frames/`, which matches a directory
+   of that name anywhere in the repo), and `.tts/` narration caches.
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has

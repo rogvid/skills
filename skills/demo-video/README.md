@@ -28,6 +28,12 @@ and a real terminal session (voice on):
   waits (recorded as segments, stitched losslessly).
 - **`images/*.png`** — stills captured at key moments, ready for a written
   guide.
+- **`frames/`** — one review frame per beat, plus `frames.md` embedding them
+  in order. It is what you hand the fresh-agent review: aimed at what the
+  storyboard did rather than at a stopwatch, so nothing is missed and a held
+  frame is photographed once. A stitched demo gets them too, off the merged
+  timeline. Deliberately uncaptioned, and aimed to within a beat or so rather
+  than exactly — SKILL.md says how far and why.
 - **`record.py`** — the storyboard that produced the media, and the thing
   that actually gets committed: re-runnable after the UI changes, so the
   video stays out of git history and is regenerated rather than archived.

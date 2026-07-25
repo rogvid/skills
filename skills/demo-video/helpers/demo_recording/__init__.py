@@ -8,27 +8,36 @@ Storyboards import from here:
 """
 
 from .core import (
+    FRAMES_SCHEMA,
     ISSUE_KINDS,
     MAX_ISSUES,
+    SCENE_MIN_SPAN_S,
     SECRET_MASK,
     STRICT_KINDS,
     TIMELINE_SCHEMA,
     Secret,
     SecretLeak,
     StrictTakeFailed,
+    beat_frames,
+    frames_paths,
     media_duration,
+    render_frames_md,
     render_timeline_md,
+    scene_times,
     stitch,
     timeline_paths,
     tts_clip,
+    write_beat_frames,
     write_timeline,
 )
 from .terminal import TerminalRecorder
 from .web import Recorder
 
 __all__ = [
+    "FRAMES_SCHEMA",
     "ISSUE_KINDS",
     "MAX_ISSUES",
+    "SCENE_MIN_SPAN_S",
     "SECRET_MASK",
     "STRICT_KINDS",
     "TIMELINE_SCHEMA",
@@ -37,10 +46,15 @@ __all__ = [
     "SecretLeak",
     "StrictTakeFailed",
     "TerminalRecorder",
+    "beat_frames",
+    "frames_paths",
     "media_duration",
+    "render_frames_md",
     "render_timeline_md",
+    "scene_times",
     "stitch",
     "timeline_paths",
     "tts_clip",
+    "write_beat_frames",
     "write_timeline",
 ]

@@ -535,6 +535,104 @@ ALIGN_ARRIVAL_FRACTION = 0.25
 # the same numbers) as MIN_CAPTION_BAND_DIFF above.
 MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0, "segments": 6.0}
 
+# -- review frames (frames/, issue #8) ---------------------------------------
+#
+# The recorder extracts one frame per beat and writes `frames/frames.md` for a
+# reviewer to read in order. It makes **no claim about what is in a frame** —
+# no caption, no verb, no selector — and the two things worth grading follow
+# from that:
+#
+#   * each frame really is the moment it says it is, which is checked by
+#     finding it again in demo.mp4 rather than by believing the manifest;
+#   * the sheet really is story-free, which is checked by searching it for
+#     every caption and selector the storyboard used.
+#
+# An earlier round of this file graded a caption printed under each frame, by
+# reading the caption bar back out of the pixels. That check worked; what it
+# was checking did not — the recorder inferred which caption a frame showed by
+# looking for caption transitions in the video, and review found the inference
+# mislabelling frames on ordinary storyboards (same-length captions give it no
+# signal, a repainting app gives it a stronger edge than the caption does, and
+# a mid-take `goto()` gives it nothing to measure at all). The claim was
+# withdrawn rather than tuned; see the recorder's own section header and
+# issue #60.
+
+# Nothing here: a review frame is graded against the video by **re-extracting**
+# it, byte for byte, rather than by any measure of similarity. Both sides are
+# the same ffmpeg decoding the same mp4 at the same second, so the healthy
+# answer is an identical file — 41 of 41 across the two graded takes — and one
+# frame away (40 ms) is already a different one. A luma comparison could not do
+# that: a PNG and a decoded frame reach the reduction through different colour
+# conversions and sit ~1.0 mean luma apart even when they are the same frame,
+# which is *more* than two moments three seconds apart in this fixture differ
+# by (0.87 across the refresh). The threshold that would have to absorb the
+# first cannot see the second.
+
+# How far a frame's timestamp may sit from its beat's midpoint, computed here
+# from timeline.json rather than imported from the recorder. Deliberately not
+# the recorder's own constants: a check that re-derives the expectation from
+# the numbers it is grading moves whenever they do, which is exactly how a
+# constant stops being graded at all.
+MAX_FRAME_PLACEMENT_S = 0.02
+
+# -- does frame N show beat N? (issue #8's acceptance criterion) --------------
+#
+# "N beats produce N frames" is nearly vacuous, and the two checks above are
+# about placement rather than content: they prove a frame was cut at the second
+# the manifest names, not that anything of that beat is in it. What is graded
+# here is the one thing about a frame's *content* the harness knows
+# independently — whether a caption bar was on screen — against the
+# **hand-written** storyboard rather than against the log, via
+# `_expected_context()`.
+#
+# It is one bit per frame, deliberately. Which caption is a stronger claim and
+# the band cannot carry it: two of this fixture's own captions sit 1.5 mean
+# luma apart in the terminal take against the 1.0 floor below, so a check that
+# named them would be reporting noise. See issue #60, and the recorder's own
+# section header for why the *recorder* claims nothing at all here.
+#
+# The bar is relative and computed per take: every frame whose beat carries a
+# caption must sit further from the take's own caption-off baseline than every
+# frame whose beat carries none. No absolute threshold to argue about — a take
+# that stopped drawing captions collapses the two groups together and the
+# margin goes to zero. MIN_ALIGN_BAND_DELTA is reused as the floor on that
+# margin because it is the same measurement on the same band: how far the
+# caption bar moves the caption band of this recorder. Observed margins, one
+# run: web 8.06, terminal 2.25, segments 16.62.
+#
+# FRAME_CAPTION_GUARD_S is the honest part. The video slides under the beat log
+# (issue #18) and a frame cut at a beat's midpoint therefore shows a moment up
+# to that far *ahead* of the beat in story time — measured at 40-120 ms in
+# these ticker-protected takes, but a take that loses the recorder's own
+# ~0.7 s setup window loses it uniformly, which is what MAX_CAPTURE_LOSS_S
+# already tolerates elsewhere in this file. So a frame is graded for the
+# caption it shows only when its timestamp is at least that far from a caption
+# *change*; nearer than that, the beat log and the video genuinely disagree
+# about which side of the change the frame is on, and this harness is not the
+# place to pretend otherwise. Same number, same reason, one definition.
+#
+# Concretely, on the storyboards here that skips every `shot` beat that sits
+# against a caption change — and those frames really do show the next beat's
+# screen: `01-part1` is captured while "One demo, in two parts." is up, and the
+# frame extracted at that beat's midpoint has already lost the caption, because
+# the beat is 50 ms long and the video is 80 ms ahead of it. That is #18, it is
+# not fixed here, and the guard is why no assertion in this file quietly
+# depends on it being fixed.
+FRAME_CAPTION_GUARD_S = MAX_CAPTURE_LOSS_S
+
+# ...and the guard must not be allowed to swallow the check. A regression that
+# moved every frame onto a caption boundary would otherwise grade nothing and
+# report a pass. Both classes have to survive it, and enough of them to mean
+# something: observed 14 (10/4), 9 (7/2) and 7 (2/5) across the three takes.
+MIN_GRADED_CAPTION_FRAMES = 5
+
+# Scene-change detection, graded directly rather than through a take: no beat
+# in either storyboard is long enough (SCENE_MIN_SPAN_S) for the recorder to
+# run it on its own, and lengthening one to provoke it would cost every take
+# the seconds. How far past the last beat the "nothing is happening now" window
+# starts.
+SCENE_WINDOW_PAD_S = 0.1
+
 # Written into each take directory so a later run can tell "a directory this
 # harness owns and may delete" from "somebody's source tree".
 MARKER_NAME = ".demo-video-smoke"
@@ -869,6 +967,13 @@ MIN_CONTROL_EDGE = {"still": 8.0, "video": 6.0}
 #          still catches the failure that matters for a field — not being
 #          masked at all, which reads as ~100%.
 MAX_REDACTED_EDGE_RATIO = {"text": 0.07, "field": 0.25}
+
+# How many of the redaction take's review frames have to show a legible
+# control before "the key is blurred in all of them" means anything. The take
+# opens on about:blank, raises the paint gate on purpose, and navigates once,
+# so a handful of its ~31 frames legitimately show nothing; a mask that blanked
+# the recording would show nothing in every one of them.
+MIN_GRADED_REVIEW_FRAMES = 10
 
 # Frames per second sampled from the redaction take's mp4. Every sampled frame
 # is scored and the *worst* one is graded, because one frame showing the key is
@@ -3508,6 +3613,499 @@ def check_timeline(
     return failures
 
 
+def _same_frame(mp4: Path, at: float, png: Path) -> bool:
+    """Is `png` the frame of `mp4` at `at` seconds?
+
+    Answered by cutting that frame again, with the same ffmpeg the recorder
+    used, and comparing the bytes. Exact rather than approximate, which matters
+    both ways: it resolves a single frame (40 ms), and it needs no threshold to
+    argue about. What it does *not* grade is whether `at` is the right second —
+    that is the midpoint check above, and the two are only worth anything
+    together.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        reference = Path(tmp) / "reference.png"
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-ss",
+                f"{at:.3f}",
+                "-i",
+                str(mp4),
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+                str(reference),
+            ],
+            capture_output=True,
+        )
+        if proc.returncode != 0 or not reference.is_file():
+            return False
+        return (
+            hashlib.sha256(reference.read_bytes()).hexdigest()
+            == hashlib.sha256(png.read_bytes()).hexdigest()
+        )
+
+
+def check_beat_frames(
+    label: str,
+    out_dir: Path,
+    started_at: float,
+    expected_beats: list[tuple[str, str | None]],
+    expected_captions: list[str],
+    frame_size: tuple[int, int],
+    expected_interludes: list[str] = [],  # noqa: B006 - read-only, never mutated
+) -> list[str]:
+    """`frames/` — one frame per beat, at the beat's midpoint, showing it.
+
+    Four claims, and the last one is the acceptance criterion of issue #8:
+
+      * **one frame per beat**, named for the beat, counted against the
+        hand-written beat list rather than against the recorder's own idea of
+        how many beats there were;
+      * **each frame is the moment it says it is** — its timestamp is the
+        beat's midpoint computed here from `timeline.json`, and the PNG is
+        byte-identical to that second cut out of `demo.mp4` again. Only
+        together: the first without the second passes a manifest that says the
+        right time over the wrong picture, and the second without the first
+        passes a frame faithfully cut from the wrong second;
+      * **the sheet leaks no storyboard.** `frames.md` goes to a context-free
+        reviewer who is asked what story the pictures tell. A caption, a verb
+        or a selector printed beside a frame answers that for them, and the
+        `fps=1/3` handoff this replaces did not leak any of it;
+      * **frame N shows beat N** — `_check_frame_captions()`. The two above are
+        both about *placement*; a frame cut at exactly the right second of a
+        video that slid under the beat log is a picture of the wrong beat, and
+        neither of them can see it. This one looks at the pixels, against the
+        hand-written storyboard, and says so.
+    """
+    from demo_recording import FRAMES_SCHEMA
+
+    failures: list[str] = []
+    frames_dir = out_dir / "frames"
+    json_path, md_path = frames_dir / "frames.json", frames_dir / "frames.md"
+    if not json_path.is_file():
+        return [f"{label}: {json_path} was never written"]
+    if json_path.stat().st_mtime < started_at - 1:
+        return [f"{label}: {json_path} is stale — it predates this run"]
+    try:
+        manifest = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [f"{label}: {json_path} is not valid JSON: {exc}"]
+    if manifest.get("schema") != FRAMES_SCHEMA:
+        failures.append(
+            f"{label}: frames.json says schema {manifest.get('schema')!r}, but "
+            f"the recorder package exports FRAMES_SCHEMA {FRAMES_SCHEMA!r}"
+        )
+    if manifest.get("skipped"):
+        return failures + [
+            f"{label}: the recorder wrote no review frames — {manifest['skipped']}"
+        ]
+
+    # -- one frame per beat, named for the beat it came from -----------------
+    listed = [f for f in manifest.get("frames") or [] if f.get("kind") == "beat"]
+    wanted = [f"beat-{i:02d}.png" for i in range(len(expected_beats))]
+    named = [str(f.get("file")) for f in listed]
+    if named != wanted:
+        failures.append(
+            f"{label}: frames/ holds {named!r} for the {len(expected_beats)} "
+            f"beats the storyboard performs — first difference at index "
+            f"{_first_difference(named, wanted)}"
+        )
+    for frame in listed:
+        if frame.get("file") != f"beat-{frame.get('beat'):02d}.png":
+            failures.append(
+                f"{label}: frame {frame.get('file')!r} claims to be beat "
+                f"{frame.get('beat')!r} — the file name and the manifest "
+                f"disagree about which beat a reviewer is looking at"
+            )
+            break
+
+    on_disk = sorted(p.name for p in frames_dir.glob("*.png"))
+    claimed = sorted(str(f.get("file")) for f in manifest.get("frames") or [])
+    if on_disk != claimed:
+        failures.append(
+            f"{label}: frames.json names {claimed!r} but frames/ holds "
+            f"{on_disk!r} — a frame was written without being listed, left "
+            f"over from an earlier run, or the other way round"
+        )
+    for name in claimed:
+        png = frames_dir / name
+        if not png.is_file():
+            failures.append(f"{label}: frames.json names {name!r}, which is not there")
+        elif png.stat().st_size < MIN_PNG_BYTES:
+            failures.append(
+                f"{label}: frame {name} is only {png.stat().st_size} bytes "
+                f"(expected at least {MIN_PNG_BYTES})"
+            )
+
+    # -- each frame is the moment it says it is ------------------------------
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    beats = {b.get("index"): b for b in doc.get("beats") or []}
+    mp4 = out_dir / "demo.mp4"
+    duration = float(doc.get("duration") or 0.0)
+    measured = 0
+    for frame in listed:
+        beat = beats.get(frame.get("beat"))
+        png = frames_dir / str(frame.get("file"))
+        if beat is None or not png.is_file():
+            continue
+        middle = (float(beat["t_start"]) + float(beat["t_end"])) / 2
+        at = float(frame["t"])
+        if abs(at - middle) > MAX_FRAME_PLACEMENT_S and at < duration - 0.2:
+            failures.append(
+                f"{label}: {frame.get('file')} was taken at {at:.3f}s, but beat "
+                f"{frame.get('beat')} runs {beat['t_start']}-{beat['t_end']}s "
+                f"and its midpoint is {middle:.3f}s — the frame is not the "
+                f"moment the sheet numbers it for"
+            )
+        if not mp4.is_file() or not duration:
+            continue
+        measured += 1
+        if not _same_frame(mp4, at, png):
+            failures.append(
+                f"{label}: {frame.get('file')} is not the frame of demo.mp4 at "
+                f"the {at:.3f}s it claims — cutting that second again produces "
+                f"a different picture. It is a frame of another moment, of "
+                f"another take, or left over from an earlier run."
+            )
+    if measured < len(listed):
+        failures.append(
+            f"{label}: only {measured} of {len(listed)} review frames were "
+            f"compared against demo.mp4 — the rest went ungraded, which is not "
+            f"the same as passing"
+        )
+
+    # -- the sheet carries no storyboard -------------------------------------
+    if not md_path.is_file():
+        failures.append(f"{label}: {md_path} was never written")
+    else:
+        markdown = md_path.read_text()
+        for frame in listed:
+            name = str(frame.get("file"))
+            if f"]({name})" not in markdown:
+                failures.append(f"{label}: frames.md does not embed {name!r}")
+        spoken = {*expected_captions, *expected_interludes}
+        leaked = [text for text in spoken if text and text in markdown]
+        leaked += [
+            target
+            for _, target in expected_beats
+            if target and f"`{target}`" in markdown
+        ]
+        if leaked:
+            failures.append(
+                f"{label}: frames.md hands a context-free reviewer "
+                f"{sorted(set(leaked))!r} — the sheet is supposed to be the "
+                f"pictures and nothing else, and every one of those tells the "
+                f"reviewer what to see before they look"
+            )
+    for key in ("caption", "verb", "selector"):
+        carrying = [f["file"] for f in manifest.get("frames") or [] if key in f]
+        if carrying:
+            failures.append(
+                f"{label}: frames.json carries a {key!r} for {carrying[0]} — "
+                f"the manifest is an index into timeline.json, and duplicating "
+                f"the storyboard into it is how it ends up back on the sheet"
+            )
+
+    failures += _check_frame_captions(
+        label,
+        out_dir,
+        frame_size,
+        listed,
+        beats,
+        _expected_context(expected_beats, expected_captions, expected_interludes),
+    )
+    failures += _check_stale_frames(label, out_dir, manifest)
+    failures += _check_segment_refusal(label, out_dir, doc)
+    failures += _check_scene_fallback(label, out_dir, doc)
+
+    if not failures:
+        print(
+            f"smoke: {label} frames/ ok ({len(listed)} beat frames, each "
+            f"byte-identical to the demo.mp4 frame it claims to be)"
+        )
+    return failures
+
+
+def _check_frame_captions(
+    label: str,
+    out_dir: Path,
+    frame_size: tuple[int, int],
+    listed: list[dict],
+    beats: dict[int, dict],
+    context: list[str] | None,
+) -> list[str]:
+    """Frame N shows beat N — measured on the pixels, one bit per frame.
+
+    For every beat the **hand-written** storyboard says had a caption bar on
+    screen, the frame must show one; for every beat it says had none, the frame
+    must not. Decided without a threshold, by ranking: each frame's caption band
+    is reduced and compared against the take's own first caption-off frame, and
+    every captioned frame has to sit further from that baseline than every
+    uncaptioned one, by at least `MIN_ALIGN_BAND_DELTA[label]`. A recorder that
+    stopped drawing the bar, or extraction that returned the same picture for
+    every beat, collapses the two groups into each other and the margin goes to
+    zero or negative — there is nothing to tune it past.
+
+    Frames within `FRAME_CAPTION_GUARD_S` of a caption *change* are not graded,
+    and the constant's comment says why at length: the video runs ahead of the
+    beat log by an amount this harness bounds but does not control (#18), so
+    close to a change the two disagree about which side a frame is on and
+    neither is wrong. `MIN_GRADED_CAPTION_FRAMES` and the one-of-each rule keep
+    that exclusion from turning the check off.
+
+    The expectation comes from `_expected_context()` — the storyboard lists at
+    the top of this file — and never from `timeline.json`, which is the
+    recorder's own account of the same thing and is graded against those same
+    lists in `check_timeline()`.
+    """
+    if context is None or len(context) != len(listed):
+        # The count and the caption list are graded above and in
+        # check_timeline(); saying so a third time adds nothing, and grading a
+        # misaligned pairing would report the wrong beat.
+        return []
+
+    # A change is where the expected context stops being what it was. The
+    # *times* have to come from the log — it is the only record of when a beat
+    # ran — but which beats are boundaries does not.
+    changes = [
+        float(beats[frame["beat"]]["t_start"])
+        for i, frame in enumerate(listed)
+        if frame.get("beat") in beats and context[i] != (context[i - 1] if i else "")
+    ]
+
+    band = caption_band(frame_size)
+    reference: bytes | None = None
+    graded: list[tuple[int, str, bytes]] = []
+    for i, frame in enumerate(listed):
+        png = out_dir / "frames" / str(frame.get("file"))
+        if not png.is_file():
+            continue
+        near = min((abs(float(frame["t"]) - c) for c in changes), default=math.inf)
+        if near < FRAME_CAPTION_GUARD_S:
+            continue
+        try:
+            reduced = gray_frames(png, band)
+        except RuntimeError as exc:
+            return [f"{label}: {exc}"]
+        if not reduced:
+            return [f"{label}: {png.name} decoded to no frames"]
+        graded.append((int(frame["beat"]), context[i], reduced[0]))
+        if reference is None and not context[i]:
+            reference = reduced[0]
+
+    captioned = [(b, c, g) for b, c, g in graded if c]
+    bare = [(b, c, g) for b, c, g in graded if not c]
+    if reference is None or not captioned or len(graded) < MIN_GRADED_CAPTION_FRAMES:
+        return [
+            f"{label}: only {len(graded)} of {len(listed)} review frames "
+            f"({len(captioned)} captioned, {len(bare)} not) sit more than "
+            f"{FRAME_CAPTION_GUARD_S}s clear of a caption change, so almost "
+            f"nothing about what the frames *show* was graded. Either the "
+            f"storyboard changed caption too often to grade, or every frame "
+            f"moved onto a boundary — which is the regression this floor is "
+            f"here to catch, not a reason to lower it"
+        ]
+
+    scored = [(frame_difference(reference, g), b, c) for b, c, g in graded]
+    worst_on = min(s for s in scored if s[2])
+    worst_off = max(s for s in scored if not s[2])
+    margin = worst_on[0] - worst_off[0]
+    floor = MIN_ALIGN_BAND_DELTA[label]
+    if margin < floor:
+        return [
+            f"{label}: beat-{worst_on[1]:02d}.png should show the caption "
+            f"{worst_on[2]!r} and its caption band is only {worst_on[0]:.2f} "
+            f"from the take's caption-off baseline — beat-{worst_off[1]:02d}."
+            f"png, which should show no caption at all, is {worst_off[0]:.2f} "
+            f"from it. The two are {margin:.2f} apart, under the {floor} floor: "
+            f"the frames do not show the beats they are named for, or the "
+            f"caption bar is not being drawn"
+        ]
+    print(
+        f"smoke: {label} each review frame shows its own beat's caption state "
+        f"({len(captioned)} captioned frames from {worst_on[0]:.1f}, "
+        f"{len(bare)} bare ones to {worst_off[0]:.1f}; "
+        f"{len(listed) - len(graded)} within {FRAME_CAPTION_GUARD_S}s of a "
+        f"caption change and not graded)"
+    )
+    return []
+
+
+def _check_stale_frames(label: str, out_dir: Path, manifest: dict) -> list[str]:
+    """A re-run must take the previous run's frames off disk.
+
+    SKILL.md advertises `beat_frames(out_dir)` as re-runnable, and step 6 tells
+    a reviewer to read everything in the directory. A storyboard that lost
+    beats between runs would otherwise leave frames nobody planned sitting in
+    it — numbered, plausible, and from a demo that no longer exists.
+
+    Done here rather than through a second recording: it is a pure function of
+    the mp4 and the timeline, so a second call is free.
+    """
+    from demo_recording import beat_frames
+
+    frames_dir = out_dir / "frames"
+    planted = frames_dir / "beat-99.png"
+    keep = frames_dir / "kept-by-a-human.png"
+    try:
+        planted.write_bytes(
+            (frames_dir / str(manifest["frames"][0]["file"])).read_bytes()
+        )
+        keep.write_bytes(b"not ours\n")
+        again = beat_frames(out_dir)
+    except (OSError, IndexError, KeyError) as exc:
+        return [f"{label}: could not re-run beat_frames(): {exc}"]
+    failures: list[str] = []
+    if planted.exists():
+        failures.append(
+            f"{label}: re-running beat_frames() left {planted.name} behind — a "
+            f"frame from a previous take stays in the directory step 6 hands to "
+            f"a reviewer"
+        )
+        planted.unlink()
+    if not keep.exists():
+        failures.append(
+            f"{label}: re-running beat_frames() deleted a file it did not "
+            f"write ({keep.name}) — the cleanup is supposed to be bounded to "
+            f"the frames and the two manifests"
+        )
+    else:
+        keep.unlink()
+    if [f["file"] for f in again["frames"]] != [f["file"] for f in manifest["frames"]]:
+        failures.append(
+            f"{label}: re-running beat_frames() produced a different set of "
+            f"frames from the same mp4 and timeline"
+        )
+    return failures
+
+
+def _check_segment_refusal(label: str, out_dir: Path, doc: dict) -> list[str]:
+    """A *single segment's* timeline must write no frames — and only that.
+
+    Two properties of an unmerged segment document, both of it rather than of
+    the world around it: its beats are numbered from zero, so two segments in
+    one directory overwrite each other's `beat-00.png`; and its `media` is a
+    `<segment>.seg.mp4`, which `stitch()` deletes on its way to demo.mp4, so
+    the sheet would embed frames of a file that is gone. Neither survives the
+    merge — issue #7 landed, `stitch()` renumbers the beats onto the joined
+    video's clock and names demo.mp4 — which is why the *stitched* demo gets
+    frames like any other take, graded by running this whole function against
+    the `segments/` take rather than by arguing about it here.
+
+    Graded by handing `beat_frames()` this take's own timeline with a segment
+    name on it, into a directory of its own — no recording needed, and the
+    refusal is a property of the document rather than of how it was made.
+    """
+    from demo_recording import beat_frames
+
+    segment_dir = out_dir / ".segment-refusal"
+    segment_dir.mkdir(exist_ok=True)
+    shutil.copy(out_dir / "demo.mp4", segment_dir / "part2.seg.mp4")
+    try:
+        manifest = beat_frames(
+            segment_dir, {**doc, "segment": "part2", "media": "part2.seg.mp4"}
+        )
+    except Exception as exc:  # noqa: BLE001 - refusing must not mean raising
+        shutil.rmtree(segment_dir, ignore_errors=True)
+        return [f"{label}: beat_frames() raised on a segment take: {exc}"]
+    written = sorted(p.name for p in segment_dir.glob("frames/*"))
+    shutil.rmtree(segment_dir, ignore_errors=True)
+    if manifest["frames"] or written:
+        return [
+            f"{label}: beat_frames() wrote {written!r} for a segment take. Two "
+            f"segments collide on beat-00.png, and the sheet names a "
+            f".seg.mp4 that stitch() deletes."
+        ]
+    if not manifest.get("skipped"):
+        return [
+            f"{label}: beat_frames() wrote nothing for a segment take but does "
+            f"not say why — a caller cannot tell that from a crash"
+        ]
+    return []
+
+
+def _check_scene_fallback(label: str, out_dir: Path, doc: dict) -> list[str]:
+    """The fallback for transitions the storyboard did not script.
+
+    Graded directly against demo.mp4 rather than through a take, because no
+    beat in either storyboard runs the SCENE_MIN_SPAN_S the recorder needs
+    before it reaches for it, and stretching one to provoke it would cost every
+    run the seconds. What it has to do is see the largest change a take
+    contains and stay quiet where nothing moves.
+
+    The positive half is **web only**, and that is about the medium rather than
+    a convenience: the biggest thing that happens to the web frame is the
+    caption bar arriving, at 0.023-0.026 against the recorder's 0.02 threshold,
+    while nothing in the terminal take reaches it at all — its largest change
+    is two lines of output on a dark background at 0.011 against an idle 0.004.
+    At a threshold separating those, an ordinary terminal repaint would be
+    reported as a cut. Issue #57.
+    """
+    from demo_recording import SCENE_MIN_SPAN_S, scene_times
+
+    failures: list[str] = []
+    mp4 = out_dir / "demo.mp4"
+    beats = doc.get("beats") or []
+    duration = float(doc.get("duration") or 0.0)
+    if not mp4.is_file() or not duration or not beats:
+        return failures
+
+    if label == "web":
+        cuts = scene_times(mp4, 0.0, duration, limit=99)
+        if not cuts:
+            failures.append(
+                f"{label}: scene detection finds nothing at all in "
+                f"{duration:.1f}s of demo.mp4 — the fallback for unscripted "
+                f"transitions cannot see the largest change the take contains"
+            )
+        elif not all(0.0 <= c <= duration for c in cuts):
+            failures.append(
+                f"{label}: scene detection reports cuts at {cuts} for a "
+                f"{duration:.1f}s video — the times it returns are not in the "
+                f"window it was asked about"
+            )
+
+    # The quiet half: after the last beat the recording holds one frame until
+    # it stops. Starting at the last beat's *logged* end is safe in the one
+    # direction that matters — the video only ever runs ahead of the beat log
+    # (issue #18), so the real end of that beat is at or before this — which is
+    # why the window is anchored there and not on a beat in the middle of the
+    # take, where a stall slid a caption change into it on the first run.
+    tail = float(beats[-1].get("t_end") or 0.0) + SCENE_WINDOW_PAD_S
+    if duration - tail > 0.4:
+        held = scene_times(mp4, tail, duration)
+        if held:
+            failures.append(
+                f"{label}: scene detection reports cuts at {held} between "
+                f"{tail:.2f}s and {duration:.2f}s of demo.mp4, where the take "
+                f"holds its closing frame — it would fill a reviewer's frame "
+                f"list with pictures of nothing happening"
+            )
+
+    # And a scene frame may only appear inside a beat long enough to hide one.
+    # Vacuous while no storyboard beat reaches the threshold — tests/README.md
+    # says so — and here so that a storyboard that grows one is graded.
+    spans = {b.get("index"): float(b["t_end"]) - float(b["t_start"]) for b in beats}
+    manifest = json.loads((out_dir / "frames" / "frames.json").read_text())
+    for frame in manifest.get("frames") or []:
+        if frame.get("kind") != "scene":
+            continue
+        if spans.get(frame.get("beat"), 0.0) < SCENE_MIN_SPAN_S:
+            failures.append(
+                f"{label}: {frame.get('file')} is a scene frame inside beat "
+                f"{frame.get('beat')}, which spans "
+                f"{spans.get(frame.get('beat'), 0.0):.2f}s — under the "
+                f"{SCENE_MIN_SPAN_S}s a beat needs before it is searched"
+            )
+    return failures
+
+
 def _expected_context(
     expected_beats: list[tuple[str, str | None]],
     expected_captions: list[str],
@@ -4121,6 +4719,71 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
                 + ")"
             )
 
+    # -- leak path 2b: the review frames issue #8 leaves on disk -------------
+    #
+    # They are frames of demo.mp4, so they inherit its mask by construction —
+    # which is a reason to expect them clean, not a reason to skip measuring
+    # them. Graded exactly like the video is, over the same rects, because
+    # "frames of a masked video" is a claim about how the recorder extracts
+    # them, and the whole point of this file is not to take such claims on
+    # trust. The worst frame, not the median: a paused video is a screenshot,
+    # and so is a PNG.
+    review = sorted((out_dir / "frames").glob("beat-*.png"))
+    if mp4.is_file() and not review:
+        failures.append(
+            "redaction: the take wrote no review frames, so the artifact a "
+            "reviewer is handed went ungraded for the secret it may hold"
+        )
+    elif review:
+        geom, size = info["geom"], info["size"]
+        key_rect = to_video_rect(rects["#api-key"], geom, size)
+        control_rect = to_video_rect(rects["#api-key-control"], geom, size)
+        # A frame is only gradable where the *control* is legible in it. This
+        # take opens on about:blank (five `redact()` beats before the first
+        # navigation), raises the paint gate on purpose mid-take and navigates
+        # once, and in all three the page shows nothing — so the control reads
+        # zero and so would a key that was blazing. Skipping those is not a
+        # loophole as long as it is the control deciding and the count is
+        # asserted: a mask that blanked the whole recording takes the gradable
+        # count to zero.
+        graded_frames: list[tuple[str, float, float]] = []
+        blanked: list[str] = []
+        for png in review:
+            control = _edges(png, control_rect)[0]
+            if control < MIN_CONTROL_EDGE["still"]:
+                blanked.append(png.name)
+                continue
+            graded_frames.append((png.name, _edges(png, key_rect)[0], control))
+        bar = MAX_REDACTED_EDGE_RATIO["text"]
+        if len(graded_frames) < MIN_GRADED_REVIEW_FRAMES:
+            failures.append(
+                f"redaction: only {len(graded_frames)} of {len(review)} review "
+                f"frames show a legible #api-key-control (floor "
+                f"{MIN_CONTROL_EDGE['still']}, at least "
+                f"{MIN_GRADED_REVIEW_FRAMES} needed) — {blanked!r} have no "
+                f"picture in them at all, and a blank frame passes any ratio "
+                f"taken against its own control"
+            )
+        else:
+            where, worst_key, control = max(graded_frames, key=lambda row: row[1])
+            if worst_key > control * bar:
+                failures.append(
+                    f"redaction: #api-key is legible in the review frame "
+                    f"{where} — {worst_key:.1f} edge energy against "
+                    f"{control:.1f} for the unredacted control in the same "
+                    f"frame ({worst_key / control:.0%}, bar {bar:.0%}). The "
+                    f"frames handed to a reviewer are extracted from demo.mp4 "
+                    f"after the take, and are subject to the same mask as "
+                    f"everything else it wrote."
+                )
+            else:
+                print(
+                    f"smoke: redaction #api-key is blurred in all "
+                    f"{len(graded_frames)} gradable review frames of "
+                    f"{len(review)} (worst {worst_key:.1f} vs control "
+                    f"{control:.1f}, {worst_key / control:.0%})"
+                )
+
     # -- leak path 3: captions, and the beat log they land in ----------------
     timeline = out_dir / "timeline.json"
     if not timeline.is_file():
@@ -4391,6 +5054,7 @@ def run_web(out_root: Path) -> list[str]:
             size,
         )
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
+        + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_healthy("web", out_dir)
     )
 
@@ -4893,6 +5557,21 @@ def check_unmatched_redaction(out_root: Path, base_url: str) -> list[str]:
     for leftover in (".frame.png",):
         if (out_dir / leftover).is_file():
             failures.append(f"redaction-unmatched: {leftover} survived the failed take")
+    # The review frames are frames of demo.mp4, so a take that wrote no mp4 must
+    # have written none of them either. Asserted rather than reasoned about:
+    # they are extracted on the way out, from the same exit path that decides
+    # whether the recording may be kept at all.
+    review = (
+        sorted(p.name for p in (out_dir / "frames").glob("*"))
+        if (out_dir / "frames").is_dir()
+        else []
+    )
+    if review:
+        failures.append(
+            f"redaction-unmatched: the review frames {review!r} survived a take "
+            f"that could not verify its mask — every one of them is a frame of "
+            f"the recording it was refused"
+        )
     for name in (CLOSED_SECRET,):
         for path in sorted(out_dir.rglob("*")):
             if path.is_file() and name.encode() in path.read_bytes():
@@ -5360,6 +6039,15 @@ def run_segments(out_root: Path) -> list[str]:
             size,
             expected_segments=SEGMENT_BEAT_SEGMENTS,
             expected_interludes=SEGMENT_INTERLUDES,
+        )
+        + check_beat_frames(
+            "segments",
+            out_dir,
+            started,
+            SEGMENT_BEATS,
+            SEGMENT_CAPTIONS,
+            size,
+            SEGMENT_INTERLUDES,
         )
         + check_healthy("segments", out_dir)
     )
@@ -6469,6 +7157,9 @@ def run_terminal(out_root: Path) -> list[str]:
             size,
         )
         + check_timeline(
+            "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
+        )
+        + check_beat_frames(
             "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
         )
         + check_healthy("terminal", out_dir)

@@ -17,6 +17,11 @@ __pycache__/
 # deletes them with their .seg.mp4 unless it was passed keep_parts=True.
 *.seg.timeline.json
 *.seg.timeline.md
+# Review frames pulled out of demo.mp4 for a reviewer to read, regenerated
+# wholesale by beat_frames(out_dir). SKILL.md tells *consumers* to anchor this
+# to their demo folder, because `frames` is a plausible name for a directory of
+# real source; this repo has none, so a bare pattern is safe here.
+frames/
 # Left behind only when a take crashes before the recorder cleans up.
 .video/
 .frame.png
