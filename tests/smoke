@@ -106,7 +106,9 @@ MIN_PNG_BYTES = 5_000
 # strongest blank one. See tests/README.md for what this metric cannot
 # resolve — notably a total stylesheet failure, which scores ~10 and is
 # therefore checked separately via getComputedStyle rather than by pixels.
-MIN_CONTENT_STDDEV = {"web": 6.0, "terminal": 2.0}
+# "segments" is the web recorder against the same fixture, composited the same
+# way, so it takes the web numbers here and in the two dicts below.
+MIN_CONTENT_STDDEV = {"web": 6.0, "terminal": 2.0, "segments": 6.0}
 
 # Pixel proof that the caption bar reached the screen, as the mean absolute
 # luma change in the caption band between two stills taken back to back — one
@@ -125,7 +127,7 @@ MIN_CONTENT_STDDEV = {"web": 6.0, "terminal": 2.0}
 # The terminal margin is the thinnest number in this file — 2.7x over its
 # floor, against 4x or better for everything else. tests/README.md calls that
 # out under "Known gaps".
-MIN_CAPTION_BAND_DIFF = {"web": 8.0, "terminal": 1.0}
+MIN_CAPTION_BAND_DIFF = {"web": 8.0, "terminal": 1.0, "segments": 8.0}
 
 # Consecutive stills must differ by at least this mean absolute luma, on the
 # 160x90 grayscale reduction. This detects a *duplicate* — a stale or copied
@@ -529,11 +531,141 @@ ALIGN_ARRIVAL_FRACTION = 0.25
 # anything. Below this the probe caption was never drawn in the video, and the
 # right answer is a failure, not a timestamp. Same per-medium reasoning (and
 # the same numbers) as MIN_CAPTION_BAND_DIFF above.
-MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0}
+MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0, "segments": 6.0}
 
 # Written into each take directory so a later run can tell "a directory this
 # harness owns and may delete" from "somebody's source tree".
 MARKER_NAME = ".demo-video-smoke"
+
+# -- the segmented take (issue #7) -------------------------------------------
+#
+# One demo recorded as two `Recorder(segment=...)` takes and joined with
+# `stitch()`. This is the shape a demo takes whenever the story contains real
+# waiting — minutes of background work nobody wants on video — and until now
+# nothing here recorded a segment at all.
+#
+# What it is for is the *merge*. Each segment writes its own beat log with
+# timestamps relative to its own start, and `stitch()` has to move them onto
+# the stitched video's clock by the real duration of the parts before them.
+# Getting that wrong is invisible in every other axis: the video is fine, the
+# beats are all present, and only the timestamps of the second half lie —
+# which is precisely what beat-aligned frame extraction and per-beat evidence
+# read. So the merged log is graded by `check_timeline()`, the *same* function
+# that grades a single take, including its measured
+# does-this-timestamp-point-at-that-frame check against the stitched mp4.
+SEGMENT_NAMES = ["part1", "part2"]
+
+# Kept deliberately small: two more browser launches and two more encodes are
+# the expensive part, and everything this take proves it proves in 15 seconds.
+SEGMENT_OPENING = "One demo, in two parts."
+SEGMENT_INTERLUDE = "A few minutes later."
+
+# Short for a title card, and the reason is the compositor. TICKER_JS is what
+# keeps the screencast from losing wall time (see issue #18), and the interlude
+# card is full-screen at the same z-index — appended after the ticker, so it
+# covers it for exactly as long as it is up. Everything else in this take has
+# the ticker painting on top, so this hold is the one window where a stall
+# could still land, and a stall between the two probes is what the
+# MAX_SKEW_DRIFT_S bar would (correctly) fail on.
+SEGMENT_INTERLUDE_HOLD_S = 1.2
+
+# One storyboard still, in the first segment: enough to prove both segments
+# write into the same images/ and that the merged log still names it. A second
+# would have to differ from the first by MIN_STILL_DIFF, and the two segments
+# open on the same dashboard.
+SEGMENT_SHOTS = ["01-part1"]
+SEGMENT_DURATION_S = (10.0, 45.0)
+
+# Every beat of both segments, in order, as (verb, target, segment). Hand
+# written for the same reason as WEB_BEATS — a list derived from the log being
+# graded agrees with it no matter what it says — and carrying the segment
+# because that is the column a merge can get wrong on its own: a stitch that
+# merged segment one twice produces a perfectly monotonic timeline of the
+# right length.
+SEGMENT_BEATS_FULL = [
+    ("goto", "/", "part1"),
+    ("wait_for", "#kpi-rev", "part1"),
+    ("pause", None, "part1"),
+    ("caption", None, "part1"),
+    ("shot", "01-part1", "part1"),
+    ("caption", None, "part1"),
+    # `interlude`'s target is its style, not its text — see core.interlude().
+    ("interlude", "card", "part2"),
+    ("goto", "/", "part2"),
+    ("wait_for", "#kpi-rev", "part2"),
+    ("caption", None, "part2"),
+    ("shot", "90-caption-off", "part2"),
+    ("pause", None, "part2"),
+    ("caption", None, "part2"),
+    ("shot", "91-caption-on", "part2"),
+    ("caption", None, "part2"),
+]
+SEGMENT_BEATS = [(verb, target) for verb, target, _ in SEGMENT_BEATS_FULL]
+SEGMENT_BEAT_SEGMENTS = [segment for _, _, segment in SEGMENT_BEATS_FULL]
+SEGMENT_CAPTIONS = [SEGMENT_OPENING, "", "", PROBE_CAPTION, ""]
+SEGMENT_INTERLUDES = [SEGMENT_INTERLUDE]
+
+# The caption each segment is timed on, in segment order — every one preceded
+# by PROBE_QUIET_S of caption-band quiet, so each can be found in its own
+# `.seg.mp4` as well as in the stitched demo. **One per segment, and that is
+# the point**: a probe only in the last segment measures only the last
+# cumulative offset, and a constant shift applied to an earlier segment's
+# beats leaves that offset exact. See check_merge_offset().
+SEGMENT_PROBES = [SEGMENT_OPENING, PROBE_CAPTION]
+
+# How far the segment offsets recorded in the merged envelope may sit from what
+# ffprobe says about the parts, and from the stitched demo.mp4's own duration.
+# They are the same measurement — this is concat's frame quantisation and the
+# recorder's 3-decimal rounding, not tolerance for a different answer.
+SEGMENT_OFFSET_TOLERANCE_S = 0.2
+
+# A segment's own beat log is relative to that segment's start, so the second
+# segment's first beat sits within a second or two of zero *before* the merge.
+# Asserted, because "the merged timestamps are large" proves nothing if they
+# were large to begin with — that is what makes the merge visible at all.
+MAX_UNMERGED_FIRST_BEAT_S = 3.0
+
+# How far the merge itself may be wrong, in seconds — **per segment**. This is
+# #7's acceptance criterion, and it is measured differentially, which is the
+# only way to state it this tightly:
+#
+#   each segment's probe caption is timed once in that segment's own
+#   `.seg.mp4` against that segment's own beat log, and once in the stitched
+#   `demo.mp4` against the merged one. Both readings carry the same screencast
+#   capture loss — the frames are literally the same frames, `stitch()` copies
+#   the streams — so the *difference* between the two skews is that segment's
+#   offset error and nothing else.
+#
+# What that removes is issue #18, which would otherwise dominate: a segment
+# whose capture stalled shows every caption early in its own video too, and a
+# bar on the absolute skew could never tell that apart from an offset the
+# merge got wrong. Residual noise is the 40 ms sampling grid in each of the
+# two measurements, which do not share a sampling phase.
+#
+# One probe per segment rather than one per demo, because the differential at
+# the *last* segment measures only the last cumulative offset: a constant
+# shift of an earlier segment's beats leaves it exact and passes. Measured —
+# +350 ms onto segment one read as +0 ms here while this timed one beat.
+MAX_MERGE_OFFSET_ERROR_S = 0.1
+
+# Bound on how far the *two* timing probes may drift apart when they sit in
+# different segments. MAX_SKEW_DRIFT_S (250 ms) is sharp because whatever a
+# capture loses it loses for every later frame equally, so a stall moves both
+# probes together and cancels. That argument holds inside one screencast and
+# stops at a segment boundary: each segment is its own capture, with its own
+# ~0.7 s of untickerable recorder setup, and a stall in the second shifts only
+# the second probe. Measured across four two-segment takes: -80, +80, +80, and
+# one at -520 — a real capture stall in segment two, not a merge error, which
+# a 250 ms bar here would fail on about one run in four.
+#
+# **This is a flake guard, not a check.** It is loose because the mechanism it
+# would otherwise catch is measured properly elsewhere, per segment and per
+# capture, by check_merge_offset(): the merge's own error at 100 ms with
+# capture loss cancelled, and each segment's own skew against the same 250 /
+# 750 ms directional bars a single take gets. Neither of those is confounded
+# by the boundary, and neither is satisfied by a constant shift of any
+# segment's beats — which is what this bar, at any width, cannot say.
+MAX_CROSS_SEGMENT_DRIFT_S = MAX_CAPTURE_LOSS_S
 
 # -- redaction (issue #4) ----------------------------------------------------
 #
@@ -1778,6 +1910,77 @@ def record_terminal(
     return b.problems, rect, rect, size
 
 
+def record_segments(
+    out_dir: Path, base_url: str
+) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
+    """One demo, recorded as two segments — the shape a real time-skip takes.
+
+    Deliberately the storyboard SKILL.md tells people to write: record part
+    one, do the slow thing (here, nothing at all), then open part two with an
+    `interlude()` on the blank page before navigating back. Both segments
+    write their own `.seg.mp4` and their own beat log; `stitch()` joins them.
+
+    Nothing is stitched here — the caller does it, so that what the parts look
+    like *before* the merge can be asserted. Without that, "the merged
+    timestamps are large" would prove nothing.
+    """
+    from demo_recording import Recorder
+
+    b = Beats("segments")
+    settings = {
+        "base_url": base_url,
+        "speech": False,
+        # Same reasoning as record_web(): deterministic=True is what makes
+        # start_ticker()'s control-element assertion mean anything, and
+        # strict=True keeps this a recording of a working app.
+        "strict": True,
+        "deterministic": True,
+    }
+
+    with Recorder(out_dir, segment=SEGMENT_NAMES[0], **settings) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        start_ticker(b, rec.page)
+        # The run-up for the early timing probe: the page has finished painting
+        # and nothing moves in the caption band until the caption does.
+        rec.pause(PROBE_QUIET_S)
+        rec.caption(SEGMENT_OPENING)
+        check_caption(b, rec.page, SEGMENT_OPENING)
+        rec.shot(SEGMENT_SHOTS[0])
+        rec.caption("")
+
+        g = rec._geom
+        video_rect: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
+        size = (rec._size["width"], rec._size["height"])
+        still_rect: Rect = (0, 0, size[0], size[1])
+
+    with Recorder(out_dir, segment=SEGMENT_NAMES[1], **settings) as rec:
+        # On about:blank, before anything else: the second segment's opening
+        # seconds are the ones most likely to go idle, and idle is what makes
+        # the screencast lose wall time (TICKER_JS, issue #18). The interlude
+        # card covers it while it is up — see SEGMENT_INTERLUDE_HOLD_S.
+        start_ticker(b, rec.page)
+        rec.interlude(SEGMENT_INTERLUDE, hold=SEGMENT_INTERLUDE_HOLD_S)
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        # The navigation took the first one with it.
+        start_ticker(b, rec.page)
+
+        # The closing probe, in the *second* segment on purpose: its beat
+        # timestamps are the ones the merge has to move, and this is where the
+        # acceptance criterion of #7 is actually measured.
+        rec.caption("")
+        check_caption(b, rec.page, "")
+        rec.shot(CAPTION_PROBE[0])
+        rec.pause(PROBE_QUIET_S)
+        rec.caption(PROBE_CAPTION)
+        check_caption(b, rec.page, PROBE_CAPTION)
+        rec.shot(CAPTION_PROBE[1])
+        rec.caption("")
+
+    return b.problems, video_rect, still_rect, size
+
+
 class EntropyTake(NamedTuple):
     """One recording of the entropy storyboard, and what it rendered."""
 
@@ -2689,6 +2892,8 @@ def check_timeline(
     expected_beats: list[tuple[str, str | None]],
     expected_captions: list[str],
     frame_size: tuple[int, int],
+    expected_segments: list[str | None] | None = None,
+    expected_interludes: list[str] | None = None,
 ) -> list[str]:
     """The beat log the take left behind: timeline.json and timeline.md.
 
@@ -2696,12 +2901,25 @@ def check_timeline(
     parses is the cheap part; that its beats are the beats the storyboard
     actually performed, and that its timestamps point at the right frames of
     demo.mp4, is the part worth having.
+
+    Used unchanged for a *merged* timeline — the one `stitch()` writes from
+    several segments' — which is the point: a demo assembled from parts has to
+    be graded by the same assertions as one recorded in a single take, or the
+    segmented path is a second, softer standard. `expected_segments` names the
+    segment each beat was recorded in (all None for a single take), and
+    `expected_interludes` the lines any `interlude` beats show.
     """
     from demo_recording import TIMELINE_SCHEMA, media_duration
 
     failures: list[str] = []
     json_path = out_dir / "timeline.json"
     md_path = out_dir / "timeline.md"
+    segments_of: list[str | None] = list(
+        expected_segments
+        if expected_segments is not None
+        else [None] * len(expected_beats)
+    )
+    segment_indices = _expected_segment_indices(segments_of)
 
     if not json_path.is_file():
         return [f"{label}: {json_path} was never written"]
@@ -2724,8 +2942,18 @@ def check_timeline(
         )
     if doc.get("segment") is not None:
         failures.append(
-            f"{label}: timeline.json says segment {doc.get('segment')!r}; these "
-            f"takes are single-segment, so it should be null"
+            f"{label}: timeline.json says segment {doc.get('segment')!r}; this "
+            f"file describes a whole demo, so it should be null"
+        )
+    # `segments` is the merge's own record of what it joined and where. A take
+    # that recorded in one go must not carry it: a consumer reading it would be
+    # told a single recording has parts, and the offsets it lists are exactly
+    # what a later reader would trust to map a timestamp back to a file.
+    if not any(segments_of) and "segments" in doc:
+        failures.append(
+            f"{label}: timeline.json carries a `segments` list "
+            f"({doc.get('segments')!r}), but this take was recorded in one "
+            f"piece — that key means the file was assembled by stitch()"
         )
 
     # Which clock produced the take. A still committed to a repo is otherwise a
@@ -2783,7 +3011,7 @@ def check_timeline(
     # the recorder's `self._caption = text` and the caption beats stay perfect
     # while every other beat goes blank. Derived from the two hand-written
     # lists above, never from the log being graded.
-    context = _expected_context(expected_beats, expected_captions)
+    context = _expected_context(expected_beats, expected_captions, expected_interludes)
     if context is not None:
         logged = [b.get("caption") for b in beats]
         if logged != context:
@@ -2837,8 +3065,27 @@ def check_timeline(
                 f"this verb for at least {MIN_HELD_BEAT_SPAN_S}s — `t_end` is "
                 f"not being recorded when the verb returned"
             )
-        if beat.get("segment") is not None:
-            failures.append(f"{where} claims segment {beat.get('segment')!r}")
+        # Which segment recorded this beat, and where it sat in that segment's
+        # own log. `index` is renumbered by the merge, so it cannot answer
+        # "which beat is this" across a stitch; `(segment, segment_index)` is
+        # the pair that can, and #9 will name per-beat evidence from it. Both
+        # expectations are derived from the hand-written list above.
+        want_segment = segments_of[position] if position < len(segments_of) else None
+        if beat.get("segment") != want_segment:
+            failures.append(
+                f"{where} says it was recorded in segment "
+                f"{beat.get('segment')!r}, expected {want_segment!r}"
+            )
+        want_segment_index = (
+            segment_indices[position] if position < len(segment_indices) else None
+        )
+        if beat.get("segment_index") != want_segment_index:
+            failures.append(
+                f"{where} carries segment_index {beat.get('segment_index')!r}, "
+                f"expected {want_segment_index!r} — it is the beat's position "
+                f"within its own segment, and unlike `index` a merge must not "
+                f"renumber it (issue #22)"
+            )
 
     # Beats run back to back, so their spans should account for essentially
     # all of the time between the first starting and the last ending. This is
@@ -3004,15 +3251,27 @@ def check_timeline(
     # not cancel.
     if len(measured) == 2:
         drift = measured[1][1] - measured[0][1]
-        if abs(drift) > MAX_SKEW_DRIFT_S:
+        # ...as long as both probes rode the same capture. Across a segment
+        # boundary they did not, and the cancellation argument goes with it —
+        # see MAX_CROSS_SEGMENT_DRIFT_S.
+        same_capture = probes[0][1].get("segment") == probes[1][1].get("segment")
+        bound = MAX_SKEW_DRIFT_S if same_capture else MAX_CROSS_SEGMENT_DRIFT_S
+        why = (
+            "A capture that dropped time would have moved both equally, so "
+            "this is the beat log's clock: time between beats is not being "
+            "measured monotonically."
+            if same_capture
+            else "These two probes are in different segments, so they rode "
+            "different captures and this bar is only a flake guard — the "
+            "sharp per-segment ones are in check_merge_offset()."
+        )
+        if abs(drift) > bound:
             failures.append(
                 f"{label}: the {measured[0][0]} is {measured[0][1] * 1000:+.0f} ms "
                 f"off the video and the {measured[1][0]} is "
                 f"{measured[1][1] * 1000:+.0f} ms — they have drifted "
                 f"{drift * 1000:+.0f} ms apart, over the "
-                f"{MAX_SKEW_DRIFT_S * 1000:.0f} ms bar. A capture that dropped "
-                f"time would have moved both equally, so this is the beat log's "
-                f"clock: time between beats is not being measured monotonically."
+                f"{bound * 1000:.0f} ms bar. {why}"
             )
         else:
             print(
@@ -3024,26 +3283,51 @@ def check_timeline(
 
 
 def _expected_context(
-    expected_beats: list[tuple[str, str | None]], expected_captions: list[str]
+    expected_beats: list[tuple[str, str | None]],
+    expected_captions: list[str],
+    expected_interludes: list[str] | None = None,
 ) -> list[str] | None:
     """The caption in force during each expected beat.
 
     A `caption` beat carries the text it sets; everything after it carries that
-    text until the next one. Returns None if the two lists disagree about how
-    many captions there are, in which case the checks above already say so and
-    this one has nothing to add.
+    text until the next one. An `interlude` beat carries its own line — it is a
+    title card, not a caption — and leaves the running caption alone, which is
+    also what the recorder does. Returns None if the lists disagree about how
+    many captions or interludes there are, in which case the checks above
+    already say so and this one has nothing to add.
     """
-    wanted = [verb for verb, _ in expected_beats].count("caption")
-    if wanted != len(expected_captions):
+    verbs = [verb for verb, _ in expected_beats]
+    if verbs.count("caption") != len(expected_captions):
+        return None
+    interludes = list(expected_interludes or [])
+    if verbs.count("interlude") != len(interludes):
         return None
     context: list[str] = []
     current = ""
     pending = list(expected_captions)
-    for verb, _ in expected_beats:
+    for verb in verbs:
         if verb == "caption":
             current = pending.pop(0)
+        elif verb == "interlude":
+            context.append(interludes.pop(0))
+            continue
         context.append(current)
     return context
+
+
+def _expected_segment_indices(segments: list[str | None]) -> list[int]:
+    """Each beat's position within its own segment, from the segment column.
+
+    For a single take (every entry None) this is just 0, 1, 2, … — so the
+    assertion that `segment_index` matches it holds for every take here, not
+    only the segmented one.
+    """
+    seen: dict[str | None, int] = {}
+    indices: list[int] = []
+    for name in segments:
+        indices.append(seen.get(name, 0))
+        seen[name] = seen.get(name, 0) + 1
+    return indices
 
 
 def _first_difference(actual: list, expected: list) -> object:
@@ -4469,6 +4753,392 @@ def run_redaction(out_root: Path) -> list[str]:
     return problems + check_redaction(out_dir, info, started)
 
 
+def _segment_parts(out_dir: Path) -> list[str]:
+    """Everything on disk a segment owns, by name."""
+    return sorted(p.name for p in out_dir.glob("*.seg.*"))
+
+
+def _probe_beat(doc: dict, text: str, segment: str | None = None) -> dict | None:
+    """The beat that set `text`, in a segment's own log or the merged one."""
+    for beat in doc.get("beats") or []:
+        if beat.get("verb") != "caption" or beat.get("caption") != text:
+            continue
+        if segment is None or beat.get("segment") == segment:
+            return beat
+    return None
+
+
+def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
+    """#7's acceptance criterion, per segment, with capture loss cancelled.
+
+    Every segment carries a caption with a quiet run-up (`SEGMENT_PROBES`), and
+    each one is timed **twice**: in that segment's own `.seg.mp4` against that
+    segment's own beat log, and in the stitched `demo.mp4` against the merged
+    one. `stitch()` copies the streams, so those are literally the same frames
+    carrying the same screencast capture loss — the *difference* between the
+    two skews is `offset_true - offset_recorded` for that segment, and nothing
+    else.
+
+    **One probe per segment, not one per demo.** Timing only the last
+    segment's caption measures only the last cumulative offset: a constant
+    shift applied to segment one's beats leaves the final offset exact and
+    goes unseen, and with three or more segments every intermediate offset has
+    no pixel measurement at all. Injecting +350 ms onto segment one passed
+    this file when it timed one beat.
+
+    Each segment's own skew is graded too, against the same directional bars a
+    single take gets. That is the half the differential cannot see: it cancels
+    capture loss on purpose, so a segment whose *own* video has slid away from
+    its *own* beat log — a stall, or a bad clock — divides out of it exactly.
+    Together they say where the merge put a beat and where the recording put
+    it, separately, per capture.
+
+    Deliberately *not* computed from the durations the merge wrote down: that
+    would be the harness re-doing the recorder's arithmetic and agreeing with
+    it. This reads pixels out of two videos.
+    """
+    band = caption_band(frame_size)
+    demo = out_dir / "demo.mp4"
+    merged_json = out_dir / "timeline.json"
+    failures: list[str] = []
+
+    for name, text in zip(SEGMENT_NAMES, SEGMENT_PROBES, strict=True):
+        part = out_dir / f"{name}.seg.mp4"
+        segment_json = out_dir / f"{name}.seg.timeline.json"
+        # Reported rather than raised: this runs after a keep_parts=True
+        # stitch, so a file missing here is one that stitch already failed to
+        # keep, and crashing on it would bury the failure that explains why.
+        missing = [
+            p.name for p in (part, demo, segment_json, merged_json) if not p.is_file()
+        ]
+        if missing:
+            failures.append(
+                f"segments: {missing!r} is not on disk after "
+                f"stitch(keep_parts=True), so {name}'s beats cannot be measured "
+                f"against the segment they came from"
+            )
+            continue
+        alone = _probe_beat(json.loads(segment_json.read_text()), text)
+        stitched = _probe_beat(json.loads(merged_json.read_text()), text, name)
+        if alone is None or stitched is None:
+            failures.append(
+                f"segments: {name}'s probe caption {text!r} is logged in "
+                f"{segment_json.name}={alone is not None} / the merged timeline "
+                f"(as a {name} beat)={stitched is not None} — it has to be in "
+                f"both for that segment's offset to be measurable at all"
+            )
+            continue
+        if alone.get("segment_index") != stitched.get("segment_index"):
+            failures.append(
+                f"segments: {name}'s probe caption is beat "
+                f"{alone.get('segment_index')!r} of {name} in that segment's own "
+                f"log but {stitched.get('segment_index')!r} in the merged one — "
+                f"the two files disagree about which beat this is"
+            )
+            continue
+
+        readings: dict[str, float] = {}
+        for what, media, t_start in (
+            ("in its own segment", part, alone.get("t_start")),
+            ("in the stitched demo", demo, stitched.get("t_start")),
+        ):
+            if not isinstance(t_start, (int, float)):
+                readings.clear()
+                failures.append(f"segments: {name}'s probe has no t_start {what}")
+                break
+            seen_at, note = caption_appearance_s(
+                "segments", media, band, float(t_start)
+            )
+            if seen_at is None:
+                readings.clear()
+                failures.append(
+                    f"segments: {name}'s probe caption could not be timed {what} "
+                    f"({media.name}) — {note}"
+                )
+                break
+            readings[what] = seen_at - float(t_start)
+        if len(readings) != 2:
+            continue
+
+        own, joined = readings["in its own segment"], readings["in the stitched demo"]
+        error = joined - own
+        if abs(error) > MAX_MERGE_OFFSET_ERROR_S:
+            failures.append(
+                f"segments: {name}'s probe caption sits {own * 1000:+.0f} ms off "
+                f"its beat in {part.name} but {joined * 1000:+.0f} ms off it in "
+                f"demo.mp4 — the merge moved that beat {error * 1000:+.0f} ms "
+                f"away from the frame it names, past the "
+                f"{MAX_MERGE_OFFSET_ERROR_S * 1000:.0f} ms bar. Both readings are "
+                f"of the same frames, so capture loss (issue #18) cancels here "
+                f"and this is stitch()'s offset arithmetic for {name}: it must "
+                f"be the parts' real ffprobe durations, in order."
+            )
+            continue
+        # The other half, per capture: this segment's own video against this
+        # segment's own log, on the same directional bars a single take gets.
+        # The differential above divides this out by construction.
+        if own > MAX_LOG_EARLY_S or own < -MAX_CAPTURE_LOSS_S:
+            failures.append(
+                f"segments: {name}'s probe caption is {own * 1000:+.0f} ms off "
+                f"its beat *within {part.name}*, outside the "
+                f"{-MAX_CAPTURE_LOSS_S * 1000:.0f}…{MAX_LOG_EARLY_S * 1000:+.0f} ms "
+                f"a single capture is allowed. The merge is not involved — this "
+                f"segment's own beat log and its own video disagree (a positive "
+                f"skew is the log's; a negative one is capture loss, issue #18)."
+            )
+            continue
+        print(
+            f"smoke: segments {name}'s probe caption is {error * 1000:+.0f} ms "
+            f"from where its own segment puts it ({own * 1000:+.0f} ms in "
+            f"{part.name}, {joined * 1000:+.0f} ms in demo.mp4)"
+        )
+    return failures
+
+
+def stitch_segments(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
+    """Stitch the recorded segments, twice, and grade what that produced.
+
+    Twice because `keep_parts` has two directions and both are load-bearing:
+    the first stitch must leave every part *and its beat log* behind, since
+    re-stitching after re-recording one expensive segment is the entire reason
+    that flag exists — and the second, at the default, must take them away
+    together. A `.seg.timeline.json` outliving its `.seg.mp4` is issue #21: it
+    names a file that no longer exists, and the next stitch cannot tell that
+    stale log from a fresh one.
+
+    The merged timeline itself is graded by `check_timeline()`, the same
+    function that grades a single take. What is here is only what is true of a
+    merge and of nothing else.
+    """
+    from demo_recording import media_duration, stitch
+
+    failures: list[str] = []
+    demo = out_dir / "demo.mp4"
+    merged_json = out_dir / "timeline.json"
+
+    # -- what the segments left behind, before any of it is merged -----------
+    before = _segment_parts(out_dir)
+    wanted = sorted(
+        f"{name}.seg.{suffix}"
+        for name in SEGMENT_NAMES
+        for suffix in ("mp4", "timeline.json", "timeline.md")
+    )
+    if before != wanted:
+        return [
+            f"segments: after recording, the take directory holds {before!r}, "
+            f"expected {wanted!r} — each segment writes its own mp4 and its own "
+            f"beat log beside it, and the merge below has nothing to read "
+            f"otherwise"
+        ]
+    if demo.exists() or merged_json.exists():
+        failures.append(
+            f"segments: {demo.name}/{merged_json.name} exist before stitch() "
+            f"was called — every assertion below would be grading a file this "
+            f"run did not produce"
+        )
+
+    # A segment's beats are relative to that segment's own start. Asserted
+    # before the merge so that the merged timestamps being large means
+    # something: if the second segment's log already started at 8 s, a stitch
+    # that offset nothing at all would look exactly like a correct one.
+    durations: list[float] = []
+    segment_docs: list[dict] = []
+    for name in SEGMENT_NAMES:
+        part = out_dir / f"{name}.seg.mp4"
+        durations.append(media_duration(part))
+        doc = json.loads((out_dir / f"{name}.seg.timeline.json").read_text())
+        segment_docs.append(doc)
+        if doc.get("segment") != name or doc.get("media") != part.name:
+            failures.append(
+                f"segments: {name}.seg.timeline.json says segment "
+                f"{doc.get('segment')!r} / media {doc.get('media')!r}, expected "
+                f"{name!r} / {part.name!r}"
+            )
+        first = (doc.get("beats") or [{}])[0].get("t_start")
+        if not isinstance(first, (int, float)) or first > MAX_UNMERGED_FIRST_BEAT_S:
+            failures.append(
+                f"segments: {name}.seg.timeline.json's first beat starts at "
+                f"{first!r}s, which is not a timestamp relative to that "
+                f"segment's own start — the merge below is then unmeasurable"
+            )
+    print(
+        f"smoke: segments recorded {len(SEGMENT_NAMES)} parts, each with its "
+        f"own beat log ("
+        + ", ".join(
+            f"{n} {d:.1f}s" for n, d in zip(SEGMENT_NAMES, durations, strict=True)
+        )
+        + ")"
+    )
+
+    # -- keep_parts=True: the parts and their logs both survive ---------------
+    stitch(out_dir, SEGMENT_NAMES, keep_parts=True)
+    kept = _segment_parts(out_dir)
+    if kept != wanted:
+        # A hard stop: everything below re-reads the parts, and "they were
+        # deleted" is the answer, not a second failure about their contents.
+        return failures + [
+            f"segments: stitch(keep_parts=True) left {kept!r}, expected the "
+            f"parts untouched ({wanted!r}) — re-recording one segment and "
+            f"re-stitching is what that flag is for, and it needs the beat logs "
+            f"as much as the mp4s"
+        ]
+    if not merged_json.is_file():
+        return failures + [
+            "segments: stitch() wrote no timeline.json next to demo.mp4 — the "
+            "segments' beat logs were not merged at all"
+        ]
+    first_merge = json.loads(merged_json.read_text())
+
+    # While the parts are still here: the acceptance criterion, measured
+    # against both videos so the screencast's own error cancels.
+    failures += check_merge_offset(out_dir, frame_size)
+
+    # -- the default: parts and logs go together (issue #21) ------------------
+    stitch(out_dir, SEGMENT_NAMES)
+    left = _segment_parts(out_dir)
+    if left:
+        failures.append(
+            f"segments: after stitch() at the default keep_parts=False, "
+            f"{left!r} are still on disk. A .seg.timeline.json whose .seg.mp4 "
+            f"has been deleted names a file that no longer exists, and the next "
+            f"stitch cannot tell it from a fresh one (issue #21)"
+        )
+    second_merge = json.loads(merged_json.read_text())
+    if second_merge.get("beats") != first_merge.get("beats"):
+        failures.append(
+            "segments: re-stitching the same parts produced different beats — "
+            "the merge is not a function of what is on disk, so a re-stitch "
+            "after re-recording one segment cannot be trusted"
+        )
+
+    # -- every field of the records the merge wrote, against its sources ------
+    #
+    # All six, not the two that are interesting. `beats`, `recorder` and
+    # `determinism` are what SKILL.md tells a reader to fall back to when the
+    # top level says "mixed" or null, so an unasserted one is a documented
+    # source of truth that nothing checks: both were injected — `beats`
+    # hardcoded to 0, `recorder` to "Bogus" — and the suite passed.
+    records = second_merge.get("segments")
+    if not isinstance(records, list) or len(records) != len(SEGMENT_NAMES):
+        failures.append(
+            f"segments: the merged timeline's `segments` is {records!r}, "
+            f"expected one record per part in order — it is what maps a "
+            f"merged timestamp back to the file it came from"
+        )
+        return failures
+    offset = 0.0
+    for record, name, probed, doc in zip(
+        records, SEGMENT_NAMES, durations, segment_docs, strict=True
+    ):
+        if record.get("segment") != name or record.get("media") != f"{name}.seg.mp4":
+            failures.append(
+                f"segments: merged `segments` record {record!r} is not part "
+                f"{name!r} — the parts are listed out of order, or renamed"
+            )
+        for field, wanted_value in (("duration", probed), ("offset", offset)):
+            value = record.get(field)
+            if (
+                not isinstance(value, (int, float))
+                or abs(value - wanted_value) > SEGMENT_OFFSET_TOLERANCE_S
+            ):
+                failures.append(
+                    f"segments: merged `segments` says {name} {field} "
+                    f"{value!r}s; ffprobe makes it {wanted_value:.3f}s. The "
+                    f"offsets have to be the encoder's own durations — nominal "
+                    f"storyboard timing puts every later beat past its frame "
+                    f"(issue #18)"
+                )
+        # Carried over from the segment's own log, so it is graded against that
+        # log rather than against a number this file made up. `beats` is
+        # checked against the segment's beat count *and* against how many of
+        # that segment's beats actually reached the merged list — the two can
+        # only differ if the merge dropped or duplicated some.
+        merged_from_segment = sum(
+            1 for b in (second_merge.get("beats") or []) if b.get("segment") == name
+        )
+        for field, wanted_value in (
+            ("beats", len(doc.get("beats") or [])),
+            ("recorder", doc.get("recorder")),
+            ("determinism", doc.get("determinism")),
+        ):
+            if record.get(field) != wanted_value:
+                failures.append(
+                    f"segments: merged `segments` says {name} {field} "
+                    f"{record.get(field)!r}, but {name}.seg.timeline.json says "
+                    f"{wanted_value!r} — SKILL.md points a reader at these "
+                    f"records for exactly the per-segment truth the top-level "
+                    f"envelope cannot carry once segments disagree"
+                )
+        if record.get("beats") != merged_from_segment:
+            failures.append(
+                f"segments: merged `segments` says {name} contributed "
+                f"{record.get('beats')!r} beats, but {merged_from_segment} beats "
+                f"in the merged list carry that segment"
+            )
+        offset += probed
+
+    total = media_duration(demo) if demo.is_file() else 0.0
+    if abs(total - offset) > SEGMENT_OFFSET_TOLERANCE_S:
+        failures.append(
+            f"segments: the parts are {offset:.2f}s of video between them but "
+            f"demo.mp4 is {total:.2f}s — the offsets do not tile the stitched "
+            f"video, so beats in the last segment cannot line up with it"
+        )
+    if not failures:
+        print(
+            f"smoke: segments stitched {len(SEGMENT_NAMES)} parts into a "
+            f"{total:.1f}s demo.mp4 and merged their beat logs "
+            f"({len(second_merge.get('beats') or [])} beats); keep_parts=True "
+            f"kept every part and its log, the default removed them"
+        )
+    return failures
+
+
+def run_segments(out_root: Path) -> list[str]:
+    """Record a demo in two parts, stitch it, and grade the merged log.
+
+    The merged timeline is handed to `check_timeline()` — the same function,
+    the same assertions, including the measured one — because a segmented demo
+    that is graded more softly than a single take is a segmented demo nobody
+    can trust. What is extra here is `stitch_segments()`.
+    """
+    out_dir = fresh_take_dir(out_root, "segments")
+    started = time.time()
+    with fixture_server() as base_url:
+        try:
+            problems, video_rect, still_rect, size = record_segments(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"segments: Recorder raised {type(exc).__name__}: {exc}"]
+        try:
+            problems += stitch_segments(out_dir, size)
+        except Exception as exc:  # noqa: BLE001 - a raising stitch is a failure
+            problems.append(f"segments: stitch() raised {type(exc).__name__}: {exc}")
+    return (
+        problems
+        + check_take(
+            "segments",
+            out_dir,
+            SEGMENT_SHOTS,
+            SEGMENT_DURATION_S,
+            started,
+            video_rect,
+            still_rect,
+            size,
+        )
+        + check_timeline(
+            "segments",
+            out_dir,
+            started,
+            SEGMENT_BEATS,
+            SEGMENT_CAPTIONS,
+            size,
+            expected_segments=SEGMENT_BEAT_SEGMENTS,
+            expected_interludes=SEGMENT_INTERLUDES,
+        )
+        + check_healthy("segments", out_dir)
+    )
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -4534,6 +5204,11 @@ def main() -> int:
         help="record only the redaction take (issue #4)",
     )
     parser.add_argument(
+        "--segments-only",
+        action="store_true",
+        help="record only the two-segment take and its stitch (issue #7)",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         help="where recordings land (default: a fresh temp dir). The web/ and "
@@ -4554,6 +5229,7 @@ def main() -> int:
             ("--terminal-only", args.terminal_only),
             ("--determinism-only", args.determinism_only),
             ("--redaction-only", args.redaction_only),
+            ("--segments-only", args.segments_only),
         )
         if on
     ]
@@ -4593,6 +5269,8 @@ def main() -> int:
             failures += run_redaction(out_root)
         if only in (None, "--terminal-only"):
             failures += run_terminal(out_root)
+        if only in (None, "--segments-only"):
+            failures += run_segments(out_root)
         # After the graded takes, never instead of them: these five record
         # nothing worth looking at, and if a recorder is broken the messages
         # above are the ones that say how.
