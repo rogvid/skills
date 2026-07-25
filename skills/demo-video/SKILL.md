@@ -308,9 +308,166 @@ that recorded a console error, an uncaught exception, or a non-zero exit — see
 | `wait_for(selector)` | Wait for something the app does on its own |
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
+| `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. See **Redacting secrets**. |
+| `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. |
 | `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4 |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
+
+## Redacting secrets
+
+A published video leaks permanently, and demos run against seeded-but-realistic
+data. Two registrations, at the top of the storyboard, before the first
+`goto()`:
+
+```python
+from demo_recording import Recorder, Secret
+
+with Recorder(Path(__file__).parent) as rec:
+    rec.redact("#api-key", ".customer-email")   # blur where it renders
+    rec.register_secret(os.environ["DEMO_TOKEN"])  # keep the text out of narration
+    rec.goto("/settings")
+    rec.type_into("#token", Secret("sk-live-…"))   # both, automatically
+```
+
+- **`redact(*selectors)`** paints an **opaque cover** over matching elements,
+  in the page — not with an ffmpeg box in post, which needs fixed coordinates
+  while elements scroll, reflow and re-render.
+
+  It covers rather than blurs because a blur is a *how much is enough*
+  question, and every answer to it is a guess about how the ink was produced.
+  Five ways of rendering text larger than its `font-size` says — a
+  `::after`, a `transform: scale()`, `zoom`, an SVG `viewBox`, a value two
+  shadow roots down — each defeated a radius derived from CSS, and there was
+  no reason to think the fifth was the last. A cover is sized from rendered
+  geometry (client rects, which include transforms and zoom by construction)
+  and asks no question about the text at all. `redact(..., style="blur")`
+  keeps the old look; it is an aesthetic choice, and a weaker one. It is installed as a context init
+  script, so it is in place before the page's own scripts run and before the
+  first frame; elements are masked from the instant they enter the DOM, and a
+  `MutationObserver` re-asserts the mask if the app rewrites the element's
+  `style` attribute or replaces the document's stylesheets. Stills inherit it,
+  because the mask is in the page rather than in the video pipeline.
+  - **Plain CSS selectors only** — an id, a class, an attribute. This is the
+    one verb that does not take `text=`, `xpath=`, `>>` or `nth=`, and it
+    refuses them with an error rather than accepting them. Continuous cover
+    comes from a stylesheet injected into the page, and a stylesheet can only
+    express CSS; a Playwright-engine selector can only be re-resolved out of
+    process at whatever moments the recorder happens to check, which measured
+    as four unmasked seconds of a ten-second take on an ordinary
+    fetch-then-render page. Name the element with CSS, or keep the value off
+    the screen and register the text.
+  - **It reaches an open shadow root** — which `document.querySelectorAll`
+    cannot see at all — because the mask is also applied from Python through
+    Playwright's engine, and because it wraps `attachShadow` at document start
+    to hold every root the app opens.
+  - **Sized from what the element paints**, not from what its CSS says: the
+    union of the client rects of everything in its subtree, shadow roots at
+    every depth included, grown by any pseudo-element's font size (generated
+    content has no rect to measure and can paint outside its parent's box).
+    Redacting a wrapper is the ordinary call — `redact("#card")` where the
+    value is an 80px child — and every measurement here is of the child's
+    rendered box, not the wrapper's font.
+  - **A blur stays underneath the cover** as a floor, sized the same way. It
+    is what a stylesheet can do with no JS at all, and `filter` applies to
+    everything an element renders — so it reaches ink the cover's rectangle
+    can miss.
+  - **It fails rather than misses.** At every checkpoint — after a navigation,
+    before every still, around every verb that spends time, and before the mp4
+    is written — the recorder asks Playwright, across every frame, how many
+    elements each selector matches, and then asks the *browser's own hit
+    testing* whether anything is painting over each cover. A cover that
+    something paints above, or a selector that never matched anything, raises
+    `SecretLeak`: the take writes no mp4, no timeline, and deletes the stills
+    it had already taken. A redacted take also withholds the first paint of
+    each navigation until that check has passed.
+- **`register_secret(*values)`** is about *text*, not pixels. A `caption()`,
+  `interlude()`, `terminal()` or `terminal_close()` line containing a
+  registered value raises `SecretLeak` and **fails the take** — deliberately,
+  rather than masking the line: captions are burned in *and* spoken *and*
+  cached as audio in `.tts/`, and a secret in one is an authoring bug that
+  wants rewording, not blurring. Text you did not author is scrubbed to
+  `[redacted]` instead: `terminal_output()` (a program's output), every string
+  on a beat (`selector`, `still`, `caption`), and `shot()`'s name, which is
+  scrubbed before it becomes a filename so the log and the disk agree.
+- **`Secret("…")`** is a value the demo types but must never show:
+  `type_into(sel, Secret(v))` registers the text, blurs the field before the
+  first keystroke, and types the real value. It is not a `str` — printing one
+  yields `[redacted]`, and it can never be logged as a beat's target by
+  accident.
+
+### What redaction does NOT cover
+
+Read this before trusting a recording to it. It closes four specific paths, and
+nothing else:
+
+- **The cover is erasure; `style="blur"` is not.** An opaque rectangle
+  removes the pixels. A blur destroys legibility, not information — a
+  determined attacker with the font and the radius can attempt deconvolution —
+  and it is sized by a rule that has been wrong five times. If you opt into
+  blur, treat it as a visual convention rather than a control. For a real
+  credential, do not render it at all: demo against a fake value.
+- **What the cover is sized from, it can miss.** It is the union of the client
+  rects the recorder can find. Generated content is allowed for by growing the
+  box by the pseudo's font size, but an absolutely positioned pseudo far from
+  its parent, or ink painted outside every rect in the subtree, is outside it —
+  the blur underneath is what covers those, and the blur is the weaker
+  mechanism. Look at the stills.
+- **`redact()` takes plain CSS and nothing else**, unlike every other verb
+  here. `text=`, `xpath=`, `>>` and `nth=` raise. See above for why.
+- **Nothing is registered for you.** `redact()` does not read the element's
+  text, so the value stays *unregistered* — write it into a caption yourself
+  and it will be captioned, spoken and cached without complaint. Register the
+  text separately, or type it as a `Secret`.
+- **Only exact substrings match.** No shape detection, no `sk-`/`ghp_`/`AKIA`
+  patterns, no normalisation — a secret rendered with different whitespace, a
+  soft hyphen, or split across two elements is not caught. (Shape matching for
+  the terminal path is [issue #5](https://github.com/rogvid/skills/issues/5).)
+- **Registering late does not un-record anything.** A caption set before its
+  value was registered is already burned into the frames and already spoken;
+  what registration afterwards buys is only that the files the recorder writes
+  (`timeline.json`, `timeline.md`, still filenames) come back masked. Register
+  before you caption.
+- **Frames recorded before the call are already on disk.** `redact()` after a
+  `goto()` warns for exactly this reason: masking late cannot un-capture a
+  frame.
+- **A *closed* shadow root cannot be masked by anything** — not by an injected
+  stylesheet, not by Playwright, not by `document.querySelector`. A take told
+  to redact something inside one fails loudly and records nothing, which is the
+  only honest outcome; there is no way to record that app with that value on
+  screen.
+- **Iframes: same-origin only, in practice.** The in-page mask is injected
+  into every frame, and masking and verification now run across all of them —
+  but a *cross-origin* frame's contents are a separate document the recorder
+  cannot always reach, and nothing here can mask what it cannot see. A key in
+  a third-party iframe is not covered.
+- **Canvas: the picture is covered, the bitmap is not.** The cover is over
+  the canvas element's rect, so nothing it draws is visible. Anything reading
+  the bitmap back (`toDataURL`, `getImageData`) still sees the original.
+- **`TerminalRecorder` has no redaction yet.** `register_secret()` and
+  `scrub()` exist on it (it shares the base), but nothing scrubs the PTY→xterm
+  path, so a command that *prints* a secret still records it. That is
+  [issue #5](https://github.com/rogvid/skills/issues/5).
+- **What CSS cannot reach, the mask cannot hide**: a cross-origin iframe's
+  contents, an OS-level dialog, anything drawn outside the page. A `<canvas>`
+  *is* covered — `filter` on the element blurs its rendered pixels like any
+  other element (verified) — but only what is *displayed*; the bitmap behind it
+  is unchanged, so anything reading it back (`toDataURL`, `getImageData`) still
+  sees the original.
+- **Non-visual channels are untouched.** The value still exists in the DOM
+  (`page.content()`), in the app's network traffic, and in whatever the app
+  logs. Redaction hides it from the *recording*, not from the machine.
+- **A screenshot the storyboard takes itself** — `rec.page.screenshot(...)`
+  rather than `rec.shot(...)` — still goes through the page, so the CSS mask
+  applies; but any artifact your storyboard writes by hand (a `page.content()`
+  dump, a downloaded file) is yours to clean.
+- **`register_secret()` takes any non-empty string, including a short one.**
+  Registering `"1234"` masks every occurrence of those four characters in beat
+  selectors and terminal output. Register whole values.
+- **A failed take deletes its own stills, and only its own.** When the mask
+  cannot be verified the recorder removes the stills *this* take wrote and
+  names each one it removed. Stills a previous take left in the same folder
+  are not touched — and anything your storyboard wrote by hand is yours.
 
 ## The beat timeline (`timeline.json` / `timeline.md`)
 
@@ -696,6 +853,10 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 - **Layout shifts strand the cursor.** When the app inserts rows/cards
   mid-recording, elements move but the cursor doesn't — re-`move_to` the
   target after any wait that can reflow the page.
+- **Recording real data and planning to blur it later.** There is no later: the
+  frame is captured the moment it paints, and a published video leaks forever.
+  Decide what must not appear *before* the first `goto()` — see **Redacting
+  secrets**, and read what it does not cover.
 - **Embedding video in markdown.** Repo-relative mp4s don't play inline in
   rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
   with a still and point at the re-record command instead. GitHub plays only

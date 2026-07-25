@@ -17,14 +17,48 @@ scans only see the diff, so the job is green today and would go red the first
 time anyone adds a schedule or workflow_dispatch trigger. ruff.toml excludes the
 same directory for the same reason.
 
-regexes: the test fixture renders a deliberately fake API key at #api-key
-(tests/fixture/index.html, behind ?secret=1) so the redaction work in issue #4
-has something to prove it hides. Note this entry is belt-and-braces, not
+regexes: three deliberately fake API keys the redaction test (issue #4) needs to
+look for. Two are rendered by the fixture behind ?secret=1
+(tests/fixture/index.html) — #api-key, which redaction hides, and
+#api-key-control, identical in shape and never redacted, so the smoke test has a
+sharp-text reference measured off the same frame. The third is typed by
+tests/smoke into #token as a Secret(...), so that the two ways of registering a
+secret can be proved apart. Note this entry is belt-and-braces, not
 load-bearing: the default ruleset does not flag that literal with or without
-this config — it is spelled FAKE followed by sixteen zeroes precisely so no
-scanner and no human mistakes it for a credential. It is kept so that a future
-gitleaks release which does start flagging it cannot turn the job red for a
-string that was never a secret. It masks nothing else.
+this config — every one is spelled with a four-letter word followed by nothing
+but zeroes, precisely so no scanner and no human mistakes any of them for a
+credential. They are kept so that a future gitleaks release which does start
+flagging them cannot turn the job red for strings that were never secrets. The
+pattern is anchored to that fixed word list and a run of four to sixteen
+literal zeroes — the lengths the fixture actually renders. It masks nothing
+else.
+
+The words, and what each fixture element they belong to is for:
+
+  FAKE  #api-key           rendered by the app, hidden with redact()
+  CTRL  #api-key-control   never redacted — the sharp reference
+  TYPE  #token             typed as Secret(...), which registers and masks it
+  BIG   #hero-key          the same, at hero font size
+  BGC   #hero-key-control  its control
+  TEXT  #alt-key           registered through a `text=` selector
+  XPTH  #xp-key            registered through an `xpath=` selector
+  SHDW  #sd-key            inside an open shadow root
+  SHTY  #sd-token          typed into the field inside that root
+  IFRM  #if-key            inside an iframe
+  PSEU  #a1-key            rendered by a ::after pseudo-element at 48px
+  TFRM  #a2-key            a descendant scaled 4x by transform
+  ZOOM  #a3-key            a descendant at zoom: 4
+  SVGT  #a4-key            SVG <text> scaled by its viewBox
+  DEEP  #a5-key            two open shadow roots below the redacted wrapper
+  CLSD  #sd-closed-key     inside a *closed* one, which nothing can mask —
+                           the take that is told to redact it must fail
+  STMP  terminal_close()   a stamp holding a secret, which must be refused,
+                           and a shot() name that must be scrubbed
+  TKCT  #token-control     a field's control — same chrome, never redacted
+  SDCT  #sd-token-control  the same, inside the shadow root
+  LATE  a caption          set before the value in it was registered
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
-regexes = ['''sk-live-FAKE0{16}''']
+regexes = [
+  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT)0{4,16}''',
+]

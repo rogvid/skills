@@ -7,7 +7,8 @@
 
 Serves `tests/fixture/` with a throwaway `python3 -m http.server`, records a
 short web demo against it with `Recorder`, records a short terminal demo with
-`TerminalRecorder`, and grades each take on three separate axes:
+`TerminalRecorder`, records a third take against a page that renders a secret,
+and grades each take on separate axes:
 
 1. **Artifacts** — demo.mp4 and every still exist, were written by *this* run,
    are not trivially small, and are not repeats of each other.
@@ -31,15 +32,21 @@ short web demo against it with `Recorder`, records a short terminal demo with
    storyboard is recorded three times against a page that renders four clocks
    and an animation; the two takes with `deterministic=True` must match byte
    for byte, and the one recorded with the recorder's *defaults* must not.
+5. **Redaction** — a registered secret reaches no frame, still, caption or TTS
+   cache entry. Graded on pixel sharpness against an unredacted control key in
+   the same frame, and on a byte search of everything the take wrote.
 
     tests/smoke                 # every take
     tests/smoke --web-only
     tests/smoke --terminal-only
     tests/smoke --determinism-only
+    tests/smoke --redaction-only
     tests/smoke --out-dir /tmp/smoke
 
-Narration is forced off (`speech=False`): CI has no ELEVENLABS_API_KEY and no
-assertion here depends on audio.
+Narration is forced off (`speech=False`) for the web and terminal takes: CI has
+no ELEVENLABS_API_KEY and no assertion there depends on audio. The redaction
+take narrates against a stubbed synthesizer, because the `.tts/` cache is one of
+the paths it has to prove clean — see `stub_narration`.
 
 Unix only, because `demo_recording/__init__.py` imports the PTY-backed
 terminal recorder unconditionally.
@@ -528,6 +535,212 @@ MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0}
 # harness owns and may delete" from "somebody's source tree".
 MARKER_NAME = ".demo-video-smoke"
 
+# -- redaction (issue #4) ----------------------------------------------------
+#
+# Three fixture literals, none of them a credential — each is spelled with a
+# four-letter word and sixteen zeroes so no scanner and no reader mistakes it
+# for one (.gitleaks.toml allowlists the shape as insurance). They exist to be
+# looked for: the take below must produce no frame, still, caption, or TTS
+# cache entry holding either of the first two, while the third must survive
+# untouched.
+#
+#   SECRET   rendered by the fixture at #api-key, hidden with redact()
+#   TYPED    typed into #token as Secret(...), which must register and mask it
+#            without being told — the two registration paths, proved apart
+#   CONTROL  rendered at #api-key-control, never registered. The reference the
+#            blur is measured against, and the reason a recorder that blurred
+#            the whole page (or recorded a black screen) cannot pass
+REDACT_SECRET = "sk-live-FAKE0000000000000000"
+REDACT_TYPED = "sk-live-TYPE0000000000000000"
+REDACT_CONTROL = "sk-live-CTRL0000000000000000"
+
+# The rest of what the fixture renders behind ?secret=1, each element there to
+# make one specific way of missing a secret fail — every one of them named by
+# a plain CSS selector, because that is the only dialect redact() accepts.
+#
+#   #hero-key    44px text inside a 12px *wrapper*, and the wrapper is what
+#                gets redacted: a radius scaled from the matched element
+#                leaves the value readable
+#   #if-key      inside an *iframe*, which page.locator() does not descend
+#                into even though frame.evaluate() reaches it
+#   #sd-key      inside an *open shadow root*, where document.querySelectorAll
+#                finds nothing and a document stylesheet does not apply
+#   #sd-token    a field inside that root, typed into as a Secret
+REDACT_HERO = "sk-live-BIG000000000"
+REDACT_HERO_CONTROL = "sk-live-BGC000000000"
+REDACT_IFRAME = "sk-live-IFRM00000000"
+# The sufficiency shapes. Each is a wrapper with a 12-13px font-size holding a
+# value rendered four to five times larger by a different mechanism, and each
+# is redacted *by the wrapper*, which is how a storyboard names a card. All
+# five leaked against a mask that asked the wrapper's computed font-size how
+# big its text was: every one of them reported 12px.
+REDACT_SHAPES = {
+    "#a1-key": ("#a1-card", "sk-live-PSEU0000", "a ::after pseudo-element at 48px"),
+    "#a2-key": ("#a2-card", "sk-live-TFRM0000", "a descendant at transform: scale(4)"),
+    "#a3-key": ("#a3-card", "sk-live-ZOOM0000", "a descendant at zoom: 4"),
+    "#a4-key": ("#a4-card", "sk-live-SVGT0000", "SVG <text> scaled by its viewBox"),
+    "#a5-key": ("#a5-card", "sk-live-DEEP0000", "two shadow roots below the wrapper"),
+}
+# Inside a *closed* shadow root: unreachable by Playwright and by an injected
+# script alike, so a take told to redact it must fail rather than pretend.
+CLOSED_SECRET = "sk-live-CLSD00000000"
+# The two field controls. Typed, never registered, never masked — the sharp
+# reference for the two fields that are.
+REDACT_FIELD_CONTROL = "sk-live-TKCT00000000"
+REDACT_SD_FIELD_CONTROL = "sk-live-SDCT00000000"
+REDACT_SHADOW = "sk-live-SHDW00000000"
+# A literal of its own, not a second use of REDACT_SHADOW: the byte sweep
+# reports which secret it found, and two names for one string cannot tell the
+# rendered-key path from the typed-field path apart — which is one of the two
+# things this fixture claims to prove separately.
+REDACT_SHADOW_TYPED = "sk-live-SHTY00000000"
+# Authored strings that are not captions: terminal_close()'s stamp, and a
+# shot() name. Both end up on disk — the stamp on the card in the frame, the
+# name as an actual filename — and both were unguarded.
+REDACT_STAMP = "sk-live-STMP0000000000000000"
+# Captioned *before* it is registered, which is the one ordering the recorder
+# cannot save you from: the words are already burned into the frames. What it
+# can still do is keep them out of every file it writes, retroactively, which
+# is what `self._caption` being sticky would otherwise defeat.
+REDACT_LATE = "sk-live-LATE0000000000000000"
+
+# Every secret that must not survive anywhere, and where it came from.
+REDACT_LITERALS = {
+    "the key the app rendered": REDACT_SECRET,
+    "the token the storyboard typed": REDACT_TYPED,
+    "the hero-size key": REDACT_HERO,
+    "the key inside the shadow root": REDACT_SHADOW,
+    "the key typed into the shadow field": REDACT_SHADOW_TYPED,
+    "the key inside the iframe": REDACT_IFRAME,
+    **{
+        f"the key rendered by {why}": literal
+        for _, (_, literal, why) in REDACT_SHAPES.items()
+    },
+    "the stamp terminal_close() refused, and the shot() name": REDACT_STAMP,
+    "the key registered after the caption naming it": REDACT_LATE,
+}
+
+# (element, selector it is registered by). The selector form is the assertion:
+# a `redact()` that only understood CSS would leave four of these in the clear.
+REDACT_TARGETS = [
+    ("#api-key", "#api-key"),
+    # The wrapper, not the value: #hero-card is 12px and #hero-key inside it is
+    # 44px, so a radius scaled from the matched element leaves the value
+    # readable. Redacting a container is the ordinary call.
+    ("#hero-key", "#hero-card"),
+    ("#sd-key", "#sd-key"),
+    ("#if-key", "#if-key"),
+    *((name, card) for name, (card, _, _) in REDACT_SHAPES.items()),
+]
+
+# Selector dialects redact() must refuse outright rather than half-cover. Every
+# other verb takes them, which is exactly why refusing has to be tested: the
+# in-page mask is a stylesheet and cannot express any of these, so accepting
+# one buys a guarantee that lapses between checkpoints.
+REDACT_REFUSED_SELECTORS = [
+    f"text={REDACT_SECRET}",
+    "xpath=//code[@id='api-key']",
+    "#secret-panel >> nth=0",
+    "#api-key:has-text('sk-live')",
+]
+
+REDACT_SHOTS = ["01-key-blurred", "02-mask-repaired", "03-token-typed"]
+# Taken while the paint gate is deliberately up and being attacked. Graded the
+# other way round from the rest: in this one even the *controls* — unredacted,
+# and normally the sharpest thing in the frame — must be invisible, because a
+# gate that lets anything through is not a gate.
+REDACT_GATE_SHOT = "05-gate-attacked"
+MAX_GATED_EDGE = 2.0
+REDACT_DURATION_S = (4.0, 32.0)
+
+# The captions this take sets. The first is innocent and is *narrated*, which
+# is what puts a real entry in .tts/ and stops the cache assertions from being
+# vacuous. The second is the authoring bug: it must raise SecretLeak, kill the
+# line before it is drawn or synthesized, and leave no cache entry behind.
+REDACT_CAPTION = "The integration key stays hidden."
+REDACT_CLOSING = "Nothing here reached the recording."
+# Set after the link navigation, which takes the caption bar with it. A fresh
+# line rather than the previous one: by then the value in that line has been
+# registered, and re-setting it would (correctly) fail the take.
+REDACT_AFTER_NAV = "The view reloaded, and the mask came back."
+REDACT_LEAK_CAPTION = f"Paste {REDACT_TYPED} to connect."
+# Set while REDACT_LATE is not yet a secret, so nothing refuses it. The frames
+# keep it — no recorder can un-paint a caption — but every file the take
+# writes must come back with it masked once it is registered.
+REDACT_LATE_CAPTION = f"Rotating {REDACT_LATE} now."
+
+# The recorder's narration defaults, written out by hand so this file computes
+# the cache path the way core.py does rather than by asking core.py. If either
+# default changes, the "the innocent line really was cached" assertion below
+# fails — which is the point: that assertion is what makes the absence of the
+# leaking line's entry mean something.
+TTS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+TTS_MODEL_ID = "eleven_multilingual_v2"
+
+# Sharpness, as mean absolute difference between neighbouring pixels of a
+# crop. Text has hard glyph edges and scores tens; a gaussian blur is exactly
+# the operation that removes them.
+#
+# **The crop is normalised to a fixed text height first**, and that is the
+# whole reason this number means "legible" rather than "small". Sharpness is
+# scale-dependent: the bigger the text, the fewer edges per pixel, so a sharp
+# 44 px key scores *lower* than a sharp 15 px one. Measured on this fixture
+# with a constant 8 px blur and only the font size varied:
+#
+#   font    control   blurred   ratio    legible to a human?
+#   15px      37.7      1.0      2.7%    no
+#   40px      16.4      1.6     10.0%    borderline
+#   52px      12.3      1.6     13.4%    YES
+#   68px       9.4      1.7     17.7%    YES
+#
+# The denominator collapses while the numerator stays flat, so a raw ratio
+# passes text anyone can read. Scaling every crop to the same text height
+# before measuring removes that: a blur that is proportional to the text
+# survives the rescale as a blur, and a constant 8 px blur on 44 px text
+# rescales into a ~3 px blur on 15 px text, which is legible and scores like
+# it. The measurement then tracks legibility instead of geometry.
+#
+# Both bars are needed and neither alone is enough:
+#
+#   * MIN_CONTROL_EDGE — the unredacted control key must be legibly sharp in
+#     the same frame. Without it, a black video, a blank page, or a mask that
+#     blurred everything all pass the ratio trivially.
+#   * MAX_REDACTED_EDGE_RATIO — the redacted key, as a fraction of that
+#     control, both normalised. Self-calibrating: a fraction of a reference
+#     measured off the same frame needs no absolute threshold tied to CI font
+#     rendering.
+#
+# Calibration numbers live in tests/README.md, measured across both font sizes
+# and against the injected faults.
+NORMALISED_TEXT_H = 22
+MIN_CONTROL_EDGE = {"still": 8.0, "video": 6.0}
+# Two bars, because text and form fields have different noise floors and one
+# bar for both would have to be the looser of the two.
+#
+#   text   a <code> holding a key. The crop is the glyph box and nothing else,
+#          so a masked one reads 2-3% of its control. The bar is tight because
+#          the faults that matter here are *weak* blurs, which land at 9-13%:
+#          a radius that does not scale with the font leaves a hero value at
+#          11%, and cutting the radius from 8px to 3px lands at 9%. A 25% bar
+#          passes both while the value stays readable.
+#
+#   field  an <input>. Its border blurs along with its contents and smears a
+#          gradient right across the crop, which the metric counts and which
+#          has nothing to do with the secret: 2.5-3.6 against a typed control
+#          at 27, i.e. 9-13%, on a field whose extracted crop is — by eye — a
+#          featureless smear. The same crop in the lossless still reads 3%, so
+#          this is the codec and the border, not the mask. Insetting past the
+#          smear is not possible: the blur radius is 8px and the field's inner
+#          box is 21px tall. So the bar is set above that floor, where it
+#          still catches the failure that matters for a field — not being
+#          masked at all, which reads as ~100%.
+MAX_REDACTED_EDGE_RATIO = {"text": 0.07, "field": 0.25}
+
+# Frames per second sampled from the redaction take's mp4. Every sampled frame
+# is scored and the *worst* one is graded, because one frame showing the key is
+# a leak: a paused video is a screenshot.
+REDACT_SAMPLE_FPS = 2
+
 
 class SmokeFailure(Exception):
     """An assertion about a recording did not hold."""
@@ -724,6 +937,112 @@ def frame_difference(a: bytes, b: bytes) -> float:
 def keep_top(rect: Rect, fraction: float = CONTENT_KEEP) -> Rect:
     x, y, w, h = rect
     return (x, y, w, max(1, int(h * fraction)))
+
+
+def native_frames(
+    path: Path,
+    rect: Rect,
+    sample_fps: int | None = None,
+    normalise: bool = True,
+    start: float | None = None,
+    duration: float | None = None,
+) -> tuple[list[bytes], int, int]:
+    """Decode a region of an mp4 or png to grayscale, normalised for text size.
+
+    `gray_frames` above scales everything to 160x90, which is fine for "is
+    there a picture" and useless for "is this text sharp": that downscale is
+    itself a blur, so a blurred crop and a sharp one arrive looking the same.
+
+    This one scales only to make crops of *different font sizes* comparable —
+    the crop's height goes to NORMALISED_TEXT_H, aspect preserved, so one line
+    of 15 px text and one line of 44 px text arrive the same height. Sharpness
+    per pixel depends on how many glyph edges fall in a pixel, so without this
+    a sharp hero-size key measures *blurrier* than a blurred body-size one.
+    Returns (frames, width, height) because the scaled width is not `rect`'s.
+    """
+    x, y, w, h = rect
+    chain = []
+    if sample_fps:
+        chain.append(f"fps={sample_fps}")
+    chain.append(f"crop={w}:{h}:{x}:{y}")
+    if normalise and h != NORMALISED_TEXT_H:
+        # -2 keeps the aspect ratio and an even width, which the decoder wants.
+        chain.append(f"scale=-2:{NORMALISED_TEXT_H}:flags=bilinear")
+    out_h = NORMALISED_TEXT_H if normalise else h
+    out_w = max(2, int(round(w * out_h / h)) & ~1) if normalise else w
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            *(["-ss", f"{start:.3f}"] if start else []),
+            *(["-t", f"{duration:.3f}"] if duration else []),
+            "-i",
+            str(path),
+            "-vf",
+            ",".join(chain),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg could not decode {path} at {rect}: "
+            f"{proc.stderr.decode(errors='replace').strip()[:300]}"
+        )
+    size = out_w * out_h
+    raw = proc.stdout
+    frames = [raw[i : i + size] for i in range(0, len(raw) - size + 1, size)]
+    return frames, out_w, out_h
+
+
+def edge_energy(frame: bytes, width: int, height: int) -> float:
+    """How sharp a crop is: mean absolute difference between adjacent pixels.
+
+    Text has hard glyph edges and scores tens. A gaussian blur is exactly the
+    operation that removes them, so a blurred crop of the same text scores
+    near zero — and unlike luma stddev, this does not reward a blurred but
+    still high-contrast smear, which is what a redacted key actually looks
+    like. Both axes are summed so a mask that only smeared horizontally (or a
+    crop one pixel tall) cannot score as blurred while staying readable.
+    """
+    if width < 2 or height < 2:
+        raise ValueError(f"crop {width}x{height} is too small to measure")
+    total, count = 0, 0
+    for row in range(height):
+        base = row * width
+        for col in range(width - 1):
+            total += abs(frame[base + col] - frame[base + col + 1])
+            count += 1
+    for row in range(height - 1):
+        base, below = row * width, (row + 1) * width
+        for col in range(width):
+            total += abs(frame[base + col] - frame[below + col])
+            count += 1
+    return total / count
+
+
+def to_video_rect(rect: Rect, geom: dict, frame_size: tuple[int, int]) -> Rect:
+    """A page-space rect, mapped to where it lands in the composited mp4.
+
+    The web recorder scales the page into a window (~0.8) and overlays it on a
+    background, so a rect read off the live page is not where those pixels are
+    in demo.mp4. Derived from the recorder's own geometry rather than a
+    hardcoded factor, so a change to the window carries this with it.
+    """
+    width, height = frame_size
+    sx, sy = geom["appw"] / width, geom["apph"] / height
+    x, y, w, h = rect
+    return (
+        int(geom["appx"] + x * sx),
+        int(geom["appy"] + y * sy),
+        max(2, int(w * sx)),
+        max(2, int(h * sy)),
+    )
 
 
 def caption_band(frame_size: tuple[int, int]) -> Rect:
@@ -1573,6 +1892,599 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
     return EntropyTake(b.problems, out_dir, clock, still_rect, video_rect, spin_rect)
 
 
+# -- redaction take ----------------------------------------------------------
+
+# The tightest box around an element's rendered text, in page coordinates.
+# The element's own box is mostly empty background (these are display:block),
+# and empty background has no edges either way — measuring it would dilute the
+# sharp control and the blurred key by the same large factor and cost the
+# measurement most of its margin. Falls back to the element box for an <input>,
+# whose value is not in a text node a Range can select.
+_TEXT_RECT_JS = """(el) => {
+  if (!el) return null;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  let box = range.getBoundingClientRect();
+  if (box && box.width >= 4 && box.height >= 4)
+    return [box.x, box.y, box.width, box.height];
+  // An <input>: its value is not in a text node a Range can select, so fall
+  // back to the element box minus its border and padding. The border is a
+  // hard edge that survives being blurred with the text behind it, and
+  // including it measures the chrome instead of the secret.
+  const cs = getComputedStyle(el);
+  const inset = (a, b) => parseFloat(cs[a] || 0) + parseFloat(cs[b] || 0) + 1;
+  box = el.getBoundingClientRect();
+  const l = inset('borderLeftWidth', 'paddingLeft');
+  const t = inset('borderTopWidth', 'paddingTop');
+  const r = inset('borderRightWidth', 'paddingRight');
+  const b = inset('borderBottomWidth', 'paddingBottom');
+  return [box.x + l, box.y + t, box.width - l - r, box.height - t - b];
+}"""
+
+# What a real app does to an element between paints, and what this recorder's
+# own spotlight() does when it clears: rewrite the `style` attribute wholesale,
+# and re-render the head. Either one alone wipes one of the two mechanisms the
+# mask uses (the inline filter, the injected stylesheet); together they wipe
+# both, and only the MutationObserver puts them back. Returns what it found, so
+# the storyboard can tell "the recorder never installed a mask" from "the mask
+# was installed and survived being torn out".
+_TAMPER_JS = """() => {
+  const el = document.getElementById('api-key');
+  const had_inline = el.style.getPropertyValue('filter');
+  const style = document.getElementById('__demo_redact_style');
+  const had_rule = !!style && style.textContent.includes('blur');
+  el.setAttribute('style', 'color: #1c1a17');
+  if (style) style.remove();
+  return [had_inline, had_rule];
+}"""
+
+_FILTER_JS = "el => getComputedStyle(el).filter"
+
+# Raise the paint gate again, mid-take, so it can be attacked while it is up.
+# The recorder lowers it as soon as a navigation is verified, which leaves no
+# window for a test to look at — and a gate nobody can watch working is a gate
+# nobody can watch failing.
+_REGATE_JS = """() => {
+  window.__demoRedact.gated = true;
+  window.__demoRedactApply();
+}"""
+
+# The two ordinary things that defeat a gate built out of an inherited
+# `visibility` rule: a descendant declaring itself visible, and a script that
+# strips <style> elements it does not recognise. Run against a live gate.
+_GATE_ATTACK_JS = """() => {
+  const style = document.createElement('style');
+  style.textContent = 'html, body, #secret-panel, #secret-panel * {'
+    + ' visibility: visible !important; }';
+  document.head.appendChild(style);
+  let removed = 0;
+  for (const node of document.querySelectorAll('style')) {
+    if (node !== style && (node.textContent || '').includes('visibility')) {
+      node.remove();
+      removed += 1;
+    }
+  }
+  return removed;
+}"""
+
+
+def find_in_frames(page, selector: str):
+    """A locator for `selector` in whichever frame holds it, or None.
+
+    `page.locator()` does not descend into an iframe, and one of the graded
+    elements lives in one — so the test cannot reach it the way it reaches the
+    others. Neither can the recorder, which is the bug this element exists to
+    catch; the difference is that the recorder now looks in every frame.
+    """
+    for frame in page.frames:
+        try:
+            if frame.locator(selector).count():
+                return frame.locator(selector).first
+        except Exception:  # noqa: BLE001 - a detached frame holds nothing
+            continue
+    return None
+
+
+def _blur_px(computed: str | None) -> float:
+    """The radius out of a computed `filter`, or 0.0 when there is no blur."""
+    match = re.search(r"blur\(([\d.]+)px\)", computed or "")
+    return float(match.group(1)) if match else 0.0
+
+
+@contextmanager
+def stub_narration(out_dir: Path) -> Iterator[None]:
+    """Record the enclosed take with narration genuinely on, offline.
+
+    The `.tts/` cache is one of the four leak paths, and with `speech=False` —
+    how every other take here records — it does not exist at all. "No cache
+    entry holds the secret" would then be true of an empty directory, which is
+    the shape of assertion this harness exists to not make. So this take really
+    does narrate: only the network call is replaced, by a synthesizer that
+    writes a short silent mp3 under the *same* key the real one computes. The
+    guard that refuses to speak a secret, the cache path, the pacing and the
+    ffmpeg audio mix are all the recorder's own code, unpatched.
+    """
+    import demo_recording.core as core
+
+    silence = out_dir / ".silence.mp3"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-t",
+            "0.6",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "9",
+            str(silence),
+        ],
+        check=True,
+    )
+
+    def fake_tts(
+        text: str, cache_dir: Path, voice_id: str, model_id: str, api_key: str
+    ) -> Path:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        clip = cache_dir / tts_cache_name(text, voice_id, model_id)
+        if not clip.exists():
+            shutil.copyfile(silence, clip)
+        return clip
+
+    real = core.tts_clip
+    core.tts_clip = fake_tts
+    os.environ["ELEVENLABS_API_KEY"] = "smoke-stub-not-a-key"
+    try:
+        yield
+    finally:
+        core.tts_clip = real
+        os.environ.pop("ELEVENLABS_API_KEY", None)
+        silence.unlink(missing_ok=True)
+
+
+def tts_cache_name(
+    text: str, voice_id: str = TTS_VOICE_ID, model_id: str = TTS_MODEL_ID
+) -> str:
+    """The file `tts_clip` caches one narration line as.
+
+    Written out by hand rather than imported, for the same reason WEB_BEATS is:
+    a path derived from the code under test agrees with that code no matter
+    what it does. Getting it wrong is caught immediately — the innocent line's
+    clip is asserted to *exist*, and that assertion is what gives the leaking
+    line's absence any meaning.
+    """
+    key = hashlib.sha256(f"{voice_id}|{model_id}|{text}".encode()).hexdigest()[:20]
+    return f"{key}.mp3"
+
+
+def record_redaction(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
+    """Record a page that renders a secret, with redaction on.
+
+    Returns the post-condition failures plus everything check_redaction needs
+    to find the pixels afterwards: where each key sits on the page, and the
+    recorder's frame geometry.
+    """
+    from demo_recording import Recorder, Secret, SecretLeak
+
+    b = Beats("redaction")
+
+    with (
+        stub_narration(out_dir),
+        Recorder(out_dir, base_url=base_url, speech=True) as rec,
+    ):
+        # Every registration happens before the first navigation, which is the
+        # whole design: the mask is a context init script, so it is in place
+        # before the page's own scripts run and no frame is ever captured
+        # unmasked. redact() takes the pixels, register_secret() the text.
+        #
+        # The selector forms are the assertion. `text=`, `xpath=` and a
+        # selector that only resolves inside an open shadow root are what every
+        # other verb in this recorder accepts; a redact() built on
+        # document.querySelectorAll silently masks none of them.
+        rec.redact(*(selector for _, selector in REDACT_TARGETS))
+        rec.register_secret(REDACT_SECRET)
+        # Every dialect the in-page mask cannot express has to be refused, not
+        # quietly resolved at checkpoints. Checked before the take does
+        # anything, so a regression here is not confused with a masking one.
+        for selector in REDACT_REFUSED_SELECTORS:
+            refused: Exception | None = None
+            try:
+                rec.redact(selector)
+            except SecretLeak as exc:
+                refused = exc
+            b.fail_if(
+                refused is None,
+                f"redact({selector!r}) was accepted. Only CSS can be expressed "
+                f"as a stylesheet, so anything else lapses between checkpoints "
+                f"— it must be refused, not half-covered",
+            )
+        # ?gate-attack=1 spends the first two seconds of the page's life doing
+        # what an ordinary app does by accident: declaring visibility:visible
+        # on a descendant, and stripping <style> elements it does not
+        # recognise. Both defeat a gate built out of html{visibility:hidden}.
+        rec.goto("/?secret=1&gate-attack=1")
+        rec.wait_for("#api-key")
+        # The ticker, but not start_ticker(): that helper also asserts the
+        # determinism CSS is in force, and this take deliberately records with
+        # the default (deterministic=False) because its gate attack runs off
+        # setInterval, which a frozen clock would never fire. What the ticker
+        # is needed for here is only that the screencast keeps emitting frames
+        # through idle stretches, so the wall-clock window the field
+        # measurements use lines up with video time.
+        rec.page.evaluate(TICKER_JS)
+        b.fail_if(
+            not rec.page.evaluate("() => !!document.getElementById('__smoke_ticker')"),
+            "the compositor ticker did not attach — the timestamps this take "
+            "measures the typed fields between are not trustworthy",
+        )
+        rec.pause(1.0)
+
+        rects: dict[str, Rect] = {}
+        measured = [name for name, _ in REDACT_TARGETS] + [
+            *(card for card, _, _ in REDACT_SHAPES.values()),
+            "#api-key-control",
+            "#hero-key-control",
+            "#token",
+            "#token-control",
+            "#sd-token",
+            "#sd-token-control",
+        ]
+        for name in measured:
+            # Through Playwright's engine, not document.querySelector: two of
+            # these live inside a shadow root, where querySelector returns null
+            # and the measurement would silently not be made.
+            found = find_in_frames(rec.page, name)
+            box = found.evaluate(_TEXT_RECT_JS) if found else None
+            if box is not None and name == "#if-key":
+                # An iframe's coordinates are its own; the page's crop needs
+                # the frame's offset added.
+                frame_box = rec.page.locator("#if-frame").bounding_box()
+                if frame_box:
+                    box = [
+                        box[0] + frame_box["x"],
+                        box[1] + frame_box["y"],
+                        box[2],
+                        box[3],
+                    ]
+            if box is None:
+                b.fail_if(True, f"the fixture rendered no {name} — ?secret=1 is broken")
+                continue
+            x, y, w, h = (int(v) for v in box)
+            # Off-screen pixels are not in the frame, and a measurement of
+            # pixels that are not in the frame passes whatever the recorder
+            # does. Say so loudly rather than grading a crop of nothing.
+            b.fail_if(
+                not (0 <= x and 0 <= y and x + w <= 1280 and y + h <= 720 and w > 20),
+                f"{name} is at {(x, y, w, h)}, not fully inside the 1280x720 "
+                f"viewport — every pixel assertion about it would be vacuous",
+            )
+            # ...and clear of the caption bar the recorder burns across the
+            # bottom. A crop that overlaps it is measuring sharp white caption
+            # text, which reads exactly like an unmasked secret: the shadow
+            # field scored 34% of control that way while being, on inspection
+            # of the pixels, thoroughly blurred.
+            band_top = caption_band((1280, 720))[1]
+            b.fail_if(
+                y + h > band_top,
+                f"{name} at {(x, y, w, h)} reaches into the caption band "
+                f"(from y={band_top}) — the crop would include the caption "
+                f"bar's own text and the measurement would be of that",
+            )
+            rects[name] = (x, y, w, h)
+
+        # The shadow-DOM premise, asserted rather than assumed: if the fixture
+        # ever stopped putting these behind a real boundary, the take would go
+        # on passing while proving nothing about shadow DOM at all.
+        b.expect(
+            "Playwright's engine reaching into the open shadow root",
+            rec.page.locator("#sd-key").count(),
+            1,
+        )
+        b.expect(
+            "document.querySelectorAll reaching into the open shadow root",
+            rec.page.evaluate("() => document.querySelectorAll('#sd-key').length"),
+            0,
+        )
+        # ...and the iframe premise: reachable through a frame, not from the
+        # page. If page.locator ever started descending, the cross-frame
+        # counting this take exists to prove would go untested.
+        b.expect(
+            "page.locator() descending into the iframe",
+            rec.page.locator("#if-key").count(),
+            0,
+        )
+        b.fail_if(
+            not any(f.locator("#if-key").count() for f in rec.page.frames),
+            "no frame holds #if-key — the fixture's iframe never rendered, so "
+            "the cross-frame case is not being exercised at all",
+        )
+
+        rec.caption(REDACT_CAPTION)
+        check_caption(b, rec.page, REDACT_CAPTION)
+        rec.shot(REDACT_SHOTS[0])
+
+        # DOM-level checks. Not the proof — the pixels are — but they say
+        # *why* when the pixels fail, and the control ones prove the mask is
+        # aimed rather than smeared over the whole page.
+        #
+        # `filter` is read, not compared to a literal: the radius scales with
+        # the element's font size, so a hardcoded 'blur(8px)' would be a
+        # change-detector that fails on the hero key for being *correct*.
+        for name, selector in REDACT_TARGETS:
+            # The element the *selector* named, which for #hero-card is not
+            # the element measured: a child inherits the rendered blur without
+            # carrying a filter of its own.
+            found = find_in_frames(rec.page, selector)
+            computed = found.evaluate(_FILTER_JS) if found else None
+            b.fail_if(
+                "blur(" not in (computed or ""),
+                f"redact({selector!r}) (masking {name}) has computed filter "
+                f"{computed!r} — the mask did not reach it",
+            )
+        for name in ("#api-key-control", "#hero-key-control"):
+            b.expect(
+                f"{name}, an unregistered element's computed filter",
+                rec.page.eval_on_selector(name, _FILTER_JS),
+                "none",
+            )
+        # Each shape's wrapper must still *say* it is small text. If a
+        # fixture edit ever gave one of these cards a large font-size, the
+        # mask would size itself correctly for the wrong reason and the shape
+        # would stop testing anything.
+        for card, _, why in REDACT_SHAPES.values():
+            wrapper_px = rec.page.eval_on_selector(
+                card, "el => parseFloat(getComputedStyle(el).fontSize)"
+            )
+            b.fail_if(
+                wrapper_px > 16,
+                f"{card} ({why}) has computed font-size {wrapper_px}px — the "
+                f"shape only tests anything while the wrapper claims to hold "
+                f"small text and the value renders large",
+            )
+
+        # The radius has to grow with the text, or a hero value stays readable
+        # through it. 44px against 15px is ~2.9x; allow for rounding.
+        small = _blur_px(rec.page.locator("#api-key").evaluate(_FILTER_JS))
+        # Read off the element redact() was *given* — the wrapper — because
+        # that is where the filter lands; the 44px value inside it inherits
+        # the rendered blur without carrying a filter of its own.
+        hero = _blur_px(rec.page.locator("#hero-card").evaluate(_FILTER_JS))
+        iframe_blur = _blur_px(
+            (
+                find_in_frames(rec.page, "#if-key") or rec.page.locator("#api-key")
+            ).evaluate(_FILTER_JS)
+        )
+        b.fail_if(
+            iframe_blur <= 0,
+            "the key inside the iframe carries no blur — page.locator() does "
+            "not descend into a frame, so this is the cross-frame masking",
+        )
+        b.fail_if(
+            not (hero > small * 2.5),
+            f"the hero value (44px text, inside a 12px wrapper that is what "
+            f"redact() was given) is blurred by {hero:.1f}px and the body key "
+            f"(15px) by {small:.1f}px — the radius is being scaled from the "
+            f"element the selector matched instead of from the text inside it",
+        )
+
+        # The app tears the mask out from under the recorder; the observer has
+        # to put it back before the next frame is painted.
+        had_inline, had_rule = rec.page.evaluate(_TAMPER_JS)
+        b.fail_if(
+            not had_inline or not had_rule,
+            f"before the tamper the recorder had inline filter {had_inline!r} "
+            f"and a blur stylesheet rule: {had_rule} — it must have installed "
+            f"both, or the tamper is not tearing out what the mask relies on",
+        )
+        rec.pause(0.8)
+        b.fail_if(
+            "blur(" not in (rec.page.eval_on_selector("#api-key", _FILTER_JS) or ""),
+            f"after the page wiped the style attribute and removed the "
+            f"stylesheet, #api-key's computed filter is "
+            f"{rec.page.eval_on_selector('#api-key', _FILTER_JS)!r} — nothing "
+            f"put the mask back",
+        )
+        rec.shot(REDACT_SHOTS[1])
+
+        # The other registration path: typing a Secret must register and mask
+        # it without being told either thing. Twice — once into a plain field,
+        # once into one inside a shadow root, where the mask has to cross a
+        # boundary that a document stylesheet cannot.
+        rec.type_into("#token", Secret(REDACT_TYPED))
+        rec.type_into("#sd-token", Secret(REDACT_SHADOW_TYPED))
+        # The controls are typed too, not pre-filled, so the encoder sees all
+        # four fields change within a second of each other. A region that has
+        # just been re-coded carries ringing that a static one does not, and
+        # comparing a freshly typed blurred field against a static sharp one
+        # measured 2.5 where the same crop in the lossless still measured 0.9
+        # — codec noise, read as a leak.
+        rec.type_into("#token-control", REDACT_FIELD_CONTROL)
+        rec.type_into("#sd-token-control", REDACT_SD_FIELD_CONTROL)
+        # Drop focus and park the cursor somewhere that is not measured.
+        # type_into() clicks the field first, which leaves the recorder's own
+        # cursor dot — a hard-edged orange disc drawn over everything — in the
+        # middle of that field's crop for the rest of the take. It measures
+        # 5.0 against 0.8 for the same field without it, and it is not the
+        # secret showing through: it is recorder chrome, which a crop cannot
+        # tell from content. Found by extracting the crop and looking at it,
+        # which is the only way that number was ever going to be explained.
+        rec.page.evaluate(
+            "() => document.activeElement && document.activeElement.blur()"
+        )
+        rec.page.mouse.move(20, 690)
+        rec.pause(0.4)
+        # When the fields started holding a secret, on the same clock as the
+        # beat log. Everything before this they held a placeholder, and the
+        # check grades them only from here on.
+        typed_at = round(time.monotonic() - rec._t0, 3)
+        rec.pause(0.8)
+        b.expect(
+            "type_into('#token', Secret(...)), the field's value",
+            rec.page.input_value("#token"),
+            REDACT_TYPED,
+        )
+        b.expect(
+            "type_into('#sd-token', Secret(...)), the shadow field's value",
+            rec.page.locator("#sd-token").input_value(),
+            REDACT_SHADOW_TYPED,
+        )
+        for name in ("#token", "#sd-token"):
+            b.fail_if(
+                "blur(" not in (rec.page.locator(name).evaluate(_FILTER_JS) or ""),
+                f"type_into({name!r}, Secret(...)) left it with computed "
+                f"filter {rec.page.locator(name).evaluate(_FILTER_JS)!r} — the "
+                f"credential was typed into a field the mask never reached",
+            )
+        b.fail_if(
+            REDACT_TYPED not in rec.secrets,
+            "typing a Secret did not register its value — a caption or a "
+            "narration line could still speak it",
+        )
+        rec.shot(REDACT_SHOTS[2])
+
+        # A caption naming a value nobody has registered yet. Nothing refuses
+        # it — correctly, the recorder has not been told it matters — and the
+        # words are in the frames from here on. Registering it afterwards is
+        # the ordering a hurried author actually produces, and what the beat
+        # log does with it is the assertion: `self._caption` is sticky, so
+        # without scrubbing, this plaintext stamps itself onto every beat that
+        # follows, in the two files this skill tells people to commit.
+        rec.caption(REDACT_LATE_CAPTION)
+        check_caption(b, rec.page, REDACT_LATE_CAPTION)
+        rec.register_secret(REDACT_LATE, REDACT_STAMP)
+        # ...and a still whose *name* holds a key. Scrubbing the beat's `still`
+        # field alone would leave the plaintext as an actual filename on disk
+        # beside a log claiming it was masked, so the name is scrubbed before
+        # the file is written.
+        named = rec.shot(f"04-{REDACT_STAMP}")
+        b.fail_if(
+            REDACT_STAMP in named.name,
+            f"shot() wrote {named.name!r} — a secret in a still's name is a "
+            f"secret in a filename, and scrubbing only the beat log would "
+            f"leave the two disagreeing",
+        )
+        # Two names that differ *only inside the secret*. Scrubbing to a bare
+        # mask makes them the same filename, and the second silently
+        # overwrites the first — a still nobody knows they lost.
+        twin = rec.shot(f"04-{REDACT_LATE}")
+        b.fail_if(
+            twin.name == named.name,
+            f"two shots whose names differ only inside the secret both became "
+            f"{twin.name!r} — the second overwrote the first",
+        )
+        b.fail_if(
+            not (named.is_file() and twin.is_file()),
+            f"one of {named.name!r} / {twin.name!r} is not on disk after both "
+            f"shots were taken",
+        )
+
+        # The gate, watched while it is up and under attack. Everything
+        # else here would pass with no gate at all — the in-page stylesheet
+        # masks from the first paint, so there is nothing legible left for it
+        # to hide — which means the gate's own integrity has to be asserted
+        # directly or not at all.
+        rec.page.evaluate(_REGATE_JS)
+        rec.page.evaluate(_GATE_ATTACK_JS)
+        rec.page.wait_for_timeout(400)
+        # Screenshotted directly rather than through shot(): shot() runs a
+        # checkpoint first, and a checkpoint's whole job is to lower the gate.
+        rec.page.screenshot(path=str(out_dir / "images" / f"{REDACT_GATE_SHOT}.png"))
+        rec.page.evaluate("() => window.__demoRedactUngate()")
+        rec.pause(0.3)
+
+        # A navigation the recorder did not make: an ordinary link click. It
+        # raises the first-paint gate like any other, and for a while nothing
+        # lowered it — the rest of the take recorded as a blank white window
+        # and still reported success. The blankness axis in check_redaction is
+        # what grades this.
+        nav_at = round(time.monotonic() - rec._t0, 3)
+        rec.click("#reload-link")
+        rec.wait_for("#api-key")
+        # A full page load takes the caption bar with it (SKILL.md says so);
+        # re-setting it is what a storyboard does after any navigation. Same
+        # text, so the .tts cache gains no entry.
+        rec.caption(REDACT_AFTER_NAV)
+        rec.pause(1.2)
+        b.fail_if(
+            "blur(" not in (rec.page.locator("#api-key").evaluate(_FILTER_JS) or ""),
+            "after a link navigation the mask did not come back — the init "
+            "script covers a new document, so this is the checkpoint failing",
+        )
+
+        # Captions and narration: burned into the frame *and* spoken *and*
+        # cached on disk, so the right answer is to refuse, not to blur.
+        leak: Exception | None = None
+        try:
+            rec.caption(REDACT_LEAK_CAPTION)
+        except SecretLeak as exc:
+            leak = exc
+        b.fail_if(
+            leak is None,
+            f"caption({REDACT_LEAK_CAPTION[:14]!r}...) holds a registered "
+            f"secret and returned normally — it must raise SecretLeak and "
+            f"fail the take",
+        )
+        b.fail_if(
+            leak is not None and REDACT_TYPED in str(leak),
+            "SecretLeak's own message quotes the secret it caught, which puts "
+            "it in every log that reports the failure",
+        )
+        # The refused line must not have reached the screen on its way out —
+        # the caption still showing is the one set before it.
+        check_caption(b, rec.page, REDACT_AFTER_NAV)
+
+        # Same rule for the on-screen terminal card, which is authored text
+        # drawn large in the middle of the frame.
+        card: Exception | None = None
+        try:
+            rec.terminal(f"curl -H 'x-api-key: {REDACT_SECRET}' /v1/orders")
+        except SecretLeak as exc:
+            card = exc
+        b.fail_if(
+            card is None,
+            "terminal() typed a command holding a registered secret instead "
+            "of raising SecretLeak",
+        )
+
+        # ...and for the card's closing stamp, which is drawn on the same card
+        # by the same mechanism and is authored the same way. terminal() had
+        # the guard and the stamp did not (issue #4 review).
+        stamp: Exception | None = None
+        try:
+            rec.terminal_close(f"done {REDACT_STAMP}")
+        except SecretLeak as exc:
+            stamp = exc
+        b.fail_if(
+            stamp is None,
+            "terminal_close() stamped a registered secret onto the card "
+            "instead of raising SecretLeak",
+        )
+        b.fail_if(
+            REDACT_STAMP in rec.page.content(),
+            "terminal_close()'s stamp reached the DOM before it was refused",
+        )
+
+        rec.caption(REDACT_CLOSING)
+        check_caption(b, rec.page, REDACT_CLOSING)
+        rec.caption("")
+
+        info = {
+            "rects": rects,
+            "geom": dict(rec._geom),
+            "size": (rec._size["width"], rec._size["height"]),
+            "typed_at": typed_at,
+            "typed_until": nav_at,
+        }
+
+    return b.problems, info
+
+
 # -- assertions --------------------------------------------------------------
 
 
@@ -2352,6 +3264,472 @@ def check_healthy(label: str, out_dir: Path) -> list[str]:
     return failures
 
 
+# Longest stretch of blank frames a redacted take may record, in seconds.
+# The first-paint gate legitimately blanks the window while the mask is
+# resolved and verified — measured at 0.30-0.55 s per navigation — so this is
+# not zero. It is nowhere near four seconds, which is what a gate that goes up
+# on a navigation nobody lowers costs, and that was the regression: the take
+# reported success over four blank seconds of a ten-second recording.
+MAX_BLANK_RUN_S = 1.5
+BLANK_STDDEV = 2.0
+
+
+def blank_run_s(mp4: Path, rect: Rect, sample_fps: int = 5) -> tuple[float, float]:
+    """Longest run of blank frames in `rect`, and where it starts, in seconds.
+
+    Blank means no picture at all — a flat window, which is what the paint
+    gate leaves while it is up. Scored on the app rect, not the whole frame,
+    because the recorder's own chrome is never blank and would hide it.
+    """
+    frames = gray_frames(mp4, rect, sample_fps=sample_fps)
+    longest = run = 0
+    start = at = 0
+    for i, frame in enumerate(frames):
+        if contrast(frame) < BLANK_STDDEV:
+            if run == 0:
+                at = i
+            run += 1
+            if run > longest:
+                longest, start = run, at
+        else:
+            run = 0
+    return longest / sample_fps, start / sample_fps
+
+
+def _edges(
+    path: Path,
+    rect: Rect,
+    sample_fps: int | None = None,
+    start: float | None = None,
+    duration: float | None = None,
+) -> list[float]:
+    """Sharpness of `rect` in every (sampled) frame of `path`, normalised for
+    text size so readings at different font sizes are comparable."""
+    frames, width, height = native_frames(
+        path, rect, sample_fps, start=start, duration=duration
+    )
+    return [edge_energy(frame, width, height) for frame in frames]
+
+
+def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
+    """The acceptance criterion of issue #4, one leak path at a time.
+
+    A storyboard that renders a registered secret must produce no frame, no
+    still, no caption and no TTS cache entry containing it. Frames and stills
+    are graded on pixels — a mask that silently stopped applying leaves the DOM
+    saying it is blurred while the recording shows the key — and the two text
+    paths by searching every byte the take wrote.
+
+    Each masked element is graded against the control at *its own* font size:
+    the body keys against #api-key-control, the hero one against
+    #hero-key-control. A single control would compare a 44px key with a 15px
+    reference, and sharpness does not survive that comparison.
+    """
+    from demo_recording import SECRET_MASK, media_duration
+
+    failures: list[str] = []
+    rects: dict[str, Rect] = info["rects"]
+    mp4 = out_dir / "demo.mp4"
+
+    # element -> the control it is measured against, matched on font size.
+    #
+    # Split by *when* the element holds a secret. The five keys are rendered by
+    # the app and hold one from the first paint, so every frame and every still
+    # is fair game. The two fields hold one only after type_into() ran; before
+    # that they are an empty box with a placeholder, which is legitimately
+    # sharp and says nothing about redaction. Grading them from frame zero
+    # would mean grading a placeholder, and the only way to make that pass
+    # would be to slacken the bar for everything.
+    graded = {
+        "#api-key": "#api-key-control",
+        "#sd-key": "#api-key-control",
+        "#if-key": "#api-key-control",
+        "#hero-key": "#hero-key-control",
+        # Every sufficiency shape, graded against the body-size control. They
+        # render four to five times larger than it, so a mask that covered
+        # them only as well as it covers 15px text would still score badly
+        # here — which is the point of grading the shapes rather than one
+        # shape.
+        **{card: "#api-key-control" for card, _, _ in REDACT_SHAPES.values()},
+    }
+    typed = {"#token": "#token-control", "#sd-token": "#sd-token-control"}
+    typed_at = float(info.get("typed_at") or 0.0)
+    # The fields hold a secret from the moment they are typed into until the
+    # page navigates away, and not one frame either side: before, a
+    # placeholder; after, an empty box. Measuring outside that window grades
+    # the wrong pixels — and averages the *control* down, which quietly
+    # loosens every ratio taken against it.
+    typed_for = max(0.0, float(info.get("typed_until") or 0.0) - typed_at) or None
+    nav_at = float(info.get("typed_until") or 0.0) or None
+    all_controls = sorted(set(graded.values()) | set(typed.values()))
+    needed = set(graded) | set(typed) | set(all_controls)
+    missing = sorted(name for name in needed if name not in rects)
+    if missing:
+        return [
+            f"redaction: the take did not report where {missing!r} are on the "
+            f"page, so those pixel assertions could not be made at all"
+        ]
+
+    # -- artifacts ----------------------------------------------------------
+    if not mp4.is_file():
+        failures.append(f"redaction: {mp4} was never written")
+    elif mp4.stat().st_mtime < started_at - 1:
+        failures.append(f"redaction: {mp4} is stale — it predates this run")
+    elif mp4.stat().st_size < MIN_MP4_BYTES:
+        failures.append(
+            f"redaction: {mp4} is only {mp4.stat().st_size} bytes "
+            f"(expected at least {MIN_MP4_BYTES})"
+        )
+    else:
+        seconds = media_duration(mp4)
+        low, high = REDACT_DURATION_S
+        if not low <= seconds <= high:
+            failures.append(
+                f"redaction: demo.mp4 is {seconds:.1f}s, expected between "
+                f"{low:.0f}s and {high:.0f}s"
+            )
+
+    # -- leak path 1: frames -------------------------------------------------
+    if mp4.is_file():
+        geom, size = info["geom"], info["size"]
+        in_video = {n: to_video_rect(rects[n], geom, size) for n in needed}
+        controls: dict[str, float | None] = {}
+        field_controls = set(typed.values())
+        for control_name in all_controls:
+            try:
+                # A field control is an empty box until it is typed into, on
+                # the same beat as the field it grades. Measuring it over the
+                # whole take averages in the frames where it holds nothing.
+                score = statistics.median(
+                    _edges(
+                        mp4,
+                        in_video[control_name],
+                        REDACT_SAMPLE_FPS,
+                        start=typed_at if control_name in field_controls else None,
+                        duration=typed_for if control_name in field_controls else None,
+                    )
+                )
+            except (RuntimeError, ValueError, statistics.StatisticsError) as exc:
+                failures.append(f"redaction: could not measure demo.mp4: {exc}")
+                controls[control_name] = None
+                continue
+            if score < MIN_CONTROL_EDGE["video"]:
+                # Every reading below is a fraction of one of these. If a
+                # control is not sharp there is no picture, and "the key is not
+                # sharp either" would be true of a black video.
+                failures.append(
+                    f"redaction: the unredacted {control_name} is not legible "
+                    f"in demo.mp4 — it scores {score:.1f} edge energy over "
+                    f"{in_video[control_name]}, under the "
+                    f"{MIN_CONTROL_EDGE['video']} floor. Nothing measured "
+                    f"against it means anything until that is fixed: a blank "
+                    f"recording, or a mask that blurred the whole page, scores "
+                    f"near zero everywhere and would pass every ratio below."
+                )
+                controls[control_name] = None
+            else:
+                controls[control_name] = score
+        for name, control_name in sorted(graded.items()) + sorted(typed.items()):
+            control = controls.get(control_name)
+            if control is None:
+                # Never a silent skip. A control that could not be measured
+                # means this element was not graded, and an element that was
+                # not graded has to read as a failure — the alternative is a
+                # green run that quietly checked less than it says it did.
+                # (This is not hypothetical: the field controls were missing
+                # from this dict for one round, and both fields went ungraded
+                # while the run printed PASSED.)
+                failures.append(
+                    f"redaction: {name} was not graded, because its control "
+                    f"{control_name} could not be measured — see above"
+                )
+                continue
+            # A field is only graded from the moment it holds the secret,
+            # and the iframe only until the take navigates away: reloading it
+            # empties it for a beat, and an empty frame is not a masked one —
+            # grading it there measures whatever the surrounding page paints
+            # into the crop. (This cost three runs to see; the crop was
+            # catching the frame's own 1px border, which is now gone, and
+            # then the label above it.)
+            from_s = typed_at if name in typed else None
+            for_s = typed_for if name in typed else None
+            if name == "#if-key":
+                for_s = nav_at
+            readings = _edges(
+                mp4, in_video[name], REDACT_SAMPLE_FPS, start=from_s, duration=for_s
+            )
+            if not readings:
+                failures.append(
+                    f"redaction: no frames of demo.mp4 could be sampled for "
+                    f"{name} after {from_s}s — the window the secret is on "
+                    f"screen was never measured"
+                )
+                continue
+            worst = max(readings)
+            bar = MAX_REDACTED_EDGE_RATIO["field" if name in typed else "text"]
+            if worst > control * bar:
+                failures.append(
+                    f"redaction: {name} is legible in demo.mp4 — the worst of "
+                    f"{len(readings)} sampled frames scores {worst:.1f} edge "
+                    f"energy against {control:.1f} for {control_name}, the "
+                    f"unredacted control of the same kind and size, in the "
+                    f"same frames ({worst / control:.0%}, bar {bar:.0%}). The "
+                    f"blur is not reaching the recording, or is too small for "
+                    f"text this size."
+                )
+            else:
+                print(
+                    f"smoke: redaction {name} is blurred in every frame of "
+                    f"demo.mp4 (worst {worst:.1f} vs {control_name} "
+                    f"{control:.1f}, {worst / control:.0%})"
+                )
+
+    # -- the gate must come down again ---------------------------------------
+    #
+    # The paint gate is only a safe default if a recording it never lowers
+    # fails. It went up on every navigation and was lowered from goto() alone,
+    # so a link click, go_back(), a form submit or location.href left the rest
+    # of the take a blank white window — and every assertion here passed,
+    # because a blank frame has no secret in it either.
+    if mp4.is_file():
+        app_rect = to_video_rect(
+            (0, 0, info["size"][0], info["size"][1]), info["geom"], info["size"]
+        )
+        blank, when = blank_run_s(mp4, keep_top(app_rect))
+        if blank > MAX_BLANK_RUN_S:
+            failures.append(
+                f"redaction: demo.mp4 is blank for {blank:.1f}s from {when:.1f}s "
+                f"(bar {MAX_BLANK_RUN_S}s) — the first-paint gate went up and "
+                f"nothing lowered it. Every pixel assertion above passes on a "
+                f"blank frame, so this is the axis that catches it."
+            )
+        else:
+            print(
+                f"smoke: redaction the paint gate never outstays a navigation "
+                f"(longest blank stretch {blank:.1f}s)"
+            )
+
+    # -- leak path 2: stills -------------------------------------------------
+    for name in REDACT_SHOTS:
+        png = out_dir / "images" / f"{name}.png"
+        if not png.is_file():
+            failures.append(f"redaction: still {png} was never captured")
+            continue
+        if png.stat().st_mtime < started_at - 1:
+            failures.append(f"redaction: still {png} is stale — it predates this run")
+            continue
+        if png.stat().st_size < MIN_PNG_BYTES:
+            failures.append(
+                f"redaction: still {png} is only {png.stat().st_size} bytes"
+            )
+            continue
+        # What this still grades, and therefore which controls it needs. The
+        # fields — and their controls, which are empty boxes until the same
+        # beat types into them — only exist as a measurement after that.
+        here = dict(graded)
+        if name == REDACT_SHOTS[2]:
+            here.update(typed)
+        still_controls: dict[str, float | None] = {}
+        for control_name in sorted(set(here.values())):
+            score = _edges(png, rects[control_name])[0]
+            if score < MIN_CONTROL_EDGE["still"]:
+                failures.append(
+                    f"redaction: the unredacted {control_name} is not legible "
+                    f"in {name}.png ({score:.1f} edge energy, floor "
+                    f"{MIN_CONTROL_EDGE['still']}) — the still is blank or "
+                    f"uniformly blurred, so nothing about it can be graded"
+                )
+                still_controls[control_name] = None
+            else:
+                still_controls[control_name] = score
+        scores: dict[str, float] = {}
+        clean = True
+        for target, control_name in sorted(here.items()):
+            control = still_controls.get(control_name)
+            if control is None:
+                clean = False
+                failures.append(
+                    f"redaction: {target} was not graded in {name}.png, "
+                    f"because its control {control_name} could not be "
+                    f"measured — see above"
+                )
+                continue
+            score = _edges(png, rects[target])[0]
+            scores[target] = score
+            bar = MAX_REDACTED_EDGE_RATIO["field" if target in typed else "text"]
+            if score > control * bar:
+                clean = False
+                failures.append(
+                    f"redaction: {target} is legible in the still {name}.png "
+                    f"— it scores {score:.1f} edge energy against "
+                    f"{control:.1f} for {control_name}, the unredacted control "
+                    f"of the same kind and size in the same image "
+                    f"({score / control:.0%}, bar {bar:.0%}). Web stills are "
+                    f"captured full-bleed, so this is the path a mask applied "
+                    f"only to the video would leak through."
+                )
+        # "ok" only when nothing about this still was wrong. A line that says
+        # ok and quotes the number that just failed is a log nobody trusts.
+        if clean:
+            worst_name = max(scores, key=lambda k: scores[k])
+            print(
+                f"smoke: redaction still {name}.png ok ({len(scores)} masked "
+                f"elements, worst {worst_name} {scores[worst_name]:.1f}, "
+                f"controls "
+                + ", ".join(
+                    f"{c} {v:.1f}"
+                    for c, v in sorted(still_controls.items())
+                    if v is not None
+                )
+                + ")"
+            )
+
+    # -- the gate holds while it is up ---------------------------------------
+    gated_png = out_dir / "images" / f"{REDACT_GATE_SHOT}.png"
+    if not gated_png.is_file():
+        failures.append(f"redaction: {gated_png} was never captured")
+    else:
+        seen = {
+            name: _edges(gated_png, rects[name])[0]
+            for name in sorted(set(graded.values()))
+        }
+        loud = {n: v for n, v in seen.items() if v > MAX_GATED_EDGE}
+        if loud:
+            failures.append(
+                "redaction: the paint gate was up and under attack, and "
+                + ", ".join(f"{n} still scores {v:.1f}" for n, v in loud.items())
+                + f" (bar {MAX_GATED_EDGE}). Those are the *controls* — never "
+                f"redacted — so what leaked through is the page itself. A gate "
+                f"built from an inherited visibility rule is one "
+                f"`visibility:visible` descendant, or one script that strips "
+                f"unknown <style> tags, away from showing everything."
+            )
+        else:
+            print(
+                "smoke: redaction the gate holds under attack (controls "
+                + ", ".join(f"{n} {v:.1f}" for n, v in sorted(seen.items()))
+                + ")"
+            )
+
+    # -- leak path 3: captions, and the beat log they land in ----------------
+    timeline = out_dir / "timeline.json"
+    if not timeline.is_file():
+        failures.append("redaction: timeline.json was never written")
+    else:
+        beats = json.loads(timeline.read_text()).get("beats") or []
+        logged = [b.get("caption") for b in beats if b.get("verb") == "caption"]
+        wanted = [
+            REDACT_CAPTION,
+            REDACT_LATE_CAPTION.replace(REDACT_LATE, SECRET_MASK),
+            # Set again after the link navigation took the bar with it.
+            REDACT_AFTER_NAV,
+            REDACT_CLOSING,
+            "",
+        ]
+        if logged != wanted:
+            failures.append(
+                f"redaction: the captions in timeline.json are {logged!r}, "
+                f"expected {wanted!r} — the refused caption must leave no "
+                f"beat behind, and the ones around it must survive it"
+            )
+        # The beat log's own leak path: `selector` is whatever string the verb
+        # was called with. The refused terminal() call is logged (the beat
+        # opens before the verb body runs), and its command held the key — so
+        # exactly one beat should carry the mask. Asserted positively, because
+        # "no beat contains the secret" is also true of a log that lost the
+        # beat entirely.
+        #
+        # Three beats: the refused terminal() command, the refused
+        # terminal_close() stamp — both logged, because a beat opens before
+        # the verb body runs — and the shot() whose name held a key.
+        masked = [b for b in beats if SECRET_MASK in (b.get("selector") or "")]
+        if len(masked) != 3:
+            failures.append(
+                f"redaction: {len(masked)} beats carry a scrubbed selector, "
+                f"expected 3 — the refused `text=` selector, the refused "
+                f"terminal() command and the refused terminal_close() stamp "
+                f"each held a key, and every one of those beats should show it "
+                f"masked (a beat opens before its verb runs, so a refusal is "
+                f"logged too). Selectors logged: "
+                f"{[b.get('selector') for b in beats]!r}"
+            )
+        # `still` and `caption` are the other two strings on a beat, and a
+        # partially cleaned record is worse than a dirty one: a `[redacted]`
+        # selector beside a plaintext `still` path reads as evidence the log
+        # was cleaned. Asserted positively — the storyboard shoots one still
+        # whose name holds a key, and captions a beat before registering the
+        # secret it names, so exactly one of each must come back masked.
+        for field, expected in (("still", 1), ("caption", 1)):
+            # A `still` is a filename, so it cannot carry SECRET_MASK verbatim:
+            # two shots whose names differ only inside the secret would collide
+            # on `[redacted]` and silently overwrite each other, and the
+            # brackets are glob metacharacters. It is spelled out and given a
+            # digest of the original name instead.
+            token = "redacted-" if field == "still" else SECRET_MASK
+            got = [b for b in beats if token in (b.get(field) or "")]
+            if len(got) < expected:
+                failures.append(
+                    f"redaction: {len(got)} beats carry a scrubbed `{field}`, "
+                    f"expected at least {expected} — the storyboard put a key "
+                    f"in one and the recorder must mask it there too. Logged: "
+                    f"{[b.get(field) for b in beats]!r}"
+                )
+
+    # -- leak path 4: the .tts cache, and every other byte on disk -----------
+    tts_dir = out_dir / ".tts"
+    cached = sorted(p.name for p in tts_dir.glob("*.mp3")) if tts_dir.is_dir() else []
+    # Three lines were narrated, and the late one is on purpose: it was spoken
+    # before anyone registered the value in it. Registering afterwards cannot
+    # un-speak it, and this set says so out loud rather than quietly expecting
+    # two — the clip's *name* is a hash, so no literal reaches the filename.
+    expected_clips = sorted(
+        {
+            tts_cache_name(REDACT_CAPTION),
+            tts_cache_name(REDACT_LATE_CAPTION),
+            tts_cache_name(REDACT_AFTER_NAV),
+            tts_cache_name(REDACT_CLOSING),
+        }
+    )
+    if cached != expected_clips:
+        # Not "the leaking line is absent" — the exact set. An extra entry is
+        # a line that was synthesized and should not have been; a missing one
+        # means narration never ran, and then the absence of the leaking
+        # line's clip is the absence of every clip and proves nothing.
+        failures.append(
+            f"redaction: .tts/ holds {cached!r}, expected exactly "
+            f"{expected_clips!r} — one file per narrated line, and none for "
+            f"the caption that was refused. If it is empty, narration did not "
+            f"run at all and this whole check is vacuous; if there is an "
+            f"extra, a line reached the synthesizer that should not have."
+        )
+    else:
+        print(
+            f"smoke: redaction .tts/ holds {len(cached)} clips — the narrated "
+            f"lines, and nothing for the refused one"
+        )
+
+    # Everything the take wrote, byte for byte: timeline.json, timeline.md,
+    # the stills, the mp4, the narration clips, the marker. No exemptions —
+    # a leak path nobody thought of is exactly what this catches.
+    swept = 0
+    for path in sorted(out_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        swept += 1
+        data = path.read_bytes()
+        for what, literal in REDACT_LITERALS.items():
+            if literal.encode() in data:
+                failures.append(
+                    f"redaction: {what} appears verbatim in {path.relative_to(out_dir)}"
+                )
+    if not failures:
+        print(
+            f"smoke: redaction none of the {len(REDACT_LITERALS)} secrets "
+            f"appears verbatim in any of the {swept} files the take wrote"
+        )
+    return failures
+
+
 def check_take(
     label: str,
     out_dir: Path,
@@ -2947,6 +4325,150 @@ def run_determinism(out_root: Path) -> list[str]:
     return failures
 
 
+def check_unmatched_redaction(out_root: Path, base_url: str) -> list[str]:
+    """A take told to hide something it cannot reach must die, not record.
+
+    The silent no-op is the worst outcome redaction has: `redact("#api-ky")`
+    masks nothing, warns nothing, and produces an mp4 that everyone downstream
+    reads as deliberate. So does a *closed* shadow root, which neither
+    Playwright's engine nor an injected script can see into — this points at
+    one, so the case being proved is the unreachable one and not merely a typo.
+
+    Cheap: a few seconds, one navigation, no storyboard.
+    """
+    from demo_recording import Recorder, SecretLeak
+
+    out_dir = fresh_take_dir(out_root, "redaction-unmatched")
+    failures: list[str] = []
+    raised: BaseException | None = None
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+            rec.redact("#sd-closed-key")
+            rec.goto("/?secret=closed")
+            # A still, taken before the failure is known — which is the whole
+            # point. Web stills are full-bleed, so this is the artifact that
+            # was left on disk holding the unmasked value while the take
+            # reported that it had written nothing.
+            rec.shot("01-before-the-failure")
+            rec.pause(0.5)
+    except SecretLeak as exc:
+        raised = exc
+    except Exception as exc:  # noqa: BLE001 - any other failure is a failure
+        failures.append(
+            f"redaction-unmatched: expected SecretLeak, got {type(exc).__name__}: {exc}"
+        )
+        return failures
+    if raised is None:
+        failures.append(
+            "redaction-unmatched: a take that was told to redact a key inside "
+            "a closed shadow root — which nothing can mask — finished cleanly. "
+            "It masked nothing and said nothing, which is the failure mode "
+            "redaction can least afford."
+        )
+    mp4 = out_dir / "demo.mp4"
+    if mp4.is_file():
+        failures.append(
+            f"redaction-unmatched: {mp4} was written anyway ("
+            f"{mp4.stat().st_size} bytes) — a take that could not verify its "
+            f"mask must leave no recording behind"
+        )
+    stills = sorted(p.name for p in (out_dir / "images").glob("*.png"))
+    if stills:
+        failures.append(
+            f"redaction-unmatched: the stills {stills!r} survived a take that "
+            f"could not verify its mask. They are full-bleed — the whole page, "
+            f"no window frame — so they hold exactly what the mp4 was refused "
+            f"for, and they are the artifact somebody opens first."
+        )
+    for leftover in (".frame.png",):
+        if (out_dir / leftover).is_file():
+            failures.append(f"redaction-unmatched: {leftover} survived the failed take")
+    for name in (CLOSED_SECRET,):
+        for path in sorted(out_dir.rglob("*")):
+            if path.is_file() and name.encode() in path.read_bytes():
+                failures.append(
+                    f"redaction-unmatched: the closed-root key is in "
+                    f"{path.relative_to(out_dir)} after the take failed"
+                )
+    leftovers = (
+        sorted(p.name for p in (out_dir / ".video").glob("*"))
+        if (out_dir / ".video").is_dir()
+        else []
+    )
+    if leftovers:
+        failures.append(
+            f"redaction-unmatched: raw capture left behind in .video/: "
+            f"{leftovers!r} — it holds the frames the mp4 was refused for"
+        )
+    if not failures:
+        print(
+            "smoke: redaction an unmaskable selector fails the take and writes no mp4"
+        )
+    return failures
+
+
+def check_storyboard_leak_discards(out_root: Path, base_url: str) -> list[str]:
+    """A leak refused mid-storyboard must take its stills with it too.
+
+    `_discard_artifacts()` used to be reached only from the exit path, so a
+    take that died on a captioned secret — or a terminal_close() stamp, or a
+    Secret typed into a field the mask could not find — kept everything it had
+    written, while SKILL.md said unconditionally that a SecretLeak keeps
+    nothing. That is a documentation lie rather than a leak (every still is
+    verified before its shutter), and the cheapest fix is to make the doc true.
+    """
+    from demo_recording import Recorder, SecretLeak
+
+    out_dir = fresh_take_dir(out_root, "redaction-storyboard-leak")
+    failures: list[str] = []
+    raised: BaseException | None = None
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+            rec.redact("#api-key")
+            rec.register_secret(REDACT_SECRET)
+            rec.goto("/?secret=1")
+            rec.shot("01-before-the-refusal")
+            # Refused, and raised out of the storyboard rather than out of
+            # __exit__: a different path to the same verdict.
+            rec.caption(f"The key is {REDACT_SECRET}.")
+    except SecretLeak as exc:
+        raised = exc
+    except Exception as exc:  # noqa: BLE001 - any other failure is a failure
+        return [
+            f"redaction-storyboard-leak: expected SecretLeak, got "
+            f"{type(exc).__name__}: {exc}"
+        ]
+    if raised is None:
+        failures.append(
+            "redaction-storyboard-leak: captioning a registered secret did not raise"
+        )
+    left = sorted(p.name for p in (out_dir / "images").glob("*.png"))
+    if left:
+        failures.append(
+            f"redaction-storyboard-leak: {left!r} survived a take that died "
+            f"on a SecretLeak. SKILL.md says a SecretLeak keeps nothing; this "
+            f"is the path where that was not true."
+        )
+    if (out_dir / "demo.mp4").is_file():
+        failures.append("redaction-storyboard-leak: demo.mp4 was written")
+    if not failures:
+        print("smoke: redaction a leak refused mid-storyboard discards its stills too")
+    return failures
+
+
+def run_redaction(out_root: Path) -> list[str]:
+    out_dir = fresh_take_dir(out_root, "redaction")
+    started = time.time()
+    with fixture_server() as base_url:
+        try:
+            problems, info = record_redaction(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"redaction: Recorder raised {type(exc).__name__}: {exc}"]
+        problems += check_unmatched_redaction(out_root, base_url)
+        problems += check_storyboard_leak_discards(out_root, base_url)
+    return problems + check_redaction(out_dir, info, started)
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -3007,6 +4529,11 @@ def main() -> int:
         help="record only the three determinism takes",
     )
     parser.add_argument(
+        "--redaction-only",
+        action="store_true",
+        help="record only the redaction take (issue #4)",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         help="where recordings land (default: a fresh temp dir). The web/ and "
@@ -3026,6 +4553,7 @@ def main() -> int:
             ("--web-only", args.web_only),
             ("--terminal-only", args.terminal_only),
             ("--determinism-only", args.determinism_only),
+            ("--redaction-only", args.redaction_only),
         )
         if on
     ]
@@ -3061,6 +4589,8 @@ def main() -> int:
     try:
         if only in (None, "--web-only"):
             failures += run_web(out_root)
+        if only in (None, "--redaction-only"):
+            failures += run_redaction(out_root)
         if only in (None, "--terminal-only"):
             failures += run_terminal(out_root)
         # After the graded takes, never instead of them: these five record

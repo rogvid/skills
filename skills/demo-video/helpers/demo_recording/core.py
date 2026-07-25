@@ -27,6 +27,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -350,6 +351,77 @@ def _clock_epoch_ms(value: str) -> int:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_dt.timezone.utc)
     return int(parsed.timestamp() * 1000)
+
+
+# -- secrets -----------------------------------------------------------------
+#
+# Demos run against seeded-but-realistic data, and a published video leaks
+# permanently. Two registries, both living here in the base rather than in a
+# medium's module, because every medium needs them and the terminal recorder's
+# PTY scrubber (issue #5) is meant to read the same one the web recorder does:
+#
+#   register_secret(...)  literal text that must never be captioned, spoken,
+#                         or written into the beat log
+#   redact(...)           where the secret *renders* — a web selector today;
+#                         medium-specific, so each medium defines its own
+#
+# What `register_secret` buys is deliberately blunt: a caption or an interlude
+# line containing a registered secret raises SecretLeak and **fails the take**.
+# It does not quietly mask the line, because a secret in a caption is an
+# authoring bug — the storyboard said to put it on screen and speak it aloud,
+# and the only safe answer is to stop and make the author fix the words.
+# `scrub()` is the softer sibling, for output nobody authored (a shell's stdout
+# on the terminal path).
+
+# What `scrub()` leaves behind. Fixed-width-ish and obviously deliberate, so a
+# reader of a scrubbed line can tell "something was removed here" from "the
+# tool mangled my output".
+SECRET_MASK = "[redacted]"
+
+
+class SecretLeak(RuntimeError):
+    """A registered secret reached something that leaves the machine.
+
+    Raised out of the storyboard, so the take dies before the mp4 is written
+    (`__exit__` skips conversion when an exception is in flight). Never carries
+    the secret in its message.
+    """
+
+
+class Secret:
+    """A value the demo must type but must never show, speak, or log.
+
+        rec.type_into("#token", Secret("sk-live-..."))
+
+    Registering happens as a side effect of using it, so there is no way to
+    type one and forget to register it.
+
+    Deliberately **not** a `str` subclass, which would be more convenient and
+    considerably more dangerous: `_verb_target` below picks the first string
+    argument of a verb as that beat's `selector`, so a str-subclassed Secret
+    handed to any verb would be written into timeline.json verbatim — a file
+    this skill tells people to commit. Being a distinct type also makes
+    `isinstance` the test for "this needs redacting", and makes an accidental
+    f-string print the mask instead of the value.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError("Secret() takes a non-empty string")
+        self._value = value
+
+    def reveal(self) -> str:
+        """The real value. The only way to get it, and named so that reading
+        the storyboard shows exactly where the plaintext is used."""
+        return self._value
+
+    def __repr__(self) -> str:
+        return f"Secret(<{len(self._value)} chars>)"
+
+    def __str__(self) -> str:
+        return SECRET_MASK
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -870,6 +942,30 @@ class _DemoBase:
         # Offset from _t0 at which Playwright was last known to be delivering
         # page events. Attribution is only as good as this is fresh.
         self._pumped_at = 0.0
+        # Redaction registries (see "secrets" above). `_secrets` is the shared
+        # one — every medium's text path checks it; `_redacted` is filled in by
+        # whatever the medium's own redact() means (CSS selectors for the web).
+        self._secrets: list[str] = []
+        self._redacted: list[str] = []
+        # Selectors that have matched at least one element at some point. Used
+        # only to tell "this selector never named anything" from "it named
+        # something that is not on screen right now" — *not* as evidence that
+        # anything is currently masked. Whether the mask is on, and big enough,
+        # is re-decided from scratch at every checkpoint against the elements
+        # that exist then; remembering a past success would let a re-render
+        # drop the marker and still count as covered.
+        self._mask_seen: set[str] = set()
+        # Withhold the first paint of a navigation until the mask is verified.
+        # The gate itself is per *document* and lives in the page; what is
+        # tracked here is only whether a navigation is waiting to be checked.
+        self._nav_pending = False
+        self._last_sync = 0.0
+        # "erase" paints an opaque cover over what the element renders;
+        # "blur" is the aesthetic opt-out. See Recorder.redact().
+        self._redact_style = "erase"
+        # Stills this take wrote, so a take that fails to verify its mask can
+        # take them back off disk (they are full-bleed, and may hold it).
+        self._shots: list[Path] = []
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
         # env) is otherwise a confusing surprise only noticed after the fact.
@@ -930,6 +1026,103 @@ class _DemoBase:
         """Transform the finished mp4 in place (e.g. composite it into a
         window on a background). No-op by default; the terminal recorder
         frames itself in-page, so only the web recorder overrides this."""
+
+    def _checkpoint(self) -> None:
+        """Re-establish and re-verify the medium's masking, cheaply.
+
+        Called wherever a take spends time. No-op unless the medium masks."""
+
+    def _before_shot(self) -> None:
+        """Last thing before `shot()` screenshots the page.
+
+        Exists so a medium can re-assert its masking on the still path. Web
+        stills are captured full-bleed — no window frame, the whole page — so
+        this is the path where a secret is most exposed if masking is skipped.
+        No-op by default."""
+
+    # -- secrets (shared registry; see "secrets" at the top of this file) ----
+
+    def register_secret(self, *values: str | Secret) -> None:
+        """Register literal text that must never be captioned, spoken, or
+        logged.
+
+        A caption or interlude line containing a registered value raises
+        SecretLeak and fails the take. Beat-log fields are scrubbed. It does
+        **not** hide the value where the app renders it — that is what the
+        medium's own redaction does (`Recorder.redact` for the web).
+
+        Typing a `Secret` registers it for you; call this directly for a value
+        the demo does not type but the app displays, or that a command prints.
+        """
+        for value in values:
+            text = value.reveal() if isinstance(value, Secret) else value
+            if not isinstance(text, str) or not text:
+                raise ValueError("register_secret() takes non-empty strings")
+            if text not in self._secrets:
+                self._secrets.append(text)
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        """Every registered secret, longest first.
+
+        Longest first so that scrubbing overlapping values (a token and the
+        header line that contains it) masks the larger one whole instead of
+        leaving its tail behind. This is the accessor a medium-specific
+        scrubber should read — see issue #5's PTY path.
+        """
+        return tuple(sorted(self._secrets, key=len, reverse=True))
+
+    def scrub(self, text: str) -> str:
+        """`text` with every registered secret replaced by SECRET_MASK.
+
+        For output nobody authored — a command's stdout, a page title. Text a
+        *storyboard* wrote goes through `_no_secrets` instead, which fails the
+        take rather than quietly editing what the author asked to say.
+        """
+        for secret in self.secrets:
+            text = text.replace(secret, SECRET_MASK)
+        return text
+
+    def _verify_redaction_final(self) -> None:
+        """Last word before conversion: raise if anything registered was
+        never masked. No-op unless the medium implements masking."""
+
+    def _scrub_deep(self, value: object) -> object:
+        """`scrub()` over a whole structure, not just its top-level strings.
+
+        A beat's `extra` keys and an issue's detail can be lists and dicts —
+        a stack trace, a list of request URLs — and a scrub that only walked
+        the outermost values left those untouched in the two files this skill
+        tells people to commit.
+        """
+        if isinstance(value, str):
+            return self.scrub(value)
+        if isinstance(value, dict):
+            return {key: self._scrub_deep(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._scrub_deep(item) for item in value]
+        return value
+
+    def _no_secrets(self, text: str, where: str) -> None:
+        """Raise unless `text` is free of every registered secret.
+
+        The message never contains the secret: it names the leak site and
+        quotes the *scrubbed* line, which is enough to find the offending
+        storyboard line without writing the value into a terminal, a CI log,
+        or a bug report.
+        """
+        if not text:
+            return
+        for secret in self.secrets:
+            if secret in text:
+                raise SecretLeak(
+                    f"{where} contains a registered secret ({len(secret)} "
+                    f"chars) and would be burned into the frames"
+                    + (" and spoken aloud" if self._speech else "")
+                    + f": {self.scrub(text)!r}. A secret in narration is an "
+                    f"authoring bug, not something to blur after the fact — "
+                    f"reword the line. This take wrote no mp4."
+                )
 
     # -- context manager ----------------------------------------------------
 
@@ -1002,8 +1195,21 @@ class _DemoBase:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        # A mask that never matched anything is the failure redaction can
+        # least afford: the take looks redacted and is not. Checked while the
+        # page is still alive, and remembered rather than raised, so the
+        # browser and the Playwright driver still get torn down — then
+        # re-raised at the end, having skipped conversion. A take that cannot
+        # prove it masked what it was told to writes no mp4.
+        unmasked: BaseException | None = None
         if exc_type is None:
-            self._finish_line(tail=0.5)  # don't end mid-sentence
+            try:
+                self._verify_redaction_final()
+            except SecretLeak as leak:
+                unmasked = leak
+            else:
+                self._finish_line(tail=0.5)  # don't end mid-sentence
+        clean = exc_type is None and unmasked is None
         self._stop()
         video = self.page.video
         self._context.close()
@@ -1011,9 +1217,9 @@ class _DemoBase:
         self._browser.close()
         self._pw.stop()
         try:
-            if exc_type is None and webm and webm.exists():
+            if clean and webm and webm.exists():
                 self._convert(webm)
-            if exc_type is None:
+            if clean:
                 # The beat log is the durable, diffable record of the take — it
                 # outlives the mp4, which is not committed. Written after
                 # conversion so `duration` is the encoder's answer, not a guess.
@@ -1025,10 +1231,40 @@ class _DemoBase:
             for leftover in self._video_dir.glob("*"):
                 leftover.unlink()
             self._video_dir.rmdir()
+            # A take that could not vouch for its mask must not leave its
+            # stills behind. They are full-bleed — the whole page, no window
+            # frame — and they are the artifact somebody picks up first,
+            # precisely because they are cheap to look at. The mp4 was never
+            # written; these were, before the failure was known.
+            # Any SecretLeak, not only the one raised on the way out. A leak
+            # refused inside the storyboard — a captioned secret, a
+            # terminal_close() stamp, a Secret typed into a field the mask
+            # could not find — leaves the same stills behind, and SKILL.md
+            # promises unconditionally that a SecretLeak keeps nothing.
+            if unmasked is not None or (
+                exc_type is not None and issubclass(exc_type, SecretLeak)
+            ):
+                self._discard_artifacts()
             # Always, strict or not, crashed or not: the problems a take
             # recorded are the one thing nobody thinks to go looking for, so
             # they have to arrive unasked.
             self._print_issue_summary()
+        # Two failure modes that disagree about what to leave behind, and the
+        # disagreement is deliberate:
+        #
+        #   StrictTakeFailed  the take recorded console errors or a bad exit
+        #                     code. The mp4, the stills and the timeline are
+        #                     written first and kept — they are the evidence
+        #                     somebody needs to see what the app did.
+        #   SecretLeak        the mask could not be verified. Nothing is kept:
+        #                     the recording, the stills and the beat log may
+        #                     each hold the value, and an artifact nobody can
+        #                     vouch for is worse than no artifact at all.
+        #
+        # So the leak is raised first and suppresses everything, and the strict
+        # verdict is only reached when there was no leak to suppress it.
+        if unmasked is not None:
+            raise unmasked
         if exc_type is None and self._strict and self._fatal_count:
             raise StrictTakeFailed(self._strict_message())
 
@@ -1255,14 +1491,30 @@ class _DemoBase:
             yield None
             return
         self._in_beat = True
+        # Every string on a beat is scrubbed, not just the obvious one.
+        # timeline.json and timeline.md are files this skill tells people to
+        # commit, and a partially-cleaned record is worse than a dirty one:
+        # a `[redacted]` selector sitting next to a plaintext `still` path
+        # reads as evidence the log was cleaned.
+        #
+        #   selector  whatever string the verb was called with
+        #   still     built from shot()'s name, which shot() scrubs before it
+        #             names the file, so path and log agree
+        #   caption   `self._caption` is sticky: a register_secret() that
+        #             lands after the caption naming the value would
+        #             otherwise stamp plaintext onto every later beat
+        #
+        # Scrubbed rather than fatal, because none of these is text a viewer
+        # reads off the screen. Caption text reaches the screen through
+        # caption(), which refuses it outright.
         record: dict = {
             "index": len(self._beats),
             "t_start": round(time.monotonic() - self._t0, 3),
             "t_end": None,
-            "caption": self._caption if caption is None else caption,
+            "caption": self.scrub(self._caption if caption is None else caption),
             "verb": verb,
-            "selector": selector,
-            "still": still,
+            "selector": self.scrub(selector) if selector else selector,
+            "still": self.scrub(still) if still else still,
             "segment": self.segment,
         }
         record.update(extra)
@@ -1287,6 +1539,19 @@ class _DemoBase:
                 duration = round(media_duration(mp4), 3)
             except (subprocess.CalledProcessError, ValueError, OSError):
                 duration = None  # a timeline without it still beats none
+        # Scrubbed again on the way out, over the whole log. `_beat` scrubs
+        # what is registered *at the time the beat runs*, which is nothing at
+        # all for a value registered later in the take — and registering late
+        # is the ordering a hurried author actually produces. The frames from
+        # before the registration keep the value (no recorder can un-paint a
+        # caption), but the files this skill tells people to commit do not
+        # have to.
+        beats = [self._scrub_deep(beat) for beat in self._beats]
+        # The issue log too: it quotes console messages, request URLs and
+        # process output — none of it authored, all of it capable of carrying
+        # a secret the app printed, and all of it written into the same two
+        # committed files.
+        issues = [self._scrub_deep(issue) for issue in self._issues]
         return {
             "schema": TIMELINE_SCHEMA,
             "generated_by": "demo-video",
@@ -1305,9 +1570,9 @@ class _DemoBase:
                 "timezone_id": self._timezone_id,
                 "locale": self._locale,
             },
-            "beats": self._beats,
+            "beats": beats,
             "strict": self._strict,
-            "issues": self._issues,
+            "issues": issues,
             "issue_count": self._issue_count,
         }
 
@@ -1321,6 +1586,11 @@ class _DemoBase:
         are delivered while the beat they belong to is still open. Deadline,
         not accumulated slices: the pump costs about a millisecond and a
         storyboard's pacing must not drift by however many of them it took."""
+        # Holding the frame is where a take spends most of its time, and it is
+        # where a page that navigated on its own sits behind a raised paint
+        # gate waiting for somebody to notice. Checking here is what keeps the
+        # gate from outliving the navigation that raised it.
+        self._checkpoint()
         end = time.monotonic() + seconds
         while True:
             self._pump_events()
@@ -1340,6 +1610,9 @@ class _DemoBase:
         With speech enabled the line is also spoken; the previous line
         always finishes before this one starts.
         """
+        # Before anything else, and specifically before _prepare_line() —
+        # which would synthesize the line and cache the audio on disk.
+        self._no_secrets(text, "caption()")
         # Synthesizing and waiting out the previous spoken line happens
         # *before* the beat opens: the beat's t_start is when this caption
         # reaches the screen, which is what a reviewer extracting a frame at
@@ -1371,6 +1644,7 @@ class _DemoBase:
         time-skips (minutes of background work) between segments. style="light"
         is a centered label over a soft scrim with the scene still visible —
         lighter, for short transitions where a full takeover feels heavy."""
+        self._no_secrets(text, "interlude()")
         clip = self._prepare_line(text)
         fn = "__demoBridge" if style == "light" else "__demoInterlude"
         with self._beat("interlude", selector=style, caption=text):
@@ -1389,11 +1663,70 @@ class _DemoBase:
         remaining = self._line_end - time.monotonic()
         self._idle(max(min_s, remaining))
 
+    def _discard_artifacts(self) -> None:
+        """Take back everything this take put on disk, and say what went.
+
+        Only what *this* take wrote: `self._shots`, not `images/*.png`, so a
+        failed retake into a directory holding a previous take's stills does
+        not delete somebody's committed guide. The message names each file
+        rather than claiming a general cleanup, because "cleaned up" without a
+        list is exactly the sentence people believe and do not check.
+        """
+        gone: list[str] = []
+        for path in self._shots + [self.out_dir / ".frame.png"]:
+            try:
+                if path.is_file():
+                    path.unlink()
+                    gone.append(path.name)
+            except OSError:  # noqa: PERF203 - report what could not be removed
+                print(
+                    f"demo-video: WARNING — could not delete {path}, which may "
+                    f"hold a secret this take failed to mask",
+                    file=sys.stderr,
+                )
+        print(
+            "demo-video: the take could not verify its mask, so it wrote no "
+            "mp4 and no timeline, and deleted "
+            + (", ".join(gone) if gone else "nothing (it had written nothing)")
+            + ". The raw capture in .video/ is gone too.",
+            file=sys.stderr,
+        )
+
+    def _safe_shot_name(self, name: str) -> str:
+        """A still's name with any secret removed, safely.
+
+        Scrubbing to the bare mask is not enough for something that becomes a
+        *filename*: two shots whose names differ only inside the secret would
+        both become `04-[redacted]` and the second would silently overwrite the
+        first, and `[`/`]` are glob metacharacters for everything downstream
+        that walks `images/`. So the mask is spelled plainly and a short digest
+        of the original name is appended — stable across runs, distinct per
+        name, and readable.
+        """
+        scrubbed = self.scrub(name)
+        if scrubbed == name:
+            return name
+        digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", scrubbed.replace(SECRET_MASK, "redacted"))
+        return f"{cleaned.strip('-')}-{digest}"
+
     def shot(self, name: str) -> Path:
         """Still for the written guide -> images/<name>.png."""
+        # Scrubbed here rather than only in the beat record, so the file on
+        # disk carries the same name the log does. Scrubbing the log alone
+        # would leave images/04-sk-live-….png sitting next to a beat that
+        # says the name was masked.
+        name = self._safe_shot_name(name)
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()
+        self._shots.append(path)
         with self._beat("shot", selector=name, still=rel):
+            # Stills are the exposed path: the web recorder captures them
+            # full-bleed — the whole page, no window frame — so a mask that
+            # only covers the video would leave every still readable. Nothing
+            # here re-derives the masking; it re-asserts the same in-page one
+            # the frames get, immediately before the shutter.
+            self._before_shot()
             self.page.screenshot(path=str(path))
         return path
 
@@ -1403,6 +1736,12 @@ class _DemoBase:
         """Synthesize (or fetch cached) audio for a narration line, and wait
         out the previous line — never speak two lines at once, never show a
         caption while the voice is still on the previous one."""
+        # The single choke point for everything this package speaks, and the
+        # last thing that runs before text becomes a file in .tts/ — which is
+        # keyed by the text and holds the spoken words as audio. Both callers
+        # (caption, interlude) already checked; this is here so that a future
+        # spoken path inherits the check instead of having to remember it.
+        self._no_secrets(text, "a narration line")
         clip = None
         if self._speech and text:
             clip = tts_clip(
