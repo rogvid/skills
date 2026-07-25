@@ -50,7 +50,31 @@ never sees it. This is the whole mechanism:
 5. `git mv wip/<name> skills/<name>`.
 6. Update the README: add a row to the **Skills** table, remove it from
    **In development**.
-7. Verify the per-skill install command against the pushed commit.
+7. Create the skill's issue label:
+   `gh label create <name> --description "Issues for the <name> skill" --color 1d76db`.
+8. Verify the per-skill install command against the pushed commit.
+
+## Issue tracking — GitHub Issues via `gh`
+
+**GitHub Issues is the issue tracker for this repo, and the `gh` CLI is how you
+reach it.** There is no `TODO.md`, no backlog file, no list of open questions
+buried in `docs/`. If work is worth remembering, it is an issue.
+
+- Start of a work session, or before picking up anything vague: `gh issue list`.
+  Read the whole issue before acting on it — `gh issue view <n>`.
+- Spotted follow-up work that is out of scope for what you are doing? **File it
+  yourself**, don't just mention it in chat:
+  `gh issue create --title … --body … --label <skill>`. Say the issue number in
+  your reply.
+- Label every issue with the skill it concerns (`demo-video`,
+  `script-conventions`, …). Create the label when a new skill is promoted:
+  `gh label create <skill> --description "Issues for the <skill> skill"`.
+  Repo-wide work gets no skill label. The default GitHub labels (`bug`,
+  `enhancement`, `documentation`, …) stack on top.
+- Close issues from commits — `Fixes #12` in the commit message — rather than by
+  hand, so the reason a thing closed is in the history.
+- Big design proposals belong in the issue body as a checklist, the way #1 does.
+  Split an item into its own issue once someone actually starts on it.
 
 ## Housekeeping
 

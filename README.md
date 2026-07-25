@@ -43,6 +43,12 @@ or installed. (You can still pull one directly by path if you want to try it.)
 
 *Nothing in development right now.*
 
+## Issues
+
+Planned work, bugs, and design proposals live in
+[GitHub Issues](https://github.com/rogvid/skills/issues), one label per skill —
+`gh issue list --label demo-video`. There is no backlog file in the repo.
+
 ## Adding or promoting a skill
 
 See [`AGENTS.md`](AGENTS.md) for the layout rules and the promotion checklist.
