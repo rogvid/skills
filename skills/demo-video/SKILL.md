@@ -550,6 +550,16 @@ at the top level carry the value every segment agrees on — `"mixed"`, and
 `null` per key, where they do not; the per-segment truth is in `segments`. A
 timeline a single take wrote has no `segments` key at all.
 
+`stitch()` refuses before it encodes anything if the parts cannot honestly be
+joined: a missing or unreadable `.seg.mp4`, a beat log of the wrong schema or
+one written for a *different recording* of that segment, or parts that
+disagree on codec, resolution, frame rate or having an audio track.
+`concat -c copy` accepts all of those and exits 0, and the damage is invisible
+afterwards — a frame-rate mismatch moves every later beat away from its frame,
+a resolution mismatch keeps the first part's dimensions, and one silent part
+makes concat drop every later part's narration. Recording every segment with
+the same `Recorder` settings is what keeps you clear of it.
+
 ## Failing the take on a broken app
 
 **A demo that looks perfect while the app throws `TypeError` on every render

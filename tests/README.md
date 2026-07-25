@@ -57,7 +57,8 @@ smoke: redaction still 01-key-blurred.png ok (key 1.0, token 2.9, control 39.3)
 smoke: redaction .tts/ holds 2 clips — the narrated lines, and nothing for the refused one
 smoke: redaction no artifact holds either secret verbatim
 smoke: segments recorded 2 parts, each with its own beat log (part1 6.8s, part2 7.8s)
-smoke: segments the merge puts the second segment's closing caption +0 ms from where its own segment does (-80 ms in part2.seg.mp4, -80 ms in demo.mp4)
+smoke: segments part1's probe caption is +0 ms from where its own segment puts it (-120 ms in part1.seg.mp4, -120 ms in demo.mp4)
+smoke: segments part2's probe caption is +0 ms from where its own segment puts it (-80 ms in part2.seg.mp4, -80 ms in demo.mp4)
 smoke: segments stitched 2 parts into a 14.6s demo.mp4 and merged their beat logs (15 beats); keep_parts=True kept every part and its log, the default removed them
 smoke: segments closing caption 'Recorded end to end.' logged at 11.43s, on screen at 11.35s (-80 ms)
 smoke: segments timeline.json ok (15 beats)
@@ -694,24 +695,42 @@ shorter than its beats say it took. Injecting nominal timing here moves the
 second segment's beats 2.1 s off their frames.
 
 **How the acceptance criterion is measured, and why it can be stated at
-100 ms.** The closing caption is timed *twice* — once in `part2.seg.mp4`
-against that segment's own beat log, and once in the stitched `demo.mp4`
-against the merged one. `stitch()` copies the streams, so those are literally
-the same frames carrying the same capture loss, and the **difference** between
-the two skews is the merge's offset error with issue #18 cancelled out.
-Measured across six takes: **+0 ms**, every time, against a 100 ms bar; the
-absolute skews behind it ranged -200 to +0 ms. A bar on the absolute skew
-could not be set anywhere near that, because a segment whose capture stalled
-shows every caption early in its own video too.
+100 ms.** Every segment carries a probe caption with a quiet run-up, and each
+is timed *twice* — once in that segment's own `.seg.mp4` against that
+segment's own beat log, and once in the stitched `demo.mp4` against the merged
+one. `stitch()` copies the streams, so those are literally the same frames
+carrying the same capture loss, and the **difference** between the two skews
+is that segment's offset error with issue #18 cancelled out. Measured across
+several takes: **+0 ms** for both segments, against a 100 ms bar; the absolute
+skews behind them ranged -200 to +0 ms. A bar on the absolute skew could not
+be set anywhere near that, because a segment whose capture stalled shows every
+caption early in its own video too.
 
-That cancellation is also why the sharp `MAX_SKEW_DRIFT_S` (250 ms) does *not*
-apply between the take's two probes here: they sit in different segments, so
-they rode different screencasts, each with its own ~0.7 s of untickerable
-recorder setup, and a stall in the second moves only the second. Measured
-across four takes: -80, +80, +80, and one at **-520** — a real segment-two
-stall, which would have made this axis flake. Across a boundary the bound is
-therefore one capture-loss window, and the tight claim is made by the
-differential measurement instead.
+**One probe per segment, and that is load-bearing rather than thorough.** The
+differential at segment *k* measures `offset_true - offset_recorded` for that
+segment and nothing else. Timing only the last segment therefore checks only
+the last cumulative offset: a constant shift applied to segment one's beats
+leaves it exact, and with three or more segments every intermediate offset
+would have no pixel measurement at all. That is not hypothetical — an earlier
+round of this file timed one beat, and injecting +350 ms onto segment one
+passed, printing `beat clock holds across the take (+400 ms)`.
+
+The other half is each segment's *own* skew, graded against the same
+directional bars a single take gets (250 ms log-ahead, 750 ms video-ahead) but
+read out of that segment's own mp4. The differential cancels capture loss on
+purpose, so it is blind by construction to a segment whose own video has slid
+away from its own beat log; this is where that shows up, per capture.
+
+Between them, `MAX_SKEW_DRIFT_S` across a boundary has nothing left to say,
+and it is explicitly **a flake guard rather than a check**: the take's two
+probes sit in different segments, so they rode different screencasts, each
+with its own ~0.7 s of untickerable recorder setup, and a stall in the second
+moves only the second. Measured across four takes: -80, +80, +80, and one at
+**-520** — a real segment-two capture stall, not a merge error, which a 250 ms
+bar here would fail on about one run in four. It is widened to one capture-loss
+window for that reason alone, and the file says so where the number is set. A
+constant shift of any segment's beats is caught by the two measurements above,
+at 100 ms, not by this one at any width.
 
 The rest is what is true of a merge and of nothing else:
 
@@ -722,7 +741,11 @@ The rest is what is true of a merge and of nothing else:
 | `stitch(keep_parts=True)` leaves every part **and its beat log** | re-recording one expensive segment and re-stitching is the whole reason that flag exists, and it needs the logs as much as the mp4s |
 | stitching twice produces the same beats | the merge has to be a function of what is on disk |
 | the default `stitch()` leaves **no** `*.seg.*` at all | [#21](https://github.com/rogvid/skills/issues/21): a `.seg.timeline.json` outliving its `.seg.mp4` names a file that is gone, and the next stitch cannot tell it from a fresh one |
-| the merged envelope's `segments` records match ffprobe, in order, and tile `demo.mp4` | it is what maps a merged timestamp back to the file it came from |
+| the merged envelope's `segments` records, **all six fields**: `segment` / `media` in order, `duration` / `offset` against ffprobe and tiling `demo.mp4`, and `beats` / `recorder` / `determinism` against the segment's own log | it is what maps a merged timestamp back to the file it came from, and `SKILL.md` points a reader at the last three for the per-segment truth the envelope cannot carry once segments disagree. Checking only the first four was measured passing with `beats` hardcoded to 0 and `recorder` to `"Bogus"` |
+| `segments[].beats` also equals how many merged beats carry that segment | the two can only differ if the merge dropped or duplicated some |
+| `stitch()` refuses parts that disagree on codec, geometry, frame rate, or having an audio track | `concat -c copy` joins them and exits 0. A frame-rate mismatch was measured putting a beat **1.92 s** from its frame; a geometry mismatch silently keeps part one's dimensions; a silent part followed by a narrated one makes concat drop the narration entirely. None is reachable through the shipped recorders — nothing enforced it at the join |
+| `stitch()` refuses a segment log written for a different recording of that segment | the `media`-name check cannot see it: both sides derive from the same segment string. Re-recording one part and merging it against the previous take's log is the ordinary way to get here, and it was accepted silently (6.6 s log against a 2.0 s part) |
+| every part is probed *before* ffmpeg runs, and `.concat.txt` is removed even when it fails | a truncated part makes concat exit 0 and `media_duration` raise afterwards, leaving `demo.mp4` with no `timeline.json` — the one state a reader cannot tell from a demo that never had beats |
 | `index` is renumbered to the position in the merged file, `segment_index` is **not** | [#22](https://github.com/rogvid/skills/issues/22): `(segment, segment_index)` names a beat the same way before and after a merge, which `index` alone cannot. Asserted in every take, not just this one — for a single take it is 0, 1, 2, … |
 | a take recorded in one piece carries no `segments` key | that key means "assembled by stitch()", and a reader would otherwise be told a single recording has parts |
 
@@ -882,18 +905,34 @@ knows is missing is worse than one that is openly absent.
   exercised only as "stitch the same parts twice". A demo mixing a web and a
   terminal segment, which the merged envelope's `"mixed"` recorder value is
   for, is recorded nowhere.
+- **The differential measurement dies before its own bar does.** Each reading
+  goes through `caption_appearance_s`, whose search window is `ALIGN_PRE_S`
+  (1.2 s) — so once a segment's *in-segment* skew passes about -0.72 s the
+  measurement cannot be made at all, and the failure it produces blames a
+  screencast stall (#18) rather than saying the merge was not graded. That
+  cliff sits *inside* the 750 ms absolute bar, and the one segment-two stall
+  measured here (-520 ms) was ~200 ms from it. The same limit makes a large
+  offset error unmeasurable rather than measured: an injected nominal-timing
+  merge (-2.12 s) degraded to "the caption band did not move… almost certainly
+  a screencast stall", and what actually named the cause was the
+  `segments`-record-vs-ffprobe check, not the acceptance criterion.
+- **The merged envelope's disagreement paths are never taken.** Both segments
+  are recorded by the same recorder with the same settings, so `recorder`
+  resolves to `"Recorder"` and every `determinism` key agrees. The `"mixed"`
+  value and `_merge_determinism`'s null-on-disagreement branch — both
+  documented in `SKILL.md` as what a reader gets from a mixed demo — are
+  produced by nothing here and asserted by nothing.
 - **The merge's `issues` path is unexercised.** `stitch()` also offsets each
   issue's `t` and re-points its `beat` at the merged beat list, and the
   segmented take is a recording of a *healthy* app under `strict=True` — so it
   records no issues at all and none of that runs. An issue attributed to the
   wrong beat of the wrong segment would pass this suite. Tracked in
   [#51](https://github.com/rogvid/skills/issues/51).
-- **The merge's error is measured at one beat, not all of them.** The
-  differential measurement below reads the *closing caption* out of two
-  videos. Every other beat in the second segment is carried by the same single
-  offset, so one being right makes the rest right — but a merge that moved
-  some beats and not others would be caught only by the ordering and coverage
-  checks, which are much coarser.
+- **The merge's error is measured at one beat per segment, not all of them.**
+  Every other beat in a segment is carried by that segment's single offset, so
+  one being right makes the rest right — but a merge that moved some of a
+  segment's beats and not others would be caught only by the ordering and
+  coverage checks, which are much coarser.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.

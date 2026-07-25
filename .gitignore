@@ -27,3 +27,6 @@ tests/out/
 
 # Best practice
 .env
+
+# ffmpeg concat listing, written and removed by stitch()
+.concat.txt

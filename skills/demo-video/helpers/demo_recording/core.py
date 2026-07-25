@@ -1881,14 +1881,29 @@ def _merge_determinism(records: list[dict]) -> dict:
     }
 
 
-def _segment_timeline(out_dir: Path, segment: str, media: Path) -> dict:
-    """One segment's timeline document, checked against the media it names.
+# How far a segment's recorded `duration` may sit from what its .seg.mp4
+# measures now. The recorder probed the same file with the same tool moments
+# after writing it, so anything past this is not rounding — it is a log paired
+# with a *different* recording of that segment (see _segment_timeline).
+SEGMENT_STALE_S = 0.25
+
+
+def _segment_timeline(out_dir: Path, segment: str, media: Path, probed: float) -> dict:
+    """One segment's timeline document, checked against the media beside it.
 
     Refuses rather than guesses. A segment timeline that is missing, written
-    to a different schema, or describing some other file is not something a
-    merge can quietly work around: the result would be a demo-wide timeline
-    silently missing a segment's worth of beats, which is exactly the failure
-    #7 exists to remove.
+    to a different schema, or describing a different recording is not
+    something a merge can quietly work around: the result would be a demo-wide
+    timeline whose beats belong to a video nobody has, which is exactly the
+    failure #7 exists to remove.
+
+    The check that does the work here is the **duration** one. The `media`
+    name is derived from the same segment string as the path this was loaded
+    from, so those two can only disagree if somebody hand-edited the file —
+    whereas re-recording one segment and merging it against the previous
+    take's log is an ordinary Tuesday, produces a name that matches perfectly,
+    and is precisely the stale pairing that would date-stamp the wrong beats
+    onto this demo.
     """
     json_path, _ = timeline_paths(out_dir, segment)
     if not json_path.is_file():
@@ -1911,13 +1926,85 @@ def _segment_timeline(out_dir: Path, segment: str, media: Path) -> dict:
         raise ValueError(
             f"{json_path} describes {doc.get('media')!r}, not {media.name!r} — "
             f"it is a leftover from a different take, and merging it would "
-            f"date-stamp somebody else's beats onto this demo"
+            f"stamp somebody else's beats onto this demo"
+        )
+    logged = doc.get("duration")
+    if isinstance(logged, (int, float)) and abs(float(logged) - probed) > SEGMENT_STALE_S:
+        raise ValueError(
+            f"{json_path} was written for a {float(logged):.2f}s recording, but "
+            f"{media.name} is {probed:.2f}s — the log and the video are from "
+            f"different takes of segment {segment!r}. Re-record the segment, or "
+            f"delete the stale log: merging them would put this demo's beats at "
+            f"timestamps belonging to a video that no longer exists."
         )
     return doc
 
 
+# What every part must agree on before `concat -c copy` may join them. All of
+# these are silent failures rather than loud ones, which is why they are
+# checked here instead of being left to ffmpeg:
+#
+#   frame rate  a mismatch is accepted, ffmpeg exits 0, and the joined video
+#               runs at one part's rate — measured putting a beat 1.92 s from
+#               its frame, which is the merge's whole subject matter;
+#   geometry    accepted silently, and the output keeps the first part's
+#               dimensions, so the second is stretched or cropped. Reachable
+#               through the very demo the merged envelope's "mixed" recorder
+#               value exists for: a web segment and a terminal one;
+#   audio       a silent part followed by a narrated one makes concat drop the
+#               narration *entirely*. The recorders give every segment a track
+#               (silence when there are no lines) for this reason, so a part
+#               without one did not come from here.
+#
+# None of it is reachable through the shipped recorders, which pin -r 25, one
+# viewport and an audio track per segment. Nothing enforced that at the join.
+_STREAM_FIELDS = ("codec", "width", "height", "frame rate", "audio track")
+
+
+def _stream_shape(path: Path) -> tuple:
+    """(codec, width, height, r_frame_rate, has audio) for one part."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries",
+         "stream=codec_name,width,height,r_frame_rate", "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    video = tuple(out.stdout.strip().split(","))
+    audio = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-select_streams", "a", "-show_entries",
+         "stream=codec_name", "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    return (*video, bool(audio.stdout.strip()))
+
+
+def _check_stream_shapes(parts: list[Path]) -> None:
+    """Refuse to concat parts that differ in anything concat cannot fix."""
+    shapes = [_stream_shape(p) for p in parts]
+    for shape, part in zip(shapes[1:], parts[1:], strict=True):
+        if shape == shapes[0]:
+            continue
+        differing = ", ".join(
+            f"{name} {a!r} vs {b!r}"
+            for name, a, b in zip(_STREAM_FIELDS, shapes[0], shape, strict=False)
+            if a != b
+        )
+        raise ValueError(
+            f"{part.name} does not match {parts[0].name}: {differing}. "
+            f"`concat -c copy` joins these without complaint and the result is "
+            f"wrong in a way nothing downstream can see — a frame-rate mismatch "
+            f"moves every beat of the later segments away from its frame, a "
+            f"geometry mismatch keeps the first part's dimensions, and a part "
+            f"with no audio track makes concat drop every later part's "
+            f"narration. Re-record the segments with the same recorder settings."
+        )
+
+
 def _merged_timeline(
-    segments: list[str], parts: list[Path], docs: list[dict], demo: Path
+    segments: list[str],
+    parts: list[Path],
+    docs: list[dict],
+    durations: list[float],
+    demo: Path,
 ) -> dict:
     """One timeline for a stitched demo, built from its segments'.
 
@@ -1940,8 +2027,10 @@ def _merged_timeline(
     offset = 0.0
     issue_count = 0
     strict = True
-    for segment, part, doc in zip(segments, parts, docs, strict=True):
-        duration = round(media_duration(part), 3)
+    for segment, part, doc, probed in zip(
+        segments, parts, docs, durations, strict=True
+    ):
+        duration = round(probed, 3)
         base = len(beats)
         for beat in doc.get("beats") or []:
             merged = dict(beat)
@@ -2014,6 +2103,10 @@ def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None
     `_merged_timeline` for how the offsets are derived and why they come from
     ffprobe rather than from the storyboard.
 
+    Refuses before it encodes anything: every part must exist, be probeable,
+    carry a beat log of this schema written for *this* recording of it, and
+    agree with the other parts on everything `concat -c copy` cannot fix.
+
     keep_parts=True leaves the .seg.mp4 files on disk so a single segment
     can be re-recorded and re-stitched without redoing the expensive ones
     (segments are untracked; only demo.mp4 is committed). The per-segment
@@ -2027,38 +2120,47 @@ def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None
     for p in parts:
         if not p.exists():
             raise FileNotFoundError(p)
-    # Every segment's beat log is read and checked *before* a frame is
-    # encoded. Failing here costs nothing; failing after the concat would
-    # leave a fresh demo.mp4 with no timeline beside it, which is the one
-    # state a reader cannot tell from a demo that never had beats.
+    # Everything the merge needs is read and checked *before* a frame is
+    # encoded — the durations included, not just the beat logs. Failing here
+    # costs nothing; failing after the concat leaves a fresh demo.mp4 with no
+    # timeline beside it, which is the one state a reader cannot tell from a
+    # demo that never had beats. That is reachable without anyone's help: a
+    # truncated .seg.mp4 makes concat exit 0 and ffprobe raise afterwards.
+    durations = [media_duration(p) for p in parts]
+    _check_stream_shapes(parts)
     docs = [
-        _segment_timeline(out_dir, s, p)
-        for s, p in zip(segments, parts, strict=True)
+        _segment_timeline(out_dir, s, p, d)
+        for s, p, d in zip(segments, parts, durations, strict=True)
     ]
     listing = out_dir / ".concat.txt"
-    listing.write_text(
-        "".join(
-            # concat-demuxer quoting: a literal ' inside single quotes
-            # is written as '\'' (paths like ".../Rógvi's Mac/..." occur).
-            "file '{}'\n".format(str(p.resolve()).replace("'", "'\\''"))
-            for p in parts
-        )
-    )
     demo = out_dir / "demo.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(demo)],
-        check=True,
-    )
-    listing.unlink()
-    # Merged before the parts can be removed: the offsets are the parts' own
-    # encoded durations, and ffprobe cannot read a file that has been unlinked.
-    merged = _merged_timeline(segments, parts, docs, demo)
+    try:
+        listing.write_text(
+            "".join(
+                # concat-demuxer quoting: a literal ' inside single quotes
+                # is written as '\'' (paths like ".../Rógvi's Mac/..." occur).
+                "file '{}'\n".format(str(p.resolve()).replace("'", "'\\''"))
+                for p in parts
+            )
+        )
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+             "-i", str(listing), "-c", "copy", "-movflags", "+faststart",
+             str(demo)],
+            check=True,
+        )
+    finally:
+        # Even when ffmpeg failed: a stray .concat.txt in a demo folder is
+        # untracked litter that outlives the run that made it.
+        listing.unlink(missing_ok=True)
+    merged = _merged_timeline(segments, parts, docs, durations, demo)
     json_path, _ = write_timeline(out_dir, merged)
     print(f"wrote {demo} and {json_path.name} from {len(segments)} segments")
     if not keep_parts:
-        for p in parts:
-            p.unlink()
-        for s in segments:
+        # missing_ok throughout, and the media and its log in one pass: a
+        # segment named twice, or a part something else already removed, must
+        # not abort this loop half-done and leave the orphans of #21 behind.
+        for s, p in zip(segments, parts, strict=True):
+            p.unlink(missing_ok=True)
             for path in timeline_paths(out_dir, s):
                 path.unlink(missing_ok=True)
