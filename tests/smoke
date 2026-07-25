@@ -27,10 +27,15 @@ short web demo against it with `Recorder`, records a short terminal demo with
    a working one — so `timeline.json`'s `issues` are graded on their own, and
    two extra short takes check that `strict=True` refuses what the default
    tolerates.
+5. **Determinism** — re-recording reproduces the recording. One short
+   storyboard is recorded three times against a page that renders four clocks
+   and an animation; the two takes with `deterministic=True` must match byte
+   for byte, and the one recorded with the recorder's *defaults* must not.
 
-    tests/smoke                 # both takes
+    tests/smoke                 # every take
     tests/smoke --web-only
     tests/smoke --terminal-only
+    tests/smoke --determinism-only
     tests/smoke --out-dir /tmp/smoke
 
 Narration is forced off (`speech=False`): CI has no ELEVENLABS_API_KEY and no
@@ -46,6 +51,7 @@ reading a pass as proof the recorder is healthy.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -63,6 +69,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixture"
@@ -164,6 +171,49 @@ CAPTION_PROBE = ("90-caption-off", "91-caption-on")
 # does not enter into it: it slides the window and the fade together.
 PROBE_CAPTION = "Recorded end to end."
 PROBE_QUIET_S = 2.0
+
+# -- the determinism takes (issue #10) ---------------------------------------
+#
+# Three short takes of one storyboard against `?entropy=1`, which renders the
+# two things a second recording is otherwise free to differ by: a wall clock
+# and a spinning shape. Two takes with determinism on must agree; a third with
+# it off must not — which is what stops the first assertion from being the
+# vacuous "two blank pages are equal".
+ENTROPY_SHOTS = ("01-entropy", "02-entropy")
+
+# Settle before the first still (the page has just loaded), then long enough
+# between the two that the spinner — one turn every 1.7 s — is somewhere else
+# entirely.
+ENTROPY_SETTLE_S = 1.0
+ENTROPY_GAP_S = 1.0
+
+# Stills are lossless PNGs of a frozen page, so two takes of this storyboard
+# are compared byte for byte and no threshold is needed. Video is different:
+# H.264 at crf 20 is not byte-reproducible and the screencast's frame timing
+# is not either, so the recordings are compared where they can be — the mean
+# absolute luma difference over the entropy panel, between the last frame of
+# each take.
+#
+# Measured over the panel rect: two deterministic takes 0.00-0.59, a
+# deterministic take against one recorded with the recorder's *defaults*
+# 6.85-7.22 (four clock readings and a spinner, all of them differing). More
+# than a factor of ten between the two bands, and both bars sit inside that
+# gap, so neither is a number the encoder can wander over.
+#
+# The bars are deliberately not set at the observed edges. Fault injections
+# that degrade the fixture itself — a blanked panel, a spinner too faint to
+# see — brought the second comparison down to 0.30 and 1.63, and the right
+# answer there is the one the harness gives: it reports that the comparison
+# has gone blind instead of quietly passing.
+MAX_TAKE_VIDEO_DELTA = 1.5
+MIN_LIVE_VIDEO_DELTA = 2.5
+
+# Two stills from *inside* the default-settings take, a second apart, over the
+# spinner. This is the number that proves the byte-comparison above can fail
+# at all: the same storyboard, the same page, and the recording differs from
+# itself the moment nothing is pinned. Measured 28.6-30.0 (it depends on where
+# the spinner stopped), against a floor 7x under the weakest of them.
+MIN_LIVE_STILL_DELTA = 4.0
 
 SERVER_START_TIMEOUT_S = 15.0
 
@@ -777,6 +827,24 @@ def check_caption(b: Beats, page, expected: str) -> None:
 # can lift a blank recording over a floor or make two identical stills look
 # different. It sits at the top-left corner, outside the caption band every
 # timing measurement reads.
+#
+# It survives the recorder's determinism controls (issue #10) for two separate
+# reasons, and both are asserted below rather than assumed:
+#
+#   * the frozen clock freezes `Date.now()` and `new Date()` and nothing else.
+#     CSS animations run on the document timeline, which is monotonic time —
+#     untouched, and check_determinism() proves it advanced while the wall
+#     clock did not.
+#   * the injected "land every animation on its final frame" rule cannot match
+#     an element carrying `data-demo-video-animate`, the recorder's documented
+#     opt-out for exactly this: something that has to keep the compositor
+#     awake. start_ticker() plants a control element with the same animation
+#     and no opt-out, and fails the take unless the rule kills the control and
+#     spares the ticker.
+#
+# Losing either would put the flake of issue #18 back — silently, since a
+# stalled take still passes everything except the timing bars, and only some
+# of the time.
 TICKER_JS = """() => {
   if (document.getElementById('__smoke_ticker')) return;
   const style = document.createElement('style');
@@ -788,25 +856,340 @@ TICKER_JS = """() => {
   el.style.cssText = 'position:fixed;top:0;left:0;width:8px;height:8px;'
     + 'background:#808080;z-index:2147483647;pointer-events:none;'
     + 'animation:__smoke_ticker .18s steps(2) infinite';
+  el.setAttribute('data-demo-video-animate', '');
   document.body.appendChild(el);
+}"""
+
+# The ticker's computed animation, plus the same animation on a throwaway
+# element that does *not* opt out. Read together: the first says the ticker is
+# alive, the second says the determinism rule is applied at all — without it,
+# "the ticker animates" would also be true of a recorder that had quietly
+# stopped injecting the rule.
+_TICKER_STATE_JS = """() => {
+  const el = document.getElementById('__smoke_ticker');
+  if (!el) return null;
+  const style = getComputedStyle(el);
+  const control = document.createElement('div');
+  control.style.cssText = 'position:fixed;top:-99px;left:-99px;width:1px;'
+    + 'height:1px;animation:__smoke_ticker .18s steps(2) infinite';
+  document.body.appendChild(control);
+  const controlDuration = getComputedStyle(control).animationDuration;
+  control.remove();
+  return {name: style.animationName, duration: style.animationDuration,
+          state: style.animationPlayState, control: controlDuration};
 }"""
 
 
 def start_ticker(b: Beats, page) -> None:
-    """Inject TICKER_JS and confirm it is running."""
+    """Inject TICKER_JS and confirm it is running *and* opted out."""
     page.evaluate(TICKER_JS)
-    running = page.evaluate(
-        "() => { const el = document.getElementById('__smoke_ticker');"
-        " return !!el && getComputedStyle(el).animationName === "
-        "'__smoke_ticker'; }"
-    )
+    state = page.evaluate(_TICKER_STATE_JS)
     # If it silently failed to attach, every timing number below becomes a
     # measurement of Chromium's screencast luck instead of the beat log.
+    if state is None:
+        b.fail_if(
+            True,
+            "the compositor ticker did not attach — timing measurements in "
+            "this take are not trustworthy (see TICKER_JS)",
+        )
+        return
     b.fail_if(
-        not running,
-        "the compositor ticker did not attach — timing measurements in this "
-        "take are not trustworthy (see TICKER_JS)",
+        state["name"] != "__smoke_ticker"
+        or state["duration"] == "0s"
+        or state["state"] != "running",
+        f"the compositor ticker is not animating (animation-name "
+        f"{state['name']!r}, duration {state['duration']!r}, play-state "
+        f"{state['state']!r}) — the page will go idle during this take, the "
+        f"screencast will drop wall time (issue #18), and every timing number "
+        f"below becomes a measurement of luck. If the recorder's determinism "
+        f"CSS stopped honouring data-demo-video-animate, this is where it "
+        f"shows up (see TICKER_JS)",
     )
+    b.fail_if(
+        state["control"] != FLATTENED_S,
+        f"a control element with the ticker's animation and no "
+        f"data-demo-video-animate reports animation-duration "
+        f"{state['control']!r}, expected {FLATTENED_S!r} — the recorder's "
+        f"determinism CSS is not being applied to this page, so the ticker "
+        f"running proves nothing about the opt-out and app animations are not "
+        f"being frozen. (Both takes record with deterministic=True precisely "
+        f"so this can be asserted; the default does not inject the rule.)",
+    )
+
+
+# -- determinism (issue #10) --------------------------------------------------
+#
+# What the recorder pins in the browser, as the page itself sees it. Written
+# out by hand rather than imported from demo_recording: a value derived from
+# the code being graded agrees with that code no matter what it says, and
+# changing the recorder's default clock *should* fail here loudly.
+#
+# The controls split in two, and the split is the thing worth grading:
+#
+#   * timezone, locale and prefers-reduced-motion are pinned in *every* take,
+#     including one that asks for no determinism at all;
+#   * the frozen clock and the motion rule are opt-in, because both change what
+#     an app does — mostly silently — so the default has to be the honest one.
+FROZEN_CLOCK = "2025-01-01T09:00:00Z"  # core.py's DEFAULT_CLOCK, as it logs it
+FROZEN_EPOCH_MS = 1735722000000  # ...the same instant, as the page reads it
+FROZEN_ISO = "2025-01-01T09:00:00.000Z"
+FROZEN_TIMEZONE = "UTC"
+FROZEN_LOCALE = "en-US"
+
+# The probe element's own animation and transition, as declared, and what the
+# motion rule must flatten them to.
+#
+# 1 ms, not 0s: a transition of combined duration zero never starts and so
+# never fires `transitionend`, which stalls every accordion, modal and wizard
+# that advances on that event. Asserting the exact flattened value — rather
+# than "not 2s" — is what keeps a future edit from quietly going back to 0s.
+PROBE_ANIMATION_S = "2s"
+PROBE_TRANSITION_S = "5s"
+FLATTENED_S = "0.001s"
+
+# How far the page's clock may sit from the harness's own when determinism is
+# off. Generous: this only has to tell "a real clock" from "frozen at 2025".
+MAX_LIVE_CLOCK_SKEW_MS = 5 * 60 * 1000
+
+# How long the page's monotonic clock must have advanced between the two
+# samples the web take draws, while its wall clock did not move at all. The
+# take is ~17 s; anything near zero means the freeze reached further than the
+# wall clock and the compositor is not running (see TICKER_JS).
+MIN_MONOTONIC_ADVANCE_MS = 5000.0
+
+_PAGE_STATE_JS = """() => {
+  // A probe element and a ::after on it, because an animated pseudo-element is
+  // the most common spinner on the web and a rule that forgets `::after` looks
+  // exactly like one that does not on a plain <div>.
+  let sheet = document.getElementById('__smoke_probe_css');
+  if (!sheet) {
+    sheet = document.createElement('style');
+    sheet.id = '__smoke_probe_css';
+    sheet.textContent =
+      '#__smoke_probe::after{content:"";animation:__smoke_probe 3s linear infinite}'
+      + '#__smoke_probe::before{content:"";animation:__smoke_probe 4s linear infinite}';
+    document.head.appendChild(sheet);
+  }
+  const probe = document.createElement('div');
+  probe.id = '__smoke_probe';
+  probe.style.cssText = 'position:fixed;top:-99px;left:-99px;width:1px;'
+    + 'height:1px;animation:__smoke_probe 2s linear infinite;'
+    + 'transition:opacity 5s linear';
+  document.body.appendChild(probe);
+  const style = getComputedStyle(probe);
+  const animation = style.animationDuration;
+  const transition = style.transitionDuration;
+  const after = getComputedStyle(probe, '::after').animationDuration;
+  const before = getComputedStyle(probe, '::before').animationDuration;
+  probe.remove();
+  return {
+    now: Date.now(),
+    iso: new Date().toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    locale: Intl.DateTimeFormat().resolvedOptions().locale,
+    language: navigator.language,
+    offset: new Date().getTimezoneOffset(),
+    reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    animation: animation,
+    transition: transition,
+    after: after,
+    before: before,
+    // Four more clocks, each of which was found running while `Date.now()`
+    // was frozen. Intl formats from its own internal clock; `constructor`
+    // walked past the proxied global to the real one; timeOrigin and
+    // lastModified are wall-clock readings of their own.
+    intl: new Intl.DateTimeFormat('en-US', {year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+      timeZone: 'UTC'}).format(),
+    constructorNow: new Date().constructor.now(),
+    constructorIsDate: Date.prototype.constructor === Date,
+    descriptorNow: Object.getOwnPropertyDescriptor(Date, 'now').value(),
+    nowIsStable: Date.now === Date.now,
+    nowName: Date.now.name,
+    timeOrigin: Math.round(performance.timeOrigin),
+    // The clock a CSS animation actually runs on — not performance.now(),
+    // which merely correlates with it. This is the one TICKER_JS depends on.
+    monotonic: typeof document.timeline.currentTime === 'number'
+      ? document.timeline.currentTime : performance.now(),
+  };
+}"""
+
+
+def check_determinism(b: Beats, page, when: str, on: bool = True) -> dict:
+    """What the page reports about its clock, its locale, and its motion.
+
+    Asserted from inside the page, never from the recorder's own attributes: a
+    constructor that stored `deterministic=True` and then forgot to wire it to
+    the context would satisfy any check made on the Python side.
+    """
+    state = page.evaluate(_PAGE_STATE_JS)
+
+    def wanted(what: str, actual: object, expected: object, why: str) -> None:
+        b.fail_if(
+            actual != expected,
+            f"{when}, {what} is {actual!r}, expected {expected!r} — {why}",
+        )
+
+    # Pinned in every take, determinism or not: none of the three changes what
+    # an app computes, and all three differ between a laptop and a CI runner.
+    wanted(
+        "the resolved timezone",
+        state["timezone"],
+        FROZEN_TIMEZONE,
+        "the context's timezone is not pinned, so a recording made in "
+        "Tórshavn formats dates differently from one made in CI",
+    )
+    wanted("the UTC offset", state["offset"], 0, "the timezone is not UTC")
+    wanted(
+        "the resolved locale",
+        state["locale"],
+        FROZEN_LOCALE,
+        "the context's locale is not pinned, so numbers and dates format "
+        "differently between machines",
+    )
+    wanted("navigator.language", state["language"], FROZEN_LOCALE, "same")
+    wanted(
+        "prefers-reduced-motion",
+        state["reduced"],
+        True,
+        "the context does not request reduced motion, so an app that honours "
+        "it still animates — this one is not gated on `deterministic`",
+    )
+    # True in both modes: these are identity, not clock readings, and the proxy
+    # that freezes the clock is exactly what breaks them.
+    wanted(
+        "Date.prototype.constructor === Date",
+        state["constructorIsDate"],
+        True,
+        "deep-clone and serialization helpers type-test Date this way, and "
+        "misclassify every Date object when it is false",
+    )
+    wanted(
+        "Date.now === Date.now",
+        state["nowIsStable"],
+        True,
+        "`now` is being minted fresh on every read instead of defined once",
+    )
+    wanted(
+        "Date.now.name",
+        state["nowName"],
+        "now",
+        "`now` has been replaced by an anonymous function",
+    )
+
+    if on:
+        wanted(
+            "Date.now()",
+            state["now"],
+            FROZEN_EPOCH_MS,
+            "the page's wall clock is not frozen, so every take renders a "
+            "different timestamp",
+        )
+        wanted(
+            "new Date().toISOString()",
+            state["iso"],
+            FROZEN_ISO,
+            "the zero-argument Date constructor is still reading the real "
+            "clock even if Date.now() is frozen",
+        )
+        # Four clocks found running behind a frozen Date.now() in review.
+        wanted(
+            "Intl.DateTimeFormat().format()",
+            state["intl"],
+            "01/01/2025, 09:00:00 AM",
+            "Intl formats from its own internal clock, which no patch of the "
+            "Date global reaches — it is how apps render dates, so it is the "
+            "hole that matters most",
+        )
+        wanted(
+            "new Date().constructor.now()",
+            state["constructorNow"],
+            FROZEN_EPOCH_MS,
+            "the prototype's constructor still points at the unfrozen Date, "
+            "so one property access reaches the real clock",
+        )
+        wanted(
+            "Object.getOwnPropertyDescriptor(Date, 'now').value()",
+            state["descriptorNow"],
+            FROZEN_EPOCH_MS,
+            "`now` is being synthesized by a proxy trap rather than defined, "
+            "so reading the descriptor hands back the real clock",
+        )
+        wanted(
+            "performance.timeOrigin",
+            state["timeOrigin"],
+            FROZEN_EPOCH_MS,
+            "timeOrigin is a wall-clock reading of its own, and "
+            "`timeOrigin + performance.now()` is a common way to take one",
+        )
+        wanted(
+            "a probe element's animation-duration",
+            state["animation"],
+            FLATTENED_S,
+            "the recorder's motion rule is not reaching this page, so "
+            "animation phase still varies between takes",
+        )
+        wanted(
+            "a probe element's transition-duration",
+            state["transition"],
+            FLATTENED_S,
+            "the recorder's motion rule is not flattening transitions — and "
+            "at 0s instead of 1ms no transitionend would ever fire, which "
+            "stalls every accordion, modal and wizard that waits for one",
+        )
+        wanted(
+            "an animated ::after's animation-duration",
+            state["after"],
+            FLATTENED_S,
+            "the motion rule does not cover pseudo-elements, and an animated "
+            "::after is the most common spinner on the web",
+        )
+        wanted(
+            "an animated ::before's animation-duration",
+            state["before"],
+            FLATTENED_S,
+            "the motion rule does not cover pseudo-elements",
+        )
+    else:
+        # The default. It has to leave the clock alone — not merely skip some
+        # of the freezing.
+        b.fail_if(
+            state["now"] == FROZEN_EPOCH_MS,
+            f"{when}, Date.now() still reads the frozen {FROZEN_EPOCH_MS} "
+            f"although determinism was not asked for — the page's clock is "
+            f"being frozen by default",
+        )
+        skew = abs(state["now"] - time.time() * 1000)
+        b.fail_if(
+            skew > MAX_LIVE_CLOCK_SKEW_MS,
+            f"{when}, Date.now() reads {state['now']} — {skew / 1000:.0f}s "
+            f"from this process's own clock, so the page is not on real time",
+        )
+        b.fail_if(
+            state["intl"].startswith("01/01/2025"),
+            f"{when}, Intl.DateTimeFormat().format() reads {state['intl']!r} — "
+            f"the frozen instant, without determinism having been asked for",
+        )
+        wanted(
+            "a probe element's animation-duration",
+            state["animation"],
+            PROBE_ANIMATION_S,
+            "the motion rule is injected without determinism having been asked for",
+        )
+        wanted(
+            "a probe element's transition-duration",
+            state["transition"],
+            PROBE_TRANSITION_S,
+            "the motion rule is injected without determinism having been asked for",
+        )
+        wanted(
+            "an animated ::after's animation-duration",
+            state["after"],
+            "3s",
+            "the motion rule is reaching pseudo-elements without determinism "
+            "having been asked for",
+        )
+    return state
 
 
 # Records every mousemove the page sees, so move_to()'s 30-step glide can be
@@ -840,10 +1223,20 @@ def record_web(
     outline = "el => getComputedStyle(el).outlineStyle"
     bg = "el => getComputedStyle(el).backgroundColor"
 
-    with Recorder(out_dir, base_url=base_url, speech=False, strict=True) as rec:
+    # deterministic=True, though the recorder's default is off: this take is
+    # where the frozen clock and the motion rule have to be shown coexisting
+    # with TICKER_JS, and the control-element assertion in start_ticker() has
+    # nothing to say unless the rule is actually injected. The default path is
+    # graded by the determinism-default take instead. strict=True because this
+    # is the healthy fixture: determinism must not itself produce a console
+    # error or a failed request.
+    with Recorder(
+        out_dir, base_url=base_url, speech=False, strict=True, deterministic=True
+    ) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
         start_ticker(b, rec.page)
+        opening = check_determinism(b, rec.page, "on landing")
         # Doubles as the run-up for the *early* timing probe: the page has
         # finished painting and the caption band does not move until the
         # first caption. See MAX_CAPTION_SKEW_S.
@@ -944,6 +1337,27 @@ def record_web(
         rec.caption(PROBE_CAPTION)
         check_caption(b, rec.page, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
+
+        # The clock has to still be frozen ~15 s later, not merely at load —
+        # and the page's *monotonic* clock has to have kept running, because
+        # that is the one CSS animations are on. A freeze that stopped it too
+        # would stop the compositor, and the recording would start losing wall
+        # time again (TICKER_JS, issue #18).
+        closing = check_determinism(b, rec.page, "at the end of the take")
+        b.fail_if(
+            closing["now"] != opening["now"],
+            f"the frozen clock moved during the take: {opening['now']} at the "
+            f"start, {closing['now']} at the end — it is pinned at page load "
+            f"and then drifts, which is worse than not pinning it",
+        )
+        advance = closing["monotonic"] - opening["monotonic"]
+        b.fail_if(
+            advance < MIN_MONOTONIC_ADVANCE_MS,
+            f"the page's monotonic clock advanced {advance:.0f} ms across a "
+            f"take that took several seconds — the freeze has reached past the "
+            f"wall clock into the clock CSS animations run on, so the "
+            f"compositor is not painting and issue #18 is back",
+        )
         rec.caption("")
 
         # Where the app lands in each medium, read off the live recorder rather
@@ -988,8 +1402,14 @@ def record_terminal(
             tail = " ".join(str(exc).split())[:200]
             b.fail_if(True, f"after {after}, the shell prompt never came back — {tail}")
 
-    with TerminalRecorder(out_dir, speech=False, strict=True) as rec:
+    with TerminalRecorder(
+        out_dir, speech=False, strict=True, deterministic=True
+    ) as rec:
         start_ticker(b, rec.page)
+        # The determinism controls live on the context, so the terminal
+        # recorder inherits every one of them — and a page that renders a real
+        # PTY is where a frozen clock is most likely to break something.
+        check_determinism(b, rec.page, "in the terminal page")
         # Let xterm.js settle, and give the early timing probe below a
         # baseline that is not the browser's first paint. See
         # MAX_CAPTION_SKEW_S.
@@ -1037,6 +1457,120 @@ def record_terminal(
     # The terminal frames itself in-page and is not composited, so its video
     # and its stills share one geometry.
     return b.problems, rect, rect, size
+
+
+class EntropyTake(NamedTuple):
+    """One recording of the entropy storyboard, and what it rendered."""
+
+    problems: list[str]
+    out_dir: Path
+    clock: str  # the wall clock the page printed, as text
+    still_rect: Rect  # where the entropy panel sits in a full-bleed still
+    video_rect: Rect  # ...and where it lands in the composited video
+    spin_rect: Rect  # just the spinning shape, in a full-bleed still
+
+
+def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> EntropyTake:
+    """The shortest storyboard that renders the things determinism controls.
+
+    `?entropy=1` puts four clocks and a spinning shape on the page. Two stills
+    a second apart, and nothing else — the point of this take is not what it
+    shows but that a second run of it shows exactly the same thing.
+
+    `deterministic=False` is passed by *omitting* the argument, so this take
+    grades the recorder's default rather than an explicit opt-out. They are the
+    same code path now, and the default is the one every user gets.
+    """
+    from demo_recording import Recorder
+
+    label = "determinism" if deterministic else "default"
+    b = Beats(label)
+    kwargs = {"deterministic": True} if deterministic else {}
+    # strict=True on all three: `?entropy=1` starts a Worker, and the recorder
+    # wraps `Worker` to re-inject the frozen clock into it. A shim that broke
+    # worker loading would show up here as a failed request rather than as a
+    # page that quietly renders one clock fewer.
+    with Recorder(
+        out_dir, base_url=base_url, speech=False, strict=True, **kwargs
+    ) as rec:
+        rec.goto("/?entropy=1")
+        # The worker's answer lands asynchronously and is part of what the
+        # stills have to reproduce, so wait for it rather than racing it. A
+        # short bound rather than the 60 s default: a Worker wrapper that
+        # stops workers loading at all shows up right here, and it should say
+        # so in seconds rather than after a minute of nothing.
+        rec.wait_for("#entropy-worker.ready", timeout_s=15)
+        rec.pause(ENTROPY_SETTLE_S)
+        rec.shot(ENTROPY_SHOTS[0])
+        check_determinism(b, rec.page, f"in the {label} take", on=deterministic)
+
+        # The worker line, read rather than left to the pixel comparisons.
+        # They cannot see this: the fixture falls back to "worker unavailable"
+        # if the Worker constructor throws, and *that* reproduces byte for byte
+        # across takes just as happily as a frozen timestamp does. A wrapper
+        # that broke every worker on the page would pass this whole phase on
+        # the strength of failing consistently.
+        worker = rec.page.locator("#entropy-worker").inner_text()
+        b.fail_if(
+            not re.fullmatch(r"worker \d+", worker),
+            f"the entropy page's worker reported {worker!r}, not a timestamp — "
+            f"the recorder's Worker wrapper stopped workers running at all, "
+            f"which every pixel comparison in this phase would call a success",
+        )
+        if deterministic:
+            b.fail_if(
+                worker != f"worker {FROZEN_EPOCH_MS}",
+                f"the entropy page's worker reported {worker!r}, expected "
+                f"'worker {FROZEN_EPOCH_MS}' — a Worker has its own global and "
+                f"page init scripts never run in it, so the freeze has to be "
+                f"re-injected there and was not",
+            )
+        # No "and it is not empty" guard here on purpose: `wait_for` above
+        # already refuses a clock that is not visible, and three empty clocks
+        # would trip the "the escape-hatch take rendered the same clock as the
+        # frozen ones" comparison below. An assertion that cannot be made to
+        # fail is a comment.
+        clock = rec.page.locator("#entropy-readings").inner_text()
+        # A second still after long enough for the spinner to be somewhere
+        # else entirely (it turns once every 1.7 s).
+        rec.pause(ENTROPY_GAP_S)
+        rec.shot(ENTROPY_SHOTS[1])
+
+        box = rec.page.locator("#entropy-panel").bounding_box()
+        spin = rec.page.locator("#entropy-spinner").bounding_box()
+        if box is None or spin is None:
+            raise SmokeFailure(
+                "#entropy-panel has no box — ?entropy=1 rendered nothing"
+            )
+        still_rect: Rect = (
+            int(box["x"]),
+            int(box["y"]),
+            int(box["width"]),
+            int(box["height"]),
+        )
+        # The spinner on its own. Over the whole panel a 54 px shape turning
+        # moves the mean luma by 0.76 — a number no honest floor can be set
+        # against. Measured where the motion actually is, the same turn moves
+        # it by tens. Cropping to the thing being asserted about is the
+        # difference between an assertion and a decoration.
+        spin_rect: Rect = (
+            int(spin["x"]),
+            int(spin["y"]),
+            int(spin["width"]),
+            int(spin["height"]),
+        )
+        # The recording is scaled into the window body, so the same panel sits
+        # somewhere else in the video. Map it rather than eyeballing a crop:
+        # this is the region both comparisons below actually look at.
+        g, size = rec._geom, (rec._size["width"], rec._size["height"])
+        scale_x, scale_y = g["appw"] / size[0], g["apph"] / size[1]
+        video_rect: Rect = (
+            g["appx"] + int(box["x"] * scale_x),
+            g["appy"] + int(box["y"] * scale_y),
+            max(2, int(box["width"] * scale_x)),
+            max(2, int(box["height"] * scale_y)),
+        )
+    return EntropyTake(b.problems, out_dir, clock, still_rect, video_rect, spin_rect)
 
 
 # -- assertions --------------------------------------------------------------
@@ -1280,6 +1814,25 @@ def check_timeline(
         failures.append(
             f"{label}: timeline.json says segment {doc.get('segment')!r}; these "
             f"takes are single-segment, so it should be null"
+        )
+
+    # Which clock produced the take. A still committed to a repo is otherwise a
+    # picture with no record of the conditions behind it, and a future diff
+    # cannot tell "the UI changed" from "the frozen instant changed" — the one
+    # question this feature exists to answer. Both takes record with
+    # deterministic=True, so that is what the log has to say.
+    record = doc.get("determinism")
+    expected_record = {
+        "deterministic": True,
+        "clock": FROZEN_CLOCK,
+        "timezone_id": FROZEN_TIMEZONE,
+        "locale": FROZEN_LOCALE,
+    }
+    if record != expected_record:
+        failures.append(
+            f"{label}: timeline.json records the take's determinism settings "
+            f"as {record!r}, expected {expected_record!r} — without them a "
+            f"committed still says nothing about the clock that produced it"
         )
 
     beats = doc.get("beats")
@@ -2178,6 +2731,222 @@ def run_strict_terminal(out_root: Path) -> list[str]:
     return check_strict_failure("terminal-strict", out_dir, raised, ["nonzero_exit"])
 
 
+def last_frame(mp4: Path, rect: Rect) -> bytes | None:
+    """The final second of a recording, reduced over `rect`, last frame first
+    available. Both takes end on the same static page, so this is the frame
+    they should agree on."""
+    from demo_recording import media_duration
+
+    try:
+        seconds = media_duration(mp4)
+    except Exception:  # noqa: BLE001 - the caller reports a missing measurement
+        return None
+    frames = gray_frames(
+        mp4, rect, sample_fps=4, start=max(0.0, seconds - 1.0), duration=1.0
+    )
+    return frames[-1] if frames else None
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def run_determinism(out_root: Path) -> list[str]:
+    """Record one storyboard three times and compare the recordings.
+
+    Two takes with the recorder's determinism controls on have to produce the
+    same pixels; a third with `deterministic=False` has to produce different
+    ones. The third is not a nicety — without it "the two takes match" is also
+    true of a recorder that produced two blank videos, and of a harness
+    comparing two files it never wrote.
+    """
+    plan = (
+        ("determinism-a", True),
+        ("determinism-b", True),
+        ("determinism-off", False),
+    )
+    takes: dict[str, EntropyTake] = {}
+    with fixture_server() as base_url:
+        for name, on in plan:
+            out_dir = fresh_take_dir(out_root, name)
+            try:
+                takes[name] = record_entropy(out_dir, base_url, on)
+            except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+                return [
+                    f"{name}: Recorder(deterministic={on}) raised "
+                    f"{type(exc).__name__}: {exc}"
+                ]
+
+    failures: list[str] = []
+    for take in takes.values():
+        failures += take.problems
+    first, second, live = (
+        takes["determinism-a"],
+        takes["determinism-b"],
+        takes["determinism-off"],
+    )
+
+    # Liveness before identity. Two blank recordings are identical too, and a
+    # missing file compares equal to another missing file in every scheme that
+    # forgets to look. Only *this* list short-circuits the comparisons below —
+    # a take whose page reported the wrong clock still has stills worth
+    # comparing, and reporting both is how the cause and the effect show up in
+    # one run.
+    liveness: list[str] = []
+    stills: dict[str, dict[str, Path]] = {}
+    for name, take in takes.items():
+        stills[name] = {}
+        for shot in ENTROPY_SHOTS:
+            png = take.out_dir / "images" / f"{shot}.png"
+            if not png.is_file():
+                liveness.append(f"{name}: still {png} was never captured")
+                continue
+            # The whole frame, on the floor the rest of the harness already
+            # calibrated for web stills (healthy 15.5-16.9, blank 0.1-1.1).
+            # That the *panel* carries signal is covered by the two "with the
+            # controls off, this much moves" floors further down, both of
+            # which have been watched to fail.
+            frames = gray_frames(png)
+            score = contrast(frames[0]) if frames else 0.0
+            if score < MIN_CONTENT_STDDEV["web"]:
+                liveness.append(
+                    f"{name}: {shot}.png is blank — the whole frame scores "
+                    f"{score:.1f} luma stddev, under the "
+                    f"{MIN_CONTENT_STDDEV['web']} floor, so there is nothing "
+                    f"in it for the comparisons below to be about"
+                )
+                continue
+            stills[name][shot] = png
+        mp4 = take.out_dir / "demo.mp4"
+        if not mp4.is_file():
+            liveness.append(f"{name}: {mp4} was never written")
+    if liveness:
+        return failures + liveness
+
+    # -- the clock the page rendered -----------------------------------------
+    if first.clock != second.clock:
+        failures.append(
+            f"determinism: two takes of one storyboard rendered different "
+            f"clocks — {first.clock!r} and {second.clock!r}. The page's wall "
+            f"clock is not frozen, so nothing dated survives a re-record."
+        )
+    elif live.clock == first.clock:
+        failures.append(
+            f"determinism: the take recorded with the recorder's *default* "
+            f"settings rendered the same clocks {live.clock!r} as the frozen "
+            f"takes — either the default freezes the clock (it must not; the "
+            f"freeze changes what clock-reading apps do and is opt-in), or all "
+            f"four readings are ones this harness is not actually varying"
+        )
+    else:
+        print("smoke: determinism froze all four clocks identically in both takes")
+        for line in first.clock.splitlines():
+            print(f"smoke:   frozen  {line}")
+        for line in live.clock.splitlines():
+            print(f"smoke:   default {line}")
+
+    # -- the stills, byte for byte -------------------------------------------
+    reproduced = True
+    for shot in ENTROPY_SHOTS:
+        one, two = stills["determinism-a"][shot], stills["determinism-b"][shot]
+        if digest(one) != digest(two):
+            reproduced = False
+            delta = frame_difference(
+                gray_frames(one, first.still_rect)[0],
+                gray_frames(two, second.still_rect)[0],
+            )
+            failures.append(
+                f"determinism: {shot}.png differs between two takes of the "
+                f"same storyboard ({digest(one)} vs {digest(two)}, {delta:.2f} "
+                f"mean luma over the entropy panel) — re-recording does not "
+                f"reproduce the stills, so a still cannot be diffed against "
+                f"the one committed last month"
+            )
+    # The same picture twice inside one take: the clock cannot have moved and
+    # the spinner cannot have turned.
+    inside = stills["determinism-a"]
+    if digest(inside[ENTROPY_SHOTS[0]]) != digest(inside[ENTROPY_SHOTS[1]]):
+        reproduced = False
+        failures.append(
+            f"determinism: {ENTROPY_SHOTS[0]}.png and {ENTROPY_SHOTS[1]}.png "
+            f"differ within one take, {ENTROPY_GAP_S}s apart on a page nothing "
+            f"touched — something on screen is still moving with the clock"
+        )
+
+    # ...and the same two stills with the controls off, which is what makes
+    # every comparison above capable of failing.
+    off = stills["determinism-off"]
+    live_delta = frame_difference(
+        gray_frames(off[ENTROPY_SHOTS[0]], live.spin_rect)[0],
+        gray_frames(off[ENTROPY_SHOTS[1]], live.spin_rect)[0],
+    )
+    if digest(off[ENTROPY_SHOTS[0]]) == digest(off[ENTROPY_SHOTS[1]]):
+        failures.append(
+            f"determinism: recorded with the recorder's default settings, "
+            f"{ENTROPY_SHOTS[0]}.png and {ENTROPY_SHOTS[1]}.png are still "
+            f"byte-identical — the page is not moving even with nothing "
+            f"pinned, so the byte comparison above proves nothing"
+        )
+    elif live_delta < MIN_LIVE_STILL_DELTA:
+        failures.append(
+            f"determinism: recorded with the recorder's default settings the "
+            f"two stills differ by only {live_delta:.2f} mean luma over the "
+            f"spinner, under the {MIN_LIVE_STILL_DELTA} floor — the fixture is "
+            f"barely varying, so the equality asserted above is nearly free"
+        )
+    # Only now, and only if the comparisons above actually held. Printing this
+    # next to a "01-entropy.png differs" failure — which an earlier revision
+    # did, because the print sat in the `else` of the *liveness* branch — makes
+    # the log contradict itself, and a log that contradicts itself is one
+    # nobody reads.
+    elif reproduced:
+        print(
+            f"smoke: determinism stills reproduce byte for byte across takes "
+            f"(the same two stills move {live_delta:.1f} over the spinner "
+            f"with the recorder's default settings)"
+        )
+
+    # -- the video, where bytes cannot be compared ---------------------------
+    closing = {
+        name: last_frame(take.out_dir / "demo.mp4", take.video_rect)
+        for name, take in takes.items()
+    }
+    if any(f is None for f in closing.values()):
+        failures.append(
+            "determinism: could not sample the closing frame of every take, so "
+            "the recordings themselves went ungraded"
+        )
+    else:
+        same = frame_difference(closing["determinism-a"], closing["determinism-b"])
+        different = frame_difference(
+            closing["determinism-a"], closing["determinism-off"]
+        )
+        if same > MAX_TAKE_VIDEO_DELTA:
+            failures.append(
+                f"determinism: the closing frames of two takes of one "
+                f"storyboard differ by {same:.2f} mean luma over the entropy "
+                f"panel, over the {MAX_TAKE_VIDEO_DELTA} bar — the recording "
+                f"itself does not reproduce"
+            )
+        if different < MIN_LIVE_VIDEO_DELTA:
+            failures.append(
+                f"determinism: a deterministic take and a default-settings "
+                f"take differ by only {different:.2f} mean luma over the "
+                f"entropy panel, under the {MIN_LIVE_VIDEO_DELTA} floor — this "
+                f"comparison cannot see the difference the controls make, so "
+                f"the {same:.2f} above is not evidence of anything"
+            )
+        if same <= MAX_TAKE_VIDEO_DELTA and different >= MIN_LIVE_VIDEO_DELTA:
+            print(
+                f"smoke: determinism demo.mp4 reproduces (takes differ by "
+                f"{same:.2f}, against {different:.2f} with the default "
+                f"settings)"
+            )
+    if not failures:
+        print("smoke: determinism ok (3 takes)")
+    return failures
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -2225,10 +2994,17 @@ def main() -> int:
         description="Smoke-test the demo-video recorders against tests/fixture.",
     )
     parser.add_argument(
-        "--web-only", action="store_true", help="record only the web take"
+        "--web-only", action="store_true", help="record only the web takes"
     )
     parser.add_argument(
-        "--terminal-only", action="store_true", help="record only the terminal take"
+        "--terminal-only",
+        action="store_true",
+        help="record only the terminal takes",
+    )
+    parser.add_argument(
+        "--determinism-only",
+        action="store_true",
+        help="record only the three determinism takes",
     )
     parser.add_argument(
         "--out-dir",
@@ -2244,8 +3020,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.web_only and args.terminal_only:
-        parser.error("--web-only and --terminal-only are mutually exclusive")
+    chosen = [
+        flag
+        for flag, on in (
+            ("--web-only", args.web_only),
+            ("--terminal-only", args.terminal_only),
+            ("--determinism-only", args.determinism_only),
+        )
+        if on
+    ]
+    if len(chosen) > 1:
+        parser.error(f"{' and '.join(chosen)} are mutually exclusive")
+    only = chosen[0] if chosen else None
 
     if not HELPERS_DIR.is_dir():
         print(f"smoke: helpers not found at {HELPERS_DIR}", file=sys.stderr)
@@ -2273,20 +3059,22 @@ def main() -> int:
 
     failures: list[str] = []
     try:
-        if not args.terminal_only:
+        if only in (None, "--web-only"):
             failures += run_web(out_root)
-        if not args.web_only:
+        if only in (None, "--terminal-only"):
             failures += run_terminal(out_root)
-        # After the graded takes, never instead of them: these four record
+        # After the graded takes, never instead of them: these five record
         # nothing worth looking at, and if a recorder is broken the messages
         # above are the ones that say how.
-        if not args.terminal_only:
+        if only in (None, "--web-only"):
             failures += run_web_problems(out_root)
             failures += run_strict_web(out_root)
-        if not args.web_only:
+        if only in (None, "--terminal-only"):
             failures += run_terminal_problems(out_root)
             failures += run_terminal_race(out_root)
             failures += run_strict_terminal(out_root)
+        if only in (None, "--determinism-only"):
+            failures += run_determinism(out_root)
     except SmokeFailure as exc:
         failures.append(str(exc))
 

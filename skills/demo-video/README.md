@@ -31,6 +31,13 @@ and a real terminal session (voice on):
 - **`record.py`** — the storyboard that produced the media, and the thing
   that actually gets committed: re-runnable after the UI changes, so the
   video stays out of git history and is regenerated rather than archived.
+- **A recording that reproduces, when you ask for it** — the browser's
+  timezone and locale are always pinned, and `Recorder(deterministic=True)`
+  additionally freezes the page's clock and flattens animations, so the same
+  storyboard gives you the same stills rather than a new set of timestamps.
+  Opt-in because a stopped clock changes what a debounce, a token check or an
+  elapsed-time bar does, usually without saying so; `SKILL.md` shows the five
+  shapes that break and what the recorder cannot pin at all.
 - **Spoken narration (optional)** — with `ELEVENLABS_API_KEY` set, every
   caption line is synthesized via ElevenLabs and mixed onto the mp4 at the
   moment it appears. Clips are cached; pacing self-adjusts so speech is
@@ -80,6 +87,10 @@ win over env vars.
 | `DEMO_VIDEO_TERMINAL_SHELL` | shell `TerminalRecorder` launches | `/bin/bash` |
 | `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | recording size, `"1280x720"` | 1280×720 |
+| `DEMO_VIDEO_DETERMINISTIC` | freeze the page clock and flatten motion (`1`/`0`) | **off** |
+| `DEMO_VIDEO_CLOCK` | instant the clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
+| `DEMO_VIDEO_TIMEZONE` | browser timezone (always applied) | `UTC` |
+| `DEMO_VIDEO_LOCALE` | browser locale (always applied) | `en-US` |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |

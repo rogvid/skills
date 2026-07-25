@@ -204,12 +204,18 @@ class Recorder(_DemoBase):
         voice_id: str | None = None,
         speech_model: str | None = None,
         strict: bool | None = None,
+        deterministic: bool | None = None,
+        clock: str | None = None,
+        timezone_id: str | None = None,
+        locale: str | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
             terminal_title=terminal_title, terminal_prompt=terminal_prompt,
             viewport=viewport, speech=speech, voice_id=voice_id,
             speech_model=speech_model, strict=strict,
+            deterministic=deterministic, clock=clock,
+            timezone_id=timezone_id, locale=locale,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")

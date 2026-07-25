@@ -22,6 +22,7 @@ tests/
 tests/smoke                       # every take, output to a temp dir
 tests/smoke --web-only            # just the Playwright takes
 tests/smoke --terminal-only       # just the PTY/xterm.js takes
+tests/smoke --determinism-only    # just the three re-recording takes
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -46,19 +47,30 @@ smoke: web-strict strict=True refused the take, naming beat 0 (goto) (4 fatal is
 smoke: terminal-problems timeline.json records 2 problem(s), 2 of them fatal under strict — take still passed
 smoke: terminal-race exit status survives a shell that starts 1.2s late (logged 5)
 smoke: terminal-strict strict=True refused the take, naming beat 1 (run) (1 fatal issues, artifacts kept)
-
+smoke: determinism froze all four clocks identically in both takes
+smoke:   frozen  1/1/2025, 9:00:00 AM · 1735722000000
+smoke:   frozen  intl 01/01/2025, 09:00:00 AM
+smoke:   frozen  ctor 1735722000000 · same true
+smoke:   frozen  worker 1735722000000
+smoke:   default 7/25/2026, 6:23:51 PM · 1785003831823
+smoke:   default intl 07/25/2026, 06:23:51 PM
+smoke:   default ctor 1785003831823 · same true
+smoke:   default worker 1785003831865
+smoke: determinism stills reproduce byte for byte across takes (the same two stills move 28.6 over the spinner with the recorder's default settings)
+smoke: determinism demo.mp4 reproduces (takes differ by 0.44, against 6.85 with the default settings)
+smoke: determinism ok (3 takes)
 smoke: PASSED
 ```
 
-Re-running into the same `--out-dir` is safe: the seven take subdirectories
+Re-running into the same `--out-dir` is safe: the ten take subdirectories
 (`web/`, `terminal/`, `web-problems/`, `terminal-problems/`, `terminal-race/`,
-`web-strict/`, `terminal-strict/`) are deleted before each take. Only the first
-two are graded on their video; the rest are short and exist to break in one
-specific way each. That is not tidiness — every
-artifact assertion works by path, so without it a leftover `demo.mp4` from the
-previous run would grade a recorder that produced nothing at all as a pass, and
-recording repeatedly into one directory is exactly how a change to the recorder
-gets verified.
+`web-strict/`, `terminal-strict/`, `determinism-a/`, `determinism-b/`,
+`determinism-off/`) are deleted before each take. Only the first two are graded
+on their video; the rest are short and exist to break, or to reproduce, in one
+specific way each. That is not tidiness — every artifact assertion works by
+path, so without it a leftover `demo.mp4` from the previous run would grade a
+recorder that produced nothing at all as a pass, and recording repeatedly into
+one directory is exactly how a change to the recorder gets verified.
 
 Deleting is bounded. Only those named subdirectories are ever
 removed, and only when each is absent, empty, or carries the
@@ -78,8 +90,8 @@ test measures.
 
 ## What it asserts
 
-Five independent axes, because a recorder can fail on any one of them while
-looking perfect on the other four.
+Six independent axes, because a recorder can fail on any one of them while
+looking perfect on the other five.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -220,6 +232,26 @@ test code can reach — and roughly 1 web take in 12 loses that window whole,
 which is what the 750 ms bound is for. **A real demo has no ticker at all**;
 see Known gaps and [#18](https://github.com/rogvid/skills/issues/18).
 
+The recorder's determinism controls ([#10](https://github.com/rogvid/skills/issues/10))
+land an animation on its final frame — which is exactly what the ticker must
+not do, and how a green harness could quietly stop being one. Two things keep
+them apart, and both are asserted rather than assumed:
+
+- **The freeze is of the wall clock only.** `Date.now()` and `new Date()` stop;
+  `performance.now()`, the document animation timeline, and
+  `requestAnimationFrame` do not, and CSS animations run on the second of
+  those. The web take samples the page at its start and at its end and fails
+  unless the wall clock moved **0 ms** while the monotonic clock moved seconds.
+- **The motion rule cannot match an opt-out.** It is written
+  `*:not([data-demo-video-animate])…`, and the ticker carries that attribute.
+  `start_ticker()` reads the ticker's computed `animation-duration` *and*
+  plants a control element with the same animation and no attribute: the take
+  fails unless the rule flattened the control to `0.001s` and left the ticker
+  at `0.18s`. Checking only the ticker would pass just as happily on a
+  recorder that had stopped injecting the rule at all. Both takes pass
+  `deterministic=True` for this reason — under the recorder's default the rule
+  is not injected and the control assertion would have nothing to say.
+
 When the measurement cannot be made the run says which reason it was: a caption
 that was never drawn, a video that slid further than the search window can see,
 or a run-up that was not quiet. They look identical from inside the window, and
@@ -306,6 +338,98 @@ matched as `beat N (verb)`), it must name the kind the storyboard caused, and
 precisely the one somebody wants to look at, so failing it by destroying the
 evidence would be worse than not failing it.
 
+**Determinism** — recording the same storyboard twice produces the same
+recording. Three extra takes, each about six seconds, against `?entropy=1`: a
+page rendering what a re-record is otherwise free to differ by — four
+*different* clocks, and a spinning shape.
+
+Four, because they are four clocks under the hood and patching the `Date`
+global reaches only the first. `Intl.DateTimeFormat().format()` formats from
+its own internal clock, a `Worker` has its own global that page init scripts
+never run in, and `new Date().constructor` walked straight past a proxied
+global to the real constructor. All three were found running behind a frozen
+`Date.now()`, by two takes that differed while every assertion passed.
+
+| Take | `deterministic` | What it is for |
+|---|---|---|
+| `determinism-a` | `True` | the reference |
+| `determinism-b` | `True` | must match `determinism-a` |
+| `determinism-off` | *not passed* | must **not** match — grades the default |
+
+The third take passes no `deterministic` argument at all, deliberately. The
+frozen clock is opt-in (it changes what a debounce, a token check or an
+elapsed-time bar does, usually silently), so the default is the setting every
+user gets and the one worth grading. The web and terminal takes above go the
+other way and pass `deterministic=True` explicitly, because that is where the
+frozen clock and the motion rule have to be shown coexisting with
+`TICKER_JS`.
+
+What is compared, and why each comparison is not free:
+
+- **The stills, byte for byte.** They are lossless PNGs of a frozen page, so
+  there is no threshold to argue about and no encoder noise to tolerate:
+  `sha256(a/01-entropy.png) == sha256(b/01-entropy.png)`, or the take failed.
+  This is the sensitive one — it catches a four-digit change in a timestamp,
+  which nothing measuring luma will. The same two stills are also compared
+  *within* `determinism-a`, a second apart on a page nobody touched, and that
+  is the comparison that catches a running animation: headless Chromium turns
+  out to reproduce animation phase across two takes of an identically-paced
+  storyboard remarkably well (a spinner exempted from the motion rule produced
+  byte-identical stills in both takes and was caught only within one).
+- **…and the same two stills inside `determinism-off`, which must differ.**
+  This is the assertion that keeps the ones above honest. Two blank screenshots
+  are byte-identical too, and so are two files a comparison forgot to read. The
+  same storyboard, the same page, nothing pinned: 28.6-30.0 mean luma over the
+  spinner, against a 4.0 floor.
+- **The video, where bytes cannot be compared.** H.264 at crf 20 is not
+  byte-reproducible and the screencast's frame timing is not either, so the
+  closing frame of each take is sampled over the entropy panel instead: two
+  deterministic takes score 0.00-0.59 mean luma apart, a deterministic take
+  against `determinism-off` scores 6.85-7.22. Both bars (1.5 and 2.5) sit in
+  that gap, and **both directions are asserted** — the second is what says the
+  comparison can see a difference at all. Know what it cannot see: a *coarse*
+  measure over a 160x90 reduction, it caught a whole panel changing colour
+  (24.14) and did not notice four digits of a timestamp changing (0.22). The
+  stills are what make the fine claim; this makes the claim about the artifact
+  people actually watch.
+- **The clock the page printed.** Frozen takes must agree on it, and
+  `determinism-off` must disagree with them. Printed on every run, so a reader
+  sees which instant was frozen and what the live clock said.
+- **What the page reports about itself**, in every take including the web and
+  terminal ones: `Date.now()`, `new Date().toISOString()`, the resolved
+  timezone and locale, `navigator.language`, `prefers-reduced-motion`, and the
+  computed `animation-duration` / `transition-duration` of a probe element
+  planted for the purpose. Read from *inside the page*, never off the
+  recorder's own attributes — a constructor that stored `deterministic=True`
+  and forgot to wire it to the context satisfies any check made in Python.
+  With determinism unasked-for, every clock-related one is asserted the other
+  way, including that the page's clock is within five minutes of this
+  process's — while timezone, locale and reduced motion are asserted *pinned*
+  in both, because those three are not gated on `deterministic`.
+
+  Four of those checks are not clock readings at all and hold in both modes:
+  `Date.prototype.constructor === Date`, `Date.now === Date.now`,
+  `Date.now.name === "now"`, and the flattened durations being **1 ms rather
+  than 0s**. The proxy that freezes the clock is exactly what breaks the first
+  three, and a transition of zero duration never starts — so it never fires
+  `transitionend`, and every accordion, modal and wizard that advances on that
+  event stalls. Both were live regressions, caught by review rather than by
+  this harness, which is why they are asserted by value and not by "not the
+  original".
+
+Before any of that, each still has to have a picture in it at all, on the same
+whole-frame luma floor the web take uses (6.0, healthy 15-17). Two blank
+recordings reproduce beautifully.
+
+And one reading is checked in the DOM rather than left to the pixels: the
+worker's. The fixture falls back to rendering `worker unavailable` if the
+`Worker` constructor throws, and that reproduces byte for byte across takes
+exactly as happily as a frozen timestamp does — so a wrapper that broke every
+worker on the page would pass this whole phase on the strength of failing
+consistently. The take reads the line and requires `worker <frozen epoch>`.
+All three takes also run `strict=True` (issue #3's machinery), which is what
+would catch the blob shim breaking worker *loading* rather than its clock.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -388,6 +512,35 @@ knows is missing is worse than one that is openly absent.
   `\#` expanded in `PS1`, which is bash behaviour; zsh needs `PROMPT_SUBST` and
   would leave every `exit_code` null. Only `/bin/bash` is recorded here — the
   `terminal-race/` take's slow shell `exec`s it.
+- **Determinism's motion rule is asserted only where a stylesheet can reach.**
+  `element.animate()` (Web Animations), `requestAnimationFrame` loops and
+  canvas rendering are untouched by it and unasserted here
+  ([#35](https://github.com/rogvid/skills/issues/35)); so are animations
+  inside a shadow root, and any the app declares `!important` at higher
+  specificity ([#36](https://github.com/rogvid/skills/issues/36)). The
+  `::before`/`::after` arms of the rule *are* asserted, because an animated
+  pseudo-element is the most common spinner on the web and dropping them from
+  the rule passed this harness until a probe was planted for it.
+- **No take records with a non-default `clock`, `timezone_id` or `locale`.**
+  Every take uses the built-in defaults, so the parameter path and
+  `_clock_epoch_ms()`'s parsing are exercised nowhere, and the locale
+  assertion had to be fault-injected with a forced `de-DE` to be seen failing
+  at all — this box is already `en-US`. Tracked in
+  [#37](https://github.com/rogvid/skills/issues/37).
+- **The determinism takes prove nothing about what the recorder cannot
+  control.** They record a static fixture served off the local disk, so
+  "identical twice" says the *browser* was pinned — not that an app with its
+  own `Math.random()`, a server that returns fresh rows, or a page whose layout
+  depends on when a request came back would reproduce. Nothing here can assert
+  that, because there is nothing in the recorder to assert about it; it is
+  called out in `SKILL.md` as the storyboard author's problem instead. The
+  fixture's `?entropy=1` hook deliberately does **not** include a random number
+  for the same reason — seeding it in the fixture would be testing a control
+  that does not exist.
+- **`TerminalRecorder`'s PTY child is outside all of it.** The determinism
+  controls are context options and page init scripts, so a `date` run in a
+  terminal demo prints the real time in the machine's own zone. Tracked in
+  [#26](https://github.com/rogvid/skills/issues/26).
 - **Nothing checks audio.** Narration is forced off and no assertion touches the
   aac track, so the whole speech path — `tts_clip`, the `.tts/` cache, the
   `adelay`/`amix` mixing in `_convert` — is untested here.
@@ -424,6 +577,21 @@ Two query-string hooks exist, inert unless asked for:
 | `?console-error=1` | logs a `console.error` **and** throws an uncaught error (Playwright `pageerror`), while the page stays usable | the Problems axis |
 | `?bad-fetch=<url>` | fetches `/definitely-missing.json` (404) and `<url>` (connection refused), both during load | the Problems axis — during load so the failures land inside the recorder's `goto` beat |
 | `?secret=1` | renders `#api-key` holding `sk-live-FAKE0000000000000000` | issue #4, redacting secrets from frames and stills |
+| `?entropy=1` | renders four clock readings (`Date`, `Intl`, `new Date().constructor`, and one posted back by a `Worker`, each read once at load) and `#entropy-spinner`, a shape turning once every 1.7 s | issue #10, the determinism takes |
+
+`?entropy=1` is the one hook the fixture's own "keep it deterministic" rule is
+suspended for, on purpose: the determinism takes need something that *would*
+differ between recordings. Each clock is read once rather than ticking, because
+a ticking one would also keep the compositor painting and confound the very
+thing being measured. There is deliberately no `Math.random()` in it — see
+Known gaps.
+
+The panel is **prepended** to `.page`, not appended. Four readings and a 54 px
+spinner are tall enough that at the bottom of the page they sit below the
+720 px fold, and `shot()` captures the viewport rather than the full page — so
+every comparison in the determinism phase passed against two byte-identical
+photographs of a spinner nobody had photographed. It was caught by the
+controls-off assertion, which is exactly what that assertion is for.
 
 One hook, one take. The graded `web/` take loads none of them, so the reference
 recording stays a recording of a working app — which is also the assertion that
@@ -448,6 +616,11 @@ insurance against a future release that does start flagging it.
   when the verb is a no-op. Anything that leaves the page still for more than a
   second also wants a look at `TICKER_JS`: idle is what makes the screencast
   lose time, and adding idle is how the timing bar was made flaky once already.
+- **Anything in the page that must keep moving** — a second ticker, an
+  animation a take is *about* — has to carry `data-demo-video-animate`, or the
+  recorder's determinism rule lands it on its final frame the moment it
+  appears. That attribute is the recorder's published opt-out, not a test
+  hook; `TICKER_JS` is the worked example.
 - **A new storyboard verb in the recorder** — decorate it with `@_beat_verb`
   so it lands in the beat log, or the timeline stops being a full account of
   the take. A verb built out of other verbs records one beat, not one per

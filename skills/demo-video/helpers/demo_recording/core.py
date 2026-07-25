@@ -22,6 +22,7 @@ SKILL.md for the full variable list.
 
 from __future__ import annotations
 
+import datetime as _dt
 import functools
 import hashlib
 import json
@@ -116,6 +117,241 @@ window.__demoBridge = (text) => {
 """
 
 
+# -- determinism -------------------------------------------------------------
+#
+# Re-recording a storyboard should produce the same video, or "did the UI
+# actually change?" is unanswerable and last month's committed still cannot be
+# compared with today's. Three things *in the browser* make it not: the wall
+# clock, locale/timezone formatting, and animation phase.
+#
+# They are not equally safe to pin, so they are not pinned together:
+#
+#   * **Timezone, locale and `prefers-reduced-motion` are always on.** They cost
+#     an app nothing — an app that honours reduced motion was built to — and
+#     they remove the difference between a recording made on a laptop in
+#     Tórshavn and one made on a CI runner.
+#
+#   * **The frozen clock and the motion rule are opt-in** (`deterministic=True`,
+#     `DEMO_VIDEO_DETERMINISTIC=1`). Both change what an app *does*, and mostly
+#     they do it silently. Measured on five adversarial pages: a lodash-shaped
+#     debounce never fires because `now - last` is always 0, an elapsed-time bar
+#     sticks at 0%, a token gate renders "not yet valid", a "last 7 days" chart
+#     draws no bars — four of the five produce a plausible wrong screen with no
+#     exception, nothing on the console, and nothing in timeline.json. The fifth
+#     wedges a `while (Date.now() - t0 < ms)` spin until the navigation times
+#     out and no mp4 is written at all. A demo recorder whose default can put a
+#     confidently wrong screen in front of a reviewer is worse than one that
+#     records a fresh timestamp each take, so the default records the truth and
+#     the storyboard asks for reproducibility when it wants it.
+#
+# What the freeze deliberately leaves alone: `performance.now()`, the document
+# animation timeline, and `requestAnimationFrame`. Only the *wall* clock stops.
+# Freezing monotonic time as well would stop the compositor, and a page that
+# never paints is a page Chromium's screencast never records — it would lose
+# wall time (issue #18) in exchange for determinism it does not need. It is also
+# why an element that opts out of the motion rule below still animates: nothing
+# here touches the clock its animation runs on.
+DEFAULT_CLOCK = "2025-01-01T09:00:00Z"
+DEFAULT_TIMEZONE = "UTC"
+DEFAULT_LOCALE = "en-US"
+
+# Freeze the wall clock at a fixed instant: `Date.now()` and `new Date()` stop
+# moving, so a rendered timestamp, a "3 minutes ago", or a date-formatted cell
+# reads the same in every take.
+#
+# Every line below closes a hole that was measured open, so none of it is
+# defensive decoration:
+#
+#   * `Date.now` is *defined on the real constructor*, once, as a named
+#     function — not synthesized by a proxy `get` trap. A trap mints a new
+#     arrow function per read, so `Date.now !== Date.now`, its `.name` is "",
+#     and `Object.getOwnPropertyDescriptor(Date, 'now').value` is the real
+#     clock the trap never saw.
+#   * `Date.prototype.constructor` is repointed at the proxy. Left alone it is
+#     the *unproxied* Date, which makes `Date.prototype.constructor === Date`
+#     false — a live type-detection idiom in deep-clone and serialization
+#     helpers — and hands out an unfrozen clock via `new Date().constructor`.
+#   * `Intl.DateTimeFormat.prototype.format()` with no argument formats "now"
+#     from the *internal* clock, which no patch of the `Date` global reaches.
+#     It is the highest-impact hole of the set: it is how apps render dates.
+#   * `performance.timeOrigin` and `document.lastModified` are wall-clock
+#     readings that survive everything above.
+#   * A `Worker` gets its own global, so init scripts never run there. The
+#     wrapper re-injects the freeze ahead of the real script via a blob
+#     shim. Module workers cannot `importScripts` and are passed through
+#     unfrozen (issue #29).
+_FROZEN_CLOCK_JS = """
+(() => {
+  const FIXED = __EPOCH_MS__;
+
+  // Shared by the page and by the worker shim below, hence a named function
+  // whose source can be stringified rather than a closure.
+  function __demoFreezeDate(scope, FIXED) {
+    const Real = scope.Date;
+    const now = function now() { return FIXED; };
+    Real.now = now;
+    // Only the zero-argument "what time is it" forms are answered from the
+    // freeze; explicit arguments, Date.parse and Date.UTC pass straight
+    // through. A Proxy rather than a subclass because `Date()` called as a
+    // function must return a string, which a class cannot do.
+    const Frozen = new Proxy(Real, {
+      apply: () => new Real(FIXED).toString(),
+      construct: (t, args, nt) =>
+        Reflect.construct(t, args.length ? args : [FIXED], nt),
+    });
+    scope.Date = Frozen;
+    Object.defineProperty(Real.prototype, 'constructor',
+      {value: Frozen, writable: true, configurable: true});
+    return Real;
+  }
+
+  const Real = __demoFreezeDate(window, FIXED);
+
+  // Intl reads its own clock, not the global Date.
+  const proto = Intl.DateTimeFormat.prototype;
+  for (const name of ['format', 'formatToParts']) {
+    const desc = Object.getOwnPropertyDescriptor(proto, name);
+    if (!desc) continue;
+    if (desc.get) {
+      // V8 exposes `format` as a getter returning a bound formatter.
+      Object.defineProperty(proto, name, {
+        configurable: true,
+        get() {
+          const bound = desc.get.call(this);
+          return function (value, ...rest) {
+            return bound(value === undefined ? FIXED : value, ...rest);
+          };
+        },
+      });
+    } else if (typeof desc.value === 'function') {
+      const real = desc.value;
+      Object.defineProperty(proto, name, {
+        configurable: true, writable: true,
+        value: function (value, ...rest) {
+          return real.call(this, value === undefined ? FIXED : value, ...rest);
+        },
+      });
+    }
+  }
+
+  try {
+    Object.defineProperty(performance, 'timeOrigin',
+      {configurable: true, get: () => FIXED});
+  } catch (e) { /* non-fatal: one reading of many */ }
+
+  try {
+    const d = new Real(FIXED);
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + '/'
+      + d.getFullYear() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+      + ':' + pad(d.getSeconds());
+    Object.defineProperty(document, 'lastModified',
+      {configurable: true, get: () => stamp});
+  } catch (e) { /* non-fatal */ }
+
+  const RealWorker = window.Worker;
+  if (typeof RealWorker === 'function') {
+    const prelude = '(' + __demoFreezeDate.toString() + ')(self,' + FIXED + ');';
+    window.Worker = class Worker extends RealWorker {
+      constructor(url, options) {
+        let target = url;
+        try {
+          if (!options || options.type !== 'module') {
+            const absolute = new URL(url, location.href).href;
+            const src = prelude + '\\nimportScripts('
+              + JSON.stringify(absolute) + ');';
+            target = URL.createObjectURL(
+              new Blob([src], {type: 'text/javascript'}));
+          }
+        } catch (e) { target = url; }
+        super(target, options);
+      }
+    };
+  }
+})();
+"""
+
+# Land every animation and transition on its finished state, so no frame of the
+# recording depends on when the take happened to start.
+#
+# **1 ms, not 0s.** A transition with a combined duration of zero never starts,
+# and a transition that never starts fires no `transitionend` — which stalls
+# every accordion, modal, carousel and wizard that advances on that event, and
+# does it in a way no amount of "move the frozen instant" advice helps with.
+# One millisecond is over before the first frame is composited and still fires
+# the whole event sequence.
+#
+# **Authored delays are left alone.** Forcing `animation-delay: 0s` made a
+# snackbar declared `dismiss .4s ease 4s forwards` invisible from frame zero:
+# the four seconds it is meant to be readable collapsed to nothing. A delay is
+# measured from the animation's own start, not from the wall clock, so honouring
+# it costs no reproducibility.
+#
+# **`animation-fill-mode` is left alone too.** Forcing `forwards` looks like it
+# guards content that animates in from `opacity: 0`, but such content is always
+# authored `forwards` already — and forcing it makes an `alternate` animation
+# hold the far keyframe instead of returning, which is not where the browser
+# would have left it. `iteration-count: 1` is forced, because an *infinite*
+# animation has no finished state to land on and would otherwise resample every
+# frame; a finite one ends where it would have ended.
+#
+# Two things are spared, and both matter:
+#   * the recorder's own overlays (`#__demo…`, `#__term…`) — their motion is
+#     triggered by the storyboard, so it is already as repeatable as the
+#     storyboard is, and killing it would only make captions pop;
+#   * anything carrying `data-demo-video-animate` — the documented opt-out for
+#     an element that must keep painting. Chromium's screencast emits a frame
+#     when the page paints (issue #18), so "no motion at all" is not a free
+#     choice: a harness or a storyboard that needs the compositor awake marks
+#     the element it keeps alive, and this rule cannot match it.
+_FREEZE_MOTION_JS = """
+(() => {
+  const KEEP =
+    ':not([data-demo-video-animate]):not([id^="__demo"]):not([id^="__term"])';
+  // The pseudo-element arms are not padding: an animated ::after is the most
+  // common spinner on the web.
+  const CSS = ['', '::before', '::after'].map((p) => '*' + KEEP + p).join(',') + `{
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 1ms !important;
+    }`;
+  const attach = () => {
+    const root = document.head || document.documentElement;
+    if (!root || document.getElementById('__demo_motion')) return;
+    const style = document.createElement('style');
+    style.id = '__demo_motion';
+    style.textContent = CSS;
+    root.appendChild(style);
+  };
+  // attach() self-guards on purpose. An init script runs before the document
+  // has a documentElement, and an appendChild that throws here would take the
+  // listener below with it — measured, and it silently left a real navigation
+  // with no rule at all while every other determinism control looked fine.
+  attach();
+  if (document.readyState === 'loading')
+    document.addEventListener('DOMContentLoaded', attach);
+})();
+"""
+
+
+def _clock_epoch_ms(value: str) -> int:
+    """Epoch milliseconds for a frozen-clock setting, given as ISO 8601.
+
+    A naive timestamp is read as UTC, so the frozen instant does not depend on
+    the recording machine's own timezone.
+    """
+    try:
+        parsed = _dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"DEMO_VIDEO_CLOCK must be an ISO 8601 timestamp like "
+            f"{DEFAULT_CLOCK!r}, got {value!r}"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
 def _env(name: str, default: str | None = None) -> str | None:
     """A DEMO_VIDEO_-prefixed environment variable, or the default."""
     value = os.environ.get(f"DEMO_VIDEO_{name}", "").strip()
@@ -208,6 +444,10 @@ def tts_clip(
 #   segment       str?   — the segment name, or null for a whole demo
 #   media         str    — the mp4 this timeline describes, e.g. "demo.mp4"
 #   duration      float? — that mp4's real duration (ffprobe), null if absent
+#   determinism   dict   — the conditions the take was recorded under:
+#                          `deterministic` (was the clock frozen and motion
+#                          flattened), `clock` (the frozen instant, null when
+#                          the page's clock ran), `timezone_id`, `locale`
 #   beats         list   — the beats, in the order they ran
 #   strict        bool   — whether strict mode was on for this take
 #   issues        list   — the problems the take recorded (see "take issues")
@@ -505,6 +745,14 @@ class _DemoBase:
     and interlude line is also narrated — synthesized via ElevenLabs, cached
     in .tts/, and mixed onto the mp4 at the moment the line appeared. Pacing
     self-adjusts: a new line waits for the previous one to finish speaking.
+
+    Determinism: the timezone, the locale and `prefers-reduced-motion` are
+    always pinned. `deterministic=True` additionally freezes the page's wall
+    clock and lands animations on their finished state, so re-recording a
+    storyboard reproduces it — at the cost of changing what a clock-reading app
+    does, which is why it is opt-in. Either way it controls the *browser* only:
+    the app's own randomness, its server data, and network timing are the
+    storyboard author's to pin down. See the determinism section above.
     """
 
     def __init__(
@@ -519,6 +767,10 @@ class _DemoBase:
         voice_id: str | None = None,
         speech_model: str | None = None,
         strict: bool | None = None,
+        deterministic: bool | None = None,
+        clock: str | None = None,
+        timezone_id: str | None = None,
+        locale: str | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
         # > built-in default (see SKILL.md for the variable names).
@@ -551,6 +803,19 @@ class _DemoBase:
                 )
             viewport = (int(w), int(h))
         self._size = {"width": viewport[0], "height": viewport[1]}
+        # Determinism (see the section above). Opt-in, because the frozen clock
+        # and the motion rule change what an app does and mostly do it
+        # silently; timezone, locale and reduced motion are pinned regardless.
+        # The clock is parsed even when it is off, so a typo in
+        # DEMO_VIDEO_CLOCK is reported when it is written rather than the first
+        # time someone turns determinism on.
+        if deterministic is None:
+            deterministic = _env_flag("DETERMINISTIC")
+        self.deterministic = False if deterministic is None else bool(deterministic)
+        self._clock = clock or _env("CLOCK", DEFAULT_CLOCK)
+        self._clock_ms = _clock_epoch_ms(self._clock)
+        self._timezone_id = timezone_id or _env("TIMEZONE", DEFAULT_TIMEZONE)
+        self._locale = locale or _env("LOCALE", DEFAULT_LOCALE)
         api_key = os.environ.get("ELEVENLABS_API_KEY", "")
         if speech is None:
             speech = _env_flag("SPEECH")
@@ -619,6 +884,35 @@ class _DemoBase:
                 "enable spoken narration.",
                 file=sys.stderr,
             )
+        # ...and determinism state, at the same volume and for the same reason.
+        # Which clock produced a take is not visible in the video, and both
+        # answers surprise somebody: a frozen clock can hand a reviewer a
+        # confidently wrong screen, and a live one means two takes never match.
+        if self.deterministic:
+            print(
+                f"demo-video: determinism ON — the page's clock is frozen at "
+                f"{self._clock}, its timezone is {self._timezone_id}, its "
+                f"locale {self._locale}, and animations land on their finished "
+                f"state. Re-recording reproduces the take. But an app that "
+                f"*reads* the clock (a debounce, an elapsed-time bar, a token's "
+                f"validity window, a 'last 7 days' chart) can render a "
+                f"plausible wrong screen rather than failing loudly — check the "
+                f"stills against the app by hand this once, and pass "
+                f"deterministic=False (or DEMO_VIDEO_DETERMINISTIC=0) if "
+                f"anything looks off. See SKILL.md, 'Determinism'.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"demo-video: determinism OFF (the default) — timezone "
+                f"{self._timezone_id}, locale {self._locale} and reduced motion "
+                f"are still pinned, but the page's clock runs, so anything the "
+                f"app renders from it differs between takes and two recordings "
+                f"of this storyboard will not match. Recorder("
+                f"deterministic=True) freezes it; read SKILL.md's 'Determinism' "
+                f"section first, it changes what some apps do.",
+                file=sys.stderr,
+            )
 
     # -- subclass hooks -----------------------------------------------------
 
@@ -645,11 +939,27 @@ class _DemoBase:
         self._pw = sync_playwright().start()
         try:
             self._browser = self._pw.chromium.launch()
+            # Always pinned. Locale and timezone are context options rather
+            # than init scripts because a page cannot fake its own Intl data
+            # convincingly, and every date/number the app formats has to come
+            # out the same on a machine in Tórshavn as on a CI runner in
+            # us-east-1. None of the three changes what an app computes, so
+            # none of them is gated on `deterministic`.
             self._context = self._browser.new_context(
                 viewport=self._size,
                 record_video_dir=str(self._video_dir),
                 record_video_size=self._size,
+                locale=self._locale,
+                timezone_id=self._timezone_id,
+                reduced_motion="reduce",
             )
+            if self.deterministic:
+                # Opt-in: both of these change what an app *does*.
+                # The clock first, so the app's own scripts never see a live one.
+                self._context.add_init_script(
+                    _FROZEN_CLOCK_JS.replace("__EPOCH_MS__", str(self._clock_ms))
+                )
+                self._context.add_init_script(_FREEZE_MOTION_JS)
             # Overlays common to every medium.
             self._context.add_init_script(
                 _CAPTION_JS.replace("__CAPFONT__", str(self._caption_font_px))
@@ -984,6 +1294,17 @@ class _DemoBase:
             "segment": self.segment,
             "media": mp4.name,
             "duration": duration,
+            # Which clock produced this take. Without it a still committed to a
+            # repo carries no record of the conditions it was recorded under,
+            # and a future diff cannot tell "the UI changed" from "the frozen
+            # instant changed" — which is the one question this whole feature
+            # exists to answer. `clock` is null when the page's clock was live.
+            "determinism": {
+                "deterministic": self.deterministic,
+                "clock": self._clock if self.deterministic else None,
+                "timezone_id": self._timezone_id,
+                "locale": self._locale,
+            },
             "beats": self._beats,
             "strict": self._strict,
             "issues": self._issues,
