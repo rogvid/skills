@@ -73,8 +73,12 @@ buried in `docs/`. If work is worth remembering, it is an issue.
   `enhancement`, `documentation`, …) stack on top.
 - Close issues from commits — `Fixes #12` in the commit message — rather than by
   hand, so the reason a thing closed is in the history.
-- Big design proposals belong in the issue body as a checklist, the way #1 does.
-  Split an item into its own issue once someone actually starts on it.
+- Big design proposals go in the issue body as a checklist, together with the
+  reasoning that motivated them. Before anyone starts, split that checklist into
+  vertical slices — one issue per slice, each with its own acceptance criterion
+  and its own note of what it deliberately leaves out — and keep the original as
+  the design record. A single issue holding a quarter of work is a backlog, and
+  nobody picks up a backlog. #1 split into #2–#12 is the worked example.
 
 ## Housekeeping
 
