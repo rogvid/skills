@@ -1,0 +1,17 @@
+# gitleaks configuration.
+#
+# The default ruleset, plus one narrowly-scoped allowlist. Nothing else is
+# relaxed: if a scan trips on something new, fix the leak, do not widen this.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+The demo-video test fixture renders a deliberately fake API key at #api-key
+(tests/fixture/index.html, behind ?secret=1) so the redaction work in issue #4
+has something to prove it hides. It is spelled FAKE followed by zeroes exactly
+so that both a scanner and a human read it as scenery. This entry matches that
+one literal and nothing else.
+"""
+regexes = ['''sk-live-FAKE0{16}''']

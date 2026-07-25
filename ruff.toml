@@ -1,0 +1,43 @@
+# Lint/format config for the Python in this repo.
+#
+# Deliberately `ruff.toml` and not `pyproject.toml`: this repo is a collection
+# of skills, not a Python package, and a pyproject.toml would invite tooling
+# (and people) to treat it as one.
+
+target-version = "py310"  # the floor demo-video's PEP 723 headers declare
+line-length = 88
+
+exclude = [
+    "skills/demo-video/helpers/assets",  # vendored xterm.js
+]
+
+# House convention names executables without a `.py` extension (see
+# skills/script-conventions), and ruff only discovers `.py`/`.pyi` on its own.
+# Without these patterns the scripts that matter most would go unlinted.
+extend-include = [
+    "tests/smoke",
+    "skills/*/scripts/*",  # every skill's PEP 723 executables
+]
+
+[lint]
+# Ruff's own default (E4/E7/E9 + F) plus the rule families that catch real
+# bugs and keep imports tidy. Intentionally not maximal — this is a lint
+# budget for a small repo, not a style crusade.
+#
+# E501 (line too long) is left out on purpose: the formatter owns line length,
+# and every over-long line here lives inside an embedded JS/CSS string that
+# cannot be wrapped anyway.
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
+
+[lint.per-file-ignores]
+# `-> "_DemoBase"` in core.py. The fix is one character, but ten PRs (#3–#12)
+# are queued against these three files and a drive-by edit conflicts with all
+# of them. Drop this once that queue drains.
+"skills/demo-video/helpers/demo_recording/core.py" = ["UP037"]
+
+[format]
+# The recorder modules predate any formatter. Running one over them now would
+# rewrite all three files and collide with every queued PR, so they are
+# excluded rather than reformatted. This is a starting point: delete the
+# exclusion (and land the reformat as its own commit) once #3–#12 are merged.
+exclude = ["skills/demo-video/helpers/demo_recording/*.py"]

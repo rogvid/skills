@@ -1,0 +1,370 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright>=1.40"]
+# ///
+"""End-to-end smoke test for the demo-video recorders.
+
+Serves `tests/fixture/` with a throwaway `python3 -m http.server`, records a
+short web demo against it with `Recorder`, records a short terminal demo with
+`TerminalRecorder`, and asserts that each take produced a real mp4 of a
+plausible duration plus the stills its storyboard asked for.
+
+The point is not to check pixels. It is to catch the failure modes that make
+the whole skill useless and that nothing else notices: a recorder that raises,
+an ffmpeg pipeline that writes a 0-byte or 0.2-second mp4, a `shot()` that
+silently stops producing files.
+
+    tests/smoke                 # both takes
+    tests/smoke --web-only
+    tests/smoke --terminal-only
+    tests/smoke --out-dir /tmp/smoke --keep
+
+Narration is forced off (`speech=False`): CI has no ELEVENLABS_API_KEY and no
+assertion here depends on audio.
+
+Unix only, because `demo_recording/__init__.py` imports the PTY-backed
+terminal recorder unconditionally.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_DIR = REPO_ROOT / "tests" / "fixture"
+HELPERS_DIR = REPO_ROOT / "skills" / "demo-video" / "helpers"
+
+# Size floors. A recorder that fails halfway still tends to leave a file
+# behind, so "exists" alone proves nothing — these say "there are actual
+# frames in there". Both are ~an order of magnitude below what a healthy
+# take produces.
+MIN_MP4_BYTES = 20_000
+MIN_PNG_BYTES = 5_000
+
+# Duration windows, in seconds. Wide on purpose: the lower bound catches a
+# take that died early, the upper one catches a hang, and everything in
+# between is legitimate variation between a laptop and a cold CI runner.
+WEB_DURATION_S = (6.0, 30.0)
+TERMINAL_DURATION_S = (4.0, 30.0)
+
+WEB_SHOTS = ["01-dashboard", "02-filtered", "03-refreshed"]
+TERMINAL_SHOTS = ["01-echo", "02-listing"]
+
+SERVER_START_TIMEOUT_S = 15.0
+
+
+class SmokeFailure(Exception):
+    """An assertion about a recording did not hold."""
+
+
+# -- environment -------------------------------------------------------------
+
+
+def scrub_env() -> None:
+    """Drop settings that would make the run depend on the operator's shell.
+
+    Every Recorder knob reads a DEMO_VIDEO_* variable, so a developer with a
+    sourced project .env would otherwise record at a different viewport, at a
+    different base URL, or with narration on — and the assertions below would
+    mean something different for them than for CI.
+    """
+    for name in [k for k in os.environ if k.startswith("DEMO_VIDEO_")]:
+        del os.environ[name]
+    os.environ.pop("ELEVENLABS_API_KEY", None)
+
+
+# -- fixture server ----------------------------------------------------------
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+@contextmanager
+def fixture_server() -> Iterator[str]:
+    """Serve tests/fixture on a free port; always shut it down."""
+    if not (FIXTURE_DIR / "index.html").is_file():
+        raise SmokeFailure(f"fixture app missing: {FIXTURE_DIR / 'index.html'}")
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            str(FIXTURE_DIR),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + SERVER_START_TIMEOUT_S
+        while True:
+            if proc.poll() is not None:
+                raise SmokeFailure(
+                    f"fixture server exited immediately (code {proc.returncode}) "
+                    f"— port {port} may already be in use"
+                )
+            try:
+                with urllib.request.urlopen(base_url, timeout=1) as resp:
+                    if resp.status == 200:
+                        break
+            except (urllib.error.URLError, OSError):
+                pass
+            if time.time() > deadline:
+                raise SmokeFailure(
+                    f"fixture server did not answer on {base_url} within "
+                    f"{SERVER_START_TIMEOUT_S:.0f}s"
+                )
+            time.sleep(0.1)
+        print(f"smoke: serving {FIXTURE_DIR} at {base_url}")
+        yield base_url
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+# -- storyboards -------------------------------------------------------------
+
+
+def record_web(out_dir: Path, base_url: str) -> None:
+    """A handful of beats: land, read a KPI, filter the table, refresh it."""
+    from demo_recording import Recorder
+
+    with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        rec.pause(0.6)
+
+        rec.caption("A small dashboard.")
+        rec.shot("01-dashboard")
+        rec.spotlight("#kpi-rev")
+        rec.hold()
+        rec.spotlight()
+
+        rec.caption("Filter by city.")
+        rec.type_into("#search", "seattle")
+        rec.pause(0.8)
+        rec.shot("02-filtered")
+
+        rec.caption("Refresh reloads it.")
+        rec.click("#refresh")
+        rec.pause(1.0)
+        rec.shot("03-refreshed")
+        rec.caption("")
+
+
+def record_terminal(out_dir: Path) -> None:
+    """Two trivial commands — enough to exercise PTY, xterm.js, and prompt sync."""
+    from demo_recording import TerminalRecorder
+
+    with TerminalRecorder(out_dir, speech=False) as rec:
+        rec.caption("A real shell, recorded.")
+        rec.run("echo hello from demo-video")
+        rec.wait_for_prompt()
+        rec.shot("01-echo")
+
+        rec.caption("Any command works.")
+        rec.run("ls -1")
+        rec.wait_for_prompt()
+        rec.pause(0.8)
+        rec.shot("02-listing")
+        rec.caption("")
+
+
+# -- assertions --------------------------------------------------------------
+
+
+def check_take(
+    label: str,
+    out_dir: Path,
+    shots: list[str],
+    duration_range: tuple[float, float],
+) -> list[str]:
+    """Everything a healthy take leaves behind. Returns failure messages."""
+    from demo_recording import media_duration
+
+    failures: list[str] = []
+
+    mp4 = out_dir / "demo.mp4"
+    if not mp4.is_file():
+        failures.append(f"{label}: {mp4} was never written")
+    else:
+        size = mp4.stat().st_size
+        if size < MIN_MP4_BYTES:
+            failures.append(
+                f"{label}: {mp4} is only {size} bytes "
+                f"(expected at least {MIN_MP4_BYTES})"
+            )
+        else:
+            try:
+                seconds = media_duration(mp4)
+            except Exception as exc:  # noqa: BLE001 - report, don't crash the run
+                failures.append(f"{label}: ffprobe could not read {mp4}: {exc}")
+            else:
+                low, high = duration_range
+                if not low <= seconds <= high:
+                    failures.append(
+                        f"{label}: {mp4.name} is {seconds:.1f}s, expected "
+                        f"between {low:.0f}s and {high:.0f}s"
+                    )
+                else:
+                    print(
+                        f"smoke: {label} demo.mp4 ok "
+                        f"({seconds:.1f}s, {size // 1024} kB)"
+                    )
+
+    for name in shots:
+        png = out_dir / "images" / f"{name}.png"
+        if not png.is_file():
+            failures.append(f"{label}: still {png} was never captured")
+            continue
+        size = png.stat().st_size
+        if size < MIN_PNG_BYTES:
+            failures.append(
+                f"{label}: still {png} is only {size} bytes "
+                f"(expected at least {MIN_PNG_BYTES})"
+            )
+        else:
+            print(f"smoke: {label} still {name}.png ok ({size // 1024} kB)")
+
+    return failures
+
+
+# -- phases ------------------------------------------------------------------
+
+
+def run_web(out_root: Path) -> list[str]:
+    out_dir = out_root / "web"
+    with fixture_server() as base_url:
+        try:
+            record_web(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
+    return check_take("web", out_dir, WEB_SHOTS, WEB_DURATION_S)
+
+
+def run_terminal(out_root: Path) -> list[str]:
+    if os.name != "posix":
+        print(
+            "smoke: SKIPPING the terminal take — TerminalRecorder needs a PTY "
+            f"and this is {os.name!r}, not a Unix platform.",
+            file=sys.stderr,
+        )
+        return []
+    out_dir = out_root / "terminal"
+    # The shell starts in the process cwd, and `ls -1` is one of the beats —
+    # pin it to the repo root so the take does not depend on where it was run.
+    previous = Path.cwd()
+    os.chdir(REPO_ROOT)
+    try:
+        record_terminal(out_dir)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [f"terminal: TerminalRecorder raised {type(exc).__name__}: {exc}"]
+    finally:
+        os.chdir(previous)
+    return check_take("terminal", out_dir, TERMINAL_SHOTS, TERMINAL_DURATION_S)
+
+
+# -- entry point -------------------------------------------------------------
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Smoke-test the demo-video recorders against tests/fixture.",
+    )
+    parser.add_argument(
+        "--web-only", action="store_true", help="record only the web take"
+    )
+    parser.add_argument(
+        "--terminal-only", action="store_true", help="record only the terminal take"
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        help="where recordings land (default: a fresh temp dir). "
+        "Point CI at a known path so artifacts can be uploaded.",
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep the output directory even when everything passes",
+    )
+    args = parser.parse_args()
+
+    if args.web_only and args.terminal_only:
+        parser.error("--web-only and --terminal-only are mutually exclusive")
+
+    if not HELPERS_DIR.is_dir():
+        print(f"smoke: helpers not found at {HELPERS_DIR}", file=sys.stderr)
+        return 1
+    sys.path.insert(0, str(HELPERS_DIR))
+
+    if shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None:
+        print(
+            "smoke: ffmpeg and ffprobe must be on PATH — the recorders shell "
+            "out to both.",
+            file=sys.stderr,
+        )
+        return 1
+
+    scrub_env()
+
+    if args.out_dir:
+        out_root = args.out_dir.resolve()
+        out_root.mkdir(parents=True, exist_ok=True)
+        ephemeral = False
+    else:
+        out_root = Path(tempfile.mkdtemp(prefix="demo-video-smoke-"))
+        ephemeral = True
+    print(f"smoke: output -> {out_root}")
+
+    failures: list[str] = []
+    try:
+        if not args.terminal_only:
+            failures += run_web(out_root)
+        if not args.web_only:
+            failures += run_terminal(out_root)
+    except SmokeFailure as exc:
+        failures.append(str(exc))
+
+    if failures:
+        print("\nsmoke: FAILED", file=sys.stderr)
+        for line in failures:
+            print(f"  - {line}", file=sys.stderr)
+        print(f"\nsmoke: recordings left in {out_root}", file=sys.stderr)
+        return 1
+
+    print("\nsmoke: PASSED")
+    if ephemeral and not args.keep:
+        shutil.rmtree(out_root, ignore_errors=True)
+    else:
+        print(f"smoke: recordings kept in {out_root}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

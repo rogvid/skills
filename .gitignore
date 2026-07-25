@@ -12,6 +12,13 @@ __pycache__/
 # demo-video working files (only demo.mp4 belongs in history)
 .tts/
 *.seg.mp4
+# Left behind only when a take crashes before the recorder cleans up.
+.video/
+.frame.png
+
+# Smoke-test recordings. tests/smoke records into a temp dir by default; this
+# covers pointing it back into the repo (tests/smoke --out-dir tests/out).
+tests/out/
 
 # Best practice
 .env
