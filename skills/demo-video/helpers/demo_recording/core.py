@@ -249,8 +249,8 @@ TIMELINE_SCHEMA = 1
 # Issue (part of the envelope's `issues`, same append-only rules as a beat)
 #   kind     str   — one of ISSUE_KINDS below
 #   t        float — seconds from the start of `media` to *observing* it
-#   beat     int?  — index of the beat it is attributed to, null if none was
-#                    open yet (setup, or a page event before the first verb)
+#   beat     int?  — index of the beat it is attributed to, or **null** when no
+#                    beat can honestly claim it (see below)
 #   verb     str?  — that beat's verb, denormalized so the list reads alone
 #   caption  str   — the caption on screen at the time, same reason
 #   message  str   — one human-readable line
@@ -262,6 +262,17 @@ TIMELINE_SCHEMA = 1
 # Playwright's sync API only delivers page events while it is being called, and
 # a command's exit status is only knowable once the prompt comes back. `beat`
 # is the attribution to trust; `t` is a hint.
+#
+# **`beat` is null whenever it cannot be established, and that is a feature.**
+# The obvious implementation — blame the most recently started beat — is wrong
+# in both directions: it hands an error thrown during a three-second hold to
+# whatever beat makes the next Playwright call, quoting a caption that appeared
+# after the error did, and it lets a beat that has already closed claim
+# something that happened after it. So holds pump events as they wait
+# (`_pump_events`), and an event is only attributed to a beat that was open,
+# and had been open since events were last known to be flowing
+# (`_attributed_beat`). A confidently wrong beat index is worse input for a
+# reviewer — or for a conformance gate reading this file — than no answer.
 ISSUE_KINDS = (
     "console_error",    # console.error(...) from the page
     "console_warning",  # console.warn(...) from the page
@@ -289,7 +300,15 @@ STRICT_KINDS = ("console_error", "page_error", "nonzero_exit")
 # A page that throws on every render can throw thousands of times. Record the
 # first MAX_ISSUES in full and keep counting the rest — `issue_count` in the
 # envelope stays honest, and timeline.json stays a file somebody can open.
+# Strict mode counts fatals separately and is *not* capped: a take whose 201st
+# problem is its first console error still has to fail.
 MAX_ISSUES = 200
+
+# How often a hold gives Playwright a chance to deliver queued page events, and
+# how stale that last delivery may be before a beat is no longer allowed to
+# claim an event. See `_pump_events` and `_attributed_beat`.
+PUMP_INTERVAL_S = 0.1
+ATTRIBUTION_SLACK_S = 0.5
 
 
 class StrictTakeFailed(RuntimeError):
@@ -352,21 +371,40 @@ def render_timeline_md(doc: dict) -> str:
         "Written by the demo-video recorder on every clean exit — do not edit "
         "it by hand, re-record instead.",
         "",
-        "| # | start | end | verb | target | caption |",
-        "|---:|---:|---:|---|---|---|",
     ]
+    # The exit column only exists when something in this take has one — a web
+    # timeline would otherwise carry an empty column on every row. A `run` beat
+    # whose status could not be read shows "?" rather than blank, so the
+    # degraded case is visible here and not only in the JSON.
+    shows_exit = any("exit_code" in b for b in beats)
+    if shows_exit:
+        out += [
+            "| # | start | end | verb | target | exit | caption |",
+            "|---:|---:|---:|---|---|---:|---|",
+        ]
+    else:
+        out += [
+            "| # | start | end | verb | target | caption |",
+            "|---:|---:|---:|---|---|---|",
+        ]
     for beat in beats:
         target = beat.get("selector")
-        out.append(
-            "| {} | {} | {} | `{}` | {} | {} |".format(
-                beat.get("index"),
-                _fmt_t(beat.get("t_start")),
-                _fmt_t(beat.get("t_end")),
-                _md_cell(beat.get("verb")),
-                f"`{_md_cell(target)}`" if target else "",
-                _md_cell(beat.get("caption")),
-            )
-        )
+        cells = [
+            str(beat.get("index")),
+            _fmt_t(beat.get("t_start")),
+            _fmt_t(beat.get("t_end")),
+            f"`{_md_cell(beat.get('verb'))}`",
+            f"`{_md_cell(target)}`" if target else "",
+        ]
+        if shows_exit:
+            if "exit_code" not in beat:
+                cells.append("")
+            elif beat["exit_code"] is None:
+                cells.append("?")
+            else:
+                cells.append(_md_cell(beat["exit_code"]))
+        cells.append(_md_cell(beat.get("caption")))
+        out.append("| " + " | ".join(cells) + " |")
     issues = doc.get("issues") or []
     if issues:
         total = doc.get("issue_count", len(issues))
@@ -561,6 +599,12 @@ class _DemoBase:
         self._strict = bool(strict)
         self._issues: list[dict] = []
         self._issue_count = 0
+        # Counted outside the MAX_ISSUES cap: the verdict must not depend on
+        # how much noise came before the thing that matters.
+        self._fatal_count = 0
+        # Offset from _t0 at which Playwright was last known to be delivering
+        # page events. Attribution is only as good as this is fresh.
+        self._pumped_at = 0.0
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
         # env) is otherwise a confusing surprise only noticed after the fact.
@@ -627,6 +671,10 @@ class _DemoBase:
             # a page that throws on load is the whole point of this.
             self._watch_page(self.page)
             self._start()
+            # _start() ends in real Playwright work, so events were flowing as
+            # it returned. Without this the first storyboard beat looks like it
+            # began after an unexplained gap and cannot claim anything.
+            self._pumped_at = time.monotonic() - self._t0
         except Exception:
             # __exit__ never runs when __enter__ raises — don't leak the
             # Playwright driver (typical cause: chromium not installed).
@@ -671,10 +719,8 @@ class _DemoBase:
             # recorded are the one thing nobody thinks to go looking for, so
             # they have to arrive unasked.
             self._print_issue_summary()
-        if exc_type is None and self._strict:
-            fatal = [i for i in self._issues if i["kind"] in STRICT_KINDS]
-            if fatal:
-                raise StrictTakeFailed(self._strict_message(fatal))
+        if exc_type is None and self._strict and self._fatal_count:
+            raise StrictTakeFailed(self._strict_message())
 
     # -- take issues --------------------------------------------------------
 
@@ -685,27 +731,84 @@ class _DemoBase:
         beat: dict | None = None,
         **extra: object,
     ) -> None:
-        """Log one problem, attributed to `beat` (default: the open one).
+        """Log one problem, attributed to `beat` (default: whichever beat can
+        honestly claim it, which is often none — see `_attributed_beat`).
 
-        Never raises: it runs inside Playwright event callbacks, where an
-        exception would surface somewhere unrelated and kill a take over a
-        diagnostic.
+        Never raises, and means it: the whole body is guarded. Page events are
+        delivered inside Playwright callbacks and `_record_exit_code` runs from
+        the PTY pump mid-recording, so an exception here would surface
+        somewhere unrelated and lose a take over a diagnostic.
         """
-        self._issue_count += 1
-        if len(self._issues) >= MAX_ISSUES:
+        try:
+            self._issue_count += 1
+            if kind in STRICT_KINDS:
+                # Outside the cap, and before the early return below it: the
+                # verdict must not depend on how much noise preceded this.
+                self._fatal_count += 1
+            if len(self._issues) >= MAX_ISSUES:
+                return
+            if beat is None:
+                beat = self._attributed_beat()
+            record: dict = {
+                "kind": kind,
+                "t": round(time.monotonic() - self._t0, 3),
+                "beat": None if beat is None else beat.get("index"),
+                "verb": None if beat is None else beat.get("verb"),
+                "caption": "" if beat is None else beat.get("caption", ""),
+                "message": message,
+            }
+            record.update(extra)
+            self._issues.append(record)
+        except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
+            pass
+
+    def _attributed_beat(self) -> dict | None:
+        """The beat an event observed *now* may honestly be blamed on.
+
+        `self._beats[-1]` is the most recently *started* beat, which is not the
+        same question. Two conditions, both required:
+
+          * a beat is actually open — storyboard code between two verbs is
+            nobody's beat, and letting a closed beat claim an event that
+            happened after it ended is how "the take broke during wait_for"
+            gets written about something that broke later;
+          * it was already open the last time events are known to have been
+            delivered, so nothing could have fired before it started. Holds
+            pump (`_pump_events`), which keeps this true for ordinary beats;
+            what it screens out is a long *non*-Playwright gap — narration
+            being synthesized, say — with a beat opening at the end of it.
+
+        Otherwise None, and the issue records `beat: null`.
+        """
+        if not self._in_beat or not self._beats:
+            return None
+        beat = self._beats[-1]
+        t_start = beat.get("t_start")
+        if not isinstance(t_start, (int, float)):
+            return None
+        if t_start > self._pumped_at + ATTRIBUTION_SLACK_S:
+            return None
+        return beat
+
+    def _pump_events(self) -> None:
+        """Give Playwright a chance to deliver queued page events.
+
+        The sync API dispatches `console`/`pageerror`/`requestfailed`/`response`
+        only while it is inside a call, so a storyboard sitting still for three
+        seconds queues everything the page throws and hands it all to whichever
+        beat makes the next call. One trivial evaluate per PUMP_INTERVAL_S
+        keeps delivery inside the beat the event belongs to. It paints nothing,
+        touches no DOM, and is skipped if it fails — a pump is a diagnostic
+        convenience, never a reason to lose a take.
+        """
+        now = time.monotonic() - self._t0
+        if now - self._pumped_at < PUMP_INTERVAL_S:
             return
-        if beat is None and self._beats:
-            beat = self._beats[-1]
-        record: dict = {
-            "kind": kind,
-            "t": round(time.monotonic() - self._t0, 3),
-            "beat": None if beat is None else beat.get("index"),
-            "verb": None if beat is None else beat.get("verb"),
-            "caption": "" if beat is None else beat.get("caption", ""),
-            "message": message,
-        }
-        record.update(extra)
-        self._issues.append(record)
+        try:
+            self.page.evaluate("0")
+        except Exception:  # noqa: BLE001 - the page may be closing
+            return
+        self._pumped_at = time.monotonic() - self._t0
 
     def _watch_page(self, page: Page) -> None:
         """Subscribe to everything the page can say about being broken."""
@@ -792,21 +895,28 @@ class _DemoBase:
         if self._issue_count > len(self._issues):
             print(
                 f"  …and {self._issue_count - len(self._issues)} more, over "
-                f"the {MAX_ISSUES}-issue cap",
+                f"the {MAX_ISSUES}-issue cap ({self._fatal_count} of all of "
+                f"them fatal under strict)",
                 file=sys.stderr,
             )
 
-    def _strict_message(self, fatal: list[dict]) -> str:
-        shown = fatal[:5]
+    def _strict_message(self) -> str:
+        recorded = [i for i in self._issues if i["kind"] in STRICT_KINDS]
+        shown = recorded[:5]
         lines = [
             f"  {i['kind']} in {self._issue_where(i)}: {i['message']}"
             for i in shown
         ]
-        if len(fatal) > len(shown):
-            lines.append(f"  …and {len(fatal) - len(shown)} more")
+        if not shown:
+            lines.append(
+                f"  (none of them recorded in detail — every one arrived past "
+                f"the {MAX_ISSUES}-issue cap)"
+            )
+        elif self._fatal_count > len(shown):
+            lines.append(f"  …and {self._fatal_count - len(shown)} more")
         return (
-            f"strict=True and this take recorded {len(fatal)} problem(s) the "
-            "app should not have produced:\n" + "\n".join(lines) + "\n"
+            f"strict=True and this take recorded {self._fatal_count} problem(s) "
+            "the app should not have produced:\n" + "\n".join(lines) + "\n"
             "The recording, its stills and its timeline were still written — "
             "read timeline.md's Issues section. Pass strict=False (or unset "
             "DEMO_VIDEO_STRICT) to record anyway."
@@ -884,9 +994,19 @@ class _DemoBase:
 
     def _idle(self, seconds: float) -> None:
         """Hold for `seconds`. Overridden by media that must keep working
-        (pumping output) while the frame is held."""
-        if seconds > 0:
-            time.sleep(seconds)
+        (pumping output) while the frame is held.
+
+        Sliced against a deadline rather than one flat sleep, so page events
+        are delivered while the beat they belong to is still open. Deadline,
+        not accumulated slices: the pump costs about a millisecond and a
+        storyboard's pacing must not drift by however many of them it took."""
+        end = time.monotonic() + seconds
+        while True:
+            self._pump_events()
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(PUMP_INTERVAL_S, remaining))
 
     @_beat_verb("pause")
     def pause(self, seconds: float) -> None:

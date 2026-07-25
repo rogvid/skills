@@ -164,6 +164,8 @@
  *
  * Query-string hooks, inert unless asked for:
  *   ?console-error=1  page logs a console error and throws on load (issue #3)
+ *   ?bad-fetch=<url>  page fetches a missing path and <url>, both on load,
+ *                     so the failures land during the recorder's goto (#3)
  *   ?secret=1         renders #api-key holding an obviously-fake secret (issue #4)
  */
 
@@ -281,6 +283,21 @@ if (params.has("secret")) {
   panel.appendChild(label);
   panel.appendChild(code);
   document.querySelector(".page").appendChild(panel);
+}
+
+if (params.has("bad-fetch")) {
+  // Deliberate network breakage for the failed-request detection work
+  // (issue #3). Two shapes: a response the server answers with 404, and a
+  // request that never gets a response at all — the caller passes a URL on a
+  // port nothing is listening on, since a dead port cannot be hardcoded.
+  //
+  // Fired here, during page load, on purpose: the recorder's goto() is still
+  // open, so these have a beat to be attributed to. Driving them from the
+  // storyboard instead would fire them between beats, where the honest
+  // answer is "no beat" and there is nothing to check attribution against.
+  fetch("/definitely-missing.json").catch(function () {});
+  var refused = params.get("bad-fetch");
+  if (refused && refused !== "1") { fetch(refused).catch(function () {}); }
 }
 
 if (params.has("console-error")) {

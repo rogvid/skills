@@ -256,25 +256,45 @@ app itself and writes what it saw into `timeline.json` as `issues`:
 | `http_error` | a response with status ≥ 400 (3xx redirects are normal) | no |
 | `nonzero_exit` | a `TerminalRecorder` `run()` whose command failed | yes |
 
-Every issue is **attributed to the beat that was running when it fired** —
+Each issue is **attributed to the beat that was running when it fired** —
 `beat` (an index into `beats`), plus the beat's `verb` and `caption` copied
 alongside so the list reads on its own. "The take broke" is not a bug report;
 "the take broke during `click('#refresh')`, under the caption *Refresh reloads
 it*" is. `timeline.md` gets an **Issues** section saying the same thing in
 prose, so a reviewer reading the PR sees it without opening the JSON.
 
+**`beat` is `null` when no beat can honestly claim the problem**, and that is a
+real answer rather than a gap. Playwright hands the recorder page events only
+while it is being called, so the naive reading — blame the most recently
+started beat — invents attributions in both directions: an error thrown during
+a three-second `hold()` would be blamed on the beat *after* the hold and quoted
+under a caption that had not appeared yet. Holds therefore pump events as they
+wait, and anything still ambiguous — a problem surfacing between two verbs,
+or after a long stretch where nothing reached Playwright — records `beat: null`
+instead of a confident guess. Trust `beat`; `t` is when the problem was
+*observed*, which can lag when it happened.
+
 Nothing has to be asked for: **a summary prints on stderr at the end of every
 take**, listing each problem and its beat, or saying plainly that there were
 none.
 
-`TerminalRecorder.run()` additionally records `exit_code` on its beat. The
-shell reports it through an invisible escape sequence in its own prompt, which
-the recorder strips before the terminal ever renders it — so the status is
-known without typing `echo $?` into the demo. It arrives when the prompt comes
-back, which is normally during the `wait_for_prompt()` that follows; a `run()`
-that is never waited on can end the take with `exit_code: null`. Non-bash
-shells that do not expand `$?` in their prompt also leave it null, rather than
-wrong.
+`TerminalRecorder.run()` additionally records `exit_code` on its beat, and
+`timeline.md` gets an `exit` column when any beat has one. The shell reports
+the status through an invisible escape in its own prompt, carrying `$?` and
+bash's command number, which the recorder strips before the terminal ever
+renders it — so the status is known without typing `echo $?` into the demo.
+
+The command number is what makes it trustworthy. The shell prints a prompt at
+startup before any command, and reprints one for an empty Enter or a Ctrl-C, and
+each of those reports a status belonging to no command; the number is what tells
+them apart. Two `run()`s with no wait between them queue, and each status
+reaches the beat that typed it, because the shell still runs them in order.
+
+An `exit_code` is either right or `null`, never wrong. It is `null` when the
+status never arrived: a `run()` the storyboard never waited on and the take
+ended, a program still running at the end, or a shell that does not expand `$?`
+in its prompt (zsh needs `PROMPT_SUBST`; only bash is exercised). Pair every
+`run()` with `wait_for_prompt()` and it is always there.
 
 ### `strict=True`
 

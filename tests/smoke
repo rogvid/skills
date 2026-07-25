@@ -58,6 +58,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -168,61 +169,133 @@ SERVER_START_TIMEOUT_S = 15.0
 
 # -- problems the take should notice (timeline.json `issues`) ----------------
 #
-# The web storyboard records a *deliberately broken* page. `?console-error=1`
-# makes the fixture log a console error and throw an uncaught one while staying
-# usable, and the storyboard then fires two requests that cannot succeed. All
-# four are things a demo can sail past while looking perfect, which is the
-# failure mode this axis exists to catch.
-WEB_PATH = "/?console-error=1"
+# Four short takes, on top of the two graded ones, because the question splits
+# four ways and no single take answers more than one of them:
+#
+#   web/, terminal/     a *healthy* app records nothing, under strict=True.
+#                       This is the direction the rest of the harness cannot
+#                       see: a recorder that reported every 2xx as a fatal
+#                       error would satisfy every "at least one issue matches"
+#                       assertion below and pass the whole suite.
+#   *-problems/         a broken app records exactly what it broke on, on the
+#                       beat it broke during, and the take still *succeeds*
+#                       under the default.
+#   *-strict/           the same broken app under strict=True does not.
+#
+# The graded takes stay recordings of a working app on purpose. They are the
+# reference demo a reader watches, and the fixture hooks belong in takes of
+# their own — the pattern the sibling PRs use for `?secret=1`.
 MISSING_PATH = "/definitely-missing.json"
 
-# Fired from one page.evaluate() straight after the `wait_for` beat, so both
-# land in a beat this file can name — see WEB_ISSUES. `Promise.all` on two
-# caught fetches: the call returns only once both have failed, so the events
-# are delivered while Playwright is still inside that beat.
-PROBE_FETCH_JS = """(url) => Promise.all([
-  fetch('__MISSING__').catch(() => {}),
-  fetch(url).catch(() => {}),
-])""".replace("__MISSING__", MISSING_PATH)
 
-# The terminal storyboard runs one command that fails. `(exit 3)` is a subshell
-# so the recorder's own shell survives it, and 3 rather than 1 because it
-# proves the *status* was read rather than "something went wrong" inferred
-# from any other signal.
+def web_problem_path(refused_url: str) -> str:
+    """The fixture URL that breaks in all four ways this axis grades.
+
+    Every failure is fired by the page during load, so the recorder's `goto`
+    beat is still open and there is a real attribution to check. Driving them
+    from the storyboard instead would fire them *between* beats, where the only
+    honest answer is `beat: null` — checked separately, see BETWEEN_BEATS.
+    """
+    return f"/?console-error=1&bad-fetch={urllib.parse.quote(refused_url)}"
+
+
+# Thrown one second into a three-second hold, from a timer set before the hold
+# starts. This is the case that made `self._beats[-1]` untenable: with nothing
+# pumping, the error surfaces in whatever beat next calls Playwright — the
+# caption *after* the hold — and gets stamped with a caption that did not exist
+# when it fired. It must land on the `pause`, under the caption that was up.
+LATE_BOOM = "fixture: late boom"
+LATE_BOOM_CAPTION = "Errors during a hold belong to the hold."
+LATE_BOOM_JS = ("() => setTimeout(() => { throw new Error('__M__'); }, 1000)").replace(
+    "__M__", LATE_BOOM
+)
+LATE_BOOM_HOLD_S = 3.0
+
+# Logged from storyboard code between two verbs, where no beat is open. The
+# only honest attribution is none, and `beat: null` is the assertion.
+BETWEEN_BEATS = "fixture: between beats"
+BETWEEN_BEATS_JS = "() => console.error('__M__')".replace("__M__", BETWEEN_BEATS)
+
+# `(exit 3)` is a subshell, so the recorder's own shell survives it, and 3
+# rather than 1 because it proves the *status* was read rather than "something
+# went wrong" inferred from any other signal.
 TERMINAL_FAILING_COMMAND = "(exit 3)"
 
-# Exit status every run() in the terminal storyboard must have logged on its
-# beat. Hand-written, like the beat list: derived from the log it grades, it
+# The regression from the first round of review: two run()s with no wait
+# between them. The shell buffers the second command and runs it after the
+# first, so both statuses arrive in order — a single pending slot handed
+# `sleep`'s 0 to `(exit 9)` and dropped the 9 entirely, which is a *wrong*
+# exit code rather than a missing one, and strict passed a failing command.
+TERMINAL_UNWAITED = ("sleep 1", "(exit 9)")
+
+# The other half of that regression: a shell that has not printed its first
+# prompt yet when run() types. Its startup prompt reports the *shell's* status,
+# 0, and a recorder that takes the next marker it sees writes that 0 onto the
+# command — which is a wrong exit code, not a missing one, and lets a failing
+# command through strict. Reproduced with a shell that sleeps before exec'ing
+# bash, and with typing instant so run() finishes first; a loaded CI box is the
+# real-world version. Written into the take directory rather than shipped,
+# because it exists to be slow and belongs to nothing else.
+TERMINAL_RACE_COMMAND = "(exit 5)"
+TERMINAL_RACE_EXIT = 5
+TERMINAL_RACE_DELAY_S = 1.2
+TERMINAL_RACE_SHELL = '#!/bin/sh\nsleep __DELAY__\nexec /bin/bash "$@"\n'
+
+# Exit status every run() in the problems storyboard must have logged on its
+# beat. Hand-written, like the beat lists: derived from the log it grades, it
 # would agree with the log no matter what the log said.
-TERMINAL_EXIT_CODES = {
-    "echo hello from demo-video": 0,
-    "ls -1": 0,
+TERMINAL_PROBLEM_EXIT_CODES = {
+    "echo ok": 0,
     TERMINAL_FAILING_COMMAND: 3,
+    TERMINAL_UNWAITED[0]: 0,
+    TERMINAL_UNWAITED[1]: 9,
 }
 
-# (kind, a substring of the message, the verb of the beat it must be
-# attributed to). Each expectation must match at least one issue; `beat` is
-# then checked against the beat list itself, so the attribution has to be a
-# real index and not just a denormalized string that happens to agree.
+# Each expectation must match at least one issue. `verb` is the verb of the
+# beat it must be attributed to, or None when the only honest answer is "no
+# beat"; `caption`, when given, is the caption that must be recorded with it.
+# The beat index is checked against the beat list itself, so the attribution
+# has to be a real index and not a denormalized string that happens to agree.
 #
 # "At least one", not "exactly the set": Chromium adds its own "Failed to load
-# resource" console error for each of the two probe requests, and pinning an
-# exact issue list would make this a test of Chromium's console wording.
-WEB_ISSUES = [
-    ("console_error", "fixture: deliberate console error", "goto"),
-    ("page_error", "fixture: deliberate uncaught error", "goto"),
-    ("http_error", MISSING_PATH, "wait_for"),
-    ("request_failed", "ERR_CONNECTION_REFUSED", "wait_for"),
+# resource" console error for each failed request, and pinning an exact list
+# would make this a test of Chromium's console wording. What closes that door
+# is the healthy takes — over-reporting has to fail *somewhere*, and it fails
+# there.
+WEB_PROBLEM_ISSUES = [
+    {
+        "kind": "console_error",
+        "needle": "fixture: deliberate console error",
+        "verb": "goto",
+    },
+    {
+        "kind": "page_error",
+        "needle": "fixture: deliberate uncaught error",
+        "verb": "goto",
+    },
+    {"kind": "http_error", "needle": MISSING_PATH, "verb": "goto"},
+    {"kind": "request_failed", "needle": "ERR_CONNECTION_REFUSED", "verb": "goto"},
+    {
+        "kind": "page_error",
+        "needle": LATE_BOOM,
+        "verb": "pause",
+        "caption": LATE_BOOM_CAPTION,
+    },
+    {"kind": "console_error", "needle": BETWEEN_BEATS, "verb": None},
 ]
-TERMINAL_ISSUES = [
-    ("nonzero_exit", f"{TERMINAL_FAILING_COMMAND!r} exited 3", "run"),
+TERMINAL_PROBLEM_ISSUES = [
+    {
+        "kind": "nonzero_exit",
+        "needle": f"{TERMINAL_FAILING_COMMAND!r} exited 3",
+        "verb": "run",
+    },
+    {
+        "kind": "nonzero_exit",
+        "needle": f"{TERMINAL_UNWAITED[1]!r} exited 9",
+        "verb": "run",
+    },
 ]
 
-# The strict takes are separate and deliberately tiny — a few seconds each
-# against the same broken fixture, recording nothing worth grading. They exist
-# to answer one question the takes above cannot: does `strict=True` actually
-# refuse the take? The takes above answer the other half, by carrying fatal
-# issues through to a clean exit under the default.
 STRICT_CAPTION = "A broken page."
 # The acceptance criterion of issue #3, as a pattern: the failure has to name
 # the beat the problem fired during, not merely that something went wrong.
@@ -236,7 +309,7 @@ STRICT_BEAT_RE = re.compile(r"beat \d+ \((\w+)\)")
 # taken from the log it is checking would agree with the log no matter what
 # the log said. Editing a storyboard means editing this list.
 WEB_BEATS = [
-    ("goto", WEB_PATH),
+    ("goto", "/"),
     ("wait_for", "#kpi-rev"),
     ("pause", None),
     ("caption", None),
@@ -275,9 +348,6 @@ TERMINAL_BEATS = [
     ("pause", None),
     ("shot", "02-listing"),
     ("caption", None),
-    ("run", TERMINAL_FAILING_COMMAND),
-    ("wait_for_prompt", None),
-    ("caption", None),
     ("shot", "90-caption-off"),
     ("pause", None),
     ("caption", None),
@@ -299,7 +369,6 @@ WEB_CAPTIONS = [
 TERMINAL_CAPTIONS = [
     "A real shell, recorded.",
     "Any command works.",
-    "A failing one is caught.",
     "",
     PROBE_CAPTION,
     "",
@@ -750,20 +819,20 @@ _TRAIL_JS = """() => {
 
 
 def record_web(
-    out_dir: Path, base_url: str, refused_url: str
+    out_dir: Path, base_url: str
 ) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
-    """Land, read a KPI, filter the table, refresh it — on a broken page.
+    """Land, read a KPI, filter the table, refresh it.
 
     Returns the post-condition failures plus two content rects: where the app
     sits inside the composited video, and where it sits in a still (stills are
     captured full-bleed, before compositing).
 
-    The page is loaded with `?console-error=1` and two doomed requests are
-    fired at it, so the take is also the fixture for the problem log: a demo
-    that looks perfect over an app that is throwing. Everything else here still
-    has to pass, because the *default* recorder tolerates all of it — that half
-    of the strict-mode assertion lives in this take, and only the other half
-    needs a take of its own.
+    A recording of a *working* app, and recorded with `strict=True` so it has
+    to stay one. That is the assertion the rest of this harness structurally
+    cannot make: every issue check elsewhere is "at least one of these
+    appeared", which a recorder that flagged every healthy response as fatal
+    would satisfy while refusing every real demo ever recorded. Here it would
+    raise, and take the whole take with it.
     """
     from demo_recording import Recorder
 
@@ -771,25 +840,21 @@ def record_web(
     outline = "el => getComputedStyle(el).outlineStyle"
     bg = "el => getComputedStyle(el).backgroundColor"
 
-    with Recorder(out_dir, base_url=base_url, speech=False) as rec:
-        rec.goto(WEB_PATH)
+    with Recorder(out_dir, base_url=base_url, speech=False, strict=True) as rec:
+        rec.goto("/")
         rec.wait_for("#kpi-rev")
-        # Not a verb, so no beat of its own: both failures are attributed to
-        # the `wait_for` beat still standing as the most recent one, which is
-        # what WEB_ISSUES asserts.
-        rec.page.evaluate(PROBE_FETCH_JS, refused_url)
         start_ticker(b, rec.page)
         # Doubles as the run-up for the *early* timing probe: the page has
         # finished painting and the caption band does not move until the
         # first caption. See MAX_CAPTION_SKEW_S.
         rec.pause(PROBE_QUIET_S)
         b.expect(
-            f"goto({WEB_PATH!r}), #rows row count",
+            "goto('/'), #rows row count",
             rec.page.locator("#rows tr").count(),
             5,
         )
         b.expect(
-            f"goto({WEB_PATH!r}), #status text",
+            "goto('/'), #status text",
             rec.page.locator("#status").inner_text(),
             "snapshot 1 of 3",
         )
@@ -797,7 +862,7 @@ def record_web(
         # legible-ish, which the luma metric scores around 10 — above its
         # floor. This resolves that case exactly, with no pixel threshold.
         b.expect(
-            "goto(…), #refresh background (did the stylesheet apply?)",
+            "goto('/'), #refresh background (did the stylesheet apply?)",
             rec.page.eval_on_selector("#refresh", bg),
             "rgb(235, 110, 20)",
         )
@@ -923,7 +988,7 @@ def record_terminal(
             tail = " ".join(str(exc).split())[:200]
             b.fail_if(True, f"after {after}, the shell prompt never came back — {tail}")
 
-    with TerminalRecorder(out_dir, speech=False) as rec:
+    with TerminalRecorder(out_dir, speech=False, strict=True) as rec:
         start_ticker(b, rec.page)
         # Let xterm.js settle, and give the early timing probe below a
         # baseline that is not the browser's first paint. See
@@ -946,14 +1011,6 @@ def record_terminal(
         expect_screen(rec, "run('ls -1')", r"^skills$")
         rec.pause(0.8)
         rec.shot("02-listing")
-
-        # A command that fails. The shell survives it (subshell), the screen
-        # shows nothing unusual, and the only evidence anywhere is the exit
-        # status the recorder reads off the prompt — which is the point.
-        rec.caption("A failing one is caught.")
-        check_caption(b, rec.page, "A failing one is caught.")
-        rec.run(TERMINAL_FAILING_COMMAND)
-        expect_prompt(rec, f"run({TERMINAL_FAILING_COMMAND!r})")
 
         rec.caption("")
         check_caption(b, rec.page, "")
@@ -1534,7 +1591,7 @@ def _first_difference(actual: list, expected: list) -> object:
 def check_issues(
     label: str,
     out_dir: Path,
-    expected: list[tuple[str, str, str]],
+    expected: list[dict],
     exit_codes: dict[str, int] | None = None,
 ) -> list[str]:
     """The problems the take noticed, as `timeline.json` records them.
@@ -1585,7 +1642,8 @@ def check_issues(
             break
 
     # -- the problems the storyboard deliberately caused ---------------------
-    for kind, needle, verb in expected:
+    for want in expected:
+        kind, needle, verb = want["kind"], want["needle"], want["verb"]
         found = [
             i
             for i in issues
@@ -1600,6 +1658,17 @@ def check_issues(
             continue
         issue = found[0]
         index = issue.get("beat")
+        if verb is None:
+            # Fired where no beat was open. Naming one anyway is the failure
+            # mode being guarded: a confident index and a quoted caption, both
+            # invented. `beat: null` is the right answer and the only one.
+            if index is not None or issue.get("verb") is not None:
+                failures.append(
+                    f"{label}: the {kind} {needle!r} fired between beats, with "
+                    f"none open, but is attributed to beat {index!r} "
+                    f"({issue.get('verb')!r}) — the attribution is invented"
+                )
+            continue
         # Both halves matter. `verb` alone is a string the recorder could have
         # copied from anywhere; `beat` alone is an integer that means nothing
         # on its own. Together they say the issue points at a real beat, and
@@ -1616,6 +1685,16 @@ def check_issues(
                 f"{label}: the {kind} {needle!r} fired during {verb!r} but is "
                 f"attributed to beat {index} "
                 f"({beats[index].get('verb')!r}/{issue.get('verb')!r})"
+            )
+            continue
+        # The caption recorded beside an issue is the one a reviewer reads as
+        # context. Quoting a line that only appeared *after* the error is worse
+        # than quoting none, and is exactly what naming a later beat produces.
+        if "caption" in want and issue.get("caption") != want["caption"]:
+            failures.append(
+                f"{label}: the {kind} {needle!r} is recorded under caption "
+                f"{issue.get('caption')!r}, but the line on screen when it "
+                f"fired was {want['caption']!r}"
             )
 
     # -- every command's exit status, on the beat that ran it ----------------
@@ -1647,9 +1726,15 @@ def check_issues(
             f"timeline.md has no Issues section — the human-readable half of "
             f"the log says the take was fine"
         )
-    for _, needle, _ in expected:
-        if needle not in markdown:
-            failures.append(f"{label}: timeline.md does not mention {needle!r}")
+    for want in expected:
+        if want["needle"] not in markdown:
+            failures.append(f"{label}: timeline.md does not mention {want['needle']!r}")
+    if exit_codes is not None and "| exit |" not in markdown:
+        failures.append(
+            f"{label}: timeline.md's beat table has no exit column, so a run() "
+            f"whose status could not be read is invisible in the half SKILL.md "
+            f"calls the take's own account of what ran"
+        )
 
     fatal = [i for i in issues if i.get("kind") in STRICT_KINDS]
     if not fatal:
@@ -1667,6 +1752,50 @@ def check_issues(
             f"smoke: {label} timeline.json records {len(issues)} problem(s), "
             f"{len(fatal)} of them fatal under strict — take still passed"
         )
+    return failures
+
+
+def check_healthy(label: str, out_dir: Path) -> list[str]:
+    """A take of a working app must have found nothing to report.
+
+    This is the only assertion in the file that can fail on *over*-reporting,
+    and without it the whole axis is one-directional. Every problem check is
+    "at least one issue matches", which a recorder that flagged every healthy
+    2xx as a fatal console error satisfies perfectly — while refusing every
+    strict take of every working app ever recorded. Verified as a real gap:
+    that exact injection passed the suite before this existed.
+
+    The take is also recorded with `strict=True`, so over-reporting does not
+    merely get noticed here, it aborts the take and is impossible to miss.
+    """
+    json_path = out_dir / "timeline.json"
+    if not json_path.is_file():
+        return [f"{label}: {json_path} was never written"]
+    try:
+        doc = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [f"{label}: {json_path} is not valid JSON: {exc}"]
+
+    failures: list[str] = []
+    if doc.get("strict") is not True:
+        failures.append(
+            f"{label}: timeline.json says strict={doc.get('strict')!r}; this "
+            f"take is recorded strict, and its passing means nothing otherwise"
+        )
+    issues = doc.get("issues")
+    if not isinstance(issues, list):
+        failures.append(f"{label}: timeline.json has no `issues` list ({issues!r})")
+    elif issues or doc.get("issue_count"):
+        failures.append(
+            f"{label}: nothing is wrong with the fixture app, but the take "
+            f"recorded {doc.get('issue_count')!r} problem(s): "
+            f"{[(i.get('kind'), i.get('message')) for i in issues]!r}. Either "
+            f"the recorder reports healthy behaviour as broken — which would "
+            f"refuse every strict take of every working app — or the fixture "
+            f"really did break."
+        )
+    if not failures:
+        print(f"smoke: {label} healthy app under strict=True records no problems")
     return failures
 
 
@@ -1790,17 +1919,22 @@ def check_take(
 # -- phases ------------------------------------------------------------------
 
 
+def refused_url() -> str:
+    """A URL nothing will answer.
+
+    free_port() binds only long enough to be told a number and lets go, so a
+    request to it is refused at connect rather than answered — which is the
+    `request_failed` shape, distinct from the 404 that `http_error` grades.
+    """
+    return f"http://127.0.0.1:{free_port()}/refused"
+
+
 def run_web(out_root: Path) -> list[str]:
     out_dir = fresh_take_dir(out_root, "web")
     started = time.time()
-    # Nothing is listening here: free_port() binds only long enough to be told
-    # a number and lets go, so a request to it is refused rather than answered.
-    refused_url = f"http://127.0.0.1:{free_port()}/refused"
     with fixture_server() as base_url:
         try:
-            problems, video_rect, still_rect, size = record_web(
-                out_dir, base_url, refused_url
-            )
+            problems, video_rect, still_rect, size = record_web(out_dir, base_url)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
     return (
@@ -1816,8 +1950,121 @@ def run_web(out_root: Path) -> list[str]:
             size,
         )
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
-        + check_issues("web", out_dir, WEB_ISSUES)
+        + check_healthy("web", out_dir)
     )
+
+
+def run_web_problems(out_root: Path) -> list[str]:
+    """A short take of a page broken in four ways, under the default.
+
+    Deliberately not the graded take: the reference demo should be a recording
+    of a working app, and a fixture hook gets a take of its own. Everything
+    interesting here is in timeline.json, so nothing about the video is graded.
+    """
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "web-problems")
+    dead = refused_url()
+    with fixture_server() as base_url:
+        try:
+            with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+                rec.goto(web_problem_path(dead))
+                rec.wait_for("#kpi-rev")
+
+                # No beat is open here. Whatever this logs must come back with
+                # `beat: null` rather than the closed `wait_for` above it.
+                rec.page.evaluate(BETWEEN_BEATS_JS)
+
+                rec.caption(LATE_BOOM_CAPTION)
+                # Armed *before* the hold, fired one second into it. Nothing
+                # else in the take reaches Playwright during that second.
+                rec.page.evaluate(LATE_BOOM_JS)
+                rec.pause(LATE_BOOM_HOLD_S)
+                rec.caption("The caption after the boom.")
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"web-problems: Recorder raised {type(exc).__name__}: {exc}"]
+    return check_issues("web-problems", out_dir, WEB_PROBLEM_ISSUES)
+
+
+def run_terminal_problems(out_root: Path) -> list[str]:
+    """A short take of commands that fail, under the default."""
+    if os.name != "posix":
+        return []
+    from demo_recording import TerminalRecorder
+
+    out_dir = fresh_take_dir(out_root, "terminal-problems")
+    try:
+        with TerminalRecorder(out_dir, speech=False) as rec:
+            rec.caption("Exit codes are recorded.")
+            rec.run("echo ok")
+            rec.wait_for_prompt(timeout_s=15)
+            rec.run(TERMINAL_FAILING_COMMAND)
+            rec.wait_for_prompt(timeout_s=15)
+            # Two commands, one wait. The shell buffers the second and runs it
+            # after the first, so both statuses arrive — in order, and to
+            # different beats. This pair is the regression, not decoration.
+            rec.run(TERMINAL_UNWAITED[0])
+            rec.run(TERMINAL_UNWAITED[1])
+            rec.wait_for_prompt(timeout_s=20)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [
+            f"terminal-problems: TerminalRecorder raised {type(exc).__name__}: {exc}"
+        ]
+    return check_issues(
+        "terminal-problems",
+        out_dir,
+        TERMINAL_PROBLEM_ISSUES,
+        exit_codes=TERMINAL_PROBLEM_EXIT_CODES,
+    )
+
+
+def run_terminal_race(out_root: Path) -> list[str]:
+    """A shell too slow to have prompted before run() types.
+
+    Its own take because the condition has to be manufactured: on a normal box
+    the startup prompt always beats the first command, so every other take
+    here passes whether or not the recorder handles this. Removing the guard
+    and running the rest of the suite is a pass — measured.
+    """
+    if os.name != "posix":
+        return []
+    from demo_recording import TerminalRecorder
+
+    label = "terminal-race"
+    out_dir = fresh_take_dir(out_root, label)
+    shell = out_dir / "slow-shell"
+    shell.write_text(
+        TERMINAL_RACE_SHELL.replace("__DELAY__", str(TERMINAL_RACE_DELAY_S))
+    )
+    shell.chmod(0o755)
+    try:
+        with TerminalRecorder(
+            out_dir, speech=False, shell=str(shell), type_delay_ms=0
+        ) as rec:
+            rec.run(TERMINAL_RACE_COMMAND)
+            rec.wait_for_prompt(timeout_s=25)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [f"{label}: TerminalRecorder raised {type(exc).__name__}: {exc}"]
+
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    logged = {
+        str(b.get("selector")): b.get("exit_code")
+        for b in doc.get("beats", [])
+        if b.get("verb") == "run"
+    }
+    if logged != {TERMINAL_RACE_COMMAND: TERMINAL_RACE_EXIT}:
+        return [
+            f"{label}: a shell that took {TERMINAL_RACE_DELAY_S}s to start made "
+            f"run() log {logged!r}, not "
+            f"{{{TERMINAL_RACE_COMMAND!r}: {TERMINAL_RACE_EXIT}}}. The startup "
+            f"prompt's own status was taken for the command's — a wrong exit "
+            f"code, which passes strict, rather than a missing one."
+        ]
+    print(
+        f"smoke: {label} exit status survives a shell that starts "
+        f"{TERMINAL_RACE_DELAY_S}s late (logged {TERMINAL_RACE_EXIT})"
+    )
+    return []
 
 
 def check_strict_failure(
@@ -1898,11 +2145,12 @@ def run_strict_web(out_root: Path) -> list[str]:
     from demo_recording import Recorder
 
     out_dir = fresh_take_dir(out_root, "web-strict")
+    dead = refused_url()
     raised: BaseException | None = None
     with fixture_server() as base_url:
         try:
             with Recorder(out_dir, base_url=base_url, speech=False, strict=True) as rec:
-                rec.goto(WEB_PATH)
+                rec.goto(web_problem_path(dead))
                 rec.wait_for("#kpi-rev")
                 rec.caption(STRICT_CAPTION)
         except Exception as exc:  # noqa: BLE001 - the raise is the assertion
@@ -1965,9 +2213,7 @@ def run_terminal(out_root: Path) -> list[str]:
         + check_timeline(
             "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
         )
-        + check_issues(
-            "terminal", out_dir, TERMINAL_ISSUES, exit_codes=TERMINAL_EXIT_CODES
-        )
+        + check_healthy("terminal", out_dir)
     )
 
 
@@ -2031,12 +2277,15 @@ def main() -> int:
             failures += run_web(out_root)
         if not args.web_only:
             failures += run_terminal(out_root)
-        # After the graded takes, never instead of them: these two record
+        # After the graded takes, never instead of them: these four record
         # nothing worth looking at, and if a recorder is broken the messages
         # above are the ones that say how.
         if not args.terminal_only:
+            failures += run_web_problems(out_root)
             failures += run_strict_web(out_root)
         if not args.web_only:
+            failures += run_terminal_problems(out_root)
+            failures += run_terminal_race(out_root)
             failures += run_strict_terminal(out_root)
     except SmokeFailure as exc:
         failures.append(str(exc))
