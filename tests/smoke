@@ -42,6 +42,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import statistics
@@ -140,11 +141,19 @@ CAPTION_PROBE = ("90-caption-off", "91-caption-on")
 # the beat's `t_start` is the caption itself, and the frames just before it
 # are a clean baseline. See MAX_CAPTION_SKEW_S for why two points.
 #
-# Two seconds, not one, because a screencast stall (see MAX_CAPTION_SKEW_S)
-# slides the video under the window by up to ~0.6 s. With a one-second run-up
-# that is enough to drag the previous caption's fade-out into the frames the
-# measurement takes as its baseline, and the run reports "the window is wrong"
-# instead of a number.
+# Quiet means *the caption band* is quiet. The rest of the frame keeps painting
+# throughout — see TICKER_JS, without which idle is what breaks this whole
+# measurement. With the ticker running, storyboard idle is free, so this is
+# sized for the geometry rather than kept short:
+#
+#   ALIGN_PRE_S < PROBE_QUIET_S + 0.04 - 0.30
+#
+# The 0.04 is the `shot()` between the clearing caption and the pause; the 0.30
+# is how long the clearing caption's fade-out keeps moving the band after
+# `caption("")` returns. Reach back further than that and the measurement takes
+# the tail of the *previous* caption as its baseline and reports a busy run-up.
+# At 2.0 against ALIGN_PRE_S of 1.2 there is 0.54 s of margin. A capture loss
+# does not enter into it: it slides the window and the fade together.
 PROBE_CAPTION = "Recorded end to end."
 PROBE_QUIET_S = 2.0
 
@@ -228,38 +237,88 @@ TERMINAL_CAPTIONS = [
 # slack absorbs the 3-decimal rounding the recorder writes.
 BEAT_ORDER_SLACK_S = 0.005
 
+# `t_end` has to mean something, and every check above is satisfied by setting
+# it equal to `t_start`. Two floors close that:
+#
+#   * a `caption(text)` beat holds 0.6 + 0.34/word (>= 1.4 s with speech off)
+#     and a `hold()` beat has a 1.5 s perception floor, both enforced by the
+#     recorder — so either spanning under a second is a broken `t_end`, not a
+#     fast machine;
+#   * the beats run back to back, so their spans together cover essentially
+#     all of first-start to last-end. Collapsing every `t_end` takes that to
+#     zero while leaving every other timestamp assertion happy.
+#
+# Load-bearing beyond this PR: #8 wants the beat *midpoint* for frame
+# extraction, precisely because `t_start` is 0% into the caption's 0.3 s fade.
+MIN_HELD_BEAT_SPAN_S = 1.0
+MIN_BEAT_TIME_COVERAGE = 0.80
+
+# A data row of timeline.md's beat table: "| 4 | 4.66 | 4.71 | `shot` | …".
+# Anchored on the leading index so the header and separator rows do not count.
+_MD_ROW = re.compile(r"^\|\s*\d+\s*\|")
+
 # How far the recorder's own `duration` may sit from what ffprobe says about
 # the mp4 next to it. They are the same measurement; this is rounding.
 DURATION_TOLERANCE_S = 0.2
 
 # How far a beat's `t_start` may sit from the caption it names appearing in
-# demo.mp4. Measured, never asserted from arithmetic — see
-# caption_appearance_s(). Two bars, because the honest answer differs by where
-# in the take you look:
+# demo.mp4, measured at both the take's first caption and its last — never
+# computed, see caption_appearance_s(). Three bounds rather than one, because
+# the two directions have different causes and only one of them is the beat
+# log's:
 #
-#   * EARLY — the take's first caption, ~2 s in. Across ten takes this landed
-#     between -20 and -120 ms in both media. This is the bar that actually
-#     grades the beat log: it fails if `_t0` moves off the start of the
-#     recording, if elapsed time is taken from a steppable clock, or if a beat
-#     is stamped somewhere other than where its verb ran.
+#   * MAX_LOG_EARLY_S — the video shows the caption *after* the log says
+#     (positive skew). Nothing about the capture can produce that: a webm
+#     that drops frames only ever makes events land earlier. So a positive
+#     skew is the log's own error, and the bar is tight. `_t0` set after
+#     `_start()` instead of at page creation measures +280 to +320 ms here.
 #
-#   * LATE — the closing caption, ~15 s in. Chromium's screencast
-#     intermittently stalls for ~0.6 s during an idle stretch, and Playwright's
-#     webm does not pad the gap, so every frame after the stall sits that much
-#     earlier in the video than the wall clock says. Measured across ten takes:
-#     five stalled once (-520 to -680 ms), five did not (-70 to -120 ms). It is
-#     a property of the capture, not of the beat log, and the recorder cannot
-#     see it happen. Hence a bar that tolerates one stall — see tests/README.md
-#     "Known gaps" and issue #18.
-MAX_CAPTION_SKEW_S = 0.20
-MAX_LATE_CAPTION_SKEW_S = 0.80
+#   * MAX_CAPTURE_LOSS_S — the video shows it *before* the log says (negative
+#     skew). Chromium's screencast emits a frame when the page paints, and
+#     nothing pads the gap when it does not, so an idle stretch costs the webm
+#     wall time and everything after it lands early. TICKER_JS removes that
+#     for the whole storyboard, but not for the ~0.7 s between the page being
+#     created and the first line of storyboard running — the recorder's own
+#     setup, which no test code can reach. Roughly 1 web take in 12 loses that
+#     window whole: -600 ms, uniformly, from the very first caption. Tolerated
+#     and reported, not asserted away; issue #18.
+#
+#   * MAX_SKEW_DRIFT_S — how far the two probes' skews may differ. This is the
+#     sharp one, and it is symmetric. Anything the capture does to a take, it
+#     does to every frame after it equally, so a stall moves both probes
+#     together and cancels here. Anything wrong with the *clock* does not: a
+#     backwards step lands between the probes and shows up as drift, as does a
+#     beat stamped somewhere other than where its verb ran. Observed across
+#     twelve takes with the ticker: 0 to 120 ms, all of it the 40 ms sampling
+#     grid and the caption's own 0.3 s fade. A mid-take screencast stall (520
+#     ms) and the measured clock step (573 ms) are both well over the bar.
+MAX_LOG_EARLY_S = 0.25
+MAX_CAPTURE_LOSS_S = 0.75
+MAX_SKEW_DRIFT_S = 0.25
 
 # Window sampled around the probe beat, and the rate it is sampled at (the
 # recorders encode at 25 fps, so this is every frame and the measurement
-# quantises to 40 ms). The run-up is longer than the drift a stall can
-# introduce, so the baseline frames stay inside the storyboard's quiet
-# PROBE_QUIET_S however far the video has slid.
-ALIGN_PRE_S, ALIGN_POST_S, ALIGN_FPS = 1.6, 0.8, 25
+# quantises to 40 ms). The run-up has to clear MAX_CAPTURE_LOSS_S — a take that
+# lost that much wall time puts the caption that far into the window, and a
+# window starting after it has no baseline at all — while staying inside the
+# caption-band quiet PROBE_QUIET_S buys. Both, at 1.2: 0.45 s of margin on the
+# first, 0.54 s on the second.
+ALIGN_PRE_S, ALIGN_POST_S, ALIGN_FPS = 1.2, 0.8, 25
+
+# How far the band may wander before the caption arrives, as a fraction of how
+# far it travels once it does. Measured on quiet run-ups: under 1%. Judged over
+# frames at least CAPTION_FADE_FRAMES before the arrival, because the recorder
+# fades the bar in over 0.3 s and the frames right before the crossing are that
+# fade, not the run-up.
+MAX_BASELINE_NOISE_FRACTION = 0.15
+CAPTION_FADE_FRAMES = int(ALIGN_FPS * 0.35)
+MIN_BASELINE_FRAMES = 4
+
+# When the narrow window comes up empty, re-sample this far either side before
+# concluding the caption was never drawn. The two answers — "the video slid out
+# from under the search window" and "the caption is not there" — look identical
+# from inside ALIGN_PRE_S, and only one of them is the recorder's fault.
+ALIGN_RESCUE_S = 5.0
 
 # The caption is counted as "on screen" once the band has travelled this far
 # toward its final state. The bar fades in over 0.3 s, so "appears" needs a
@@ -552,6 +611,62 @@ def check_caption(b: Beats, page, expected: str) -> None:
     )
 
 
+# Keeps the compositor producing frames for the whole take.
+#
+# Not cosmetic, and not optional. Chromium's screencast emits a frame when the
+# page paints; nothing pads the gap when it does not. Left idle, Playwright's
+# webm silently loses ~0.6 s of wall time somewhere in a take, and every frame
+# after that sits that much earlier in the video than the recorder's clock says
+# — which would be measured here as the beat log being wrong when it is not.
+# Instrumented takes, 10 marks over 32 s, three runs each:
+#
+#   idle    -0.11 -0.60 -0.62 -0.59 -0.60 -0.61 -0.62 -0.63 -0.60 -0.60
+#   ticking -0.18 -0.08 -0.09 -0.10 -0.07 -0.08 -0.09 -0.09 -0.10 -0.11
+#
+# 3/3 idle takes stalled; 3/3 ticking takes did not. So the harness removes the
+# confound rather than widening a bar around it — the drift itself is the
+# recorder's problem to solve, tracked in issue #18, and tests/README.md says
+# plainly that this axis no longer sees it.
+#
+# Sized so it cannot be mistaken for content: 8x8 px at 2-6% opacity is about
+# one pixel of the 160x90 luma reduction, moving a handful of levels. It adds
+# ~0.03 to a frame's luma stddev against floors of 6.0/2.0, and ~0.0007 to the
+# mean absolute difference between two stills against a 0.25 floor — neither
+# can lift a blank recording over a floor or make two identical stills look
+# different. It sits at the top-left corner, outside the caption band every
+# timing measurement reads.
+TICKER_JS = """() => {
+  if (document.getElementById('__smoke_ticker')) return;
+  const style = document.createElement('style');
+  style.textContent =
+    '@keyframes __smoke_ticker{0%{opacity:.02}100%{opacity:.06}}';
+  document.head.appendChild(style);
+  const el = document.createElement('div');
+  el.id = '__smoke_ticker';
+  el.style.cssText = 'position:fixed;top:0;left:0;width:8px;height:8px;'
+    + 'background:#808080;z-index:2147483647;pointer-events:none;'
+    + 'animation:__smoke_ticker .18s steps(2) infinite';
+  document.body.appendChild(el);
+}"""
+
+
+def start_ticker(b: Beats, page) -> None:
+    """Inject TICKER_JS and confirm it is running."""
+    page.evaluate(TICKER_JS)
+    running = page.evaluate(
+        "() => { const el = document.getElementById('__smoke_ticker');"
+        " return !!el && getComputedStyle(el).animationName === "
+        "'__smoke_ticker'; }"
+    )
+    # If it silently failed to attach, every timing number below becomes a
+    # measurement of Chromium's screencast luck instead of the beat log.
+    b.fail_if(
+        not running,
+        "the compositor ticker did not attach — timing measurements in this "
+        "take are not trustworthy (see TICKER_JS)",
+    )
+
+
 # Records every mousemove the page sees, so move_to()'s 30-step glide can be
 # told apart from the single move Playwright's own click() dispatches.
 _TRAIL_JS = """() => {
@@ -579,9 +694,10 @@ def record_web(
     with Recorder(out_dir, base_url=base_url, speech=False) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
-        # Long enough to double as the run-up for the *early* timing probe:
-        # the page has finished painting and nothing moves until the first
-        # caption. See MAX_CAPTION_SKEW_S.
+        start_ticker(b, rec.page)
+        # Doubles as the run-up for the *early* timing probe: the page has
+        # finished painting and the caption band does not move until the
+        # first caption. See MAX_CAPTION_SKEW_S.
         rec.pause(PROBE_QUIET_S)
         b.expect("goto('/'), #rows row count", rec.page.locator("#rows tr").count(), 5)
         b.expect(
@@ -720,6 +836,7 @@ def record_terminal(
             b.fail_if(True, f"after {after}, the shell prompt never came back — {tail}")
 
     with TerminalRecorder(out_dir, speech=False) as rec:
+        start_ticker(b, rec.page)
         # Let xterm.js settle, and give the early timing probe below a
         # baseline that is not the browser's first paint. See
         # MAX_CAPTION_SKEW_S.
@@ -841,7 +958,7 @@ def caption_appearance_s(
     Returns (seconds, note) — seconds is None when the measurement could not
     be made, and `note` says why, or reports the numbers behind the answer.
 
-    The storyboard leaves PROBE_QUIET_S of nothing happening before the probe
+    The storyboard leaves PROBE_QUIET_S of caption-band quiet before the probe
     caption, so within this window the caption band changes for one reason
     only. Sample it every frame from before the beat to after it, and take the
     first frame that has travelled ALIGN_ARRIVAL_FRACTION of the way from the
@@ -866,22 +983,42 @@ def caption_appearance_s(
     settled = sum(travel[-3:]) / 3
     floor = MIN_ALIGN_BAND_DELTA[label]
     if settled < floor:
-        return None, (
-            f"the caption band never changed around {t_start:.2f}s — it moved "
-            f"{settled:.2f} mean luma by the end of the window, under the "
-            f"{floor} floor. The probe caption is not in the video at all, so "
-            f"there is no appearance to time."
-        )
-    # Noise floor from the quiet run-up, so encoder dither cannot be mistaken
-    # for the caption arriving; ALIGN_ARRIVAL_FRACTION dominates in practice.
-    quiet = int(ALIGN_FPS * 0.3)
-    noise = max(travel[1:quiet]) if len(travel) > quiet else 0.0
-    threshold = max(settled * ALIGN_ARRIVAL_FRACTION, noise * 4)
+        return None, _explain_flat_window(label, mp4, band, t_start, settled, floor)
+    # Find the arrival on the travel fraction alone, then validate the baseline
+    # using only the frames *before* it. Deriving a noise floor from a fixed
+    # prefix of the window instead looks right and is not: a take that lost
+    # capture time early puts the caption a few frames into the window, the
+    # "quiet" prefix then straddles the caption's own step, and the run reports
+    # a busy run-up for a page that never moved. Measured once, on a take whose
+    # video had slid 440 ms.
+    threshold = settled * ALIGN_ARRIVAL_FRACTION
     arrived = next((i for i, d in enumerate(travel) if d > threshold), None)
     if arrived is None:
         return None, (
             f"the caption band settles at {settled:.2f} but no frame in the "
-            f"window crossed {threshold:.2f} — the window is wrong"
+            f"window crossed {threshold:.2f} — the band never reaches a state "
+            f"it holds, so there is nothing to time"
+        )
+    # Validate the baseline on frames that are genuinely *before* the caption:
+    # not the ones immediately preceding the arrival, which are the caption's
+    # own 0.3 s fade partway up. Measuring those instead reports a busy run-up
+    # on every take whose fade happened to be captured as a ramp rather than a
+    # jump — it reads a fifth of `settled`, by construction just under the
+    # arrival threshold.
+    usable = arrived - CAPTION_FADE_FRAMES
+    if usable < MIN_BASELINE_FRAMES:
+        return None, (
+            f"the caption arrives {arrived / ALIGN_FPS:.2f}s into a "
+            f"{ALIGN_PRE_S:.1f}s run-up, leaving no frames before its fade to "
+            f"use as a baseline — the video has slid further under the beat log "
+            f"than the search window allows for (see issue #18)"
+        )
+    noise = max(travel[1:usable], default=0.0)
+    if noise > settled * MAX_BASELINE_NOISE_FRACTION:
+        return None, (
+            f"the caption band wanders by {noise:.2f} before the caption "
+            f"arrives, against a settled {settled:.2f} — the run-up was not "
+            f"quiet, so there is no baseline to measure from"
         )
     if arrived == 0:
         return None, (
@@ -892,6 +1029,57 @@ def caption_appearance_s(
     return start + arrived / ALIGN_FPS, (
         f"band travelled {settled:.1f}, noise {noise:.2f}, "
         f"arrival threshold {threshold:.2f}"
+    )
+
+
+def _explain_flat_window(
+    label: str, mp4: Path, band: Rect, t_start: float, settled: float, floor: float
+) -> str:
+    """Why the caption band did not move in the window around `t_start`.
+
+    Two very different things look identical from inside ALIGN_PRE_S: the
+    caption was never drawn, or the video slid so far under the beat log that
+    the whole window is already past it. Saying the first when it is the second
+    accuses the recorder of losing a caption that is plainly on screen. So
+    widen the search before concluding anything.
+    """
+    unmeasurable = (
+        f"the caption band did not move in the {ALIGN_PRE_S + ALIGN_POST_S:.1f}s "
+        f"around {t_start:.2f}s ({settled:.2f} mean luma, under the {floor} floor)"
+    )
+    wide_start = max(0.0, t_start - ALIGN_RESCUE_S)
+    try:
+        frames = gray_frames(
+            mp4,
+            band,
+            sample_fps=ALIGN_FPS,
+            start=wide_start,
+            duration=(t_start - wide_start) + ALIGN_RESCUE_S,
+        )
+    except RuntimeError as exc:
+        return f"{unmeasurable}, and the wider search failed too: {exc}"
+    if len(frames) < ALIGN_FPS:
+        return f"{unmeasurable}, and too little video remains to search wider"
+
+    # Rising edges anywhere in +/- ALIGN_RESCUE_S. If the caption is on screen
+    # at all, one of them is it, and the nearest says how far the video slid.
+    steps = [frame_difference(frames[i - 1], frames[i]) for i in range(1, len(frames))]
+    peak = max(steps)
+    if peak < floor * ALIGN_ARRIVAL_FRACTION:
+        return (
+            f"{unmeasurable}. Nothing moves in the caption band for "
+            f"{ALIGN_RESCUE_S:.0f}s either side either, so the caption really "
+            f"was never drawn — this is not a timing problem."
+        )
+    edges = [wide_start + i / ALIGN_FPS for i, s in enumerate(steps, 1) if s > peak / 2]
+    nearest = min(edges, key=lambda t: abs(t - t_start))
+    return (
+        f"{unmeasurable}, but the band does change at {nearest:.2f}s — "
+        f"{(nearest - t_start) * 1000:+.0f} ms away, outside the "
+        f"{ALIGN_PRE_S:.1f}s search window. The video has slid out from under "
+        f"the beat log by more than the window can see, so the skew cannot be "
+        f"measured (not that the caption is missing). Almost certainly a "
+        f"screencast stall — see issue #18."
     )
 
 
@@ -970,8 +1158,27 @@ def check_timeline(
             f"storyboard sets {expected_captions!r}"
         )
 
+    # Every beat, not just the caption ones, must say which caption was on
+    # screen while it ran — that context is what makes a `shot` or a `click`
+    # beat mean anything to a reviewer, and it is what timeline.md quotes over
+    # each still. Checking only `verb == "caption"` beats is blind to it: drop
+    # the recorder's `self._caption = text` and the caption beats stay perfect
+    # while every other beat goes blank. Derived from the two hand-written
+    # lists above, never from the log being graded.
+    context = _expected_context(expected_beats, expected_captions)
+    if context is not None:
+        logged = [b.get("caption") for b in beats]
+        if logged != context:
+            failures.append(
+                f"{label}: beats do not carry the caption they ran under — "
+                f"first difference at index {_first_difference(logged, context)}. "
+                f"Logged {logged!r}."
+            )
+
     # -- indices and timestamps ---------------------------------------------
     previous_end = 0.0
+    first_start: float | None = None
+    covered = 0.0
     for position, beat in enumerate(beats):
         where = f"{label}: beat {position} ({beat.get('verb')!r})"
         if beat.get("index") != position:
@@ -995,8 +1202,41 @@ def check_timeline(
                 f"ended ({previous_end:.3f}s) — the log is not monotonic"
             )
         previous_end = max(previous_end, t_end)
+        if first_start is None:
+            first_start = t_start
+        covered += max(0.0, t_end - t_start)
+        # A verb that provably occupies the screen for a known minimum must
+        # say so. `caption(text)` holds 0.6 + 0.34/word (>= 1.4 s) with speech
+        # off and `hold()` has a 1.5 s perception floor, both enforced by the
+        # recorder itself — so a beat here that reports less than a second is
+        # not reporting when its verb returned.
+        held = beat.get("verb") == "hold" or (
+            beat.get("verb") == "caption" and beat.get("caption")
+        )
+        if held and t_end - t_start < MIN_HELD_BEAT_SPAN_S:
+            failures.append(
+                f"{where} spans {t_end - t_start:.3f}s, but the recorder holds "
+                f"this verb for at least {MIN_HELD_BEAT_SPAN_S}s — `t_end` is "
+                f"not being recorded when the verb returned"
+            )
         if beat.get("segment") is not None:
             failures.append(f"{where} claims segment {beat.get('segment')!r}")
+
+    # Beats run back to back, so their spans should account for essentially
+    # all of the time between the first starting and the last ending. This is
+    # the assertion that survives any single beat being plausible: collapse
+    # every `t_end` onto its `t_start` and the coverage goes to zero while
+    # every other timestamp check still passes.
+    if first_start is not None and previous_end > first_start:
+        elapsed = previous_end - first_start
+        share = covered / elapsed
+        if share < MIN_BEAT_TIME_COVERAGE:
+            failures.append(
+                f"{label}: the beats span {covered:.2f}s between them but cover "
+                f"{first_start:.2f}s to {previous_end:.2f}s ({share:.0%} of "
+                f"{elapsed:.2f}s, floor {MIN_BEAT_TIME_COVERAGE:.0%}) — `t_end` "
+                f"is carrying no information about how long verbs took"
+            )
 
     # -- the mp4 the timestamps are relative to ------------------------------
     mp4 = out_dir / "demo.mp4"
@@ -1057,12 +1297,32 @@ def check_timeline(
         for text in (c for c in expected_captions if c):
             if text not in markdown:
                 failures.append(f"{label}: timeline.md does not mention {text!r}")
+        # The beat table specifically, not just "the text appears somewhere":
+        # every expected caption also sits above a still in the Stills section,
+        # so the whole table can go missing and the checks above still pass.
+        # The table is the only place non-`shot` beats — every click, every
+        # spotlight, the shape of the take — appear at all.
+        rows = [ln for ln in markdown.splitlines() if _MD_ROW.match(ln)]
+        if len(rows) != len(beats):
+            failures.append(
+                f"{label}: timeline.md's beat table has {len(rows)} rows for "
+                f"{len(beats)} beats — the table is the only place a beat "
+                f"without a still shows up at all"
+            )
+        for beat in beats:
+            verb = str(beat.get("verb"))
+            if not any(f"| {beat.get('index')} |" in r and verb in r for r in rows):
+                failures.append(
+                    f"{label}: timeline.md's beat table has no row for beat "
+                    f"{beat.get('index')} ({verb!r})"
+                )
+                break
 
     # -- the acceptance criterion: timestamps point at the right frames ------
     spoken = [b for b in beats if b.get("verb") == "caption" and b.get("caption")]
-    probes: list[tuple[str, dict, float]] = []
+    probes: list[tuple[str, dict]] = []
     if spoken:
-        probes.append(("first caption", spoken[0], MAX_CAPTION_SKEW_S))
+        probes.append(("first caption", spoken[0]))
     last = next(
         (b for b in reversed(spoken) if b.get("caption") == PROBE_CAPTION), None
     )
@@ -1072,11 +1332,12 @@ def check_timeline(
             f"the end of the timeline cannot be checked against the video"
         )
     elif last is not spoken[0]:
-        probes.append(("closing caption", last, MAX_LATE_CAPTION_SKEW_S))
+        probes.append(("closing caption", last))
     if not spoken:
         failures.append(f"{label}: no caption beats at all to time against")
 
-    for what, probe, bar in probes:
+    measured: list[tuple[str, float]] = []
+    for what, probe in probes:
         if not mp4.is_file() or not isinstance(probe.get("t_start"), (int, float)):
             continue
         text = probe["caption"]
@@ -1090,22 +1351,81 @@ def check_timeline(
             )
             continue
         skew = seen_at - t_start
-        if abs(skew) > bar:
+        measured.append((what, skew))
+        where = (
+            f"timeline.json puts the {what} {text!r} at {t_start:.2f}s, but "
+            f"demo.mp4 shows it at {seen_at:.2f}s ({skew * 1000:+.0f} ms)"
+        )
+        if skew > MAX_LOG_EARLY_S:
             failures.append(
-                f"{label}: timeline.json puts the {what} {text!r} at "
-                f"{t_start:.2f}s, but demo.mp4 shows it at {seen_at:.2f}s — "
-                f"{skew * 1000:+.0f} ms, over the {bar * 1000:.0f} ms bar. The "
-                f"beat log and the video are on different clocks ({note})."
+                f"{label}: {where} — the log is {skew * 1000:.0f} ms ahead of "
+                f"the frame, over the {MAX_LOG_EARLY_S * 1000:.0f} ms bar. "
+                f"Nothing about the capture can move an event *later*, so this "
+                f"is the beat log: check where `_t0` is taken and where `_beat` "
+                f"stamps `t_start`. ({note})"
+            )
+        elif skew < -MAX_CAPTURE_LOSS_S:
+            failures.append(
+                f"{label}: {where} — the video is {-skew * 1000:.0f} ms ahead of "
+                f"the log, past the {MAX_CAPTURE_LOSS_S * 1000:.0f} ms allowed "
+                f"for capture loss. That is more wall time than one stall of "
+                f"the recorder's un-tickerable setup window accounts for, so "
+                f"either TICKER_JS stopped working or issue #18 got worse. "
+                f"({note})"
+            )
+        else:
+            note = "" if abs(skew) <= MAX_LOG_EARLY_S else " — capture loss, see #18"
+            print(
+                f"smoke: {label} {what} {text!r} logged at {t_start:.2f}s, on "
+                f"screen at {seen_at:.2f}s ({skew * 1000:+.0f} ms{note})"
+            )
+
+    # The sharp one: whatever the capture loses, it loses for every frame after
+    # it, so both probes move together and the difference cancels. A clock that
+    # stepped, or a beat stamped somewhere other than where its verb ran, does
+    # not cancel.
+    if len(measured) == 2:
+        drift = measured[1][1] - measured[0][1]
+        if abs(drift) > MAX_SKEW_DRIFT_S:
+            failures.append(
+                f"{label}: the {measured[0][0]} is {measured[0][1] * 1000:+.0f} ms "
+                f"off the video and the {measured[1][0]} is "
+                f"{measured[1][1] * 1000:+.0f} ms — they have drifted "
+                f"{drift * 1000:+.0f} ms apart, over the "
+                f"{MAX_SKEW_DRIFT_S * 1000:.0f} ms bar. A capture that dropped "
+                f"time would have moved both equally, so this is the beat log's "
+                f"clock: time between beats is not being measured monotonically."
             )
         else:
             print(
-                f"smoke: {label} {what} {text!r} logged at {t_start:.2f}s, on "
-                f"screen at {seen_at:.2f}s ({skew * 1000:+.0f} ms, bar "
-                f"{bar * 1000:.0f} ms)"
+                f"smoke: {label} beat clock holds across the take ({drift * 1000:+.0f} ms)"
             )
     if not failures:
         print(f"smoke: {label} timeline.json ok ({len(beats)} beats)")
     return failures
+
+
+def _expected_context(
+    expected_beats: list[tuple[str, str | None]], expected_captions: list[str]
+) -> list[str] | None:
+    """The caption in force during each expected beat.
+
+    A `caption` beat carries the text it sets; everything after it carries that
+    text until the next one. Returns None if the two lists disagree about how
+    many captions there are, in which case the checks above already say so and
+    this one has nothing to add.
+    """
+    wanted = [verb for verb, _ in expected_beats].count("caption")
+    if wanted != len(expected_captions):
+        return None
+    context: list[str] = []
+    current = ""
+    pending = list(expected_captions)
+    for verb, _ in expected_beats:
+        if verb == "caption":
+            current = pending.pop(0)
+        context.append(current)
+    return context
 
 
 def _first_difference(actual: list, expected: list) -> object:

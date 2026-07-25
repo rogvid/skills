@@ -355,12 +355,12 @@ class Recorder(_DemoBase):
         elements that re-render continuously (polling UIs re-mount
         popovers, restarting entrance animations, so locator.click()'s
         actionability check can stall for minutes)."""
-        deadline = time.time() + 10
+        deadline = time.monotonic() + 10
         box = None
         while box is None:
             box = self.page.locator(selector).first.bounding_box()
             if box is None:
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     raise RuntimeError(f"no visible element for {selector!r}")
                 time.sleep(0.1)
         x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2

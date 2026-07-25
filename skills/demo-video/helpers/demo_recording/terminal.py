@@ -304,10 +304,10 @@ class TerminalRecorder(_DemoBase):
     def _idle(self, seconds: float) -> None:
         """Hold the frame while pumping program output, so long-running
         commands keep scrolling on screen instead of freezing."""
-        end = time.time() + seconds
+        end = time.monotonic() + seconds
         while True:
             self._pump()
-            remaining = end - time.time()
+            remaining = end - time.monotonic()
             if remaining <= 0:
                 return
             time.sleep(min(0.04, remaining))
@@ -383,13 +383,13 @@ class TerminalRecorder(_DemoBase):
         anchor to individual screen lines (re.MULTILINE). Robust for TUIs,
         which repaint continuously and emit no clean 'done' line."""
         rx = re.compile(pattern, re.MULTILINE)
-        deadline = time.time() + timeout_s
+        deadline = time.monotonic() + timeout_s
         while True:
             text = self._screen()
             if rx.search(text):
                 self.pause(0.2)
                 return
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 tail = text[-1000:]
                 raise RuntimeError(
                     f"timed out after {timeout_s}s waiting for /{pattern}/. "
@@ -402,7 +402,7 @@ class TerminalRecorder(_DemoBase):
         """Wait until the shell prompt returns after a run() — i.e. the
         command finished. A special case of wait_for_text keyed on the
         branded prompt marker."""
-        deadline = time.time() + timeout_s
+        deadline = time.monotonic() + timeout_s
         while True:
             text = self._screen()
             if self._at_idle_prompt(text):
@@ -410,7 +410,7 @@ class TerminalRecorder(_DemoBase):
                 return
             if self._child_done:
                 return  # the shell itself exited
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 tail = text[-1000:]
                 raise RuntimeError(
                     f"timed out after {timeout_s}s waiting for the prompt "

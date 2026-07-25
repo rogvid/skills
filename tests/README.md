@@ -31,11 +31,12 @@ fresh Linux box). A pass looks like this, and takes about half a minute:
 
 ```
 smoke: serving …/tests/fixture at http://127.0.0.1:36321
-smoke: web demo.mp4 ok (18.0s, 244 kB, content 16.0)
+smoke: web demo.mp4 ok (20.2s, 279 kB, content 16.0)
 smoke: web still 01-dashboard.png ok (77 kB, content 16.9)
 smoke: web caption is visible on screen (delta 25.6)
-smoke: web first caption 'A small dashboard.' logged at 3.00s, on screen at 2.92s (-80 ms, bar 200 ms)
-smoke: web closing caption 'Recorded end to end.' logged at 17.04s, on screen at 16.96s (-80 ms, bar 800 ms)
+smoke: web first caption 'A small dashboard.' logged at 3.03s, on screen at 2.95s (-80 ms)
+smoke: web closing caption 'Recorded end to end.' logged at 17.03s, on screen at 16.99s (-40 ms)
+smoke: web beat clock holds across the take (+40 ms)
 smoke: web timeline.json ok (23 beats)
 …
 smoke: PASSED
@@ -139,36 +140,79 @@ The beats are checked against `WEB_BEATS` / `TERMINAL_BEATS`, a hand-written
 count or a sequence derived from the log being graded agrees with that log no
 matter what it says, which is how a dropped beat would pass. `WEB_CAPTIONS` /
 `TERMINAL_CAPTIONS` do the same for the caption text, separately, so a
-missing beat and a wrong caption fail independently. Alongside them:
-`schema` matches the `TIMELINE_SCHEMA` the package exports, indices match
-positions, timestamps are monotonic and inside the mp4's duration, the
-recorder's own `duration` matches ffprobe, every `still` a beat names is a
-file on disk *and* every file in `images/` is named by a beat, and
-`timeline.md` embeds each of them.
+missing beat and a wrong caption fail independently.
+
+Three of the checks exist because an earlier round of this file had them
+missing and did not notice:
+
+- **Every beat carries the caption it ran under**, not just the `caption`
+  beats. That context is what makes a `shot` or a `click` beat mean anything,
+  and it is what `timeline.md` quotes over each still — but checking only
+  `verb == "caption"` beats is blind to losing it. The expected per-beat
+  caption is derived from the two hand-written lists, never from the log.
+- **`t_end` has to carry information.** Setting it equal to `t_start` satisfies
+  every ordering check. So: a `caption(text)` or `hold()` beat must span at
+  least a second (the recorder enforces 1.4 s and 1.5 s floors itself), and the
+  beats together must account for ≥ 80% of the time from the first starting to
+  the last ending. #8 wants the beat *midpoint* for frame extraction precisely
+  because `t_start` is 0% into the caption's fade, so this is load-bearing for
+  the next PR, not decoration.
+- **`timeline.md`'s beat table specifically**, one row per beat. Checking that
+  each caption "appears in the file" is satisfied by the Stills section alone,
+  so the entire table could vanish and the run would pass — and the table is
+  the only place a beat *without* a still (every click, every spotlight, the
+  shape of the take) shows up at all.
+
+Alongside them: `schema` matches the `TIMELINE_SCHEMA` the package exports,
+indices match positions, timestamps are monotonic and inside the mp4's
+duration, the recorder's own `duration` matches ffprobe, and every `still` a
+beat names is a file on disk *and* every file in `images/` is named by a beat.
 
 **Where the timestamps point** is the assertion worth having, and it is
-measured rather than computed: both takes set a caption after two seconds of
-nothing at all happening, then the caption band is sampled every frame around
-what `timeline.json` claims and the first frame that has travelled a quarter
-of the way to the caption's final state is taken as when it appeared. A
-quarter, not "any change at all", because the bar fades in over 0.3 s and
-those two definitions are a third of a second apart. If the band never gets
-anywhere the run *fails* rather than reporting a timestamp — a caption that
-was never drawn has no appearance to time.
+measured rather than computed. Both takes set a caption after two seconds of
+caption-band quiet; the band is then sampled every frame around what
+`timeline.json` claims, and the first frame that has travelled a quarter of the
+way to the caption's final state is taken as when it appeared. A quarter, not
+"any change at all", because the bar fades in over 0.3 s and those two
+definitions are a third of a second apart. The run-up is validated too — but on
+frames well before the crossing, never the ones just before it, which *are* the
+fade partway up and would read as a busy run-up on any take whose fade got
+captured as a ramp.
 
-Two bars, because the honest answer depends on where in the take you look:
+Both the take's first caption and its last are timed, and the skew is graded
+three ways, because the two directions have different causes and only one of
+them is the beat log's:
 
-| | measured | bar |
+| | bound | why |
 |---|---|---|
-| first caption, ~3 s in | -40 to -120 ms, both media, every take | 200 ms |
-| closing caption, ~17 s in | -40 to -680 ms depending on the take | 800 ms |
+| log **ahead** of the frame | 250 ms | nothing about the capture can move an event *later*, so a positive skew is the log's own error |
+| video **ahead** of the log | 750 ms | a screencast that drops frames only ever makes events land early; capped at one lost setup window |
+| the two probes **drifting apart** | 250 ms | whatever the capture loses, it loses for every later frame equally, so a stall cancels here and only a bad clock survives |
 
-The first bar is the one that grades the beat log — it fails if `_t0` moves
-off the start of the recording (the pre-fix placement measured **+280 ms**),
-if elapsed time comes off a steppable clock, or if a beat is stamped anywhere
-other than where its verb ran. The second has to tolerate Chromium's
-screencast losing ~0.6 s of wall time mid-take, which is a property of the
-capture and not of the log — see Known gaps.
+Observed across eight consecutive `--web-only` runs and six full runs, both
+media: first caption **-80 to -200 ms**, closing caption **-160 to 0 ms**,
+drift **0 to 80 ms**. Nothing came near the 250 ms *ahead* bound — no run has
+ever produced a positive skew — which is the point of splitting by direction:
+the tight bound guards a failure mode with no natural variation near it.
+`_t0` set after `_start()` instead of at page creation measures **+320 ms** and
+fails it; a beat clock running 3% fast drifts **-360 ms** and fails the third.
+
+That split, and the tightness, only work because of `TICKER_JS` — the part to
+understand before trusting this axis. Chromium's screencast emits a frame when
+the page paints and nothing pads the gap when it does not, so an idle stretch
+silently costs the recording ~0.6 s of wall time and everything after it sits
+that much early. Measured, three runs each: 3/3 idle takes stalled, 3/3 takes
+with a small animated element running did not. Both storyboards inject one for
+their whole length. It cannot cover the ~0.7 s between the page being created
+and the first line of storyboard running — the recorder's own setup, which no
+test code can reach — and roughly 1 web take in 12 loses that window whole,
+which is what the 750 ms bound is for. **A real demo has no ticker at all**;
+see Known gaps and [#18](https://github.com/rogvid/skills/issues/18).
+
+When the measurement cannot be made the run says which reason it was: a caption
+that was never drawn, a video that slid further than the search window can see,
+or a run-up that was not quiet. They look identical from inside the window, and
+only the first is the recorder losing a caption.
 
 ## Known gaps
 
@@ -196,14 +240,16 @@ knows is missing is worse than one that is openly absent.
   the attribute while moving the app elsewhere would silently score the wrong
   pixels. Tracked in [#17](https://github.com/rogvid/skills/issues/17), which
   proposes the recorder expose its geometry as public API.
-- **Late beat timestamps drift from the video by up to ~0.6 s.** Chromium's
-  screencast intermittently stalls during an idle stretch and Playwright's webm
-  does not pad the gap, so every frame after the stall sits that much earlier
-  in the video than the clock says (`demo.mp4`'s duration shrinks by exactly
-  that much). Measured across ten takes: five stalled once, five did not. The
-  recorder cannot see it happen, which is why the closing-caption bar is 800 ms
-  rather than 200. Consequence: a frame extracted at a beat timestamp late in a
-  stalled take can show the wrong beat. Tracked in
+- **This harness no longer sees the drift real demos have, on purpose.**
+  Chromium's screencast stalls during idle stretches and Playwright's webm does
+  not pad the gap, so a real take loses ~0.6 s of wall time per stall and every
+  frame after it sits that much early (a 32 s take was measured losing 1.44 s;
+  it is not confined to late in a take, it accumulates with idle time).
+  `TICKER_JS` removes the confound here so the timing bar grades the beat log —
+  which means **a pass says nothing about how well a real, tickerless demo's
+  timestamps line up.** Consequence: a frame extracted at a beat timestamp can
+  show the wrong beat, and narration inherits the same lag because audio rides
+  the wall clock while pixels ride the screencast. Tracked in
   [#18](https://github.com/rogvid/skills/issues/18), which matters most to
   [#8](https://github.com/rogvid/skills/issues/8).
 - **Nothing reads the caption text off the video.** The timing check proves the
@@ -271,7 +317,9 @@ insurance against a future release that does start flagging it.
   lengthens the take; keep it inside the duration window, or widen the window
   deliberately. **Every interaction gets a `b.expect(...)` naming what it
   should have changed** — a beat with no post-condition is a beat that passes
-  when the verb is a no-op.
+  when the verb is a no-op. Anything that leaves the page still for more than a
+  second also wants a look at `TICKER_JS`: idle is what makes the screencast
+  lose time, and adding idle is how the timing bar was made flaky once already.
 - **A new storyboard verb in the recorder** — decorate it with `@_beat_verb`
   so it lands in the beat log, or the timeline stops being a full account of
   the take. A verb built out of other verbs records one beat, not one per

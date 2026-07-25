@@ -439,12 +439,14 @@ class _DemoBase:
         # the same height, keeping caption placement uniform across media.
         self._caption_bottom_px = 44
         self._lines: list[tuple[float, Path]] = []  # (video offset s, clip)
-        # Both are readings of time.monotonic(), never time.time(): everything
-        # here measures an *elapsed interval* against the video, and the system
-        # clock can step (NTP, a VM resuming — a WSL2 box was measured stepping
-        # 573 ms backwards inside 8 s). One such step during a take puts every
-        # beat and every narration cue after it on a different clock from the
-        # frames they describe.
+        # Both are readings of time.monotonic(). Nothing in this package
+        # measures elapsed time any other way — not the beat log, not narration
+        # pacing, not the terminal recorder's idle pump, not a wait_for
+        # deadline — because time.time() steps (NTP, a VM resuming; a WSL2 box
+        # was measured stepping 573 ms backwards inside 8 s). One such step
+        # puts every beat and narration cue after it on a different clock from
+        # the frames they describe, and makes every sleep-until loop in here
+        # over- or under-run by the size of the step.
         self._line_end = 0.0  # when the current line stops speaking
         self._t0 = 0.0  # when video capture started
         self.page: Page = None  # type: ignore[assignment]
@@ -541,17 +543,21 @@ class _DemoBase:
         webm = Path(video.path()) if video else None
         self._browser.close()
         self._pw.stop()
-        if exc_type is None and webm and webm.exists():
-            self._convert(webm)
-        if exc_type is None:
-            # The beat log is the durable, diffable record of the take — it
-            # outlives the mp4, which is not committed. Written after
-            # conversion so `duration` is the encoder's answer, not a guess.
-            json_path, _ = write_timeline(self.out_dir, self._timeline_doc())
-            print(f"wrote {json_path} ({len(self._beats)} beats)")
-        for leftover in self._video_dir.glob("*"):
-            leftover.unlink()
-        self._video_dir.rmdir()
+        try:
+            if exc_type is None and webm and webm.exists():
+                self._convert(webm)
+            if exc_type is None:
+                # The beat log is the durable, diffable record of the take — it
+                # outlives the mp4, which is not committed. Written after
+                # conversion so `duration` is the encoder's answer, not a guess.
+                json_path, _ = write_timeline(self.out_dir, self._timeline_doc())
+                print(f"wrote {json_path} ({len(self._beats)} beats)")
+        finally:
+            # Whatever went wrong above, don't leave .video/ behind — the
+            # next take into this directory would trip over it.
+            for leftover in self._video_dir.glob("*"):
+                leftover.unlink()
+            self._video_dir.rmdir()
 
     # -- beat log -----------------------------------------------------------
 

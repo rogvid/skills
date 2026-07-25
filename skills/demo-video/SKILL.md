@@ -226,11 +226,13 @@ key is fine, renaming one is not:
   and any tooling resolve the same way.
 
 **Timestamps are wall-clock offsets, and the video can drift under them.**
-Chromium's screencast intermittently loses ~0.6 s during an idle stretch and
-Playwright does not pad the gap, so late in a take a frame extracted at a beat
-timestamp can be off by that much (early in a take it is within ~100 ms). The
-lost time shows up as `duration` being shorter than the take really was.
-Tracked in [issue #18](https://github.com/rogvid/skills/issues/18).
+Chromium's screencast emits a frame when the page paints and nothing pads the
+gap when it does not, so an idle stretch costs the recording ~0.6 s of wall
+time and every frame after it lands that much earlier than the timestamps say.
+The beat log itself is good to ~100–200 ms of the frame it describes; the drift
+is the capture's, and it shows up as `duration` being shorter than the take
+really was. Tracked in [issue #18](https://github.com/rogvid/skills/issues/18)
+— read it before relying on a beat timestamp to extract a frame.
 
 ## Pacing and perception
 
