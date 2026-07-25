@@ -12,6 +12,10 @@ __pycache__/
 # demo-video working files (only demo.mp4 belongs in history)
 .tts/
 *.seg.mp4
+# Per-segment beat logs. The merged timeline.json/timeline.md next to
+# demo.mp4 is committed; these are the parts it is built from.
+*.seg.timeline.json
+*.seg.timeline.md
 # Left behind only when a take crashes before the recorder cleans up.
 .video/
 .frame.png

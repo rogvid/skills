@@ -7,14 +7,26 @@ Storyboards import from here:
     from demo_recording import stitch             # concat segments -> demo.mp4
 """
 
-from .core import media_duration, stitch, tts_clip
+from .core import (
+    TIMELINE_SCHEMA,
+    media_duration,
+    render_timeline_md,
+    stitch,
+    timeline_paths,
+    tts_clip,
+    write_timeline,
+)
 from .terminal import TerminalRecorder
 from .web import Recorder
 
 __all__ = [
+    "TIMELINE_SCHEMA",
     "Recorder",
     "TerminalRecorder",
-    "stitch",
     "media_duration",
+    "render_timeline_md",
+    "stitch",
+    "timeline_paths",
     "tts_clip",
+    "write_timeline",
 ]

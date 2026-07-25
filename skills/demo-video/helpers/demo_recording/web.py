@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .core import _DemoBase, _env
+from .core import _beat_verb, _DemoBase, _env
 
 # Pastel gradient behind the window — matches the terminal recorder's
 # background so web and terminal demos share one look.
@@ -283,6 +283,7 @@ class Recorder(_DemoBase):
 
     # -- storyboard verbs ---------------------------------------------------
 
+    @_beat_verb("goto")
     def goto(self, path: str = "") -> None:
         url = path if path.startswith("http") else self.base_url + path
         # Asset fetches hang occasionally on a busy dev box — a reload
@@ -299,16 +300,19 @@ class Recorder(_DemoBase):
         except Exception:
             pass  # apps that poll never go network-idle; the page is up
 
+    @_beat_verb("terminal")
     def terminal(self, command: str) -> None:
         """Type a command in an on-screen terminal card, then perform the
         real action it describes right after this returns."""
         self.page.evaluate("cmd => window.__demoTerminal(cmd)", command)
 
+    @_beat_verb("terminal_output")
     def terminal_output(self, text: str) -> None:
         """Reveal real command output inside the terminal card, line by
         line — run the command first, pass its actual (trimmed) output."""
         self.page.evaluate("t => window.__demoTerminalOutput(t)", text)
 
+    @_beat_verb("terminal_close")
     def terminal_close(self, stamp: str | None = None) -> None:
         """Stamp a closing line ('✓ delivered' by default, "" for none)
         on the terminal card and fade it out."""
@@ -318,6 +322,7 @@ class Recorder(_DemoBase):
         self.page.evaluate("() => window.__demoTerminalHide()")
         self.pause(0.5)
 
+    @_beat_verb("spotlight")
     def spotlight(self, selector: str | None = None) -> None:
         """Highlight one element while the caption talks about it;
         spotlight() with no argument clears it."""
@@ -328,6 +333,7 @@ class Recorder(_DemoBase):
             )
         self.pause(0.3)
 
+    @_beat_verb("move_to")
     def move_to(self, selector: str) -> None:
         """Glide the cursor onto an element (smooth, watchable motion)."""
         box = self.page.locator(selector).first.bounding_box()
@@ -337,22 +343,24 @@ class Recorder(_DemoBase):
             box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=30
         )
 
+    @_beat_verb("click")
     def click(self, selector: str) -> None:
         self.move_to(selector)
         self.pause(0.4)
         self.page.locator(selector).first.click()
 
+    @_beat_verb("click_fast")
     def click_fast(self, selector: str) -> None:
         """Coordinate click without Playwright's stability wait — for
         elements that re-render continuously (polling UIs re-mount
         popovers, restarting entrance animations, so locator.click()'s
         actionability check can stall for minutes)."""
-        deadline = time.time() + 10
+        deadline = time.monotonic() + 10
         box = None
         while box is None:
             box = self.page.locator(selector).first.bounding_box()
             if box is None:
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     raise RuntimeError(f"no visible element for {selector!r}")
                 time.sleep(0.1)
         x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
@@ -360,6 +368,7 @@ class Recorder(_DemoBase):
         self.pause(0.3)
         self.page.mouse.click(x, y)
 
+    @_beat_verb("type_into")
     def type_into(self, selector: str, text: str, delay_ms: int = 40) -> None:
         """Click a field and type into it visibly, key by key — for form
         demos (checkout, login, search). For anything the verbs don't
@@ -367,12 +376,14 @@ class Recorder(_DemoBase):
         self.click(selector)
         self.page.keyboard.type(text, delay=delay_ms)
 
+    @_beat_verb("scroll_to")
     def scroll_to(self, selector: str) -> None:
         self.page.locator(selector).first.evaluate(
             "el => el.scrollIntoView({behavior: 'smooth', block: 'center'})"
         )
         self.pause(1.2)
 
+    @_beat_verb("wait_for")
     def wait_for(self, selector: str, timeout_s: float = 60) -> None:
         """Wait for something the app does on its own (a job, a run)."""
         self.page.locator(selector).first.wait_for(timeout=timeout_s * 1000)

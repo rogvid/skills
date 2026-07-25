@@ -35,6 +35,8 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 |---|---|---|
 | `record.py` | The storyboard that produced the media (re-runnable) | yes |
 | `images/*.png` | Stills captured at key moments | yes |
+| `timeline.json` | The beat log — every verb, when it ran, what caption was up | yes |
+| `timeline.md` | The same log rendered for humans, stills embedded | yes |
 | `guide.md` | Optional written guide embedding the stills | yes |
 | `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
 
@@ -183,6 +185,54 @@ mp4 conversion happens on clean exit.
 | `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4 |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
+
+## The beat timeline (`timeline.json` / `timeline.md`)
+
+Every storyboard verb is logged as a **beat** — what was done, when, and what
+caption was on screen while it happened — and a clean exit writes the log next
+to the media. No storyboard changes are needed; it is a byproduct of recording.
+
+`timeline.md` is the readable version: a table of every beat, then each still
+embedded under the caption it was taken during. **Commit both.** They are
+small, diffable, and unlike `demo.mp4` they survive as a record of what the
+demo showed after the video has been regenerated or thrown away — which is
+what makes them worth reviewing in a PR. Segments write
+`<segment>.seg.timeline.json` alongside `<segment>.seg.mp4`; gitignore those
+with the segment media.
+
+`timeline.json` is the machine-readable one, and a stable contract — adding a
+key is fine, renaming one is not:
+
+```json
+{ "schema": 1, "generated_by": "demo-video", "recorder": "Recorder",
+  "segment": null, "media": "demo.mp4", "duration": 18.04,
+  "beats": [
+    { "index": 4, "t_start": 3.02, "t_end": 3.06, "caption": "A small dashboard.",
+      "verb": "shot", "selector": "01-dashboard",
+      "still": "images/01-dashboard.png", "segment": null }
+  ] }
+```
+
+- `t_start` / `t_end` are seconds from the start of `media` — the verb
+  starting and returning. A verb built out of other verbs (`click` glides
+  first, `type_into` clicks first) is one beat, not one per internal step.
+- `caption` is the line on screen during the beat: the new text for a
+  `caption` beat, the line shown for an `interlude`, `""` when none is up.
+- `selector` is what the verb acted on, as a string — a CSS selector for the
+  web verbs, the command / keys / pattern for the terminal ones, the name for
+  `shot`. `null` for verbs with no target (`pause`, `hold`, a cleared
+  `spotlight`).
+- `still` is a path relative to the timeline file, so `timeline.md`'s embeds
+  and any tooling resolve the same way.
+
+**Timestamps are wall-clock offsets, and the video can drift under them.**
+Chromium's screencast emits a frame when the page paints and nothing pads the
+gap when it does not, so an idle stretch costs the recording ~0.6 s of wall
+time and every frame after it lands that much earlier than the timestamps say.
+The beat log itself is good to ~100–200 ms of the frame it describes; the drift
+is the capture's, and it shows up as `duration` being shorter than the take
+really was. Tracked in [issue #18](https://github.com/rogvid/skills/issues/18)
+— read it before relying on a beat timestamp to extract a frame.
 
 ## Pacing and perception
 
@@ -350,7 +400,10 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    loaded if it configures DEMO_VIDEO_* or the ElevenLabs key:
    `set -a; source .env; set +a`). Aim for 30–60 s.
 5. **Verify by looking, not by exit code:** read the `images/*.png` stills
-   to confirm the story is actually visible; check `ffprobe` duration.
+   to confirm the story is actually visible; check `ffprobe` duration. Read
+   `timeline.md` too — it is the take's own account of what ran and when, so
+   a beat that fired at the wrong moment or a caption that never changed
+   shows up there without decoding a frame.
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you:
 
@@ -378,13 +431,14 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    video is not committed (step 8), so a repo-relative link to it is dead
    in a fresh clone. End with a "Re-recording this demo" section giving the
    exact command — that is how a reader gets the video.
-8. **Commit the storyboard, not the media.** `record.py`, `guide.md`, and
-   the `images/*.png` stills go into git — they are small, diffable, and
-   the guide needs the stills to render. **`demo.mp4` does not.** A video
-   is stale by the next change to the feature and bloats history
-   permanently, and anyone with the skill installed can regenerate it with
+8. **Commit the storyboard, not the media.** `record.py`, `guide.md`, the
+   `images/*.png` stills, and `timeline.json` / `timeline.md` go into git —
+   they are small, diffable, and between them they say what the demo showed
+   without anyone having to watch it. **`demo.mp4` does not.** A video is
+   stale by the next change to the feature and bloats history permanently,
+   and anyone with the skill installed can regenerate it with
    `uv run <demo folder>/record.py`. Gitignore `demo.mp4`, `*.seg.mp4`
-   segment parts, and `.tts/` narration caches.
+   segment parts, `*.seg.timeline.*`, and `.tts/` narration caches.
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has
