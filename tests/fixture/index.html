@@ -102,6 +102,32 @@
     font: 15px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     color: var(--ink);
   }
+
+  /* Entropy panel (only with ?entropy=1) ------------------------------ */
+  /* The two things a re-recording is allowed to differ by, made large and
+     high-contrast on purpose: a wall clock and a running animation. With
+     determinism on they are pinned and two takes match pixel for pixel;
+     with it off they are what makes them not. See issue #10. */
+  #entropy-panel {
+    margin-bottom: 22px; padding: 14px 20px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    display: flex; align-items: center; gap: 22px;
+  }
+  #entropy-readings {
+    flex: 1;
+    font: 700 22px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    letter-spacing: -0.01em; color: var(--ink);
+  }
+  #entropy-readings div { white-space: nowrap; }
+  @keyframes entropy-spin { to { transform: rotate(360deg); } }
+  #entropy-spinner {
+    width: 54px; height: 54px; flex: 0 0 auto;
+    background: var(--ink);
+    /* Deliberately asymmetric: a rotating disc would look identical at every
+       angle and prove nothing about animation phase. */
+    clip-path: polygon(50% 0, 100% 100%, 50% 72%, 0 100%);
+    animation: entropy-spin 1.7s linear infinite;
+  }
 </style>
 </head>
 <body>
@@ -167,6 +193,9 @@
  *   ?bad-fetch=<url>  page fetches a missing path and <url>, both on load,
  *                     so the failures land during the recorder's goto (#3)
  *   ?secret=1         renders #api-key holding an obviously-fake secret (issue #4)
+ *   ?entropy=1        renders four clock readings (Date, Intl, the Date
+ *                     constructor, and one posted back by a Worker) and a
+ *                     spinning shape — what determinism pins down (issue #10)
  */
 
 // Three fixed snapshots. #refresh cycles through them in order, so a
@@ -298,6 +327,72 @@ if (params.has("bad-fetch")) {
   fetch("/definitely-missing.json").catch(function () {});
   var refused = params.get("bad-fetch");
   if (refused && refused !== "1") { fetch(refused).catch(function () {}); }
+}
+
+if (params.has("entropy")) {
+  // Everything a second take of the same storyboard would otherwise render
+  // differently (issue #10). Each clock is read once, at load: a ticking one
+  // would also keep the compositor painting, which would confound the very
+  // measurement this panel exists for. Deliberately NOT here: Math.random().
+  // The recorder cannot seed an app's RNG, and pretending otherwise by
+  // seeding it in the fixture would test a control that does not exist.
+  //
+  // Four different ways of asking what time it is, because they are four
+  // different clocks under the hood and patching the Date global reaches only
+  // the first. Each one of the others was a hole found open in review: Intl
+  // formats from its own internal clock, a Worker gets its own global that
+  // page init scripts never run in, and `new Date().constructor` walked
+  // straight past a proxied global to the real constructor.
+  var entropy = document.createElement("div");
+  entropy.id = "entropy-panel";
+  var readings = document.createElement("div");
+  readings.id = "entropy-readings";
+
+  var clock = document.createElement("div");
+  clock.id = "entropy-clock";
+  clock.textContent = new Date().toLocaleString() + " · " + Date.now();
+
+  var intl = document.createElement("div");
+  intl.id = "entropy-intl";
+  intl.textContent = "intl " + new Intl.DateTimeFormat("en-US", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC"
+  }).format();
+
+  var ctor = document.createElement("div");
+  ctor.id = "entropy-ctor";
+  ctor.textContent = "ctor " + new Date().constructor.now()
+    + " · same " + (Date.prototype.constructor === Date);
+
+  var worker = document.createElement("div");
+  worker.id = "entropy-worker";
+  worker.textContent = "worker …";
+  try {
+    var w = new Worker("entropy-worker.js");
+    w.onmessage = function (e) {
+      worker.textContent = "worker " + e.data;
+      worker.className = "ready";
+      w.terminate();
+    };
+  } catch (err) {
+    worker.textContent = "worker unavailable";
+    worker.className = "ready";
+  }
+
+  var spinner = document.createElement("div");
+  spinner.id = "entropy-spinner";
+  readings.appendChild(clock);
+  readings.appendChild(intl);
+  readings.appendChild(ctor);
+  readings.appendChild(worker);
+  entropy.appendChild(readings);
+  entropy.appendChild(spinner);
+  // Prepended, not appended: four readings and a 54px spinner are tall enough
+  // that at the bottom of the page they fall below the 720px fold, and a
+  // shot() captures the viewport, not the full page. A panel nobody can
+  // photograph makes every comparison in tests/smoke pass for the wrong
+  // reason — measured, as two byte-identical stills of a spinning shape.
+  document.querySelector(".page").prepend(entropy);
 }
 
 if (params.has("console-error")) {

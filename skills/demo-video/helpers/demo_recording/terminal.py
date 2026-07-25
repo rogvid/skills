@@ -200,6 +200,10 @@ class TerminalRecorder(_DemoBase):
         voice_id: str | None = None,
         speech_model: str | None = None,
         strict: bool | None = None,
+        deterministic: bool | None = None,
+        clock: str | None = None,
+        timezone_id: str | None = None,
+        locale: str | None = None,
         type_delay_ms: int = 45,
     ) -> None:
         # A branded, distinctive default prompt so wait_for_prompt's marker
@@ -210,6 +214,8 @@ class TerminalRecorder(_DemoBase):
             terminal_title=terminal_title, terminal_prompt=prompt,
             viewport=viewport, speech=speech, voice_id=voice_id,
             speech_model=speech_model, strict=strict,
+            deterministic=deterministic, clock=clock,
+            timezone_id=timezone_id, locale=locale,
         )
         # Match the web recorder's effective caption height. Web composites
         # its page into a scaled, centered window, lifting its bottom:44px
