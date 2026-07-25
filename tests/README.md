@@ -1,8 +1,9 @@
 # tests
 
-One smoke test and one fixture app. Together they answer two questions:
-**does the demo-video recorder still produce a real video, and does it still
-notice when the thing it recorded was broken?**
+One smoke test and one fixture app. Together they answer three questions:
+**does the demo-video recorder still produce a real video, does it still notice
+when the thing it recorded was broken, and does a registered secret stay out of
+everything it produces?**
 
 They are not unit tests. The recorders' interesting behaviour is "shell out to
 ffmpeg, drive a headless browser, come back with an mp4", which nothing short
@@ -16,6 +17,10 @@ tests/
     └── index.html     # the app it records: static, dependency-free, deterministic
 ```
 
+Takes: `web/` and `terminal/` (the two media), the determinism pair, the
+problem takes, and `redaction/` — the web recorder against a page that renders
+a secret, plus a second few-second take that must *fail*.
+
 ## Running it
 
 ```sh
@@ -23,6 +28,10 @@ tests/smoke                       # every take, output to a temp dir
 tests/smoke --web-only            # just the Playwright takes
 tests/smoke --terminal-only       # just the PTY/xterm.js takes
 tests/smoke --determinism-only    # just the three re-recording takes
+tests/smoke                       # all three takes, output to a temp dir
+tests/smoke --web-only            # just the Playwright take
+tests/smoke --terminal-only       # just the PTY/xterm.js take
+tests/smoke --redaction-only      # just the secret-redaction take
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -41,6 +50,10 @@ smoke: web closing caption 'Recorded end to end.' logged at 17.03s, on screen at
 smoke: web beat clock holds across the take (+40 ms)
 smoke: web timeline.json ok (23 beats)
 smoke: web healthy app under strict=True records no problems
+smoke: redaction #api-key is blurred in every frame of demo.mp4 (worst 1.5 vs control 52.0, 3%)
+smoke: redaction still 01-key-blurred.png ok (key 1.0, token 2.9, control 39.3)
+smoke: redaction .tts/ holds 2 clips — the narrated lines, and nothing for the refused one
+smoke: redaction no artifact holds either secret verbatim
 …
 smoke: web-problems timeline.json records 8 problem(s), 6 of them fatal under strict — take still passed
 smoke: web-strict strict=True refused the take, naming beat 0 (goto) (4 fatal issues, artifacts kept)
@@ -71,10 +84,19 @@ specific way each. That is not tidiness — every artifact assertion works by
 path, so without it a leftover `demo.mp4` from the previous run would grade a
 recorder that produced nothing at all as a pass, and recording repeatedly into
 one directory is exactly how a change to the recorder gets verified.
+Re-running into the same `--out-dir` is safe: the `web/`, `redaction/` and
+`terminal/` subdirectories are deleted before each take. That is not tidiness — every
+artifact assertion works by path, so without it a leftover `demo.mp4` from the
+previous run would grade a recorder that produced nothing at all as a pass, and
+recording repeatedly into one directory is exactly how a change to the recorder
+gets verified.
 
 Deleting is bounded. Only those named subdirectories are ever
 removed, and only when each is absent, empty, or carries the
 `.demo-video-smoke` marker file a previous run wrote there. `--out-dir .` in a
+Deleting is bounded. Only `<out-dir>/web/`, `<out-dir>/redaction/` and
+`<out-dir>/terminal/` are ever removed, and only when each is absent, empty, or
+carries the `.demo-video-smoke` marker file a previous run wrote there. `--out-dir .` in a
 project that has its own `web/` directory gets a refusal naming the path, not a
 deleted source tree.
 
@@ -83,15 +105,27 @@ recorder unconditionally, so the whole package needs a Unix platform. The
 terminal *take* additionally skips itself with a message if `os.name` is not
 `posix`.
 
-Narration is forced off (`speech=False`), and the runner deletes every
-`DEMO_VIDEO_*` variable plus `ELEVENLABS_API_KEY` from its own environment
-before recording. A sourced project `.env` therefore cannot change what the
-test measures.
+The runner deletes every `DEMO_VIDEO_*` variable plus `ELEVENLABS_API_KEY` from
+its own environment before recording, so a sourced project `.env` cannot change
+what the test measures. The web and terminal takes then force narration off
+(`speech=False`).
+
+The **redaction take is the exception, and deliberately so**: it records with
+`speech=True` against a stubbed synthesizer (`stub_narration`), which writes a
+short silent mp3 under the same cache key `tts_clip` computes. The `.tts/`
+cache is one of the four leak paths, and with narration off it does not exist —
+"no cache entry holds the secret" would then be a statement about an empty
+directory. Only the network call is replaced; the guard that refuses to speak a
+secret, the cache path, the pacing and the ffmpeg audio mix are the recorder's
+own code. That also makes this the one take that exercises the speech path at
+all (see Known gaps).
 
 ## What it asserts
 
 Six independent axes, because a recorder can fail on any one of them while
 looking perfect on the other five.
+Five independent axes, because a recorder can fail on any one of them while
+looking perfect on the other four.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -430,6 +464,205 @@ consistently. The take reads the line and requires `worker <frozen epoch>`.
 All three takes also run `strict=True` (issue #3's machinery), which is what
 would catch the blob shim breaking worker *loading* rather than its clock.
 
+**Redaction** — a third take, `redaction/`, records `?secret=1` with
+`rec.redact("#api-key")` and `rec.type_into("#token", Secret(...))`, and grades
+the four leak paths of [#4](https://github.com/rogvid/skills/issues/4)
+separately. Its acceptance criterion is *no frame, still, caption or TTS cache
+entry containing the secret*, so it is graded on pixels and bytes, never on the
+recorder agreeing that it did the right thing.
+
+Six elements are masked and graded, each reached a different way, because
+each is a different way for a mask to miss:
+
+| element | why it is there |
+|---|---|
+| `#api-key` | the ordinary case: a leaf with the value in it |
+| `#hero-key` | 44px text inside a **12px wrapper**, and the wrapper is what `redact()` is given — a radius scaled from the matched element leaves the value readable |
+| `#sd-key` | inside an **open shadow root**: `page.locator` sees it, `document.querySelectorAll` does not, and a document stylesheet does not apply to it |
+| `#if-key` | inside an **iframe**: `frame.evaluate` reaches it, `page.locator` does not descend into it |
+| `#token`, `#sd-token` | typed into as `Secret(...)`, one of them across the shadow boundary |
+| `#a1-card` … `#a5-card` | the **sufficiency shapes**: a wrapper with a small font-size holding a value rendered four to five times larger by a `::after`, a `transform: scale(4)`, `zoom: 4`, an SVG `viewBox`, and two nested shadow roots. Each is redacted by the wrapper, and each reported 12–13 px to a mask that asked CSS how big its text was |
+
+The sufficiency axis tests *shapes*, plural, on purpose. For two rounds it was
+exercised by exactly one — a wrapper with a plain 44 px descendant — and five
+constructions walked straight through it. A single shape tests the shape, not
+the property.
+
+`redact()` takes **plain CSS only**, and the take asserts that the dialects
+every other verb accepts — `text=`, `xpath=`, `>>`, `:has-text()` — are
+*refused*. That is the honest trade rather than a limitation: continuous cover
+is a stylesheet, a stylesheet is CSS, and a Playwright-engine selector can only
+be re-resolved at checkpoints. Measured before the change, a `text=` selector
+sat unmasked for four seconds of a ten-second take on an ordinary
+fetch-then-render page while its CSS sibling holding the same value was covered
+throughout — and the end-of-take check then found it masked and passed.
+
+**The mask is an opaque cover, not a blur**, and that is a decision this
+harness forced. A blur has to answer "how much is enough", and the answer is a
+guess about how the ink was produced; five separate ways of rendering text
+larger than its `font-size` says — a `::after`, `transform: scale()`, `zoom`,
+an SVG `viewBox`, a value two shadow roots down — each defeated a radius
+derived from CSS, and nothing suggested the fifth was the last. A cover is
+sized from client rects, which include transforms and zoom by construction, and
+asks nothing about the text.
+
+**What the in-page check can and cannot prove.** For two rounds it compared the
+filter it had just applied against the value it had just computed —
+`applied < needed` was unreachable by construction, so it read as a check and
+could not fail. It now asks the *browser's hit testing* whether anything paints
+over each cover, at nine points per element, which is a fact the recorder does
+not decide. That covers **stacking** — z-index, the top layer, paint order.
+It does **not** cover **extent**: whether the cover is over the right pixels is
+geometry, and the only independent grading of that is the pixel measurement
+below. Nothing in the page can grade it, because the same walk that positions
+the cover would be the one grading it.
+
+The pixel measurement is **sharpness**, not contrast: `edge_energy()` is the
+mean absolute difference between neighbouring pixels of a crop. A gaussian blur
+is precisely the operation that removes glyph edges, so it separates a masked
+key from a legible one by more than an order of magnitude — where luma stddev
+would happily score a blurred-but-colourful smear as "content".
+
+**The crop is normalised to a fixed text height first, and that is what makes
+the number mean "legible" rather than "small".** Sharpness is scale-dependent:
+bigger text has fewer glyph edges per pixel, so a *sharp* 44 px key scores
+lower than a *blurred* 15 px one. Measured with only the font size varied and a
+constant 8 px blur:
+
+| font | control | blurred | ratio | legible to a human? |
+|---|---|---|---|---|
+| 15px | 37.7 | 1.0 | 2.7% | no |
+| 40px | 16.4 | 1.6 | 10.0% | borderline |
+| 52px | 12.3 | 1.6 | 13.4% | **yes** |
+| 68px | 9.4 | 1.7 | 17.7% | **yes** |
+
+The denominator collapses while the numerator stays flat, so a raw ratio passes
+text anyone can read — and at 68px the control is about to trip its own floor,
+three sizes after the secret became readable. Scaling every crop to the same
+text height removes that: a blur proportional to the text survives the rescale
+as a blur, while a constant 8 px blur on 44 px text rescales into a ~3 px blur
+on 15 px text and scores like the legible thing it is.
+
+**What it is measured against is the whole trick again.** Every masked element
+has a control of the same kind and size in the same frame, never registered:
+`#api-key-control` for the body-size keys, `#hero-key-control` for the hero
+one, and a control *field* beside each secret field. Fields need their own
+control because a field is not comparable with text — its border blurs along
+with its contents and smears a gradient across the crop — and the control
+fields are **typed into**, not pre-filled, because a freshly re-coded region
+carries ringing that a static one does not.
+
+| | control | masked | mask off | constant 8px radius, hero | radius 8→3 | whole page blurred |
+|---|---|---|---|---|---|---|
+| stills, text | 26 – 30 | 0.8 – 0.9 | 40.6 | 3.5 (12%) | 3.0 (11%) | 0.4 |
+| video, text | 30 – 36 | 0.8 – 1.2 | 53.6 | 3.4 (11%) | 3.7 (10%) | 0.7 |
+| video, fields | 27 – 28 | 2.5 – 3.6 | ~100% | — | 7.7 (28%) | — |
+
+So the bar is per kind: **7%** for text, where the interesting faults (a blur
+that does not scale, a radius cut to 3px) land at 10–12%, and **25%** for
+fields, whose floor is structurally higher (9–13% while being, on inspection of
+the extracted crop, a featureless smear — the same crop in the lossless still
+reads 3%). The looser field bar still catches the failure that matters there,
+a field not masked at all, by 4x.
+
+With covers, a masked element reads **0.0–0.2** where a blurred one read
+0.7–1.4, against controls at 25–35. The bars below are unchanged and are now
+a long way from anything healthy.
+
+**Bar headroom, stated because it is thinner than the rest of this file.**
+Injecting a radius cut from 8px to 3px puts `#sd-token` at 28% against a 25%
+field bar and `#token` at 22% — two near-identical fields either side of the
+line. The 7% text bar catches a 44px hero under a 15px-calibrated radius at
+11–12%, but a 28–30px hero would likely slip under it. Both bars are backstops
+now rather than the primary check: a radius too small for the text fails
+*verification*, in the page, deterministically, before any pixel is measured —
+which is where that class of bug is actually caught.
+
+The control also carries an absolute floor (8.0 stills / 6.0 video), and that
+floor is the anti-vacuity guard: without it a black recording, a blank page, or
+a mask that blurred *everything* — all of which score near zero everywhere —
+would pass the ratio trivially. Injecting exactly that (mask every element)
+trips the floor in all four artifacts.
+
+Video is sampled at 2 fps and graded on the **worst** frame, not the median:
+one frame showing the key is a leak, because a paused video is a screenshot.
+Rects come from the recorder's own `_geom` mapped through `to_video_rect()`,
+never a hardcoded scale factor. The two fields are graded only from the moment
+they were typed into — before that they hold a placeholder, and grading a
+placeholder would force the bar up for everything else.
+
+**A control that cannot be measured is a failure, not a skip.** For one round
+the field controls were missing from the dict the loop reads, both fields went
+ungraded, and the run printed PASSED. It now says which element was not graded
+and why.
+
+**Two axes exist only because a mask can succeed by hiding everything.**
+
+*Blankness*: the recorder withholds the first paint of each navigation until
+the mask is verified, which means a gate that never comes down records a blank
+window — and every leak assertion above passes on a blank frame. The take
+measures the longest run of blank frames in the app rect (bar 1.5s, observed
+0.6s) after clicking an ordinary link, because for one round the gate was
+lowered from `goto()` alone and a link click left four of ten seconds white
+with the take reporting success.
+
+*Gate integrity*: the gate is raised again deliberately, mid-take, and attacked
+the way an ordinary page does it by accident — a descendant declaring
+`visibility: visible`, and a script stripping `<style>` elements it does not
+recognise. A still taken while it is up must show **nothing**, including the
+controls, which are never redacted. This is the only assertion that can fail
+when the gate is weakened: with CSS-only redaction the in-page stylesheet
+already masks from the first paint, so no *leak* assertion depends on the gate
+— it is defence in depth, and the honest way to test defence in depth is to
+test the mechanism directly rather than to claim a leak it no longer prevents.
+
+Two things that line does **not** cover, and the phrasing should not be read as
+covering: content in the browser's **top layer** (`<dialog>.showModal()`, a
+popover, fullscreen) ignores z-index entirely. The gate and the covers ask for
+the top layer when the browser offers it, and a cover that something paints
+over is caught by the hit test — but a *dialog opened after* a cover is
+ordered above it in the top layer, and only the hit test at the next checkpoint
+notices. And the attack the fixture runs is the two ordinary ones, not an
+adversary.
+
+The two text paths are checked by searching bytes, not by asking the recorder:
+
+- every file the take wrote — `timeline.json`, `timeline.md`, the stills, the
+  mp4, the narration clips — is read and searched for both literals, with no
+  exemptions, so a leak path nobody anticipated still shows up;
+- `.tts/` must hold **exactly** the clips for the lines that were narrated —
+  not merely "nothing for the refused line", which is also true of an empty
+  directory. The innocent line's clip existing is what makes the refused line's
+  absence mean anything;
+- the refused caption must leave **no beat** behind, and exactly one beat must
+  carry a `[redacted]` selector — the `terminal()` call whose command held the
+  key. Asserted positively, because "no beat contains the secret" is equally
+  true of a log that dropped the beat.
+
+The storyboard also tears the mask out mid-take the way a real app does —
+rewriting the element's `style` attribute wholesale and removing the injected
+stylesheet, which is what a framework re-render and this recorder's own
+`spotlight()` clear both do — and requires that the next frame is masked again.
+That is the assertion the `MutationObserver` exists for; with the observer
+stubbed out, the video check fails on the frames between the tamper and the
+next `shot()`.
+
+**A mask that cannot be applied must kill the take, not quietly cover
+nothing.** A second, few-second recording (`check_unmatched_redaction`) points
+`redact()` at a key inside a *closed* shadow root — reachable by neither
+Playwright nor an injected script, so there is no way to mask it — and requires
+`SecretLeak`, no `demo.mp4`, no `.frame.png`, no raw capture in `.video/`, and
+**no stills**. It takes one first, on purpose: web stills are full-bleed, and
+for one round a failed take left them on disk holding the value it had refused
+to write an mp4 for, while reporting that it had written nothing. The same
+path covers the plain typo, `redact("#api-ky")`, which is the same failure with
+a friendlier cause.
+
+Two premises of the shadow-DOM case are asserted rather than assumed, because
+if the fixture ever stopped putting those elements behind a real boundary the
+take would go on passing while proving nothing: `page.locator("#sd-key")` must
+find exactly one, and `document.querySelectorAll("#sd-key")` exactly none.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -544,6 +777,41 @@ knows is missing is worse than one that is openly absent.
 - **Nothing checks audio.** Narration is forced off and no assertion touches the
   aac track, so the whole speech path — `tts_clip`, the `.tts/` cache, the
   `adelay`/`amix` mixing in `_convert` — is untested here.
+- **Nothing checks audio.** The redaction take narrates (against a stubbed
+  synthesizer) and asserts *which lines were cached*, which exercises
+  `_prepare_line`, the cache path and the `adelay`/`amix` mixing in `_convert`
+  far enough that a crash would surface — but no assertion decodes the aac
+  track, and the clips are silence, so nothing here can tell a correctly mixed
+  narration from a silent one landing at the wrong offset. The real
+  ElevenLabs call is never made.
+- **Nothing reads the burned-in caption text off the video, which the
+  redaction take needs and does not have.** A caption holding a secret is
+  refused before it is drawn, so the leak is prevented rather than detected —
+  but if that guard were bypassed *only* on the drawing path, the words would
+  be in the frames and every pixel assertion here would still pass. What
+  catches the caption path today is the beat log, the `.tts/` set and the byte
+  sweep, all of which are downstream text checks, not pixels. Same OCR-shaped
+  hole as the caption-wording gap above.
+- **Four guard sites cannot be fault-injected on their own.** Each is a
+  redundant belt, and removing any one alone leaves the run green:
+  - the first-paint gate. With `redact()` restricted to CSS the in-page
+    stylesheet masks from the first paint, so weakening the gate leaks
+    nothing — which is why its integrity is asserted directly (see above)
+    rather than through a leak it no longer prevents.
+  - `_before_shot()`, which re-pushes the mask before a still. The mask is in
+    the page, the observer keeps it there, and a still *is* the page. It only
+    becomes load-bearing with the observer *also* disabled, and then the
+    tampered still leaks and the check fires.
+  - the blur underneath the cover. It is what a stylesheet can do with no JS,
+    and it reaches ink outside the cover's rectangle — but with the cover
+    working, removing it changes no measurement here.
+  - `caption()`'s own `_no_secrets` call, and `_prepare_line()`'s. The
+    relationship is **symmetric**: `caption()` calls `_prepare_line()`
+    immediately, so removing either one still leaves the other to refuse the
+    line. Only removing both leaks, and then six assertions fire. An earlier
+    version of this file presented the first as tested and the second as the
+    redundant one; that was wrong in a way worth stating, because it claimed
+    coverage that does not exist.
 - **Nothing checks `stitch()`, segments, or `interlude()`.** Single-segment
   takes only — so `<segment>.seg.timeline.json`, and the merge
   [#7](https://github.com/rogvid/skills/issues/7) will build on it, are
@@ -596,11 +864,34 @@ controls-off assertion, which is exactly what that assertion is for.
 One hook, one take. The graded `web/` take loads none of them, so the reference
 recording stays a recording of a working app — which is also the assertion that
 the recorder does not invent problems.
+| `?console-error=1` | logs a `console.error` **and** throws an uncaught error (Playwright `pageerror`), while the page stays usable | issue #3, failing a take on console errors |
+| `?secret=1` | pins a panel of keys to redact and controls not to: body-size, hero-size, two reachable only by `text=`/`xpath=`, two fields, and an **open shadow root** holding a third key and a third field | issue #4, redacting secrets from frames and stills |
+| `?secret=closed` | the same, plus a **closed** shadow root holding a key nothing can mask | issue #4, proving an unmaskable selector fails the take |
 
-That key is not a credential. It is spelled `FAKE` followed by sixteen zeroes so
-both gitleaks and a human read it as scenery — the default ruleset does not flag
-it either way. `.gitleaks.toml` allowlists the exact literal anyway, as
-insurance against a future release that does start flagging it.
+None of them is a credential. Each is spelled with a four-letter word followed
+by nothing but zeroes so both gitleaks and a human read it as scenery — the
+default ruleset does not flag them either way. `.gitleaks.toml` allowlists the
+shape anyway, and lists what each word belongs to, as insurance against a
+future release that does start flagging it.
+
+The panel is `position: fixed` rather than in the flow, which is load-bearing
+rather than cosmetic: the redaction take measures pixels inside those elements,
+so their rect has to be identical in every frame. In the flow the panel sits
+below the fold, and anything that scrolls — Playwright scrolls a field into view
+before typing into it — would move the measured region mid-take, which reads as
+a leak or hides one depending on what slid into the crop.
+
+It also has to stay clear of the bottom 160 px, where the recorder burns its
+caption bar. A measured crop that overlaps the bar is measuring sharp white
+caption text: the shadow field scored 34% of its control that way while being,
+on inspection of the extracted pixels, thoroughly blurred. The take asserts the
+clearance for every measured element, so the layout cannot drift back into it
+silently — and two other measurement artifacts found the same way are worth
+knowing about, because both looked exactly like a leak: the recorder's own
+cursor dot parked inside a field's crop by `type_into`'s click (5.0 against
+0.8), and an `<input>`'s border blurring into its own crop (2.5 against 0.8 for
+the same value as text). Every number in this section was checked by extracting
+the crop and looking at it before it was believed.
 
 ## Adding a case
 
@@ -641,6 +932,16 @@ insurance against a future release that does start flagging it.
   "the take raises" cannot be asserted about a take that has to succeed for
   everything else to be graded, so they exist, and they are kept to a few
   seconds each and graded on nothing else.
+  over another take. Takes cost ~15 s each in CI; assertions are free. The
+  redaction take is the exception that earned its own recording: it needs a
+  different page state (`?secret=1`), a different narration setting
+  (`speech=True`), and it deliberately provokes failures — a refused caption, a
+  torn-out mask — that would corrupt the expectations of the take it shared.
+- **A new thing redaction must hide** — add it to the `?secret=1` panel, add a
+  literal to the `REDACT_*` constants in `tests/smoke`, allowlist its shape in
+  `.gitleaks.toml`, and give it *both* a masked and an unmasked measurement.
+  A redaction assertion with nothing sharp to compare against is the most
+  dangerous kind of vacuous test: it passes on a black frame.
 
 **Prove any new assertion can fail.** Break the thing it watches — stub the verb
 out in `skills/demo-video/helpers/`, or blank the fixture — run `tests/smoke`,
