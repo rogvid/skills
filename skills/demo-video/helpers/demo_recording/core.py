@@ -557,6 +557,9 @@ def tts_clip(
 #                      merge — so `(segment, segment_index)` names a beat the
 #                      same way before and after `stitch`, which `index` alone
 #                      cannot (see issue #22).
+#   evidence  str?   — path, relative to the timeline file, of this beat's
+#                      evidence file ("evidence/beat-04.json"); null when
+#                      evidence capture is off. See "per-beat evidence" below
 #   exit_code int?   — TerminalRecorder `run` beats only: the shell's status
 #                      for that command, or null if it could not be read
 #
@@ -564,6 +567,101 @@ def tts_clip(
 # out of other verbs (`click` glides with `move_to`, `type_into` clicks first)
 # record one beat spanning the whole call, not one per internal step.
 TIMELINE_SCHEMA = 1
+
+# -- per-beat evidence -------------------------------------------------------
+#
+# A reviewing agent handed only frames has to infer the DOM from pixels. The
+# recorder is *driving* the page — it has the real thing — so at the end of
+# every beat it also writes down what was on screen, in text, next to the
+# frame the beat's timestamps point at.
+#
+# What is captured, per medium:
+#
+#   Recorder          the page's ARIA snapshot (Playwright's `aria_snapshot`,
+#                     a compact YAML tree of roles and accessible names) —
+#                     semantic, an order of magnitude smaller than the markup,
+#                     and stable across restyling. Plus `url` and `title`. When
+#                     a spotlight is up, the same snapshot *scoped to the
+#                     spotlight target* and that element's `outerHTML`.
+#   TerminalRecorder  the rendered screen, ANSI already stripped by xterm.js
+#                     (`_screen()`), scrollback included.
+#
+# **`outerHTML` is only ever the spotlight target's, never the page's**, and
+# that is a safety decision as much as a size one. `document.body.outerHTML`
+# on the smoke fixture is 24 kB against 2.3 kB of ARIA, and it carries two
+# things ARIA does not: the text of every inline `<script>`, and `srcdoc`
+# attributes — i.e. source code and whole embedded documents that nobody put
+# on screen. The clone that is serialized drops both (see web.py).
+#
+# **Evidence is plain text, and that makes it the leak path with the fewest
+# natural defences.** Every other artifact this package writes is pixels, and
+# `redact()` is a *pixel* control: it covers where a value renders and leaves
+# the value in the DOM, which is exactly what is being dumped here. So:
+#
+#   * every string written is masked against the registered secrets *and*
+#     against the rendered text of everything `redact()` is covering, harvested
+#     from the page at capture time (see `Recorder._redacted_rendered_text`);
+#   * nothing reaches the disk until the take has exited cleanly and the mask
+#     has been verified — the documents are built in memory and written
+#     alongside timeline.json, so a take that dies on a SecretLeak leaves no
+#     evidence file to delete;
+#   * a document that still holds a forbidden literal when it is serialized
+#     raises SecretLeak and kills the take rather than being written.
+#
+# Naming, and issue #22. A beat's `index` is its position in *its own take*, so
+# two segments of one demo both start at 0. Evidence therefore does two things
+# that make renumbering a non-event: a segment's files carry the segment in
+# their name (`evidence/part1.seg.beat-03.json`, mirroring how
+# `<segment>.seg.timeline.json` is named), and the path is written *onto the
+# beat* as `evidence` rather than derived from `index` by whoever reads the
+# log. A merge that renumbers beats (issue #7) has only to carry that string
+# across; nothing has to be renamed, and every evidence file names its own
+# `segment` and `index` internally.
+EVIDENCE_SCHEMA = 1
+EVIDENCE_DIR = "evidence"
+
+# Per-field character budgets. A TUI's scrollback is 5000 lines and a real
+# app's ARIA tree is unbounded, so an uncapped evidence directory is bigger
+# than the mp4 it describes. Truncation is *marked*, never silent: a reviewer
+# reading a cut-off tree has to be able to tell it was cut off, and the file
+# says so twice — inline where the text stops, and in `truncated`.
+EVIDENCE_MAX_ARIA = 12_000
+EVIDENCE_MAX_HTML = 8_000
+EVIDENCE_MAX_SCREEN = 12_000
+EVIDENCE_LIMITS = {
+    "aria": EVIDENCE_MAX_ARIA,
+    "scope_aria": EVIDENCE_MAX_ARIA,
+    "html": EVIDENCE_MAX_HTML,
+    "screen": EVIDENCE_MAX_SCREEN,
+}
+EVIDENCE_TRUNCATED = "\n…[demo-video: truncated here, {n} more characters]"
+
+# Harvested text shorter than this is not used as a mask. `redact()` pointed at
+# an element rendering "$" would otherwise replace every dollar sign in every
+# evidence file, which costs the evidence its meaning and hides nothing: a
+# one-character secret is not one. Registered secrets are masked at any length
+# — `register_secret()` was told, explicitly, that the value matters.
+EVIDENCE_MIN_MASK_LEN = 2
+
+
+def evidence_name(index: int, segment: str | None = None) -> str:
+    """The file one beat's evidence is written as.
+
+    Mirrors `timeline_paths`: a whole demo writes `beat-04.json`, a segment
+    writes `<segment>.seg.beat-04.json`, so two segments of one demo never
+    collide and no merge has to rename anything (issue #22).
+    """
+    stem = f"{segment}.seg." if segment else ""
+    return f"{stem}beat-{index:02d}.json"
+
+
+def _cap_text(text: str, limit: int) -> tuple[str, int]:
+    """`text` cut to `limit` characters, with an explicit marker. -> (text, cut)"""
+    if len(text) <= limit:
+        return text, 0
+    cut = len(text) - limit
+    return text[:limit] + EVIDENCE_TRUNCATED.format(n=cut), cut
+
 
 # -- take issues -------------------------------------------------------------
 #
@@ -1224,6 +1322,7 @@ class _DemoBase:
         clock: str | None = None,
         timezone_id: str | None = None,
         locale: str | None = None,
+        evidence: bool | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
         # > built-in default (see SKILL.md for the variable names).
@@ -1347,6 +1446,20 @@ class _DemoBase:
         # Stills this take wrote, so a take that fails to verify its mask can
         # take them back off disk (they are full-bleed, and may hold it).
         self._shots: list[Path] = []
+        # Per-beat evidence (see "per-beat evidence" above). Buffered as
+        # (beat record, medium payload) and only turned into files on a clean
+        # exit — nothing plaintext reaches the disk before the mask has been
+        # verified, which is why there is no evidence file for
+        # _discard_artifacts to take back. `_evidence_masks` accumulates the
+        # rendered text of everything redact() is covering; the union is
+        # applied to *every* beat's evidence on the way out, so a value first
+        # seen at beat 20 is masked out of beat 3 as well.
+        if evidence is None:
+            evidence = _env_flag("EVIDENCE")
+        self._evidence_on = True if evidence is None else bool(evidence)
+        self._evidence: list[tuple[dict, dict]] = []
+        self._evidence_masks: set[str] = set()
+        self._evidence_docs: list[tuple[Path, dict]] = []
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
         # env) is otherwise a confusing surprise only noticed after the fact.
@@ -1619,6 +1732,34 @@ class _DemoBase:
                 f"({type(exc_check).__name__}: {exc_check}), so nothing can "
                 f"vouch for what is in the frames. This take wrote no mp4."
             )
+        # Evidence documents are assembled **after** the mask has been vouched
+        # for and only when there is still a take to keep — the same treatment
+        # an unverifiable mask gets, because evidence is the one artifact that
+        # is plain text and a pixel control never protected it.
+        #
+        # It runs after `_stop()` deliberately, and that is safe rather than
+        # merely convenient: the captures were buffered per beat while the page
+        # was alive, and this turns them into documents in memory — it opens no
+        # beat, touches no page, and writes no file. Nothing here can add
+        # content to the recording after the verifier has vouched for it, which
+        # is the property the ordering above exists to protect.
+        if exc_type is None and unmasked is None:
+            try:
+                self._build_evidence()
+            except SecretLeak as leak:
+                unmasked = leak
+            except Exception as exc_build:  # noqa: BLE001 - same verdict
+                # Not a leak that was found, but a document nobody can say is
+                # clean — which is the same verdict for the same reason. The
+                # message says which of the two happened, because "could not be
+                # verified" and "holds a secret" send an author to different
+                # places.
+                unmasked = SecretLeak(
+                    f"this take's evidence could not be assembled "
+                    f"({type(exc_build).__name__}: {exc_build}), so the "
+                    f"recorder cannot say whether it holds a registered or "
+                    f"redacted value. This take wrote no mp4."
+                )
         clean = exc_type is None and unmasked is None
         video = self.page.video
         self._context.close()
@@ -1629,6 +1770,10 @@ class _DemoBase:
             if clean and webm and webm.exists():
                 self._convert(webm)
             if clean:
+                # Before the timeline, because every beat in it carries an
+                # `evidence` path: a timeline pointing at files that are not
+                # there yet is the one ordering a reader can be caught by.
+                self._write_evidence()
                 # The beat log is the durable, diffable record of the take — it
                 # outlives the mp4, which is not committed. Written after
                 # conversion so `duration` is the encoder's answer, not a guess.
@@ -1943,11 +2088,23 @@ class _DemoBase:
             # can use it without knowing which kind of timeline it is reading.
             "segment_index": len(self._beats),
         }
+        if self._evidence_on:
+            # Written onto the beat rather than left for a reader to derive
+            # from `index`, so a merge that renumbers beats (issue #7) does
+            # not silently repoint every beat at somebody else's evidence.
+            record["evidence"] = (
+                f"{EVIDENCE_DIR}/{evidence_name(record['index'], self.segment)}"
+            )
         record.update(extra)
         self._beats.append(record)
         try:
             yield record
         finally:
+            # Captured before `t_end` is stamped, so the round trips it costs
+            # are accounted for *inside* the beat that paid for them and no
+            # unexplained gap opens up between one beat and the next.
+            if self._evidence_on:
+                self._capture_evidence(record)
             record["t_end"] = round(time.monotonic() - self._t0, 3)
             self._in_beat = False
 
@@ -1960,6 +2117,169 @@ class _DemoBase:
         frames themselves instead of taking this paragraph's word for it.
         """
         write_beat_frames(self.out_dir, doc, "this take")
+
+    # -- per-beat evidence (see the section at the top of this file) --------
+
+    def _evidence_payload(self) -> dict:
+        """What this medium can say about the screen right now.
+
+        Overridden per medium (`Recorder` -> ARIA + outerHTML, `TerminalRecorder`
+        -> the rendered screen). A payload of `{"omitted": reason}` is the
+        medium refusing to hand over page text it cannot vouch for; the file is
+        still written, and says so.
+        """
+        return {}
+
+    def _capture_evidence(self, beat: dict) -> None:
+        """Buffer one beat's evidence. Never raises.
+
+        A capture failure must not lose a take that is otherwise fine — the
+        beat gets a file saying what went wrong instead, which keeps the
+        `evidence` pointer on every beat pointing at something real. The one
+        failure that is *not* survivable — a redacted element whose rendered
+        text could not be read, and therefore could not be masked — is handled
+        in the medium's payload, which returns `omitted` rather than raising.
+        """
+        try:
+            payload = self._evidence_payload()
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must not kill a take
+            payload = {"error": f"{type(exc).__name__}: {exc}"}
+            print(
+                f"demo-video: could not capture evidence for beat "
+                f"{beat.get('index')} ({beat.get('verb')}): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        self._evidence.append((beat, payload))
+
+    def _evidence_forbidden(self) -> tuple[str, ...]:
+        """Every literal that must not appear in an evidence file, longest first.
+
+        Two sources, and the second is the reason this exists at all:
+
+          * `self.secrets` — text somebody registered. `scrub()` already covers
+            this everywhere else.
+          * `self._evidence_masks` — the *rendered text of everything redact()
+            is covering*, read out of the page as the take ran. `redact()` is a
+            pixel control: it hides where a value renders and leaves the value
+            in the DOM, so a text dump of that DOM is not protected by it at
+            all. This is what makes evidence inherit redaction.
+
+        Longest first so overlapping values (a token, and the header line
+        holding it) mask the larger one whole instead of leaving its tail.
+        """
+        literals = set(self._secrets)
+        literals |= {
+            text for text in self._evidence_masks
+            if len(text.strip()) >= EVIDENCE_MIN_MASK_LEN
+        }
+        return tuple(sorted(literals, key=len, reverse=True))
+
+    def _evidence_mask(self, text: str, forbidden: tuple[str, ...]) -> str:
+        for literal in forbidden:
+            text = text.replace(literal, SECRET_MASK)
+        return text
+
+    def _evidence_scrub_deep(self, value: object, forbidden: tuple[str, ...]) -> object:
+        """`_evidence_mask` over a whole structure, keys included.
+
+        Keys as well as values: a payload key is a string the recorder chose
+        today, but the schema is append-only and the next slice to add a field
+        may not be. Masking both costs nothing and removes a hole nobody would
+        think to look for.
+        """
+        if isinstance(value, str):
+            return self._evidence_mask(value, forbidden)
+        if isinstance(value, dict):
+            return {
+                self._evidence_mask(str(key), forbidden)
+                if isinstance(key, str) else key:
+                self._evidence_scrub_deep(item, forbidden)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [self._evidence_scrub_deep(item, forbidden) for item in value]
+        return value
+
+    def _evidence_doc(self, beat: dict, payload: dict) -> dict:
+        """One evidence document: masked, then capped, then checked.
+
+        Order matters and is not interchangeable. Masking runs *before*
+        capping, because capping first can cut a secret in half and leave its
+        first twenty characters as the last thing in the file — which no later
+        substring search would find.
+        """
+        forbidden = self._evidence_forbidden()
+        doc: dict = {
+            "schema": EVIDENCE_SCHEMA,
+            "generated_by": "demo-video",
+            "recorder": type(self).__name__,
+            "segment": self.segment,
+            "media": self._media_path().name,
+            "beat": {
+                key: beat.get(key)
+                for key in ("index", "t_start", "t_end", "verb", "selector",
+                            "caption", "still", "evidence")
+            },
+        }
+        doc.update(payload)
+        doc = self._evidence_scrub_deep(doc, forbidden)  # type: ignore[assignment]
+        truncated: list[str] = []
+        for field, limit in EVIDENCE_LIMITS.items():
+            text = doc.get(field)
+            if not isinstance(text, str):
+                continue
+            capped, cut = _cap_text(text, limit)
+            if cut:
+                truncated.append(field)
+                doc[field] = capped
+        doc["truncated"] = sorted(truncated)
+        doc["limits"] = {k: v for k, v in EVIDENCE_LIMITS.items() if k in doc}
+        # A backstop over the *serialized bytes*, not a second opinion on the
+        # masking above — run against the same list, it cannot disagree with it
+        # about a plain string value, and this file does not pretend otherwise.
+        # What it does reach is everything the walker structurally cannot: a
+        # field added to this schema by a later slice that is built after the
+        # scrub, a non-string key, a literal that only exists once JSON
+        # escaping has run. The grading that can actually fail is the byte
+        # sweep over `evidence/` in tests/smoke.
+        blob = json.dumps(doc, ensure_ascii=False)
+        for literal in forbidden:
+            if literal in blob:
+                raise SecretLeak(
+                    f"a beat's evidence still holds a {len(literal)}-character "
+                    f"value that is registered or redacted, after masking — so "
+                    f"the recorder cannot vouch for what it was about to write. "
+                    f"No evidence file, no mp4 and no timeline were written."
+                )
+        return doc
+
+    def _build_evidence(self) -> None:
+        """Turn the buffered captures into documents. Writes nothing.
+
+        Separate from writing on purpose: a document that cannot be made safe
+        raises here, before the first byte of the first file has been written,
+        so the failure cannot leave half an evidence directory behind.
+        """
+        if not self._evidence_on:
+            return
+        out = self.out_dir / EVIDENCE_DIR
+        self._evidence_docs = [
+            (out / evidence_name(beat["index"], self.segment),
+             self._evidence_doc(beat, payload))
+            for beat, payload in self._evidence
+        ]
+
+    def _write_evidence(self) -> None:
+        if not self._evidence_docs:
+            return
+        (self.out_dir / EVIDENCE_DIR).mkdir(parents=True, exist_ok=True)
+        for path, doc in self._evidence_docs:
+            path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        print(
+            f"wrote {self.out_dir / EVIDENCE_DIR} "
+            f"({len(self._evidence_docs)} beats)"
+        )
 
     def _media_path(self) -> Path:
         """The mp4 this take converts to on exit."""
@@ -2122,9 +2442,11 @@ class _DemoBase:
                 )
         print(
             "demo-video: the take could not verify its mask, so it wrote no "
-            "mp4 and no timeline, and deleted "
+            "mp4, no timeline and no evidence, and deleted "
             + (", ".join(gone) if gone else "nothing (it had written nothing)")
-            + ". The raw capture in .video/ is gone too.",
+            + ". The raw capture in .video/ is gone too. (Per-beat evidence is "
+            "held in memory until a clean exit precisely so there is nothing "
+            "to take back here — it is the one artifact that is plain text.)",
             file=sys.stderr,
         )
 

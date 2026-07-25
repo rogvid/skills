@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["playwright>=1.40"]
+# dependencies = ["playwright>=1.49"]
 # ///
 """End-to-end smoke test for the demo-video recorders.
 
@@ -37,6 +37,13 @@ and grades each take on separate axes:
    the same frame, and on a byte search of everything the take wrote. The
    terminal half (issue #5) grades the PTY scrubber the same way, against a
    value split across `os.read()` boundaries on purpose.
+6. **Evidence** — every beat left a text account of what was on screen, capped
+   and explicitly truncated, from which a reader can state what the frame
+   showed without decoding one. Its own leak path, because it is the only
+   artifact here that is *plain text* and `redact()` only covers pixels.
+
+Playwright 1.49 or newer: evidence uses `locator.aria_snapshot()`, and the
+`page.accessibility` API that predates it has since been removed.
 
     tests/smoke                 # every take
     tests/smoke --web-only
@@ -767,6 +774,123 @@ MAX_MERGE_OFFSET_ERROR_S = 0.1
 # by the boundary, and neither is satisfied by a constant shift of any
 # segment's beats — which is what this bar, at any width, cannot say.
 MAX_CROSS_SEGMENT_DRIFT_S = MAX_CAPTURE_LOSS_S
+
+# -- per-beat evidence (issue #9) ---------------------------------------------
+#
+# Every beat writes evidence/beat-NN.json: what was on screen when the verb
+# returned, in text. The acceptance criterion is that a reviewer given only
+# those files can say what the frame showed — so the assertions below are not
+# "the file exists and parses" but *facts about the fixture app*, hand-written
+# here and looked for in the page text the recorder captured.
+EVIDENCE_DIR_NAME = "evidence"
+
+# The recorder's caps and its truncation marker, written out by hand for the
+# same reason WEB_BEATS is: a bound read off the code being graded agrees with
+# that code whatever it says. check_evidence_caps() asserts the package's own
+# constants equal these, so widening a cap has to be done on purpose.
+EVIDENCE_SCHEMA_EXPECTED = 1
+EVIDENCE_LIMITS_EXPECTED = {
+    "aria": 12_000,
+    "scope_aria": 12_000,
+    "html": 8_000,
+    "screen": 12_000,
+}
+EVIDENCE_MARKER = "[demo-video: truncated here,"
+# The most a marker can add past a field's budget, so "cut to the cap" can be
+# asserted as a range rather than as "under some ceiling".
+EVIDENCE_TRUNCATED_MAX = len(
+    "\n…[demo-video: truncated here, 999999999 more characters]"
+)
+
+# One file's ceiling: the three text fields at their caps (32 000 characters)
+# plus JSON escaping of a newline-dense YAML tree, plus the beat block. Well
+# clear of the ~3.3 kB a healthy fixture beat writes, and it exists to catch a
+# cap that stopped being applied rather than to tune anything.
+MAX_EVIDENCE_FILE_BYTES = 64_000
+# ...and the directory's, which is the "do not bloat the evidence folder" half.
+# Observed: 76 kB for the 23-beat web take, 40 kB for the 18-beat terminal one.
+MAX_EVIDENCE_DIR_BYTES = 512_000
+
+# What a reviewer must be able to read out of one beat's evidence, and what
+# must *not* be in it. The second list is what makes this more than a
+# spell-check of a static dump: `03-refreshed` holding `$134,950` and *not*
+# `$128,400` says the evidence tracks the page beat by beat, which is the whole
+# claim. Every string is a fact about tests/fixture/index.html, written here,
+# never read back off the recorder.
+#
+#   (verb, target, must appear, must not appear)
+WEB_EVIDENCE = [
+    (
+        "shot",
+        "01-dashboard",
+        [
+            "$128,400",
+            "snapshot 1 of 3",
+            "Refresh",
+            "Harbor Supply Co.",
+            "Ferrari Logistics",
+            "A small dashboard.",
+        ],
+        ["$134,950", "snapshot 2 of 3"],
+    ),
+    (
+        # The filter really filtered: one row left, and the four it dropped are
+        # gone from the account of the screen as well as from the screen.
+        "shot",
+        "02-filtered",
+        ["Harbor Supply Co.", "Seattle", "Filter by city."],
+        ["Ferrari Logistics", "Cascade Outfitters", "Pine & Poplar"],
+    ),
+    (
+        "shot",
+        "03-refreshed",
+        ["$134,950", "snapshot 2 of 3", "Refresh reloads it."],
+        ["$128,400", "snapshot 1 of 3"],
+    ),
+]
+
+# The spotlight is what issue #9 says the capture is scoped to, so it is graded
+# on its own: the beat that sets one names it and carries that element's own
+# tree and markup, and the beat that clears one carries neither.
+WEB_EVIDENCE_SCOPE = ("#kpi-rev", "$128,400", 'id="kpi-rev"')
+
+TERMINAL_EVIDENCE = [
+    (
+        "shot",
+        "01-echo",
+        # The command as typed *and* its output, which is the pair that says
+        # the PTY ran what run() sent rather than echoing it.
+        ["echo hello from demo-video", "hello from demo-video"],
+        ["ls -1", "AGENTS.md"],
+    ),
+    (
+        "shot",
+        "02-listing",
+        ["ls -1", "skills", "tests", "hello from demo-video"],
+        [],
+    ),
+]
+
+# -- the evidence cap take ----------------------------------------------------
+#
+# Truncation cannot be provoked on the fixture as it stands — its whole ARIA
+# tree is 2.3 kB against a 12 kB cap — and slackening the cap to meet it would
+# be grading the wrong number. So one short take bloats the page on purpose,
+# and is graded on nothing else. Its own take rather than a hook in a graded
+# one: 900 list items would change what the reference recording shows.
+EVIDENCE_BLOAT_ID = "smoke-bloat"
+EVIDENCE_BLOAT_ITEMS = 900
+EVIDENCE_BLOAT_JS = """(n) => {
+  const box = document.createElement('ul');
+  box.id = '__ID__';
+  for (let i = 0; i < n; i++) {
+    const li = document.createElement('li');
+    li.textContent = 'bloat row ' + i + ' — filler so the evidence cap has '
+      + 'something to cut';
+    box.appendChild(li);
+  }
+  document.body.appendChild(box);
+}""".replace("__ID__", EVIDENCE_BLOAT_ID)
 
 # -- redaction (issue #4) ----------------------------------------------------
 #
@@ -4962,9 +5086,56 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
             f"lines, and nothing for the refused one"
         )
 
+    # -- leak path 5: the evidence files -------------------------------------
+    #
+    # `evidence/beat-NN.json` is the one artifact this recorder writes that is
+    # plain text, and `redact()` is a *pixel* control — it covers where a value
+    # renders and leaves the value in the DOM, which is exactly what an
+    # evidence file is a dump of. So the sweep below has to actually reach
+    # these files, and they have to have something in them.
+    #
+    # Both halves are needed and neither alone is worth anything. An empty
+    # `evidence/`, or files holding nothing but a beat record, satisfy "no
+    # secret appears" perfectly — so the *controls*, which are never redacted
+    # and sit in the same panel as the keys, must be found in there. That pair
+    # is what makes the absence of the keys mean something.
+    evidence_dir = out_dir / EVIDENCE_DIR_NAME
+    evidence_files = sorted(evidence_dir.glob("*.json"))
+    beat_count = 0
+    if timeline.is_file():
+        beat_count = len(json.loads(timeline.read_text()).get("beats") or [])
+    if len(evidence_files) != beat_count or not evidence_files:
+        failures.append(
+            f"redaction: {EVIDENCE_DIR_NAME}/ holds {len(evidence_files)} files "
+            f"for {beat_count} beats. The byte sweep below is only a statement "
+            f"about the files that are there, so a take that wrote no evidence "
+            f"would pass it by writing nothing."
+        )
+    evidence_text = "\n".join(p.read_text() for p in evidence_files)
+    for what, control in (
+        ("the unredacted control key", REDACT_CONTROL),
+        ("the unredacted hero control", REDACT_HERO_CONTROL),
+    ):
+        if control not in evidence_text:
+            failures.append(
+                f"redaction: {what} ({control}) is not in any evidence file. It "
+                f"is rendered beside the redacted keys and is never registered, "
+                f"so its absence means the evidence captured nothing — and "
+                f"'no secret appears in it' is then a statement about an empty "
+                f"file."
+            )
+    for what, literal in REDACT_LITERALS.items():
+        holding = [p.name for p in evidence_files if literal in p.read_text()]
+        if holding:
+            failures.append(
+                f"redaction: {what} appears verbatim in the evidence files "
+                f"{holding!r}. redact() hides where a value *renders*; the DOM "
+                f"still holds it, and evidence is a text dump of the DOM."
+            )
+
     # Everything the take wrote, byte for byte: timeline.json, timeline.md,
-    # the stills, the mp4, the narration clips, the marker. No exemptions —
-    # a leak path nobody thought of is exactly what this catches.
+    # the stills, the mp4, the narration clips, the evidence, the marker. No
+    # exemptions — a leak path nobody thought of is exactly what this catches.
     swept = 0
     for path in sorted(out_dir.rglob("*")):
         if not path.is_file():
@@ -4979,7 +5150,227 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
     if not failures:
         print(
             f"smoke: redaction none of the {len(REDACT_LITERALS)} secrets "
-            f"appears verbatim in any of the {swept} files the take wrote"
+            f"appears verbatim in any of the {swept} files the take wrote "
+            f"({len(evidence_files)} of them per-beat evidence, which the "
+            f"controls prove is not empty)"
+        )
+    return failures
+
+
+def evidence_docs(
+    label: str, out_dir: Path
+) -> tuple[list[dict], list[dict], list[str]]:
+    """(beats, evidence documents, failures) for one take, paired by index.
+
+    The pairing is the structural half of this axis: every beat in
+    timeline.json must name an evidence file, that file must exist, and
+    `evidence/` must hold nothing the log does not name — the same
+    both-directions check the stills already get, and for the same reason. A
+    dangling pointer sends a reviewer to a file that was never written; an
+    orphan file is a beat the log forgot.
+    """
+    failures: list[str] = []
+    timeline = out_dir / "timeline.json"
+    if not timeline.is_file():
+        return [], [], [f"{label}: timeline.json was never written"]
+    beats = json.loads(timeline.read_text()).get("beats") or []
+    directory = out_dir / EVIDENCE_DIR_NAME
+    if not directory.is_dir():
+        return (
+            beats,
+            [],
+            [
+                f"{label}: no {EVIDENCE_DIR_NAME}/ directory — the take recorded "
+                f"{len(beats)} beats and wrote an account of none of them"
+            ],
+        )
+    docs: list[dict] = []
+    for position, beat in enumerate(beats):
+        # Computed here rather than imported, so a change to how evidence is
+        # named fails loudly instead of being agreed with.
+        wanted = f"{EVIDENCE_DIR_NAME}/beat-{position:02d}.json"
+        if beat.get("evidence") != wanted:
+            failures.append(
+                f"{label}: beat {position} ({beat.get('verb')!r}) points at "
+                f"evidence {beat.get('evidence')!r}, expected {wanted!r}"
+            )
+        path = out_dir / (beat.get("evidence") or wanted)
+        if not path.is_file():
+            failures.append(
+                f"{label}: beat {position} ({beat.get('verb')!r}) names "
+                f"evidence {path.name!r}, which was never written"
+            )
+            continue
+        size = path.stat().st_size
+        if size > MAX_EVIDENCE_FILE_BYTES:
+            failures.append(
+                f"{label}: {path.name} is {size} bytes, over the "
+                f"{MAX_EVIDENCE_FILE_BYTES}-byte ceiling — the per-field caps "
+                f"are not being applied"
+            )
+        try:
+            docs.append(json.loads(path.read_text()))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            failures.append(f"{label}: {path.name} is not valid JSON: {exc}")
+    on_disk = sorted(p.name for p in directory.glob("*.json"))
+    named = sorted(Path(b["evidence"]).name for b in beats if b.get("evidence"))
+    if on_disk != named:
+        failures.append(
+            f"{label}: {EVIDENCE_DIR_NAME}/ holds {on_disk!r} but the beats "
+            f"name {named!r} — a beat captured nothing, or something was "
+            f"captured that no beat owns"
+        )
+    total = sum(p.stat().st_size for p in directory.glob("*.json"))
+    if total > MAX_EVIDENCE_DIR_BYTES:
+        failures.append(
+            f"{label}: {EVIDENCE_DIR_NAME}/ is {total // 1024} kB over "
+            f"{len(named)} beats, past the {MAX_EVIDENCE_DIR_BYTES // 1024} kB "
+            f"bar — evidence is meant to be capped, not to outgrow the mp4"
+        )
+    return beats, docs, failures
+
+
+def evidence_screen_text(doc: dict) -> str:
+    """Only the part of an evidence document that describes the *screen*.
+
+    Deliberately excludes the embedded beat record. Every caption is in
+    `beat.caption` already, so searching the whole file for one would pass on a
+    recorder that captured no page text at all — the assertion has to be about
+    what the page said, not about the log quoting itself.
+    """
+    return "\n".join(
+        str(doc.get(field) or "") for field in ("aria", "scope_aria", "html", "screen")
+    )
+
+
+def check_evidence(
+    label: str,
+    out_dir: Path,
+    expected: list[tuple[str, str, list[str], list[str]]],
+    scope: tuple[str, str, str] | None = None,
+) -> list[str]:
+    """Issue #9's acceptance criterion, made concrete.
+
+    "A reviewer given only the evidence files can state what was on screen
+    without seeing an image" is not something a test can assert as written, so
+    it is asserted as its consequence: named facts about the fixture app —
+    values, labels, table rows, command output — have to be readable in the
+    evidence for the beat that showed them, and the values the *previous*
+    screen showed have to be gone.
+    """
+    beats, docs, failures = evidence_docs(label, out_dir)
+    if not docs:
+        return failures
+
+    for position, (beat, doc) in enumerate(zip(beats, docs, strict=False)):
+        where = f"{label}: {EVIDENCE_DIR_NAME}/beat-{position:02d}.json"
+        if doc.get("schema") != EVIDENCE_SCHEMA_EXPECTED:
+            failures.append(
+                f"{where} says schema {doc.get('schema')!r}, expected "
+                f"{EVIDENCE_SCHEMA_EXPECTED!r}"
+            )
+        if doc.get("segment") is not None:
+            failures.append(f"{where} claims segment {doc.get('segment')!r}")
+        if doc.get("media") != "demo.mp4":
+            failures.append(f"{where} describes media {doc.get('media')!r}")
+        # The embedded beat has to be *this* beat. Without it every file could
+        # hold the same screen and every fact below would still be found
+        # somewhere.
+        stamped = doc.get("beat") or {}
+        for field in ("index", "verb", "selector", "caption", "t_start", "t_end"):
+            if stamped.get(field) != beat.get(field):
+                failures.append(
+                    f"{where} stamps beat {field}={stamped.get(field)!r}, but "
+                    f"timeline.json says {beat.get(field)!r}"
+                )
+        if not isinstance(doc.get("truncated"), list):
+            failures.append(
+                f"{where} has no `truncated` list — a reader cannot tell a "
+                f"short page from a cut-off one"
+            )
+
+    def find(verb: str, target: str) -> tuple[int, dict] | None:
+        hits = [
+            (i, doc)
+            for i, (beat, doc) in enumerate(zip(beats, docs, strict=False))
+            if beat.get("verb") == verb and beat.get("selector") == target
+        ]
+        if len(hits) != 1:
+            failures.append(
+                f"{label}: {len(hits)} beats are ({verb!r}, {target!r}), so the "
+                f"evidence facts written for it cannot be checked against one"
+            )
+            return None
+        return hits[0]
+
+    for verb, target, present, absent in expected:
+        hit = find(verb, target)
+        if hit is None:
+            continue
+        position, doc = hit
+        text = evidence_screen_text(doc)
+        if not text.strip():
+            failures.append(
+                f"{label}: beat {position} ({verb} {target!r}) captured no page "
+                f"text at all — `aria`/`screen` are empty, so nothing about "
+                f"what was on screen survived"
+            )
+            continue
+        missing = [s for s in present if s not in text]
+        if missing:
+            failures.append(
+                f"{label}: the evidence for beat {position} ({verb} {target!r}) "
+                f"does not say {missing!r} was on screen. A reviewer holding "
+                f"only this file cannot state what the frame showed, which is "
+                f"issue #9's acceptance criterion. Captured "
+                f"{len(text)} characters."
+            )
+        leaked = [s for s in absent if s in text]
+        if leaked:
+            failures.append(
+                f"{label}: the evidence for beat {position} ({verb} {target!r}) "
+                f"still says {leaked!r} was on screen, which belongs to an "
+                f"earlier state of the page — the capture is not per-beat, it "
+                f"is a stale dump reused across beats"
+            )
+
+    if scope is not None:
+        selector, inside, markup = scope
+        hit = find("spotlight", selector)
+        if hit is not None:
+            position, doc = hit
+            if doc.get("scope") != selector:
+                failures.append(
+                    f"{label}: beat {position} spotlights {selector!r} and its "
+                    f"evidence scopes to {doc.get('scope')!r} — issue #9 asks "
+                    f"for the capture to be scoped to the spotlight target"
+                )
+            for field, wanted in (("scope_aria", inside), ("html", markup)):
+                got = doc.get(field)
+                if not isinstance(got, str) or wanted not in got:
+                    failures.append(
+                        f"{label}: beat {position}'s evidence `{field}` is "
+                        f"{str(got)[:120]!r}, which does not contain {wanted!r} "
+                        f"— the spotlight target's own tree and markup are "
+                        f"what the scope is for"
+                    )
+        cleared = find("spotlight", None)  # type: ignore[arg-type]
+        if cleared is not None:
+            position, doc = cleared
+            if doc.get("scope") is not None or doc.get("html") is not None:
+                failures.append(
+                    f"{label}: beat {position} clears the spotlight, but its "
+                    f"evidence still scopes to {doc.get('scope')!r} with "
+                    f"markup attached — the scope outlives the highlight"
+                )
+
+    if not failures:
+        sizes = [
+            (out_dir / b["evidence"]).stat().st_size for b in beats if b.get("evidence")
+        ]
+        print(
+            f"smoke: {label} evidence ok ({len(docs)} beats, "
+            f"{sum(sizes) // 1024} kB, largest {max(sizes)} bytes)"
         )
     return failures
 
@@ -5136,6 +5527,7 @@ def run_web(out_root: Path) -> list[str]:
         )
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
+        + check_evidence("web", out_dir, WEB_EVIDENCE, WEB_EVIDENCE_SCOPE)
         + check_healthy("web", out_dir)
     )
 
@@ -7257,6 +7649,129 @@ def run_terminal_redaction(out_root: Path) -> list[str]:
     return problems + check_terminal_redaction(out_dir, info, started)
 
 
+def run_evidence_caps(out_root: Path) -> list[str]:
+    """A four-second take whose only job is the evidence size cap.
+
+    The fixture's whole ARIA tree is 2.3 kB against a 12 kB cap, so truncation
+    has to be provoked: 900 list items put both the page tree and the
+    spotlight target's markup well past their budgets. Graded on nothing else
+    — no video, no stills, no timeline beyond the evidence pointers.
+    """
+    from demo_recording import EVIDENCE_LIMITS, EVIDENCE_SCHEMA
+
+    failures: list[str] = []
+    # The package's own constants against the ones written above. Everything
+    # below is a statement about those numbers, so a cap quietly widened by ten
+    # has to fail here rather than pass by agreeing with itself.
+    if dict(EVIDENCE_LIMITS) != EVIDENCE_LIMITS_EXPECTED:
+        failures.append(
+            f"evidence-caps: the package caps evidence at {dict(EVIDENCE_LIMITS)!r}, "
+            f"this harness grades {EVIDENCE_LIMITS_EXPECTED!r} — one of them "
+            f"moved without the other"
+        )
+    if EVIDENCE_SCHEMA != EVIDENCE_SCHEMA_EXPECTED:
+        failures.append(
+            f"evidence-caps: the package exports EVIDENCE_SCHEMA "
+            f"{EVIDENCE_SCHEMA!r}, this harness grades "
+            f"{EVIDENCE_SCHEMA_EXPECTED!r}"
+        )
+
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "evidence-caps")
+    with fixture_server() as base_url:
+        try:
+            with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+                rec.goto("/")
+                rec.wait_for("#kpi-rev")
+                # Before the bloat. Its evidence must come back *un*truncated —
+                # a recorder that marked every field truncated would otherwise
+                # satisfy everything below.
+                rec.pause(0.2)
+                rec.page.evaluate(EVIDENCE_BLOAT_JS, EVIDENCE_BLOAT_ITEMS)
+                rec.spotlight(f"#{EVIDENCE_BLOAT_ID}")
+                rec.pause(0.2)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return failures + [
+                f"evidence-caps: Recorder raised {type(exc).__name__}: {exc}"
+            ]
+
+    beats, docs, problems = evidence_docs("evidence-caps", out_dir)
+    failures += problems
+    if not docs:
+        return failures
+    pauses = [
+        (i, doc)
+        for i, (beat, doc) in enumerate(zip(beats, docs, strict=False))
+        if beat.get("verb") == "pause"
+    ]
+    if len(pauses) != 2:
+        return failures + [
+            f"evidence-caps: {len(pauses)} pause beats, expected 2 (one before "
+            f"the bloat, one after) — the take is not the take this grades"
+        ]
+    (before_i, before), (after_i, after) = pauses
+
+    if before.get("truncated"):
+        failures.append(
+            f"evidence-caps: beat {before_i} ran before anything was appended "
+            f"to the page and its evidence is already marked truncated "
+            f"{before.get('truncated')!r} — the marker means nothing if it is "
+            f"always there"
+        )
+    if len(before.get("aria") or "") >= EVIDENCE_LIMITS_EXPECTED["aria"]:
+        failures.append(
+            f"evidence-caps: beat {before_i}'s aria is "
+            f"{len(before.get('aria') or '')} characters before the page was "
+            f"bloated, so the untruncated case is not being exercised"
+        )
+
+    for field in ("aria", "html"):
+        limit = EVIDENCE_LIMITS_EXPECTED[field]
+        text = after.get(field)
+        if not isinstance(text, str):
+            failures.append(
+                f"evidence-caps: beat {after_i} captured no `{field}` at all, "
+                f"so the cap on it is untested"
+            )
+            continue
+        if field not in (after.get("truncated") or []):
+            failures.append(
+                f"evidence-caps: beat {after_i}'s `{field}` is {len(text)} "
+                f"characters against a {limit} cap, and `truncated` is "
+                f"{after.get('truncated')!r} — it was cut and does not say so"
+            )
+        if EVIDENCE_MARKER not in text:
+            failures.append(
+                f"evidence-caps: beat {after_i}'s `{field}` was cut with no "
+                f"marker where it stops. It ends {text[-80:]!r}, which reads "
+                f"as a page that simply ended there."
+            )
+        # Cut *to* the budget, not merely somewhere under a ceiling: the marker
+        # is the only thing allowed past it.
+        allowed = limit + EVIDENCE_TRUNCATED_MAX
+        if not limit < len(text) <= allowed:
+            failures.append(
+                f"evidence-caps: beat {after_i}'s `{field}` is {len(text)} "
+                f"characters, expected the {limit}-character budget plus a "
+                f"marker (at most {allowed})"
+            )
+    if after.get("scope") != f"#{EVIDENCE_BLOAT_ID}":
+        failures.append(
+            f"evidence-caps: beat {after_i} scopes to {after.get('scope')!r}, "
+            f"expected the bloated element — its markup is what the html cap "
+            f"is being graded on"
+        )
+    if not failures:
+        print(
+            f"smoke: evidence-caps aria cut to "
+            f"{EVIDENCE_LIMITS_EXPECTED['aria']} and html to "
+            f"{EVIDENCE_LIMITS_EXPECTED['html']} characters, both marked "
+            f"(untruncated beat {before_i} left alone)"
+        )
+    return failures
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -7295,6 +7810,7 @@ def run_terminal(out_root: Path) -> list[str]:
         + check_beat_frames(
             "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
         )
+        + check_evidence("terminal", out_dir, TERMINAL_EVIDENCE)
         + check_healthy("terminal", out_dir)
     )
 
@@ -7398,6 +7914,7 @@ def main() -> int:
         if only in (None, "--web-only"):
             failures += run_web_problems(out_root)
             failures += run_strict_web(out_root)
+            failures += run_evidence_caps(out_root)
         if only in (None, "--terminal-only"):
             failures += run_terminal_problems(out_root)
             failures += run_terminal_race(out_root)

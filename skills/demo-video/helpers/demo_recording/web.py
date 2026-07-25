@@ -29,7 +29,14 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .core import Secret, SecretLeak, _beat_verb, _DemoBase, _env
+from .core import (
+    SECRET_MASK,
+    Secret,
+    SecretLeak,
+    _beat_verb,
+    _DemoBase,
+    _env,
+)
 
 # Pastel gradient behind the window — matches the terminal recorder's
 # background so web and terminal demos share one look.
@@ -589,6 +596,165 @@ _CSS_ONLY_JS = """(sel) => {
 }"""
 
 
+# -- evidence (issue #9) -----------------------------------------------------
+#
+# Everything a redacted element *renders*, as text, so the evidence writer can
+# mask it. This is the whole reason evidence can inherit redaction:
+# `redact("#api-key")` never tells the recorder what `#api-key` says, and a
+# dump of the DOM is not covered by a control that paints over pixels.
+#
+# It runs in the page rather than through Playwright's engine, once per frame
+# instead of once per selector per frame, and it finds the same elements the
+# mask does two ways:
+#
+#   * `[data-demo-redact]` — the marker `wear()` stamps on every element the
+#     mask has actually reached, including inside open shadow roots;
+#   * the registered selectors themselves, re-resolved here, which covers an
+#     element that entered the DOM since the last checkpoint. `redact()` only
+#     accepts plain CSS, so `querySelectorAll` can parse every one of them.
+#
+# Shadow roots are walked at every depth, because `textContent` stops at the
+# boundary and a value two roots down is the ordinary composition of "redact a
+# card" and "the card is a web component" — the same shape the mask's own
+# `deep()` exists for.
+#
+# **Every node in the subtree is harvested on its own, not just the element the
+# selector matched**, and that is not thoroughness for its own sake. Redacting
+# a *wrapper* is the ordinary call (`redact("#hero-card")` where the value is
+# the 44 px child), and the wrapper's `textContent` is the label and the value
+# run together — a single string that appears nowhere in an ARIA tree, which
+# renders them as separate nodes. Harvesting only the matched element masked
+# five of the eight keys on the smoke fixture and left three in the clear.
+#
+# `::before`/`::after` content is read too, from the computed style, because
+# generated content has no node to hold it — and Chromium *does* put it in the
+# accessibility tree, so it reaches an evidence file by a route no walk of the
+# DOM would find.
+_EVIDENCE_HARVEST_JS = r"""(selectors) => {
+  const MARK = '__MARK__';
+  const ATTRS = ['value', 'title', 'alt', 'placeholder', 'aria-label',
+                 'content', 'srcdoc', 'data-value'];
+  const out = [];
+  const push = (s) => { if (typeof s === 'string' && s.trim()) out.push(s); };
+  const roots = [document];
+  const findRoots = (root) => {
+    let all;
+    try { all = root.querySelectorAll('*'); } catch (e) { return; }
+    for (const el of all) {
+      if (el.shadowRoot) { roots.push(el.shadowRoot); findRoots(el.shadowRoot); }
+    }
+  };
+  findRoots(document);
+  // Every node the subtree renders through, shadow roots at every depth.
+  const walk = (node, acc) => {
+    if (!node) return acc;
+    acc.push(node);
+    let kids = [];
+    try { kids = node.querySelectorAll ? node.querySelectorAll('*') : []; }
+    catch (e) { kids = []; }
+    for (const kid of kids) {
+      acc.push(kid);
+      if (kid.shadowRoot) walk(kid.shadowRoot, acc);
+    }
+    if (node.shadowRoot) walk(node.shadowRoot, acc);
+    return acc;
+  };
+  const harvest = (el) => {
+    for (const node of walk(el, [])) {
+      push(node.textContent);
+      if (typeof node.value === 'string') push(node.value);
+      // Individual text nodes as well as the concatenation: an accessible
+      // name is built per element, so the pieces are what a tree shows.
+      for (const child of node.childNodes || []) {
+        if (child.nodeType === 3) push(child.nodeValue);
+      }
+      if (node.nodeType !== 1) continue;  // a shadow root has no attrs or style
+      for (const a of ATTRS) {
+        try { push(node.getAttribute(a)); } catch (e) { /* exotic attr */ }
+      }
+      for (const which of ['::before', '::after']) {
+        let content;
+        try { content = getComputedStyle(node, which).content; }
+        catch (e) { continue; }
+        if (!content || content === 'none' || content === 'normal') continue;
+        push(content);
+        // Computed `content` comes back quoted and escaped; the tree shows
+        // the string itself, so push that too.
+        const quoted = /^"([\s\S]*)"$/.exec(content);
+        if (quoted) push(quoted[1].replace(/\\(.)/g, '$1'));
+      }
+    }
+  };
+  for (const root of roots) {
+    for (const sel of selectors.concat(['[' + MARK + ']'])) {
+      let hits = [];
+      try { hits = root.querySelectorAll(sel); } catch (e) { continue; }
+      for (const hit of hits) harvest(hit);
+    }
+  }
+  return out;
+}"""
+
+# The spotlight target's markup, cleaned, from a *clone* — nothing here may
+# touch the live page, which is being recorded.
+#
+# Three things come out that `outerHTML` would otherwise put in a file nobody
+# expects to hold them:
+#
+#   * `<script>` and `<style>` text, and `srcdoc` — source code and whole
+#     embedded documents, none of it on screen. The smoke fixture's own key
+#     literals are in its inline script, which is how this was noticed.
+#   * anything the mask is covering: its children are replaced by the mask
+#     text and its value-bearing attributes removed. Matched by the marker
+#     *and* by the registered selectors, so an element the mask reached and an
+#     element it is about to reach are treated the same.
+#   * the recorder's own furniture — the covers, the paint gate, the caption
+#     bar, the cursor — which is chrome, not app.
+#
+# The structural elision matters beyond tidiness: a value split across tags
+# (`sk-live-<b>FAKE</b>`) has a `textContent` the string mask can find and an
+# `outerHTML` it cannot, so a mask built only out of substring replacement
+# would leave it in the markup whole.
+_EVIDENCE_HTML_JS = r"""(el, opts) => {
+  const [MARK, COVER, SELECTORS, MASK] = opts;
+  const clone = el.cloneNode(true);
+  const drop = (root, sel) => {
+    let hits = [];
+    try { hits = root.querySelectorAll(sel); } catch (e) { return; }
+    for (const hit of hits) hit.remove();
+  };
+  drop(clone, 'script,style,template,noscript,link,meta');
+  drop(clone, '[' + COVER + '],[id^="__demo"],[id^="__term"]');
+  let framed = [];
+  try { framed = clone.querySelectorAll('[srcdoc]'); } catch (e) { framed = []; }
+  for (const node of framed) node.setAttribute('srcdoc', MASK);
+  const hide = (node) => {
+    for (const a of ['value', 'title', 'alt', 'placeholder', 'aria-label',
+                     'href', 'src', 'srcdoc', 'content', 'data-value']) {
+      try { node.removeAttribute(a); } catch (e) { /* exotic attr */ }
+    }
+    node.textContent = MASK;
+  };
+  for (const sel of SELECTORS.concat(['[' + MARK + ']'])) {
+    let hits = [];
+    try { hits = clone.querySelectorAll(sel); } catch (e) { continue; }
+    for (const hit of hits) hide(hit);
+    // querySelectorAll never returns the root it was called on, and the root
+    // is exactly the element a storyboard spotlights and redacts together.
+    try { if (clone.matches && clone.matches(sel)) hide(clone); }
+    catch (e) { /* an ancestor-relative selector cannot match a clone */ }
+  }
+  return clone.outerHTML;
+}"""
+
+# Transient frame failures, classified the same way `_mask_selector` does:
+# frames come and go several times a second on ad-slot- and embed-heavy apps,
+# and a diagnostic must not be the reason a take dies.
+_EVIDENCE_TRANSIENT = (
+    "detach", "navigat", "execution context was destroyed", "target closed",
+)
+
+
 class Recorder(_DemoBase):
     """Playwright page wrapper that records video and captures guide stills.
 
@@ -621,6 +787,7 @@ class Recorder(_DemoBase):
         clock: str | None = None,
         timezone_id: str | None = None,
         locale: str | None = None,
+        evidence: bool | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
@@ -628,7 +795,7 @@ class Recorder(_DemoBase):
             viewport=viewport, speech=speech, voice_id=voice_id,
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
-            timezone_id=timezone_id, locale=locale,
+            timezone_id=timezone_id, locale=locale, evidence=evidence,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")
@@ -636,6 +803,11 @@ class Recorder(_DemoBase):
         # The recording is composited into a window and scaled down (~0.8),
         # so captions are rendered larger to stay readable in the final mp4.
         self._caption_font_px = 34
+        # What spotlight() is currently pointing at, which is what a beat's
+        # evidence is scoped to. Held here rather than read back out of the
+        # page: `window.__spotEl` is an element handle, not a selector, and the
+        # selector is the thing worth writing down.
+        self._spotlit: str | None = None
 
     def _frame_geometry(self) -> dict:
         """Where the window and the app video sit in the final frame.
@@ -1047,6 +1219,102 @@ class Recorder(_DemoBase):
         """
         self._nav_pending = True
 
+    # -- evidence (issue #9) ------------------------------------------------
+
+    def _redacted_rendered_text(self) -> list[str]:
+        """Everything the mask is covering, as text, across every frame.
+
+        Raises if the *main* frame cannot be read. A sub-frame that refuses is
+        logged and skipped: frames detach and re-attach constantly on
+        embed-heavy apps, and nothing a sub-frame renders reaches an evidence
+        file anyway — the ARIA snapshot is taken of the top document's `body`
+        and stops at an `iframe` node, and the markup dump replaces `srcdoc`
+        wholesale. Harvesting sub-frames is defence in depth, so failing to is
+        survivable; failing on the main frame is not.
+        """
+        found: list[str] = []
+        script = _EVIDENCE_HARVEST_JS.replace("__MARK__", REDACT_MARK_ATTR)
+        frames = list(self.page.frames)
+        main = self.page.main_frame
+        for frame in frames:
+            try:
+                found += frame.evaluate(script, self._redacted) or []
+            except Exception as exc:  # noqa: BLE001 - classified, then re-raised
+                if frame is main:
+                    raise
+                detail = str(exc)
+                if not any(t in detail.lower() for t in _EVIDENCE_TRANSIENT):
+                    raise
+                print(
+                    f"demo-video: a sub-frame could not be read while "
+                    f"collecting what redact() hides ({type(exc).__name__}); "
+                    f"nothing it renders reaches an evidence file, and the "
+                    f"next beat tries again.",
+                    file=sys.stderr,
+                )
+        return found
+
+    def _aria(self, locator) -> tuple[str | None, str]:
+        """(snapshot, format) for one locator's accessibility tree.
+
+        Playwright's `aria_snapshot` arrived in 1.49 and `page.accessibility`
+        — the API issue #9 was written against — has since been removed, so
+        there is exactly one way to do this and no second, untested branch
+        pretending otherwise. An older Playwright gets a null snapshot and a
+        format that says why, rather than a fallback nobody here can exercise.
+        """
+        if not hasattr(locator, "aria_snapshot"):
+            return None, "unavailable: this Playwright predates 1.49"
+        return locator.aria_snapshot(), "aria-yaml"
+
+    def _evidence_payload(self) -> dict:
+        """What was on screen at the end of this beat, as text.
+
+        The ARIA snapshot is the primary artifact and the page's is always
+        taken: it is what lets a reviewer say what was on screen without
+        decoding a frame. `outerHTML` is the spotlight target's only — never
+        the page's — because the markup of a whole document is an order of
+        magnitude larger than its ARIA tree and carries script text and
+        `srcdoc` documents that were never on screen at all.
+        """
+        # The marker attribute the elision below matches on is stamped by the
+        # mask, and the mask is re-asserted at checkpoints. Take one now so the
+        # page's idea of what is covered is not one re-render out of date.
+        self._checkpoint()
+        if self._redacted:
+            try:
+                self._evidence_masks.update(self._redacted_rendered_text())
+            except Exception as exc:  # noqa: BLE001 - refuse, never guess
+                # The one failure that must not degrade into a written file:
+                # without this text the writer cannot mask what redact() is
+                # hiding, and a DOM dump is not protected by a pixel cover.
+                return {
+                    "omitted": (
+                        f"the recorder could not read what redact() is "
+                        f"covering ({type(exc).__name__}), so no page text was "
+                        f"captured for this beat"
+                    )
+                }
+        aria, aria_format = self._aria(self.page.locator("body"))
+        payload: dict = {
+            "scope": self._spotlit,
+            "url": self.page.url,
+            "title": self.page.title(),
+            "aria_format": aria_format,
+            "aria": aria,
+            "scope_aria": None,
+            "html": None,
+            "redacted": list(self._redacted),
+        }
+        if self._spotlit:
+            target = self.page.locator(self._spotlit).first
+            payload["scope_aria"] = self._aria(target)[0]
+            payload["html"] = target.evaluate(
+                _EVIDENCE_HTML_JS,
+                [REDACT_MARK_ATTR, REDACT_COVER_ATTR, self._redacted, SECRET_MASK],
+            )
+        return payload
+
     # -- storyboard verbs ---------------------------------------------------
 
     @_beat_verb("goto")
@@ -1120,6 +1388,11 @@ class Recorder(_DemoBase):
             self.page.locator(selector).first.evaluate(
                 "el => window.__demoSpotlight(el)"
             )
+        # Set after the highlight actually landed, so a selector that matched
+        # nothing (and raised above) never becomes the scope of a beat's
+        # evidence — a scope naming an element that is not there would put
+        # `"html": null` in the file with no explanation.
+        self._spotlit = selector or None
         self.pause(0.3)
 
     @_beat_verb("move_to")

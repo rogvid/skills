@@ -37,6 +37,12 @@ and a real terminal session (voice on):
 - **`record.py`** — the storyboard that produced the media, and the thing
   that actually gets committed: re-runnable after the UI changes, so the
   video stays out of git history and is regenerated rather than archived.
+- **`evidence/beat-NN.json`** — what was on screen at every beat, in text:
+  the page's ARIA tree (or the terminal's rendered screen), the spotlight
+  target's markup, capped and explicitly truncated. An agent reviewing the
+  demo reads what the app said instead of inferring it from pixels. Plain
+  text, so it is masked against registered secrets *and* against whatever
+  `redact()` is covering — and it is **not committed**; `SKILL.md` says why.
 - **A recording that reproduces, when you ask for it** — the browser's
   timezone and locale are always pinned, and `Recorder(deterministic=True)`
   additionally freezes the page's clock and flattens animations, so the same
@@ -57,6 +63,8 @@ and a real terminal session (voice on):
 - `ffmpeg` on PATH.
 - Chromium for Playwright, once per machine:
   `uv run --with playwright playwright install chromium`
+- Playwright **1.49 or newer** for per-beat evidence (`aria_snapshot`).
+  Storyboards declare `playwright` unpinned, so a fresh resolve has it.
 - Optional: an ElevenLabs API key for narration (free tier works — the
   default voice is a premade one, and rate limits are retried).
 - Terminal demos (`TerminalRecorder`) are **Unix-only** (they use a PTY).
@@ -98,6 +106,7 @@ win over env vars.
 | `DEMO_VIDEO_TIMEZONE` | browser timezone (always applied) | `UTC` |
 | `DEMO_VIDEO_LOCALE` | browser locale (always applied) | `en-US` |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
+| `DEMO_VIDEO_EVIDENCE` | write `evidence/beat-NN.json` per beat (`1`/`0`) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
 | `DEMO_VIDEO_SKILL_DIR` | where storyboards find this skill | the constant baked into each storyboard |

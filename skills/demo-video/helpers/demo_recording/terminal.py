@@ -633,6 +633,7 @@ class TerminalRecorder(_DemoBase):
         clock: str | None = None,
         timezone_id: str | None = None,
         locale: str | None = None,
+        evidence: bool | None = None,
         type_delay_ms: int = 45,
     ) -> None:
         # A branded, distinctive default prompt so wait_for_prompt's marker
@@ -644,7 +645,7 @@ class TerminalRecorder(_DemoBase):
             viewport=viewport, speech=speech, voice_id=voice_id,
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
-            timezone_id=timezone_id, locale=locale,
+            timezone_id=timezone_id, locale=locale, evidence=evidence,
         )
         # Match the web recorder's effective caption height. Web composites
         # its page into a scaled, centered window, lifting its bottom:44px
@@ -1147,3 +1148,24 @@ class TerminalRecorder(_DemoBase):
         output first so the latest screen state is captured)."""
         self._pump()
         return super().shot(name)
+
+    # -- evidence (issue #9) ------------------------------------------------
+
+    def _evidence_payload(self) -> dict:
+        """The rendered screen at the end of this beat.
+
+        `_screen()` is what `wait_for_text` already matches against: xterm.js's
+        own view of the buffer, ANSI sequences resolved rather than stripped by
+        a regex, visible rows and scrollback both. It is the terminal's exact
+        analogue of the web recorder's ARIA snapshot — what a reader would see,
+        with none of the paint.
+
+        **Nothing here is redacted, and that is not an oversight.**
+        `TerminalRecorder` has no `redact()` at all (issue #5 is the PTY
+        scrubber), so the only thing between a printed credential and this file
+        is `register_secret()`, which `core`'s writer applies. A command that
+        prints a value nobody registered writes it here verbatim — the same
+        exposure the recording itself already has, in a form that greps.
+        SKILL.md says so where an author will read it.
+        """
+        return {"screen": self._screen()}

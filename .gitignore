@@ -25,6 +25,9 @@ frames/
 # Left behind only when a take crashes before the recorder cleans up.
 .video/
 .frame.png
+# Per-beat evidence: greppable plaintext of the app's DOM (or terminal),
+# regenerated wholesale on every take. SKILL.md says why it is not committed.
+evidence/
 
 # Smoke-test recordings. tests/smoke records into a temp dir by default; this
 # covers pointing it back into the repo (tests/smoke --out-dir tests/out).

@@ -54,7 +54,9 @@ storyboard, not the media** in the Process section.
    once per machine: `uv run --with playwright playwright install chromium`
    (on a fresh Linux box add `--with-deps` for system libraries). If a
    later run resolves a newer Playwright that wants a newer browser
-   build, re-run this command.
+   build, re-run this command. Playwright **1.49 or newer** for per-beat
+   evidence — `locator.aria_snapshot()` arrived there, and the older
+   `page.accessibility` API it replaced has since been removed.
 3. **Learn how the app runs** (dev server command, port, how to build the
    frontend, how to seed data). If the project documents this, follow it;
    otherwise ask. Reuse an already-running server.
@@ -129,6 +131,7 @@ clean:
 | `DEMO_VIDEO_LOCALE` | browser locale (`locale`), always applied | `en-US` |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
 | `DEMO_VIDEO_STRICT` | fail the take on console errors / non-zero exits (`1`/`0`) | off |
+| `DEMO_VIDEO_EVIDENCE` | write `evidence/beat-NN.json` per beat (`1`/`0`) — see **Per-beat evidence** | **on** |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
 | `DEMO_VIDEO_SKILL_DIR` | where storyboards find this skill | the constant baked into each storyboard |
@@ -601,6 +604,11 @@ set of paths — four on the web, one in the terminal — and nothing else:
 - **Non-visual channels are untouched.** The value still exists in the DOM
   (`page.content()`), in the app's network traffic, and in whatever the app
   logs. Redaction hides it from the *recording*, not from the machine.
+  - The one place this skill *does* dump the DOM is `evidence/beat-NN.json`,
+    and it is plain text, so it cannot inherit a pixel control for free: the
+    recorder reads what each redacted element renders and masks that text out
+    of every evidence file. Read **Per-beat evidence** before trusting it, and
+    do not commit `evidence/`.
 - **A screenshot the storyboard takes itself** — `rec.page.screenshot(...)`
   rather than `rec.shot(...)` — still goes through the page, so the CSS mask
   applies; but any artifact your storyboard writes by hand (a `page.content()`
@@ -665,6 +673,8 @@ key is fine, renaming one is not:
   `spotlight`).
 - `still` is a path relative to the timeline file, so `timeline.md`'s embeds
   and any tooling resolve the same way.
+- `evidence` is a path, the same way — the beat's own account of what was on
+  screen. See **Per-beat evidence** below.
 - `exit_code` appears on `TerminalRecorder` `run` beats — see **Failing the
   take** below.
 - `issues` is what the recorder saw *behind* the pixels; `issue_count` is how
@@ -775,6 +785,116 @@ record in parts is a demo nobody wants to review by scrubbing.
 downstream reads it; `beat_frames(out_dir)` from `demo_recording` regenerates
 it from `demo.mp4` and `timeline.json` without re-recording, and clears the
 previous run's frames first.
+
+## Per-beat evidence (`evidence/beat-NN.json`)
+
+A reviewing agent handed frames has to infer what the page said from pixels.
+The recorder is *driving* the page, so at the end of every beat it also writes
+down what was on screen, in text, next to the frame that beat's timestamps
+point at. No storyboard changes; it is a byproduct of recording, like the
+timeline. `Recorder(..., evidence=False)` or `DEMO_VIDEO_EVIDENCE=0` turns it
+off.
+
+```json
+{ "schema": 1, "generated_by": "demo-video", "recorder": "Recorder",
+  "segment": null, "media": "demo.mp4",
+  "beat": { "index": 6, "t_start": 5.31, "t_end": 5.44, "verb": "shot",
+            "selector": "01-dashboard", "caption": "A small dashboard.",
+            "still": "images/01-dashboard.png",
+            "evidence": "evidence/beat-06.json" },
+  "scope": "#kpi-rev",
+  "url": "http://localhost:3000/", "title": "Northwind Ops",
+  "aria_format": "aria-yaml",
+  "aria": "- banner:\n  - heading \"Northwind Ops\" [level=1]\n- text: Revenue $128,400 …",
+  "scope_aria": "- text: $128,400",
+  "html": "<div id=\"kpi-rev\">$128,400</div>",
+  "redacted": ["#api-key"],
+  "truncated": [], "limits": { "aria": 12000, "html": 8000 } }
+```
+
+| Field | What it is |
+|---|---|
+| `aria` | **`Recorder`**: the page's ARIA snapshot — a compact YAML tree of roles and accessible names, the same thing `expect(...).toMatchAriaSnapshot` compares. Semantic, ~10× smaller than the markup, and stable across restyling, which is why it is preferred over raw HTML |
+| `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML`. All three are null when no spotlight is up |
+| `screen` | **`TerminalRecorder`**: the rendered screen, ANSI resolved by xterm.js, scrollback included — the same text `wait_for_text()` matches against |
+| `truncated` / `limits` | which fields were cut, and at what budget. A cut field also says so inline where it stops |
+
+**`outerHTML` is only ever the spotlight target's, never the page's.** A whole
+document's markup is an order of magnitude bigger than its ARIA tree and
+carries two things nobody put on screen: the text of every inline `<script>`,
+and `srcdoc` attributes — i.e. source code and whole embedded documents. The
+clone that gets serialized drops both, along with `<style>`, the recorder's own
+overlays, and anything `redact()` is covering.
+
+Fields are capped (12 000 characters of ARIA or screen text, 8 000 of markup)
+and truncation is **marked, never silent** — a TUI's scrollback is 5 000 lines,
+and an uncapped `evidence/` outgrows the mp4 it describes.
+
+### Evidence is plain text — what that means for secrets
+
+**This is the artifact where a secret is cheapest to find**, and it is worth
+being blunt about why: everything else this skill writes is pixels, and
+`redact()` is a *pixel* control. It covers where a value renders. The value is
+still in the DOM — and an evidence file is a text dump of that DOM. "It is
+blurred in the video" is no protection here at all.
+
+So evidence is masked twice over, and the second one is what makes redaction
+carry across:
+
+- every registered secret (`register_secret()`, a typed `Secret`) is replaced
+  with `[redacted]`, as everywhere else;
+- **the rendered text of everything `redact()` is covering** is read out of the
+  page as the take runs — the matched element and every node under it, shadow
+  roots at every depth, `::before`/`::after` content, input values, and
+  value-bearing attributes — and every occurrence of any of it is replaced
+  too, in every beat's evidence, including beats recorded before the value
+  first appeared. `redact()` never tells the recorder what the element *says*,
+  so this is the step that turns a pixel control into a text one;
+- markup is elided structurally as well as by substring, because a value split
+  across tags (`sk-live-<b>FAKE</b>`) has a `textContent` a string mask finds
+  and an `outerHTML` it does not.
+
+Nothing reaches the disk until the take exits cleanly and the mask has been
+verified: the documents are built in memory and written beside `timeline.json`,
+so a take that dies on a `SecretLeak` has no evidence file to delete. If a
+document cannot be made safe — or if the recorder cannot read what `redact()`
+is hiding for a given beat — it fails the take, or writes that beat's evidence
+as `{"omitted": …}` with no page text in it, rather than writing something it
+cannot vouch for.
+
+**What it still does not cover:**
+
+- **`TerminalRecorder` has no `redact()`** (that is
+  [issue #5](https://github.com/rogvid/skills/issues/5)), so `screen` is the
+  whole terminal, scrubbed for registered secrets only. A command that
+  *prints* a value nobody registered writes it here verbatim — the same
+  exposure the recording already has, in a form that greps.
+- **`url` and `title` are scrubbed, not redacted.** A token in a query string
+  that nobody registered lands in the file.
+- **Only exact substrings match**, the same limit `register_secret()` has:
+  the same value rendered with different whitespace is a different string.
+- **The ARIA snapshot needs Playwright ≥ 1.49.** Older versions get a null
+  `aria` and an `aria_format` saying so, rather than a fallback nobody tests.
+
+**Evidence is not committed.** Gitignore `evidence/`. It is a byproduct
+regenerated on every take, it churns completely on each re-record, and — the
+reason that matters — it is greppable plaintext of a real app's DOM, which is
+exactly the thing a git history should not carry permanently and cannot be
+made to forget afterwards. `timeline.json` and `timeline.md` stay the
+committed, diffable record of what the demo showed; evidence is for the
+reviewer looking at *this* take, alongside `demo.mp4`, which is not committed
+either.
+
+### Naming, and merged segments
+
+A beat's `index` is its position in **its own take**, so two segments of one
+demo both start at 0. Two things make that a non-event: a segment's evidence
+carries the segment in its filename
+(`evidence/part1.seg.beat-03.json`, mirroring `<segment>.seg.timeline.json`),
+and the path is written **onto the beat** as `evidence` rather than derived
+from `index` by whoever reads the log. Read the pointer, never rebuild it —
+then a merge that renumbers beats has only to carry the string across, and
+every evidence file names its own `segment` and `index` internally anyway.
 
 ## Failing the take on a broken app
 
@@ -1049,7 +1169,8 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    recorder prints on stderr**, and the Issues section of `timeline.md`: a
    demo of an app throwing on every render looks exactly like a demo of a
    working one, and this is the only place it shows (see **Failing the take
-   on a broken app**).
+   on a broken app**). To check what a *specific* frame showed without
+   decoding it, open the beat's `evidence` file — that is what it is for.
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you. The
    recorder has already written what they need: `frames/`, one PNG per
@@ -1095,7 +1216,17 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    segment parts, `*.seg.timeline.*`, `<demo folder>/frames/` (regenerated
    from the two by `beat_frames(out_dir)` — anchor the pattern to the demo
    folder rather than writing a bare `frames/`, which matches a directory
-   of that name anywhere in the repo), and `.tts/` narration caches.
+   of that name anywhere in the repo), `.tts/` narration caches, and
+   `<demo folder>/evidence/`.
+
+   **`evidence/` is not committed either, and for a stronger reason than the
+   mp4.** It is regenerated wholesale on every take, so it would churn
+   completely on each re-record and diff as noise — but the deciding argument
+   is that it is greppable plaintext of a real app's DOM and terminal, which
+   is precisely what a git history should not carry permanently and cannot be
+   made to forget afterwards. It is a per-take artifact for the reviewer
+   looking at *this* recording, like the mp4. `timeline.md` is what a reader
+   six months from now gets.
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has
