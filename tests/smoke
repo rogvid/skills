@@ -84,6 +84,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
+from html import unescape as html_unescape
 from pathlib import Path
 from typing import NamedTuple
 
@@ -295,6 +296,26 @@ TERMINAL_FAILING_COMMAND = "(exit 3)"
 # absent" from being a statement about an empty screen dump.
 TERMINAL_PRINTED_MARKER = "printed-below"
 TERMINAL_PRINTED_SECRET = "sk-live-PRNT00000000"
+
+# ...and the same, printed on a line long enough to **wrap**. `__termText()`
+# emits one xterm.js buffer row per line joined with newlines and never consults
+# `isWrapped`, so a credential that crosses the last column arrives split:
+# `"…sk-live-WRAP0000\n000000000000 wrapped-marker…"` — fully legible, and
+# recovered by anyone who pipes the file through `tr -d '\n'`. The mask missed
+# it, and so did the end-of-document backstop, which is the failure a backstop
+# exists to not have.
+#
+# The take before this one could never provoke it: `echo printed-below` plus a
+# 20-character secret is ~60 columns against a ~120-column terminal. A real
+# `env`, `aws configure get` or `curl -v` wraps every time. So this one is
+# padded to the measured width of the terminal, deliberately, and the padding
+# is computed at record time from `term.cols` rather than guessed.
+TERMINAL_WRAP_MARKER = "wrapped-marker"
+TERMINAL_WRAP_SECRET = "sk-live-WRAP0000000000000000"
+# How many characters of the secret land on the first row. Any value strictly
+# between 1 and len(secret) exercises the split; 8 keeps both halves long enough
+# to be obviously a fragment of one string in the failure message.
+TERMINAL_WRAP_HEAD = 8
 
 # The regression from the first round of review: two run()s with no wait
 # between them. The shell buffers the second command and runs it after the
@@ -939,11 +960,26 @@ EVIDENCE_BLOAT_JS = """(n) => {
 #   SLOT  light DOM slotted into a redacted shadow host — assigned into the
 #         subtree, not a descendant of it.
 #   VALU  an input value, which lives on the property and not the attribute.
-#   TICK  rewritten every 25 ms, so the harvest and the ARIA snapshot see
+#   TICK  rewritten every 5 ms, so the harvest and the ARIA snapshot see
 #         different values unless the capture refuses to straddle a repaint.
 #   ATTR  a data-* attribute nothing renders, reached only because the markup
 #         dump is a new surface this feature created.
 #   JSON  the same, inside a JSON blob in another attribute.
+#   HATT  mirrored into `title`, `data-value`, `aria-label` and an input value
+#         on siblings the take does not redact. The harvest read those when
+#         deciding what "renders in the clear", so any one of them exempted the
+#         key from masking everywhere — including timeline.json.
+#   HIDE  the same trick in CSS: an .sr-only clip, `opacity:0`,
+#         `visibility:hidden` and `left:-9999px`. `checkVisibility()` called
+#         with no arguments reports every one of them visible.
+#   AMPS  a registered secret containing `&`, which `outerHTML` writes as
+#         `&amp;`. The mask, the withhold fallback and the end-of-document
+#         backstop were all raw substring tests and all three missed it.
+#
+# HATT and HIDE are one literal per *family* rather than per channel, and that
+# is deliberate: every element in a family holds the same value, so a single
+# channel regressing puts that value back into `outside` and un-masks it
+# everywhere. One assertion covers four shapes and names the family it broke.
 EVIDENCE_SECRETS = {
     "the whitespace-padded key": "sk-live-WSPC00000000",
     "the key whose label also renders outside it": "sk-live-BLED00000000",
@@ -951,9 +987,12 @@ EVIDENCE_SECRETS = {
     "the accessible name sourced from outside the subtree": "sk-live-LBLD00000000",
     "the key slotted into a redacted shadow host": "sk-live-SLOT00000000",
     "the input value that lives on the property": "sk-live-VALU00000000",
-    "the key rewritten every 25 ms": "sk-live-TICK",
+    "the key rewritten every 5 ms": "sk-live-TICK",
     "the data-* attribute nothing renders": "sk-live-ATTR00000000",
     "the key inside a JSON attribute": "sk-live-JSON00000000",
+    "the key mirrored into attributes nothing paints": "sk-live-HATT00000000",
+    "the key mirrored into elements CSS hides": "sk-live-HIDE00000000",
+    "the registered secret an ampersand escapes": "sk-live-AMPS0000&sig=0000000000",
 }
 # The elements the take redacts, and the two it registers as text instead.
 # `#ev-spot-*` are deliberately **not** redacted: their values are registered
@@ -970,8 +1009,17 @@ EVIDENCE_REDACT = [
     "#ev-slot-inner",
     "#ev-value-card",
     "#ev-tick-card",
+    # The two whose values are mirrored *outside* them — into attributes on one
+    # hand, into CSS-hidden elements on the other. Neither mirror is redacted,
+    # which is the whole shape: `redact()` covers where a value renders, and
+    # the question is whether the recorder agrees with the browser about where
+    # that is.
+    "#ev-attr-card",
+    "#ev-hide-card",
 ]
-EVIDENCE_REGISTER = ["harborzenith7725"]
+# `harborzenith7725` is split across tags; the second contains an `&`, which
+# only exists in the markup as `&amp;`.
+EVIDENCE_REGISTER = ["harborzenith7725", "sk-live-AMPS0000&sig=0000000000"]
 
 # A caption naming a value that `redact()` covers and nobody registered. It is
 # not refused — correctly: `register_secret()` was never told about it, and the
@@ -980,7 +1028,22 @@ EVIDENCE_REGISTER = ["harborzenith7725"]
 # `timeline.md` are the two this skill tells people to commit. Without the
 # harvest reaching them, the same string is `[redacted]` in the evidence and in
 # the clear in the log beside it.
-EVIDENCE_BLEED_CAPTION = "The card shows sk-live-BLED00000000 today."
+#
+# It names *two* values, one from each family of leak, because the caption is
+# the only path by which a redacted value reaches the two committed files —
+# and B1's measured leak landed in both of them, not just in evidence/.
+#
+# It also quotes one of the EVIDENCE_KEEP sentences verbatim, which is not
+# decoration. A sticky caption is copied into `beat.caption` in every evidence
+# file that follows, so a `keep` assertion that searched whole files would find
+# that sentence in all of them with **zero** page text captured — the same
+# hollow shape found in `check_terminal_evidence_secret` last round. With the
+# sentence here, "the mask did not eat the app" and "the log quoted itself" are
+# distinguishable, and the assertion searches page text only.
+EVIDENCE_BLEED_CAPTION = (
+    "The card shows sk-live-BLED00000000, mirrored at sk-live-HIDE00000000. "
+    "Revenue for the quarter was steady, and the feed is live."
+)
 # Planted in evidence/ *before* the take, as if a previous recording into the
 # same folder had left it there. It must not survive.
 EVIDENCE_STALE_SECRET = "sk-live-STAL00000000"
@@ -1024,7 +1087,15 @@ EVIDENCE_KEEP = {
 #                   in the clear, and then withholds the markup as a
 #                   consolation. Elided markup is worth reading and withheld
 #                   markup is not, so the difference is graded.
+#   #ev-spot-amp    renders a registered secret containing an `&`. `outerHTML`
+#                   writes that as `&amp;`, so the markup holds the value in
+#                   full and matches no raw search — measured as a clean `aria`
+#                   reading `token=[redacted]` and a dirty `html` in the same
+#                   file. Nothing here asserts *which* way it comes out safe
+#                   (masked or withheld); the byte sweep asserts the value is
+#                   gone, which is the claim.
 EVIDENCE_SPLIT_TARGET = "#ev-spot-split"
+EVIDENCE_AMP_TARGET = "#ev-spot-amp"
 EVIDENCE_ATTR_TARGET = "#ev-spot-attrs"
 EVIDENCE_REDACTED_TARGET = "#ev-child-card"
 EVIDENCE_HTML_WITHHELD_MARKER = "[demo-video: markup withheld"
@@ -5338,7 +5409,7 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
                 f"file."
             )
     for what, literal in REDACT_LITERALS.items():
-        holding = [p.name for p in evidence_files if literal in p.read_text()]
+        holding = [p.name for p in evidence_files if leaked_in(p.read_bytes(), literal)]
         if holding:
             failures.append(
                 f"redaction: {what} appears verbatim in the evidence files "
@@ -5356,7 +5427,7 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
         swept += 1
         data = path.read_bytes()
         for what, literal in REDACT_LITERALS.items():
-            if literal.encode() in data:
+            if leaked_in(data, literal):
                 failures.append(
                     f"redaction: {what} appears verbatim in {path.relative_to(out_dir)}"
                 )
@@ -5456,6 +5527,38 @@ def evidence_docs(
             f"bar — evidence is meant to be capped, not to outgrow the mp4"
         )
     return beats, docs, failures
+
+
+def leaked_in(data: bytes, literal: str) -> bool:
+    """Is `literal` recoverable from these bytes by anyone who opens the file?
+
+    A byte search for the literal is not enough, and every extra form below is
+    a leak that walked past exactly such a search during review:
+
+      * **HTML entities.** `outerHTML` writes a registered
+        `sk-live-AMPS0000&sig=…` as `…&amp;sig=…`. The value is in the file
+        whole, and `literal.encode() in data` says it is not there.
+      * **Whitespace that is not in the value.** A terminal wraps a credential
+        at the last column and `__termText()` puts a newline through it;
+        `json.dumps` then writes that newline as the two characters `\\n`. Both
+        halves are legible and `tr -d '\\n'` reassembles them.
+
+    Deliberately *not* imported from `demo_recording`: a sweep that normalized
+    the same way the code under test normalizes would agree with it whatever it
+    did, which is the failure this whole file is arranged to avoid. These are
+    written out from what a reader can actually do to the file.
+    """
+    text = data.decode("utf-8", "replace")
+    recovered = html_unescape(
+        text.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+    )
+    return (
+        literal in text
+        or literal in recovered
+        # Whitespace deleted, on both sides: the wrap put whitespace inside the
+        # value, so the value has to be squeezed too or the two never meet.
+        or re.sub(r"\s+", "", literal) in re.sub(r"\s+", "", recovered)
+    )
 
 
 def evidence_screen_text(doc: dict) -> str:
@@ -5818,7 +5921,9 @@ def check_terminal_evidence_secret(out_dir: Path) -> list[str]:
     files = sorted(directory.glob("*.json"))
     if not files:
         return ["terminal-problems: the take wrote no evidence at all"]
-    holding = sorted(p.name for p in files if TERMINAL_PRINTED_SECRET in p.read_text())
+    holding = sorted(
+        p.name for p in files if leaked_in(p.read_bytes(), TERMINAL_PRINTED_SECRET)
+    )
     if holding:
         failures.append(
             f"terminal-problems: a registered secret a command printed is "
@@ -5843,6 +5948,110 @@ def check_terminal_evidence_secret(out_dir: Path) -> list[str]:
         print(
             "smoke: terminal-problems a printed secret is masked out of the "
             "screen dump, and the line around it survives"
+        )
+    return failures
+
+
+def run_terminal_wrap(out_root: Path) -> list[str]:
+    """A registered secret printed across a terminal line wrap.
+
+    Its own take rather than another command in `terminal-problems/`, because
+    the line has to be as wide as the terminal and the terminal's width is
+    measured at record time — a beat whose `selector` is a command of
+    unpredictable length cannot be an entry in that take's hand-written
+    exit-code table.
+
+    **The transformation is the point.** `__termText()` walks the xterm.js
+    buffer a row at a time and joins with newlines, without consulting
+    `isWrapped`, so a credential crossing the last column is two rows and a
+    newline goes through the middle of it. `_evidence_re` used to be
+    `r"\\s+".join(tokens)` — elastic about whitespace the *literal* has and
+    exact about whitespace the *text* has — so it matched neither half, and the
+    end-of-document backstop was a plain `in` over `json.dumps` output, where
+    the newline is the two characters `\\n`, so it missed in the same
+    direction. Measured: the value legible in the file, recoverable with
+    `tr -d '\\n'`, and a second unwrapped occurrence on the same screen masked
+    to `[redacted]` right beside it.
+
+    Graded as a matched pair, and a third assertion for the premise: the take
+    computes where the secret lands and refuses to grade a line that did not
+    actually wrap, so this cannot quietly become a test of an ordinary echo.
+    """
+    if os.name != "posix":
+        return []
+    from demo_recording import TerminalRecorder
+
+    label = "terminal-wrap"
+    out_dir = fresh_take_dir(out_root, label)
+    failures: list[str] = []
+    geometry: dict = {}
+    try:
+        with TerminalRecorder(out_dir, speech=False) as rec:
+            rec.register_secret(TERMINAL_WRAP_SECRET)
+            cols = int(rec.page.evaluate("() => window.__term.cols"))
+            # The shell prints "<pad> <secret> <marker>" starting at column 0,
+            # so the secret starts at len(pad) + 1. Solve for the padding that
+            # puts TERMINAL_WRAP_HEAD of its characters before the boundary.
+            pad = "x" * max(0, cols - TERMINAL_WRAP_HEAD - 1)
+            line = f"{pad} {TERMINAL_WRAP_SECRET} {TERMINAL_WRAP_MARKER}"
+            geometry = {
+                "cols": cols,
+                "starts_at": len(pad) + 1,
+                "ends_at": len(pad) + 1 + len(TERMINAL_WRAP_SECRET),
+            }
+            rec.caption("A long line wraps.")
+            rec.run(f"echo {line}")
+            rec.wait_for_prompt(timeout_s=15)
+            rec.pause(0.4)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [f"{label}: TerminalRecorder raised {type(exc).__name__}: {exc}"]
+
+    # The premise, arithmetic rather than hoped for.
+    if not (geometry["starts_at"] < geometry["cols"] < geometry["ends_at"]):
+        failures.append(
+            f"{label}: the secret occupies columns {geometry['starts_at']}-"
+            f"{geometry['ends_at']} of a {geometry['cols']}-column terminal, so "
+            f"the line did not wrap through it and nothing below is being "
+            f"exercised"
+        )
+
+    files = sorted((out_dir / EVIDENCE_DIR_NAME).glob("*.json"))
+    if not files:
+        return failures + [f"{label}: the take wrote no evidence at all"]
+    everything = sorted(p for p in out_dir.rglob("*") if p.is_file())
+    holding = sorted(
+        str(p.relative_to(out_dir))
+        for p in everything
+        if leaked_in(p.read_bytes(), TERMINAL_WRAP_SECRET)
+    )
+    if holding:
+        failures.append(
+            f"{label}: the registered secret is recoverable from {holding!r} — "
+            f"in one piece, or in the two the wrap left once the whitespace "
+            f"between them is deleted"
+        )
+    # ...and the half that catches the wrap. The literal is *not* in the file
+    # as written — a newline is sitting in the middle of it — so a search for
+    # it says nothing. Delete the whitespace and look again.
+    screens = "\n".join(evidence_screen_text(json.loads(p.read_text())) for p in files)
+    if TERMINAL_WRAP_SECRET in re.sub(r"\s+", "", screens):
+        failures.append(
+            f"{label}: the registered secret is recoverable from the screen "
+            f"dump by deleting whitespace — the terminal wrapped it and the "
+            f"mask compared against the unwrapped form. It is one `tr -d` from "
+            f"plaintext, in a file whose whole purpose is to be grepped."
+        )
+    if TERMINAL_WRAP_MARKER not in screens:
+        failures.append(
+            f"{label}: {TERMINAL_WRAP_MARKER!r} is in no evidence file's "
+            f"`screen`, so the line holding the secret was never captured and "
+            f"its absence proves nothing"
+        )
+    if not failures:
+        print(
+            f"smoke: {label} a registered secret split by a line wrap at column "
+            f"{geometry['cols']} (chars {geometry['starts_at']}-"
+            f"{geometry['ends_at']}) is masked in both halves"
         )
     return failures
 
@@ -8107,7 +8316,7 @@ def run_evidence(out_root: Path) -> list[str]:
                 rec.goto("/?evidence=1")
                 rec.wait_for("#ev-ws-key")
                 # Two beats while #ev-tick-card is still rewriting itself every
-                # 25 ms. The capture reads the page three times (harvest,
+                # 5 ms. The capture reads the page three times (harvest,
                 # snapshot, harvest) and that window is wider than the interval,
                 # so the mask cannot be built from what the snapshot saw — and
                 # the right answer is to write no page text, not to write text
@@ -8136,6 +8345,11 @@ def run_evidence(out_root: Path) -> list[str]:
                 rec.spotlight(EVIDENCE_ATTR_TARGET)
                 rec.pause(0.3)
                 rec.spotlight(EVIDENCE_REDACTED_TARGET)
+                rec.pause(0.3)
+                # ...and a registered value the serializer escapes on its way
+                # into `html`. Nothing else on this page puts a character with
+                # an entity form inside a secret.
+                rec.spotlight(EVIDENCE_AMP_TARGET)
                 rec.pause(0.3)
                 rec.spotlight()
 
@@ -8183,9 +8397,9 @@ def run_evidence(out_root: Path) -> list[str]:
         for i, (beat, doc) in enumerate(zip(beats, docs, strict=False))
         if beat.get("verb") == "pause"
     ]
-    if len(pauses) != 7:
+    if len(pauses) != 8:
         return failures + [
-            f"{label}: {len(pauses)} pause beats, expected 7 — the take is not "
+            f"{label}: {len(pauses)} pause beats, expected 8 — the take is not "
             f"the take this grades"
         ]
     ticking = pauses[:2]
@@ -8193,7 +8407,8 @@ def run_evidence(out_root: Path) -> list[str]:
     split_i, split = pauses[3]
     attrs_i, attrs = pauses[4]
     elided_i, elided = pauses[5]
-    capped_i, capped = pauses[6]
+    amp_i, amp = pauses[6]
+    capped_i, capped = pauses[7]
 
     # -- the leak shapes -----------------------------------------------------
     #
@@ -8202,6 +8417,16 @@ def run_evidence(out_root: Path) -> list[str]:
     # everything, or captured nothing.
     written = sorted((out_dir / EVIDENCE_DIR_NAME).glob("*.json"))
     blob = "\n".join(p.read_text() for p in written)
+    # The `keep` half is searched in the **page text only**, the same way
+    # `check_evidence` and `check_terminal_evidence_secret` search theirs, and
+    # for the same reason: every one of these strings is also in a caption or a
+    # selector somewhere in the embedded beat record, so searching the whole
+    # file would find them whether or not a character of the page was captured.
+    # Sound over the whole file today by luck. The absence half stays broad —
+    # "this credential is in none of these bytes" is a claim about every byte.
+    screens = "\n".join(
+        evidence_screen_text(json.loads(p.read_text())) for p in written
+    )
     # Every file the take wrote, not only the evidence — `timeline.json` and
     # `timeline.md` are the ones this skill tells people to *commit*, and the
     # harvest that keeps a redacted value out of the evidence has to reach them
@@ -8211,7 +8436,7 @@ def run_evidence(out_root: Path) -> list[str]:
         holding = sorted(
             str(p.relative_to(out_dir))
             for p in everything
-            if literal.encode() in p.read_bytes()
+            if leaked_in(p.read_bytes(), literal)
         )
         if holding:
             failures.append(
@@ -8221,10 +8446,10 @@ def run_evidence(out_root: Path) -> list[str]:
                 f"anything about a picture."
             )
     for what, literal in EVIDENCE_KEEP.items():
-        if literal not in blob:
+        if literal not in screens:
             failures.append(
-                f"{label}: {what} ({literal!r}) is in none of the evidence "
-                f"files. It renders outside everything redact() covers, so "
+                f"{label}: {what} ({literal!r}) is in no evidence file's page "
+                f"text. It renders outside everything redact() covers, so "
                 f"either the capture wrote no page text — which makes every "
                 f"assertion above a statement about an empty file — or the "
                 f"mask went wide enough to eat the app it was documenting."
@@ -8236,7 +8461,7 @@ def run_evidence(out_root: Path) -> list[str]:
         failures.append(
             f"{label}: neither beat {ticking[0][0]} nor {ticking[1][0]} refused "
             f"to capture, and both ran while a redacted card was being "
-            f"rewritten every 25 ms — faster than the three round trips a "
+            f"rewritten every 5 ms — faster than the three round trips a "
             f"capture takes. One of them has to come back `omitted`, or the "
             f"mask is being built from a value the snapshot did not see."
         )
@@ -8345,6 +8570,34 @@ def run_evidence(out_root: Path) -> list[str]:
             f"subtree; markup that kept the subtree and masked only the "
             f"strings in it is elided wherever the mask happened to reach and "
             f"in the clear everywhere else."
+        )
+
+    # -- markup: an entity form is still the value ---------------------------
+    #
+    # The byte sweep above is what grades the leak; this grades the *premise*,
+    # which the sweep cannot. `sk-live-AMPS0000&sig=…` is absent from a file
+    # that never captured the element at all, so without this the whole shape
+    # is satisfied by a null `html`.
+    if amp.get("scope") != EVIDENCE_AMP_TARGET:
+        failures.append(
+            f"{label}: beat {amp_i} scopes to {amp.get('scope')!r}, expected "
+            f"{EVIDENCE_AMP_TARGET!r} — the entity-escaping shape is not being "
+            f"captured, so the sweep's silence about it says nothing"
+        )
+    amp_html = str(amp.get("html") or "")
+    if not amp_html:
+        failures.append(
+            f"{label}: beat {amp_i} captured no `html` at all, so the value "
+            f"`outerHTML` escapes was never serialized and nothing about entity "
+            f"forms is being graded"
+        )
+    elif EVIDENCE_HTML_WITHHELD_MARKER not in amp_html and "&amp;" in amp_html:
+        failures.append(
+            f"{label}: beat {amp_i}'s `html` is {amp_html[:160]!r} — it still "
+            f"carries an escaped ampersand, so a registered secret spelled with "
+            f"one is being published in a form no raw search finds. The mask, "
+            f"the withhold fallback and the backstop must all resolve entities "
+            f"before deciding."
         )
 
     # -- the caps ------------------------------------------------------------
@@ -8597,6 +8850,7 @@ def main() -> int:
             failures += run_evidence(out_root)
         if only in (None, "--terminal-only"):
             failures += run_terminal_problems(out_root)
+            failures += run_terminal_wrap(out_root)
             failures += run_terminal_race(out_root)
             failures += run_strict_terminal(out_root)
         # Both flags reach it: it is a terminal take and a redaction take, and

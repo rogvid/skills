@@ -882,13 +882,29 @@ guess about what a secret looks like: a string that renders in the clear
 somewhere the mask does not cover is already in the frames and the stills, so
 masking it in a text file buys nothing and costs the file its meaning.
 
-"Renders outside" is narrower than it sounds, and each exclusion was a leak:
-hidden elements do not count (an `aria-labelledby` source can be `display:none`
-and still name a redacted element), `<script>` text does not count (it is
-source, not screen), light DOM slotted into a redacted element counts as
-*inside* it, and **the recorder's own caption bar does not count at all** —
-captioning a redacted value would otherwise exempt it from masking everywhere,
-turning one mistake in the frames into the same mistake in `timeline.json`.
+"Renders outside" means **painted**, which is narrower than it sounds, and every
+relaxation of it has been a leak:
+
+- only **text nodes and `::before`/`::after` content** count. An attribute never
+  does — not `title`, `alt`, `placeholder`, `aria-label`, `data-*`, `content` or
+  `srcdoc` — and neither does an input's `value`. A copy-to-clipboard button
+  carrying the key it copies in `title` is ordinary UI, and it was enough to
+  exempt that key from masking in every evidence file *and* in `timeline.json`.
+  The same reasoning already strips those attributes out of `html`;
+- **hidden means hidden by any mechanism the browser will admit to**:
+  `display`, `visibility`, `opacity`, `content-visibility`, a box under 2×2 CSS
+  pixels (the screen-reader-only clip), and a box entirely off the top or left
+  of the document (the `-9999px` skip link). Only `display:none` was excluded
+  for one round, which was the one shape the fixture happened to use;
+- `<script>` text does not count — it is source, not screen;
+- light DOM slotted into a redacted element counts as *inside* it;
+- and **the recorder's own caption bar does not count at all** — captioning a
+  redacted value would otherwise exempt it from masking everywhere, turning one
+  mistake in the frames into the same mistake in `timeline.json`.
+
+What is left uncovered is occlusion: an element painted underneath an opaque
+sibling, or clipped away by a `clip-path` on an ancestor, still counts as
+rendered ([issue #69](https://github.com/rogvid/skills/issues/69)).
 
 Nothing reaches the disk until the take exits cleanly and the mask has been
 verified: the documents are built in memory and written beside `timeline.json`,
@@ -901,7 +917,7 @@ safe, the take fails.
 
 **A page that repaints while it is being read gets no page text.** The ARIA
 snapshot is a protocol call and the harvest is a page evaluation, so they cannot
-be one operation: a card rewritten on a 25 ms interval — a countdown, a ticker,
+be one operation: a card rewritten on a 5 ms interval — a countdown, a ticker,
 a rotating token — hands the harvest one value and the snapshot the next. The
 harvest is therefore taken on both sides of the snapshot and the two must agree;
 if they will not settle, that beat's evidence is written as `{"omitted": …}`
@@ -928,9 +944,25 @@ redacted region never holds still, expect most beats to come back that way —
   accessible name, so they are in `aria` by design even though they are
   stripped from `html`. That is what a screen-reader user perceives; if it is a
   secret, redact the element.
-- **Only exact substrings match**, modulo whitespace — the same limit
-  `register_secret()` has. A value rendered with a soft hyphen, or split across
-  two elements that are not both redacted, is a different string.
+- **Matching is exact, modulo a stated list of transformations — and that list
+  is the boundary, not a promise to keep growing.** Every leak this feature has
+  had was the same shape: a comparison between a value somebody registered and
+  a transformation of that value the code did not anticipate. Three are
+  handled, and they are handled by normalizing rather than by special cases:
+
+  | Transformation | Where it comes from | How it is matched |
+  |---|---|---|
+  | whitespace the value has, the text does not | `textContent` keeps the source's indentation; an ARIA tree does not | a run of whitespace in the value matches any run in the text |
+  | whitespace the text has, the value does not | a terminal wrapping at the last column; anything that reflows | inside a token of 8+ characters, every character may be followed by whitespace |
+  | HTML entities and character references | `outerHTML` writes `&` as `&amp;`, NBSP as `&nbsp;` | entities are resolved before the check, in `html` and in the end-of-document guard |
+  | JSON string escapes | the guard runs over the serialized document, where a newline is `\n` | resolved the same way, so the guard cannot miss what the mask missed |
+
+  **Not** handled, and not planned: case differences, Unicode normalization
+  forms and confusables, percent- / base64- / backslash-encoding, a value the
+  app itself reformats (inserted hyphens, an ellipsis, a thousands separator),
+  and a value split across two elements that are not both redacted. This is an
+  asymptotic surface; a demo whose secret survives one of those is a demo whose
+  author should `redact()` the element rather than rely on a string match.
 - **The ARIA snapshot needs Playwright ≥ 1.49.** Older versions get a null
   `aria` and an `aria_format` saying so, rather than a fallback nobody tests.
 

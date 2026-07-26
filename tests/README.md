@@ -77,10 +77,11 @@ smoke: web-problems timeline.json records 8 problem(s), 6 of them fatal under st
 smoke: web-strict strict=True refused the take, naming beat 0 (goto) (4 fatal issues, artifacts kept)
 smoke: evidence a SecretLeak raised while capturing a beat kills the take and keeps nothing
 smoke: evidence a registered secret spans the markup budget (chars 7984-8016 of 72716, budget 8000)
-smoke: evidence ok (16 beats as shapes.seg.beat-NN.json, 9 leak shapes clean, 4 controls intact, 2 beat(s) refused a moving target)
+smoke: evidence ok (18 beats as shapes.seg.beat-NN.json, 12 leak shapes clean, 4 controls intact, 2 beat(s) refused a moving target)
 smoke: terminal-problems timeline.json records 2 problem(s), 2 of them fatal under strict — take still passed
 smoke: terminal-race exit status survives a shell that starts 1.2s late (logged 5)
 smoke: terminal-problems a printed secret is masked out of the screen dump, and the line around it survives
+smoke: terminal-wrap a registered secret split by a line wrap at column 120 (chars 112-140) is masked in both halves
 smoke: terminal-strict strict=True refused the take, naming beat 1 (run) (1 fatal issues, artifacts kept)
 smoke: determinism froze all four clocks identically in both takes
 smoke:   frozen  1/1/2025, 9:00:00 AM · 1735722000000
@@ -101,8 +102,8 @@ Re-running into the same `--out-dir` is safe: the take subdirectories
 (`web/`, `terminal/`, `segments/`, `redaction/`, `terminal-redaction/`,
 `terminal-cursor-leak-clean/`, `terminal-cursor-leak-crash/`,
 `terminal-cursor-leak-tail/`, `web-problems/`, `terminal-problems/`,
-`terminal-race/`, `web-strict/`, `terminal-strict/`, `evidence/`,
-`evidence-leak-fatal/`, `determinism-a/`, `determinism-b/`,
+`terminal-race/`, `terminal-wrap/`, `web-strict/`, `terminal-strict/`,
+`evidence/`, `evidence-leak-fatal/`, `determinism-a/`, `determinism-b/`,
 `determinism-off/`) are deleted before each take. Only the first two are graded
 on their video; the rest are short and exist to break, or to reproduce, in one
 specific way each. That is not tidiness — every artifact assertion works by
@@ -1176,9 +1177,9 @@ sweep alone grades nothing: replacing `_evidence_payload` with a constant
 returning two control strings **passed the whole take**, sweep and all.
 
 `evidence/` is the take for the shapes that leak into *text and nothing else*.
-It records `?evidence=1`, redacts seven cards, registers two values, and sweeps
-for nine literals — every one of which was readable in `evidence/*.json` when
-this was first reviewed:
+It records `?evidence=1`, redacts nine cards, registers two values, and sweeps
+for twelve literals — every one of which was readable in `evidence/*.json` when
+the round that introduced it was reviewed:
 
 | shape | why a picture never sees it |
 |---|---|
@@ -1190,6 +1191,14 @@ this was first reviewed:
 | `CHLD` | a key whose characters are three text nodes, each an ordinary string alone |
 | `ATTR`, `JSON` | `data-*` attributes the page never renders, which only exist in evidence because the markup dump is a surface this feature created |
 | `BLED` | in a card whose *label* also renders outside it — the mirror defect, below — and **captioned** by the storyboard, which is the case that reaches `timeline.json` |
+| `HATT` | mirrored into `title`, `data-value`, `aria-label` and an input's `value` on siblings nothing redacts. The harvest read those when deciding what "renders in the clear", so a copy-to-clipboard button carrying the key it copies exempted that key from masking **everywhere**. None of those channels is painted by anything, and `_EVIDENCE_HTML_JS` already strips the same attributes out of `html` on exactly that reasoning — the feature contradicted itself for a round |
+| `HIDE` | the same trick in CSS: a `.sr-only` clip, `opacity:0`, `visibility:hidden`, `left:-9999px`. `checkVisibility()` called with no arguments reports all four visible; it models `display` and `content-visibility` and nothing else, and `display:none` was the one shape this fixture happened to use. Measured leaking into `timeline.json` and `timeline.md` as well as all six evidence files |
+| `AMPS` | a registered secret containing `&`, which `outerHTML` writes `&amp;`. The mask searched the raw literal, the withhold fallback stripped tags but not entities, and the end-of-document backstop was a plain `in` — all three missed, and the file came out with `aria` reading `token=[redacted]` and `html` carrying the value in full |
+
+One literal covers each of `HATT` and `HIDE` rather than one per channel, and
+that is deliberate: every element in a family holds the same value, so any
+single channel regressing puts that value back into `outside` and un-masks it
+everywhere. One assertion, four shapes, and the failure names the family.
 
 Three of those were written the wrong way first and passed while proving
 nothing: the slotted value was a DOM descendant of the redacted element, the
@@ -1272,6 +1281,25 @@ untested:
 It is also the only take that records with `segment=`, so
 `evidence/<segment>.seg.beat-NN.json` is exercised rather than merely designed
 ([#22](https://github.com/rogvid/skills/issues/22)).
+
+`terminal-wrap/` is the take for the one transformation the terminal
+introduces on its own. `__termText()` walks the xterm.js buffer a row at a time
+and joins with newlines without consulting `isWrapped`, so a credential that
+crosses the last column arrives split — and the mask was elastic about
+whitespace the *literal* has and exact about whitespace the *text* has, so it
+matched neither half. The end-of-document backstop was a plain `in` over
+`json.dumps` output, where a newline is the two characters `\n`, so it missed in
+the same direction; a backstop that fails the way the thing it backs up fails is
+not one.
+
+`terminal-problems/` could never provoke it — `echo printed-below` plus a
+20-character secret is ~60 columns against a 120-column terminal — so this take
+measures `term.cols` at record time and pads the line so that
+`TERMINAL_WRAP_HEAD` characters of the secret land before the boundary. The
+geometry is asserted and printed (`chars 112-140` at column 120), because a take
+that quietly stopped wrapping would be a test of an ordinary echo. The sweep
+that grades it deletes whitespace from both sides before comparing, which is
+what a reader with `tr -d` does.
 
 `terminal-problems/` carries the last piece: a command *prints* a registered
 secret, and the screen dump must mask it while the word printed beside it
@@ -1548,9 +1576,24 @@ knows is missing is worse than one that is openly absent.
   rendered terminal and `register_secret()` is the only thing masked out of it,
   because `TerminalRecorder` has no `redact()` at all
   ([#5](https://github.com/rogvid/skills/issues/5)).
-  `terminal-problems/` proves the registered path reaches the screen dump; a
-  value nobody registered is written verbatim, and there is nothing yet to
-  assert about it.
+  `terminal-problems/` proves the registered path reaches the screen dump and
+  `terminal-wrap/` proves it survives the line wrap; a value nobody registered
+  is written verbatim, and there is nothing yet to assert about it.
+- **A crash that is not a `SecretLeak` skips the stale-evidence clearing**
+  ([#79](https://github.com/rogvid/skills/issues/79)), the end-of-document
+  guard runs after capping and so cannot see a literal cut in half by a budget
+  ([#80](https://github.com/rogvid/skills/issues/80)), and an unsegmented take
+  never clears a previous *segmented* take's evidence
+  ([#81](https://github.com/rogvid/skills/issues/81)). All three fail safe —
+  nothing new is written — and all three are exercised by nothing here.
+- **The normalization boundary is stated, not tested to its edges.** Matching
+  is exact modulo whitespace in either direction, HTML entities and JSON string
+  escapes — the four transformations `SKILL.md` lists, each with a shape here.
+  Case differences, Unicode normalization forms and confusables, percent- and
+  base64-encoding, and a value the app itself reformats are all outside it and
+  are exercised by nothing. That is a deliberate boundary rather than a gap to
+  close: it is an asymptotic surface, and the answer for a value that survives
+  one of those is `redact()` on the element, not a longer list here.
 - **Sub-frames are not harvested, and the argument that they need not be is
   not itself asserted.** Nothing an iframe renders can reach an evidence file
   — `aria_snapshot` is taken of the top document's `body` and stops at the
@@ -1560,13 +1603,18 @@ knows is missing is worse than one that is openly absent.
   rather than the claim itself. A future change that made `aria` descend into
   frames would be caught; one that made only `html` do so, on a page with no
   iframe in the spotlight, would not.
-- **`checkVisibility()` is the whole definition of "renders in the clear".**
-  The rule that keeps the mask from eating the page exempts any string that
-  renders outside the mask, and "renders" is one browser API call. An element
-  hidden some way that API does not model — clipped to zero size, painted
-  under an opaque sibling, `opacity` on an ancestor — counts as rendered, and
-  a value visible only there would go unmasked. Only `display:none` and
-  `content-visibility` are exercised here.
+- **"Renders in the clear" still cannot see occlusion.** The rule that keeps
+  the mask from eating the page exempts any string that renders outside it, and
+  "renders" is now four conditions: `checkVisibility()` with `opacityProperty`,
+  `visibilityProperty` and `contentVisibilityAuto` set; a box of at least 2×2
+  CSS pixels; a box not entirely off the top or left of the document; and no
+  attribute or input `value` counting at all. `HIDE` exercises the first three
+  through four shapes at once. What none of it models is an element **painted
+  underneath an opaque sibling**, or clipped away by a `clip-path` on an
+  *ancestor* rather than on itself — both count as rendered, and a value
+  visible only there would go unmasked
+  ([#69](https://github.com/rogvid/skills/issues/69)). Deciding that properly
+  needs per-node hit testing, which is a different order of cost.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.

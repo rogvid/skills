@@ -44,8 +44,13 @@ and a real terminal session (voice on):
   plain text, which makes it the one artifact a pixel control cannot protect
   for free — so the recorder reads what `redact()` is covering out of the page
   and masks *that* out too, refuses to write page text it cannot vouch for,
-  and clears what a previous take left behind. It is **not committed**;
-  `SKILL.md` explains both decisions and what they still do not cover.
+  and clears what a previous take left behind. "What renders in the clear"
+  means **painted**: an attribute, an input's `value`, and anything CSS hides
+  by any mechanism do not count, because a value that is only in one of those
+  was in no frame either. Matching is exact modulo whitespace in either
+  direction, HTML entities and JSON escaping — a stated list, not an open
+  promise. It is **not committed**; `SKILL.md` explains every one of those
+  decisions and where they stop.
 - **A recording that reproduces, when you ask for it** — the browser's
   timezone and locale are always pinned, and `Recorder(deterministic=True)`
   additionally freezes the page's clock and flattens animations, so the same

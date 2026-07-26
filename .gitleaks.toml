@@ -25,13 +25,16 @@ sharp-text reference measured off the same frame. The third is typed by
 tests/smoke into #token as a Secret(...), so that the two ways of registering a
 secret can be proved apart. Note this entry is belt-and-braces, not
 load-bearing: the default ruleset does not flag that literal with or without
-this config — every one is spelled with a four-letter word followed by nothing
+this config — every one is spelled as a short all-caps tag followed by nothing
 but zeroes, precisely so no scanner and no human mistakes any of them for a
 credential. They are kept so that a future gitleaks release which does start
 flagging them cannot turn the job red for strings that were never secrets. The
-pattern is anchored to that fixed word list and a run of four to sixteen
-literal zeroes — the lengths the fixture actually renders. It masks nothing
-else.
+pattern is anchored to that fixed, closed word list and a run of literal zeroes.
+It masks nothing else.
+
+(The tags are four letters apart from `BIG` and `BGC`, which are three. An
+earlier version of this note said "four-letter word" as though it were a rule;
+it is not one, and the word list is what does the narrowing.)
 
 The words, and what each fixture element they belong to is for:
 
@@ -84,9 +87,23 @@ per assertion about how the writer handles a value it was told about:
                             length is what makes the straddle arithmetic land,
                             hence the wider run below
 
+...and four more from the second review round, each a channel the recorder was
+comparing a registered value against a *transformation* of:
+
+  HATT  #ev-attr-card      mirrored into title/data-value/aria-label and an
+                           input value on siblings nothing redacts
+  HIDE  #ev-hide-card      mirrored into elements CSS hides four different ways
+  WRAP  a terminal line    split by a wrap at the last column
+  AMPS  #ev-spot-amp       contains an `&`, which outerHTML writes `&amp;`
+
+`AMPS` is the one entry that is not "tag then zeroes": it is
+`sk-live-AMPS0000&sig=0000000000`, and the `&sig=` in the middle is the entire
+point of the shape. It is listed as its own alternative rather than by
+loosening the pattern, so the closed word list still does the narrowing.
+
 The word list is what keeps this narrow, not the run length: every literal is a
-four-letter word followed by nothing but zeroes, and lengthening the run admits
-no string the word list did not already admit.
+short all-caps tag from that list followed by zeroes, and lengthening the run
+admits no string the word list did not already admit.
 
 The terminal half of redaction (issue #5) adds a family of its own, and they
 are not all `sk-live-` shaped because the shapes themselves are what is being
@@ -125,5 +142,6 @@ neither. Verified by running gitleaks over the whole tree, not assumed.
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
 regexes = [
-  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT|WSPC|BLED|CHLD|LBLD|SLOT|VALU|TICK|ATTR|JSON|PRNT|STAL|CUTT)0{4,24}''',
+  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT|WSPC|BLED|CHLD|LBLD|SLOT|VALU|TICK|ATTR|JSON|PRNT|STAL|CUTT|HATT|HIDE|WRAP)0{4,24}''',
+  '''sk-live-AMPS0000&sig=0000000000''',
 ]

@@ -788,12 +788,35 @@ _EVIDENCE_HARVEST_JS = r"""(selectors) => {
     }
     return false;
   };
+  // "Rendered" has to mean *painted*, and every relaxation of that has been a
+  // leak. checkVisibility() with no arguments models `display` and
+  // `content-visibility` and nothing else, so `opacity: 0`,
+  // `visibility: hidden`, an .sr-only clip and `left: -9999px` all reported
+  // true — and a value sitting in any of them was read as "already on screen
+  // in the clear" and dropped from the mask, in every evidence file and in
+  // timeline.json. Four conditions, each conservative on purpose: the cost of
+  // being too strict here is masking one string more than necessary, and the
+  // cost of being too lax is publishing a credential.
+  const MIN_PAINT_PX = 2;
   const rendered = (node) => {
     if (NOT_RENDERED[node.tagName]) return false;
     if (chrome(node)) return false;
     try {
-      if (typeof node.checkVisibility === 'function') return node.checkVisibility();
-    } catch (e) { /* fall through */ }
+      if (typeof node.checkVisibility === 'function' &&
+          !node.checkVisibility({opacityProperty: true, visibilityProperty: true,
+                                 contentVisibilityAuto: true})) return false;
+    } catch (e) { /* an older Chromium: the geometry test below still applies */ }
+    // ...and geometry, which checkVisibility() models nothing about. A
+    // screen-reader-only span is 1x1 with a clip; a skip link is at -9999px.
+    // Both are visible to the accessibility tree, both are on nobody's screen.
+    let rect;
+    try { rect = node.getBoundingClientRect(); } catch (e) { return false; }
+    if (!rect) return false;
+    if (rect.width < MIN_PAINT_PX || rect.height < MIN_PAINT_PX) return false;
+    // Off the top or left of the document entirely. Deliberately *not* a
+    // viewport test: content below the fold is painted as soon as anyone
+    // scrolls, and the recorder scrolls.
+    if (rect.right <= 0 || rect.bottom <= 0) return false;
     return true;
   };
   for (const root of roots) {
@@ -801,12 +824,22 @@ _EVIDENCE_HARVEST_JS = r"""(selectors) => {
     try { all = root.querySelectorAll('*'); } catch (e) { continue; }
     for (const node of all) {
       if (covered(node) || !rendered(node)) continue;
+      // Text nodes and generated content, and nothing else. Attributes and
+      // `value` used to be read here too, on the assumption that this bucket
+      // was collecting "what the page shows" — but `title`, `alt`,
+      // `placeholder`, `aria-label`, `data-*` and `srcdoc` are not painted by
+      // anything, and neither is the value of a password field or of an input
+      // nobody has scrolled to. A copy-to-clipboard button carrying the key it
+      // copies in `title` is ordinary UI, and it was enough to exempt that key
+      // from masking everywhere.
+      //
+      // The same reasoning removed inline <script> text from this bucket one
+      // round earlier, and `srcdoc` is a whole embedded document — the same
+      // category, arrived at the same way. Note the feature contradicted
+      // itself until this line changed: _EVIDENCE_HTML_JS strips exactly these
+      // attributes from the markup *because* nothing renders them.
       for (const child of node.childNodes || []) {
         if (child.nodeType === 3) add(outside, child.nodeValue);
-      }
-      if (typeof node.value === 'string') add(outside, node.value);
-      for (const a of ATTRS) {
-        try { add(outside, node.getAttribute(a)); } catch (e) { /* exotic */ }
       }
       readPseudo(outside, node);
     }
@@ -1464,7 +1497,7 @@ class Recorder(_DemoBase):
         **The harvest and the snapshot are separate round trips, and a page
         that repaints between them is a leak.** `aria_snapshot()` is a
         protocol call, not something a page evaluation can produce, so they
-        cannot literally be one operation. A card rewritten on a 25 ms
+        cannot literally be one operation. A card rewritten on a 5 ms
         `setInterval` — a countdown, a ticker, a rotating token — hands the
         harvest one value and the snapshot the next, and the mask is then built
         from a value the snapshot does not contain.

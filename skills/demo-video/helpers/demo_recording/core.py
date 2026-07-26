@@ -35,6 +35,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from html import unescape as html_unescape
 from pathlib import Path
 from types import TracebackType
 
@@ -644,6 +645,33 @@ EVIDENCE_HTML_WITHHELD = (
     "across elements here, and there is no safe way to edit it out of the "
     "serialization. The ARIA snapshot above is unaffected.]"
 )
+
+# A token this long or longer, found with whitespace *inside* it, was broken by
+# something that reflowed the text rather than written that way. A terminal wrap
+# is the case that matters: xterm.js emits one buffer row per line, so a 28-
+# character credential that crosses column 120 comes back as
+# `"…sk-live-WRAP0000\n00000000…"` and an exact search finds neither half.
+#
+# Eight is where "no natural text breaks this in the middle" starts being true.
+# Below it, allowing whitespace between every character turns a two-character
+# mask into a pattern that matches ordinary prose — `ok` would match `o k`, and
+# over-masking is the failure this whole `outside` machinery exists to prevent.
+# Above it, the cost of being wrong is that a value the author registered gets
+# masked in one more place than strictly necessary.
+EVIDENCE_WRAP_MIN_TOKEN = 8
+
+# The escapes `json.dumps` introduces, undone for *detection* by
+# `_evidence_probe`. The backstop runs over the serialized document, where a
+# newline is the two characters `\` and `n` — which no amount of elastic
+# whitespace in a pattern can match, so the backstop used to miss exactly what
+# the mask missed. A backstop that fails in the same direction as the thing it
+# backs up is not one.
+_JSON_STRING_ESCAPE = re.compile(r'\\[nrtbf"/\\]')
+_JSON_ESCAPES = {
+    r"\n": "\n", r"\r": "\r", r"\t": "\t", r"\b": "\b", r"\f": "\f",
+    r"\"": '"', r"\/": "/", "\\\\": "\\",
+}
+_JSON_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 # Harvested text shorter than this is not used as a mask. `redact()` pointed at
 # an element rendering "$" would otherwise replace every dollar sign in every
@@ -2232,22 +2260,98 @@ class _DemoBase:
         return tuple(sorted(literals, key=len, reverse=True))
 
     def _evidence_re(self, literal: str) -> "re.Pattern[str]":
-        """`literal` as a pattern whose whitespace is elastic.
+        """`literal` as a pattern whose whitespace is elastic in both directions.
 
-        The harvest reads `textContent`, which carries the source's own
-        indentation: a value on its own line in hand-written HTML comes back as
-        `'\\n      wombatxray7714\\n    '`. An ARIA tree renders the same value
-        as `- code: wombatxray7714`, and `str.replace` between those two finds
-        nothing at all — the single most ordinary shape there is, leaking in
-        every file. So every run of whitespace in the literal matches any run of
-        whitespace in the text, and the ends are trimmed before matching.
+        Every leak this has had is the same shape: a comparison between a value
+        somebody registered and *a transformation of that value* that the code
+        did not anticipate. Whitespace is where two of those transformations
+        land, and they pull opposite ways:
+
+          * **Whitespace the literal has and the text does not.** The harvest
+            reads `textContent`, which carries the source's own indentation: a
+            value on its own line in hand-written HTML comes back as
+            `'\\n      wombatxray7714\\n    '`, while an ARIA tree renders it
+            `- code: wombatxray7714`. So a run of whitespace in the literal
+            matches any run in the text, and the ends are trimmed.
+          * **Whitespace the text has and the literal does not.** Anything that
+            reflows text inserts it. `__termText()` emits one xterm.js buffer
+            row per line joined with newlines and does not consult `isWrapped`,
+            so a credential crossing the last column arrives split in two —
+            `"…sk-live-WRAP0000\\n00000000…"` — fully legible, trivially
+            recovered with `tr -d '\\n'`, and matched by neither half of an
+            exact search. So inside a token of `EVIDENCE_WRAP_MIN_TOKEN`
+            characters or more, every character may be followed by whitespace.
+
+        The token-length floor is what keeps the second rule from eating the
+        page: separating the characters of a short mask by `\\s*` makes it match
+        ordinary prose, and over-masking is the failure `_evidence_forbidden`'s
+        whole `outside` rule exists to prevent. See `EVIDENCE_WRAP_MIN_TOKEN`.
+
+        What this does **not** normalize is written down in SKILL.md, under
+        "What it still does not cover". This is an asymptotic surface and the
+        boundary is stated rather than chased.
         """
         pattern = self._evidence_res.get(literal)
         if pattern is None:
-            tokens = [re.escape(t) for t in literal.split()]
-            pattern = re.compile(r"\s+".join(tokens) if tokens else re.escape(literal))
+            tokens = literal.split()
+            if not tokens:
+                pattern = re.compile(re.escape(literal))
+            else:
+                parts = []
+                for token in tokens:
+                    if len(token) >= EVIDENCE_WRAP_MIN_TOKEN:
+                        parts.append(r"\s*".join(re.escape(c) for c in token))
+                    else:
+                        parts.append(re.escape(token))
+                pattern = re.compile(r"\s+".join(parts))
             self._evidence_res[literal] = pattern
         return pattern
+
+    @staticmethod
+    def _evidence_probe(text: str) -> str:
+        """`text` with the escapes a *serializer* added resolved. Detection only.
+
+        Never written anywhere — this exists so the two checks that ask "is a
+        forbidden value still in here" can see through the encodings the writer
+        itself introduces on the way to disk:
+
+          * **HTML entity escaping.** `outerHTML` writes `&` as `&amp;`, `<` as
+            `&lt;`, a non-breaking space as `&nbsp;`. A registered
+            `sk-live-AMPS0000&sig=0000000000` — an ordinary shape for a
+            presigned URL or a SAS token — is in the markup in full and matches
+            no raw search, so the mask left it and the backstop waved it
+            through, in a file whose `aria` said `[redacted]` two lines above.
+          * **JSON string escaping.** The backstop runs over `json.dumps(doc)`,
+            where a newline is the two characters `\\n`. Elastic whitespace in
+            the pattern cannot match that, so the backstop missed every wrapped
+            value the mask missed — the two failed identically, which is the
+            one thing a backstop must not do.
+
+        Resolving both, on a copy, costs one pass and removes the whole class.
+        The output is deliberately not valid markup or valid JSON; nothing may
+        serialize it.
+        """
+        probe = _JSON_STRING_ESCAPE.sub(
+            lambda m: _JSON_ESCAPES.get(m.group(0), m.group(0)), text
+        )
+        probe = _JSON_UNICODE_ESCAPE.sub(
+            lambda m: chr(int(m.group(1), 16)), probe
+        )
+        return html_unescape(probe)
+
+    def _evidence_holds(self, text: str, literals: "tuple[str, ...]") -> str | None:
+        """The first forbidden literal still findable in `text`, or None.
+
+        Checked against the text as written *and* against
+        `_evidence_probe(text)`, because a value that only survives in an
+        escaped form is exactly as readable to whoever opens the file.
+        """
+        probed = self._evidence_probe(text)
+        for literal in literals:
+            pattern = self._evidence_re(literal)
+            if pattern.search(text) or pattern.search(probed):
+                return literal
+        return None
 
     def _evidence_mask(self, text: str, forbidden: tuple[str, ...]) -> str:
         for literal in forbidden:
@@ -2298,19 +2402,27 @@ class _DemoBase:
         }
         doc.update(payload)
         doc = self._evidence_scrub_deep(doc, forbidden)  # type: ignore[assignment]
-        # Markup is the one field a substring mask cannot finish the job on. A
-        # value written `harbor<b>zenith</b>7725` has a `textContent` the mask
-        # finds and an `outerHTML` it does not, and only elements the *mask*
-        # reached are elided structurally (web.py) — a `register_secret()` value
-        # split across tags in an ordinary paragraph is reached by neither. So
-        # the tags are stripped and the bare text re-checked, and markup that
-        # still holds a forbidden value is withheld rather than published: the
-        # field is a convenience, and there is no safe way to edit a value out
-        # of markup that interleaves it with elements.
+        # Markup is the one field a substring mask cannot finish the job on, and
+        # it has two ways of hiding a value from one:
+        #
+        #   * **structure.** A value written `harbor<b>zenith</b>7725` has a
+        #     `textContent` the mask finds and an `outerHTML` it does not, and
+        #     only elements the *mask* reached are elided structurally (web.py)
+        #     — a `register_secret()` value split across tags in an ordinary
+        #     paragraph is reached by neither. So the tags are stripped.
+        #   * **entity escaping.** `outerHTML` writes `&` as `&amp;`, so a
+        #     registered `…AMPS0000&sig=0000000000` is in the file whole and
+        #     matches no raw search. `_evidence_holds` resolves entities before
+        #     looking, which is the only reason this branch sees it at all.
+        #
+        # Markup that still holds a forbidden value after both is withheld
+        # rather than published: the field is a convenience, and there is no
+        # safe way to edit a value out of markup that interleaves it with
+        # elements or spells it in character references.
         html = doc.get("html")
         if isinstance(html, str):
             bare = re.sub(r"<[^>]*>", "", html)
-            if any(self._evidence_re(lit).search(bare) for lit in forbidden):
+            if self._evidence_holds(bare, forbidden) is not None:
                 doc["html"] = EVIDENCE_HTML_WITHHELD
         truncated: list[str] = []
         for field, limit in EVIDENCE_LIMITS.items():
@@ -2328,18 +2440,25 @@ class _DemoBase:
         # about a plain string value, and this file does not pretend otherwise.
         # What it does reach is everything the walker structurally cannot: a
         # field added to this schema by a later slice that is built after the
-        # scrub, a non-string key, a literal that only exists once JSON
-        # escaping has run. The grading that can actually fail is the byte
-        # sweep over `evidence/` in tests/smoke.
+        # scrub, a non-string key, a literal that only exists once serialization
+        # has run. The grading that can actually fail is the byte sweep over
+        # `evidence/` in tests/smoke.
+        #
+        # It goes through `_evidence_holds` rather than `in`, and that is the
+        # difference between a backstop and a comment. `json.dumps` writes a
+        # newline as the two characters `\` and `n`, so a plain substring test
+        # here missed every wrapped value the mask missed — failing in the same
+        # direction as the thing it backs up, which is the one thing it must
+        # not do.
         blob = json.dumps(doc, ensure_ascii=False)
-        for literal in forbidden:
-            if literal in blob:
-                raise SecretLeak(
-                    f"a beat's evidence still holds a {len(literal)}-character "
-                    f"value that is registered or redacted, after masking — so "
-                    f"the recorder cannot vouch for what it was about to write. "
-                    f"No evidence file, no mp4 and no timeline were written."
-                )
+        held = self._evidence_holds(blob, forbidden)
+        if held is not None:
+            raise SecretLeak(
+                f"a beat's evidence still holds a {len(held)}-character "
+                f"value that is registered or redacted, after masking — so "
+                f"the recorder cannot vouch for what it was about to write. "
+                f"No evidence file, no mp4 and no timeline were written."
+            )
         return doc
 
     def _build_evidence(self) -> None:
