@@ -41,10 +41,12 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 | `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
 | `evidence/beat-NN.json` | **A working file, not an artifact.** What was on screen at each beat, in text — read by the reviewing agent in the same run that produced it, then thrown away. Greppable plaintext of a real app's DOM | **no** — gitignore it |
 | `frames/` | Review frames pulled out of `demo.mp4`, plus the sheet you hand a reviewer | **no** — a working file of a review; `beat_frames(out_dir)` regenerates it |
+| `failure/` | Only after a take that did not finish: the last frame, the console log, the page text, and the failing beat. See **When a take does not finish** | **no** — it describes one run and the next one rewrites it |
+| `demo-video-FAILED.md` | Only after a take that did not finish: what happened, when, and whether the `demo.mp4` beside it is this take's. Deleted by the next take that writes its own artifacts | **no** |
 
-The storyboard is the durable artifact, not the video. The last two rows are
+The storyboard is the durable artifact, not the video. The last four rows are
 neither: they are inputs to a review that happens once, derived from a video
-that is itself not committed, and both are in this repo's `.gitignore`
+that is itself not committed, and all four are in this repo's `.gitignore`
 ([#50](https://github.com/rogvid/skills/issues/50)). See **Commit the
 storyboard, not the media** in the Process section.
 
@@ -301,8 +303,10 @@ no matter what this section does:
 ## Recorder API (storyboard verbs)
 
 `Recorder(out_dir, base_url=..., segment=None, strict=False, ...)` as a context
-manager; mp4 conversion happens on clean exit. `strict=True` refuses a take
-that recorded a console error, an uncaught exception, or a non-zero exit — see
+manager; exiting the `with` converts the recording to mp4 and writes the beat
+log. A storyboard that *raises* gets the same treatment plus a `failure/` dump
+— see **When a take does not finish**. `strict=True` refuses a take that
+recorded a console error, an uncaught exception, or a non-zero exit — see
 **Failing the take on a broken app**.
 
 | Verb | Use |
@@ -317,7 +321,7 @@ that recorded a console error, an uncaught exception, or a non-zero exit — see
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
 | `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. See **Redacting secrets**. |
-| `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. |
+| `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. **Refuses values under 8 characters** — see **Redacting secrets**. |
 | `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
@@ -621,19 +625,33 @@ set of paths — four on the web, one in the terminal — and nothing else:
   rather than `rec.shot(...)` — still goes through the page, so the CSS mask
   applies; but any artifact your storyboard writes by hand (a `page.content()`
   dump, a downloaded file) is yours to clean.
-- **`register_secret()` takes any non-empty string, including a short one.**
-  Registering `"1234"` masks every occurrence of those four characters in beat
-  selectors and terminal output. Register whole values.
+- **`register_secret()` refuses anything under 8 characters**, with an error
+  naming the length rather than the value. Registering is a literal
+  find-and-replace over the beat log, the still filenames, the caption text,
+  every line of terminal output and every evidence file — so `"1234"` would
+  rewrite a `:nth-child(1234)` selector, an unrelated account number and the
+  `1234` in a timestamp, and the damage reads exactly like redaction working.
+  To hide something shorter, use `redact()`: it covers the pixels the element
+  paints and rewrites no text at all.
+- **`caption(Secret(...))` and `interlude(Secret(...))` raise `SecretLeak`**,
+  by name. A caption is burned into every frame and spoken aloud, which is the
+  one thing a `Secret` must never be. `Secret` is for typing —
+  `type_into(sel, Secret(v))`, `send(Secret(v))`.
 - **A failed take deletes its own stills, and only its own.** When the mask
   cannot be verified the recorder removes the stills *this* take wrote and
   names each one it removed. Stills a previous take left in the same folder
-  are not touched — and anything your storyboard wrote by hand is yours.
+  are not touched — and anything your storyboard wrote by hand is yours. It
+  writes no `failure/` dump either: that dump is a text account of the page,
+  which is exactly what a take whose mask cannot be vouched for must not
+  publish. It does leave `demo-video-FAILED.md`, because the previous run's
+  files are still sitting there.
 
 ## The beat timeline (`timeline.json` / `timeline.md`)
 
 Every storyboard verb is logged as a **beat** — what was done, when, and what
-caption was on screen while it happened — and a clean exit writes the log next
-to the media. No storyboard changes are needed; it is a byproduct of recording.
+caption was on screen while it happened — and exiting the `with` writes the log
+next to the media, whether or not the storyboard finished. No storyboard
+changes are needed; it is a byproduct of recording.
 
 `timeline.md` is the readable version: a table of every beat, then each still
 embedded under the caption it was taken during. **Commit both.** They are
@@ -685,6 +703,17 @@ key is fine, renaming one is not:
   screen. See **Per-beat evidence** below.
 - `exit_code` appears on `TerminalRecorder` `run` beats — see **Failing the
   take** below.
+- `error` appears **only on a beat whose verb raised**, carrying the
+  exception's `type` and its scrubbed `message`; it is absent from every beat
+  that returned. `t_start` and `t_end` are stamped either way, so this is the
+  only thing that tells the two apart — do not read a beat as evidence that
+  something was demonstrated without checking it. The envelope gains a
+  `failure` key on the same terms: absent when the take finished, present with
+  `type`, `message`, `beat` and `verb` when it did not (`beat` is `null` when
+  the failure happened between verbs and no beat may honestly be blamed).
+- `duration` is the length of the mp4 **this take encoded**, and is `null`
+  when it encoded none — even if a `demo.mp4` from an earlier run is sitting
+  right there. A null is the honest answer; the previous take's number is not.
 - `issues` is what the recorder saw *behind* the pixels; `issue_count` is how
   many it saw, and is larger than `len(issues)` only when a take blew past the
   200-issue cap.
@@ -1065,6 +1094,69 @@ the console for anything that 404s or refuses a connection, and that is a real
 console error — so a missing favicon fails a strict take too. Use it when you
 want the demo to be a check that the app works, not when you want it to be
 lenient.
+
+## When a take does not finish
+
+A storyboard that raises — a `wait_for()` that times out, an assertion of your
+own, a Ctrl-C on a hung demo — used to leave **nothing at all**: the webm the
+browser already had was discarded, and the beats sitting in memory were never
+written. In CI, where there is no screen to look at, that means blind retries.
+
+It now keeps everything it had, and marks it:
+
+```
+demo.mp4               the partial recording, cut off where the storyboard
+                       gave up — converted from the webm rather than deleted
+timeline.json/.md      the beats. The one whose verb raised carries `error`;
+                       the envelope carries `failure`
+evidence/, frames/     as usual, off the recording that exists
+failure/               failure.json  the failing beat in full, every issue the
+                                     take recorded, and what was written
+                       failure.md    the same for a person
+                       screen.txt    the page's accessibility tree, or the
+                                     rendered terminal buffer
+                       last-frame.png the final frame of demo.mp4
+demo-video-FAILED.md   what happened, when, and whether the demo.mp4 beside it
+                       is this take's or an earlier run's
+```
+
+The original exception still propagates, unchanged — it is the message that
+says what to fix, and the recorder does not replace it. What the recorder adds
+is a line on stderr naming the beat and pointing at `failure/`.
+
+**`demo-video-FAILED.md` is the one file written on every abnormal exit**,
+including the refusal path that keeps nothing else. That path is the reason it
+exists: a take that cannot verify its mask writes no mp4 and no timeline, and
+what it does *not* touch is what a previous run left in the same folder — so
+the folder ends up holding a watchable `demo.mp4`, an emptied `images/`, and a
+`timeline.json` from the run before. That reads as a successful take with
+missing stills, and the video is a recording of different code. The next take
+that writes its own artifacts deletes the marker, so its presence always
+describes the most recent run.
+
+**Redaction covers all of it.** `failure/` is a crash dump of a page that may
+be mid-secret, which is the worst leak path this package has, so: the page is
+read exactly once, *before* the final redaction check vouches for it; the
+documents are built in memory, masked against the registered secrets and
+against the rendered text of everything `redact()` covers, and refused whole
+if anything survives; and the last frame is extracted from `demo.mp4` rather
+than screenshotted, so it inherits the recording's guarantee instead of needing
+its own. A take whose mask cannot be verified writes no dump at all.
+
+**This holds with `evidence=False` too**, and that is not free. `redact()` is a
+pixel control — it covers where a value renders and leaves the value in the
+DOM, which is exactly what `failure/screen.txt` dumps — and the only thing that
+reads what the mask is hiding is a harvest off the live page. Per-beat evidence
+does that on the clean path and does not run at all when evidence is off, so
+the failure path harvests for itself, on both sides of the snapshot, whatever
+the flag says. Without it, switching evidence off published every redacted
+value in the crash dump in the clear.
+
+**What this does not do.** It does not make a crashed take's `demo.mp4` a
+complete demo — it stops where the storyboard did. It does not diagnose the
+crash. And if the *browser* died (so the redaction check cannot run), the take
+is treated as unverifiable and keeps nothing but the marker: a page nothing can
+vouch for is not a page to dump.
 
 **Timestamps are wall-clock offsets, and the video can drift under them.**
 Chromium's screencast emits a frame when the page paints and nothing pads the

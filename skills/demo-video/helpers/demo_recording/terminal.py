@@ -923,6 +923,23 @@ class TerminalRecorder(_DemoBase):
                 f"that shows it."
             )
 
+    def _failure_screen(self) -> str | None:
+        """The rendered terminal buffer, for `failure/screen.txt` (issue #11).
+
+        The same string `_verify_redaction_final` is about to read and the same
+        one `wait_for_text` matches against — visible rows and scrollback, ANSI
+        already resolved by xterm.js. For a TUI that is the entire account of
+        what went wrong, and a reviewer cannot get it out of a frame.
+
+        Called from `__exit__` between `_stop()` and the verifier, which is the
+        only slot where it is both complete and vouched for: `_stop()` has
+        flushed whatever the stream scrubber was withholding, and the verifier
+        that runs next decides whether any of this may be written at all. It
+        does not re-pump — the fd is closed by then — so this is xterm.js's
+        buffer as the recording ends on it.
+        """
+        return str(self.page.evaluate("() => window.__termText()"))
+
     def _take_exit_markers(self, text: str) -> str:
         """Strip the PS1 exit-status markers out of `text`, recording each.
 

@@ -30,6 +30,13 @@ frames/
 # It is read by the reviewing agent in the same pipeline that produced it and
 # nowhere else (issue #50).
 evidence/
+# What a take that did not finish leaves behind: the crash dump (last frame,
+# console log, page text, failing beat) and the marker that says the folder is
+# not a successful take's output. Both describe *one run* and are rewritten or
+# deleted by the next one, so neither is history — and failure/screen.txt is
+# plaintext page text, for the same reason evidence/ is not committed.
+failure/
+demo-video-FAILED.md
 
 # Smoke-test recordings. tests/smoke records into a temp dir by default; this
 # covers pointing it back into the repo (tests/smoke --out-dir tests/out).

@@ -67,7 +67,10 @@ reading a pass as proof the recorder is healthy.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -5921,7 +5924,7 @@ def run_terminal_wrap(out_root: Path) -> list[str]:
     """
     if os.name != "posix":
         return []
-    from demo_recording import SecretLeak, TerminalRecorder
+    from demo_recording import FAILURE_MARKER, SecretLeak, TerminalRecorder
 
     label = "terminal-wrap"
     out_dir = fresh_take_dir(out_root, label)
@@ -5994,10 +5997,16 @@ def run_terminal_wrap(out_root: Path) -> list[str]:
             f"this take planted — something else refused it and the wrap was "
             f"never reached"
         )
+    # The marker is exempt for the reason it exists (issue #46) — it is a note
+    # about the folder, not an artifact of the take, and a refused take is the
+    # case where nothing else says the folder is not a good take's output. It
+    # is required and its content is checked, so the exemption costs nothing;
+    # and it goes through the same masking every other text artifact does, so
+    # the byte sweep below still has to find the value absent from it.
     left = sorted(
         str(q.relative_to(out_dir))
         for q in out_dir.rglob("*")
-        if q.is_file() and q.name != MARKER_NAME
+        if q.is_file() and q.name not in (MARKER_NAME, FAILURE_MARKER)
     )
     if left:
         failures.append(
@@ -6005,11 +6014,20 @@ def run_terminal_wrap(out_root: Path) -> list[str]:
             f"SKILL.md says a SecretLeak keeps nothing, and a terminal still is "
             f"the raw screen."
         )
+    marker = out_dir / FAILURE_MARKER
+    if not marker.is_file():
+        failures.append(f"{label}: no {FAILURE_MARKER} after a refused take")
+    elif TERMINAL_WRAP_SECRET in marker.read_text():
+        failures.append(
+            f"{label}: {FAILURE_MARKER} contains the value the take was refused "
+            f"for — the one text file a refused take does write"
+        )
     if not failures:
         print(
             f"smoke: {label} a registered secret split by a line wrap at column "
             f"{geometry['cols']} (chars {geometry['starts_at']}-"
-            f"{geometry['ends_at']}) is still refused, and keeps nothing"
+            f"{geometry['ends_at']}) is still refused, and keeps nothing but "
+            f"{FAILURE_MARKER}"
         )
     return failures
 
@@ -6629,6 +6647,10 @@ def run_redaction(out_root: Path) -> list[str]:
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"redaction: Recorder raised {type(exc).__name__}: {exc}"]
         problems += check_unmatched_redaction(out_root, base_url)
+        # Reads the directory the take above left, rather than recording
+        # another one: a refused take is the only path that writes *nothing*,
+        # which is what makes the marker the whole defence there (issue #46).
+        problems += check_refused_take_marker(out_root)
         problems += check_storyboard_leak_discards(out_root, base_url)
     return (
         problems
@@ -8129,7 +8151,7 @@ def check_evidence_leak_is_fatal(out_root: Path, base_url: str) -> list[str]:
     unconditionally that a `SecretLeak` keeps nothing, and "the take raised"
     is equally true of one that raised after writing the mp4.
     """
-    from demo_recording import Recorder, SecretLeak
+    from demo_recording import FAILURE_MARKER, Recorder, SecretLeak
 
     label = "evidence-leak-fatal"
     injected = "injected: the mask could not be verified for this beat"
@@ -8163,10 +8185,16 @@ def check_evidence_leak_is_fatal(out_root: Path, base_url: str) -> list[str]:
             f"is not the one this injected — something else refused and the "
             f"path under test was never reached"
         )
+    # `FAILURE_MARKER` is the documented exception and the only one: it is not
+    # an artifact *of* the take, it is a note about the folder, and a refused
+    # take is precisely the case where nothing else says the folder is not the
+    # output of a successful run (issue #46). It is required rather than merely
+    # tolerated, and its content is checked, so exempting it from the sweep
+    # costs nothing.
     left = sorted(
         str(p.relative_to(out_dir))
         for p in out_dir.rglob("*")
-        if p.is_file() and p.name != MARKER_NAME
+        if p.is_file() and p.name not in (MARKER_NAME, FAILURE_MARKER)
     )
     if left:
         failures.append(
@@ -8175,10 +8203,22 @@ def check_evidence_leak_is_fatal(out_root: Path, base_url: str) -> list[str]:
             f"nothing, and an mp4 left behind by a refused take is read by "
             f"everything downstream as a verified one."
         )
+    marker = out_dir / FAILURE_MARKER
+    if not marker.is_file():
+        failures.append(
+            f"{label}: no {FAILURE_MARKER}. This take kept nothing, which is "
+            f"right — and leaves a folder with nothing in it saying why."
+        )
+    elif "this take wrote none" not in marker.read_text():
+        failures.append(
+            f"{label}: {FAILURE_MARKER} does not say the folder holds no mp4, "
+            f"which is the state it is in: "
+            f"{' '.join(marker.read_text().split())[:200]!r}"
+        )
     if not failures:
         print(
             "smoke: evidence a SecretLeak raised while capturing a beat kills "
-            "the take and keeps nothing"
+            f"the take and keeps nothing but {FAILURE_MARKER}"
         )
     return failures
 
@@ -8693,7 +8733,1095 @@ def run_terminal(out_root: Path) -> list[str]:
     )
 
 
+# -- what a take that did not finish leaves behind (issues #11/#20/#24/#46) ---
+#
+# Everything in this section grades one sentence: **after an abnormal exit,
+# every artifact present is either current, or absent, or explicitly marked
+# stale.** Nothing above it can, because everything above it records a take
+# that works — and the whole failure surface was, until now, "the recorder
+# deletes what it had and says nothing".
+#
+# Four takes, because there are four ways out of the `with` and they behaved
+# differently:
+#
+#   crash-web        a verb raised (a wait_for timeout). The common case.
+#   crash-terminal   the same, in the medium whose page text is the *only*
+#                    account of what went wrong — a TUI's state is not
+#                    recoverable from a frame.
+#   crash-interrupt  KeyboardInterrupt inside a beat. `BaseException`, not
+#                    `Exception`, so a handler written for the latter misses
+#                    it — and Ctrl-C on a hung demo is exactly the take
+#                    somebody is about to go looking at.
+#   crash-between    a failure in storyboard code between two verbs, where no
+#                    beat may honestly be blamed. It grades the *absence* of a
+#                    confidently wrong attribution, which is the failure mode
+#                    the issue log's `beat: null` rule already exists for.
+#
+# Plus two takes about the folder rather than the take:
+#
+#   stale-media      conversion fails with a previous run's demo.mp4 sitting
+#                    in the directory — the only remaining way to write a
+#                    timeline and no mp4, and the exact shape issue #20
+#                    describes.
+#   marker-cleared   a take that succeeds into a folder a failed one left
+#                    behind. A stale "this failed" marker is the same lie
+#                    inverted, and it is the one that makes people stop
+#                    believing the marker.
+
+# The selector the crash arms wait for. Deliberately not a typo of a real one:
+# a reader of the failure dump should be in no doubt that it was never going to
+# match.
+CRASH_SELECTOR = "#this-selector-matches-nothing"
+CRASH_CAPTION = "This take is about to give up."
+
+# A string the fixture page renders and nothing else in the harness writes, so
+# "screen.txt is an account of the page" is a content assertion rather than a
+# file-exists one.
+CRASH_SCREEN_WEB = "Northwind Ops"
+
+# ...and its terminal equivalent, printed by the storyboard's own command.
+CRASH_SCREEN_TERMINAL = "crash-arm-was-here"
+
+# What `register_secret()` must refuse, and what it must accept, one character
+# apart. Testing the floor from well inside it would leave the constant free to
+# be any value at all — see "the ungraded constant".
+SHORT_SECRET = "7f3a9c1"  # 7 characters: one under SECRET_MIN_LEN
+FLOOR_SECRET = "7f3a9c1x"  # 8 characters: exactly at it
+CAPTION_SECRET = "sk-live-CAPT0000000000000000"
+
+# Written by hand into a folder before a take that succeeds, so the cleanup
+# half of #46 has something distinctive to remove.
+STALE_MARK = "stale-from-a-previous-run-0000"
+
+
+def _crash_dump(out_dir: Path) -> tuple[dict | None, str]:
+    """(failure/failure.json, the reason it is missing)."""
+    path = out_dir / "failure" / "failure.json"
+    if not path.is_file():
+        return None, f"{path} was never written"
+    try:
+        return json.loads(path.read_text()), ""
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return None, f"{path} is not valid JSON: {exc}"
+
+
+def _erroring_beats(doc: dict) -> list[dict]:
+    return [b for b in (doc.get("beats") or []) if "error" in b]
+
+
+def check_crash_take(
+    label: str,
+    out_dir: Path,
+    started: float,
+    raised: BaseException | None,
+    want_exc: str,
+    want_verb: str | None,
+    want_screen: str,
+) -> list[str]:
+    """Everything a take that did not finish has to have left behind.
+
+    `want_verb` is the verb whose beat must carry `error`, or **None** for the
+    arm that fails between beats — where the requirement is the opposite one:
+    no beat may claim it.
+    """
+    from demo_recording import FAILURE_MARKER, media_duration
+
+    failures: list[str] = []
+    if raised is None:
+        return [
+            f"{label}: the storyboard was written to fail and the take "
+            f"returned normally, so none of the assertions below are about "
+            f"anything"
+        ]
+    if type(raised).__name__ != want_exc:
+        failures.append(
+            f"{label}: expected the storyboard's {want_exc} to propagate, got "
+            f"{type(raised).__name__}: {str(raised)[:200]!r}. A recorder that "
+            f"replaces the exception costs the author the message that says "
+            f"what to fix."
+        )
+
+    # -- the recording it already had ---------------------------------------
+    #
+    # Issue #32's half of #11: the webm was in hand when the storyboard gave
+    # up, and `__exit__` used to discard it along with `.video/`.
+    mp4 = out_dir / "demo.mp4"
+    duration: float | None = None
+    if not mp4.is_file():
+        failures.append(
+            f"{label}: a take that crashed wrote no demo.mp4. The browser had "
+            f"a webm when the storyboard gave up; converting it costs one "
+            f"ffmpeg call, and in CI — where there is no screen — a crash with "
+            f"no recording means blind retries."
+        )
+    else:
+        if mp4.stat().st_size < MIN_MP4_BYTES:
+            failures.append(
+                f"{label}: demo.mp4 is {mp4.stat().st_size} bytes, under the "
+                f"{MIN_MP4_BYTES} floor"
+            )
+        if mp4.stat().st_mtime < started:
+            failures.append(
+                f"{label}: demo.mp4 predates this run — it is a leftover, not "
+                f"this take's partial recording"
+            )
+        try:
+            duration = media_duration(mp4)
+        except Exception as exc:  # noqa: BLE001 - an unprobeable mp4 is a failure
+            failures.append(f"{label}: ffprobe could not read demo.mp4: {exc}")
+
+    # -- the beat log, and the beat that raised (issue #24) ------------------
+    json_path = out_dir / "timeline.json"
+    doc: dict = {}
+    if not json_path.is_file():
+        failures.append(
+            f"{label}: a take that crashed wrote no timeline.json. The beats "
+            f"were in memory; the log is what says which one it died on."
+        )
+    else:
+        doc = json.loads(json_path.read_text())
+        erroring = _erroring_beats(doc)
+        beats = doc.get("beats") or []
+        if want_verb is None:
+            if erroring:
+                failures.append(
+                    f"{label}: this arm fails in storyboard code between two "
+                    f"verbs, and "
+                    f"{[(b.get('index'), b.get('verb')) for b in erroring]!r} "
+                    f"claims to have raised. Blaming a beat that returned is "
+                    f"the confidently-wrong attribution the issue log's "
+                    f"`beat: null` rule already refuses to make."
+                )
+        elif len(erroring) != 1:
+            failures.append(
+                f"{label}: {len(erroring)} of {len(beats)} beats carry an "
+                f"`error` key, expected exactly 1 — the "
+                f"{want_verb}() that raised. "
+                f"{[(b.get('index'), b.get('verb')) for b in erroring]!r}. A "
+                f"beat that returned must be distinguishable from one that "
+                f"did not, in both directions."
+            )
+        else:
+            beat = erroring[0]
+            if beat.get("verb") != want_verb:
+                failures.append(
+                    f"{label}: the beat carrying `error` is "
+                    f"{beat.get('verb')!r}, not the {want_verb!r} that raised"
+                )
+            if beat is not beats[-1]:
+                failures.append(
+                    f"{label}: the erroring beat is index {beat.get('index')} "
+                    f"but the log has {len(beats)} beats — the take carried on "
+                    f"after the verb that killed it"
+                )
+            error = beat.get("error")
+            if not isinstance(error, dict):
+                failures.append(f"{label}: beat `error` is {error!r}, not a dict")
+            else:
+                if error.get("type") != want_exc:
+                    failures.append(
+                        f"{label}: the beat's error.type is "
+                        f"{error.get('type')!r}, not {want_exc!r} — reading "
+                        f"timeline.json alone does not say what happened"
+                    )
+                if not str(error.get("message") or "").strip():
+                    failures.append(
+                        f"{label}: the beat's error.message is empty, so the "
+                        f"log says a verb raised and nothing about what"
+                    )
+        # `duration` is this take's, measured off the file it just wrote.
+        logged = doc.get("duration")
+        if duration is None:
+            pass  # already reported above
+        elif not isinstance(logged, (int, float)) or isinstance(logged, bool):
+            failures.append(
+                f"{label}: timeline.json duration is {logged!r}, but this take "
+                f"encoded a {duration:.2f}s demo.mp4"
+            )
+        elif abs(float(logged) - duration) > 0.25:
+            failures.append(
+                f"{label}: timeline.json says duration {float(logged):.2f}s "
+                f"and demo.mp4 measures {duration:.2f}s — the log and the "
+                f"recording are from different takes"
+            )
+        record = doc.get("failure")
+        if not isinstance(record, dict):
+            failures.append(
+                f"{label}: timeline.json has no `failure` record ({record!r}), "
+                f"so a reader of the beat table cannot tell this take from one "
+                f"that finished"
+            )
+        else:
+            if record.get("type") != want_exc:
+                failures.append(
+                    f"{label}: timeline.json's failure.type is "
+                    f"{record.get('type')!r}, not {want_exc!r}"
+                )
+            if record.get("verb") != want_verb:
+                failures.append(
+                    f"{label}: timeline.json's failure.verb is "
+                    f"{record.get('verb')!r}, expected {want_verb!r}"
+                )
+        # Every beat's `evidence` pointer has to resolve. Writing the timeline
+        # on this path without writing the evidence beside it would point every
+        # beat at a file that is not there.
+        missing = [
+            b.get("evidence")
+            for b in doc.get("beats") or []
+            if b.get("evidence") and not (out_dir / str(b["evidence"])).is_file()
+        ]
+        if missing:
+            failures.append(
+                f"{label}: {len(missing)} beat(s) name evidence files that do "
+                f"not exist ({missing[:3]!r}) — the timeline points at nothing"
+            )
+
+    # -- failure/ (issue #11) -----------------------------------------------
+    dump, why = _crash_dump(out_dir)
+    if dump is None:
+        failures.append(
+            f"{label}: {why}. Killing a storyboard partway through has to "
+            f"leave a folder from which the failing beat can be identified "
+            f"without re-running."
+        )
+    else:
+        if dump.get("failure", {}).get("type") != want_exc:
+            failures.append(
+                f"{label}: failure.json names "
+                f"{dump.get('failure', {}).get('type')!r}, not {want_exc!r}"
+            )
+        # The dump and the beat log have to name the *same* beat. Two records
+        # of one crash that disagree is worse than one.
+        dumped = (dump.get("failure") or {}).get("beat")
+        logged_beat = (doc.get("failure") or {}).get("beat") if doc else None
+        if dumped != logged_beat:
+            failures.append(
+                f"{label}: failure/failure.json blames beat {dumped!r} and "
+                f"timeline.json blames beat {logged_beat!r}"
+            )
+        if want_verb is None:
+            if dumped is not None:
+                failures.append(
+                    f"{label}: the dump blames beat {dumped!r} for a failure "
+                    f"that happened between beats"
+                )
+            if dump.get("beat") is not None:
+                failures.append(
+                    f"{label}: the dump carries a failing beat record "
+                    f"({dump['beat'].get('verb')!r}) for a failure no beat owns"
+                )
+        else:
+            if not isinstance(dump.get("beat"), dict):
+                failures.append(
+                    f"{label}: the dump carries no failing-beat record, so the "
+                    f"beat has to be looked up in timeline.json by hand"
+                )
+            elif dump["beat"].get("verb") != want_verb:
+                failures.append(
+                    f"{label}: the dump's beat is {dump['beat'].get('verb')!r}, "
+                    f"not the {want_verb!r} that raised"
+                )
+        if dump.get("media_written_by_this_take") is not True:
+            failures.append(
+                f"{label}: the dump says media_written_by_this_take="
+                f"{dump.get('media_written_by_this_take')!r} while demo.mp4 "
+                f"beside it is this take's — the two artifacts disagree"
+            )
+        if not isinstance(dump.get("issues"), list):
+            failures.append(
+                f"{label}: the dump carries no console log ({dump.get('issues')!r})"
+            )
+
+    md = out_dir / "failure" / "failure.md"
+    if not md.is_file():
+        failures.append(f"{label}: {md} was never written")
+    elif want_verb is not None and want_verb not in md.read_text():
+        failures.append(
+            f"{label}: failure.md never names the {want_verb!r} that raised"
+        )
+
+    # The page text: read once, before the redaction verifier vouched for the
+    # page, and written only after it passed. Graded on *content* — a file that
+    # exists and says nothing about the app would pass a file-exists check.
+    screen = out_dir / "failure" / "screen.txt"
+    if not screen.is_file():
+        failures.append(
+            f"{label}: {screen} was never written — a crash dump with no "
+            f"account of what was on screen is a timestamp"
+        )
+    elif want_screen not in screen.read_text():
+        failures.append(
+            f"{label}: failure/screen.txt does not contain {want_screen!r}, "
+            f"which the app had rendered when the take died. It is not an "
+            f"account of this page."
+        )
+
+    # The last frame, extracted from the recording rather than screenshotted
+    # off the page — so it inherits the redaction guarantee whole. Graded for
+    # *picture*, not existence: `_extract` writes a file for a blank video too.
+    frame = out_dir / "failure" / "last-frame.png"
+    if not frame.is_file():
+        failures.append(f"{label}: {frame} was never written")
+    else:
+        if frame.stat().st_size < MIN_PNG_BYTES:
+            failures.append(
+                f"{label}: failure/last-frame.png is {frame.stat().st_size} "
+                f"bytes, under the {MIN_PNG_BYTES} floor"
+            )
+        frames = gray_frames(frame)
+        score = contrast(frames[0]) if frames else 0.0
+        if score < MIN_CONTENT_STDDEV["web"]:
+            failures.append(
+                f"{label}: failure/last-frame.png scores {score:.1f} luma "
+                f"stddev, under the {MIN_CONTENT_STDDEV['web']} floor — it is "
+                f"a blank picture, which also means demo.mp4 is blank where it "
+                f"stopped"
+            )
+
+    # -- the marker (issue #46) ---------------------------------------------
+    marker = out_dir / FAILURE_MARKER
+    if not marker.is_file():
+        failures.append(
+            f"{label}: no {FAILURE_MARKER} — somebody who only opens the "
+            f"folder sees a demo.mp4 and a timeline.json and nothing that says "
+            f"the take did not finish"
+        )
+    else:
+        text = marker.read_text()
+        if want_exc not in text:
+            failures.append(
+                f"{label}: {FAILURE_MARKER} does not name the {want_exc} that "
+                f"ended the take"
+            )
+        if "this take's recording" not in text:
+            failures.append(
+                f"{label}: {FAILURE_MARKER} does not say whether demo.mp4 is "
+                f"this take's, which is the one question it exists to answer"
+            )
+
+    if not failures:
+        print(
+            f"smoke: {label} crashed and kept everything it had — demo.mp4 "
+            f"({duration:.1f}s), timeline.json, failure/ (dump, page text, "
+            f"last frame), {FAILURE_MARKER}"
+            if duration is not None
+            else f"smoke: {label} crashed and kept its artifacts"
+        )
+    return failures
+
+
+def run_crash_web(out_root: Path, base_url: str) -> list[str]:
+    """A web verb that raises. The common case, and the one #11 is written for."""
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "crash-web")
+    started = time.time()
+    raised: BaseException | None = None
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+            rec.goto("/")
+            rec.caption(CRASH_CAPTION)
+            rec.wait_for(CRASH_SELECTOR, timeout_s=2)
+    except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    return check_crash_take(
+        "crash-web",
+        out_dir,
+        started,
+        raised,
+        "TimeoutError",
+        "wait_for",
+        CRASH_SCREEN_WEB,
+    )
+
+
+def run_crash_terminal(out_root: Path) -> list[str]:
+    """The same, where the page text is the only account of what went wrong.
+
+    A TUI's state is not recoverable from a frame, and `TerminalRecorder` has
+    no `redact()` at all — so `failure/screen.txt` is both the most useful
+    thing in the dump and the one that has to be read before the final
+    redaction check rather than after it.
+    """
+    if os.name != "posix":
+        return []
+    from demo_recording import TerminalRecorder
+
+    out_dir = fresh_take_dir(out_root, "crash-terminal")
+    started = time.time()
+    raised: BaseException | None = None
+    try:
+        with TerminalRecorder(out_dir, speech=False) as rec:
+            rec.caption(CRASH_CAPTION)
+            rec.run(f"echo {CRASH_SCREEN_TERMINAL}")
+            rec.wait_for_prompt(timeout_s=20)
+            rec.wait_for_text("this-text-never-appears", timeout_s=3)
+    except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    return check_crash_take(
+        "crash-terminal",
+        out_dir,
+        started,
+        raised,
+        "RuntimeError",
+        "wait_for_text",
+        CRASH_SCREEN_TERMINAL,
+    )
+
+
+def run_crash_interrupt(out_root: Path, base_url: str) -> list[str]:
+    """Ctrl-C while the frame is held.
+
+    `KeyboardInterrupt` is a `BaseException`, so `except Exception` around the
+    beat body would let it through unrecorded and every guard written for
+    `Exception` misses it. A real SIGINT arrives inside the `time.sleep` in
+    `_idle`, which is where `pause()` spends its whole beat — so `_idle` is
+    where it is raised from here. The beat is a real `pause` beat, opened and
+    closed by the recorder's own decorator.
+    """
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "crash-interrupt")
+    started = time.time()
+    raised: BaseException | None = None
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+            rec.goto("/")
+            rec.caption(CRASH_CAPTION)
+
+            def _sigint(_seconds: float) -> None:
+                raise KeyboardInterrupt("operator gave up on a hung demo")
+
+            rec._idle = _sigint  # type: ignore[method-assign]
+            rec.pause(1.0)
+    except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    return check_crash_take(
+        "crash-interrupt",
+        out_dir,
+        started,
+        raised,
+        "KeyboardInterrupt",
+        "pause",
+        CRASH_SCREEN_WEB,
+    )
+
+
+def run_crash_between(out_root: Path, base_url: str) -> list[str]:
+    """A failure in storyboard code, where no beat may honestly be blamed.
+
+    The inverse of every other arm: what is graded is that nothing claims it.
+    Blaming the last beat that *returned* is the same confidently-wrong
+    attribution the issue log refuses to make, and it would be believed — the
+    dump is what somebody reads instead of re-running.
+    """
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "crash-between")
+    started = time.time()
+    raised: BaseException | None = None
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+            rec.goto("/")
+            rec.caption(CRASH_CAPTION)
+            # Not inside a verb: the recorder is idle and no beat is open.
+            raise _StoryboardFailed("the storyboard's own code gave up")
+    except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    return check_crash_take(
+        "crash-between",
+        out_dir,
+        started,
+        raised,
+        "_StoryboardFailed",
+        None,
+        CRASH_SCREEN_WEB,
+    )
+
+
+def run_crash_no_evidence(out_root: Path, base_url: str) -> list[str]:
+    """A crash dump of a redacted page, with per-beat evidence switched off.
+
+    The arm that closes [#101](https://github.com/rogvid/skills/issues/101),
+    and it caught a real leak rather than confirming an argument.
+
+    `failure/screen.txt` is masked with `_evidence_forbidden()` — the
+    registered secrets **plus** the rendered text of everything `redact()`
+    covers. That second half is harvested from the page, and until this arm
+    existed the only thing that ever harvested was `_evidence_payload`, which
+    runs under `if self._evidence_on`. So with `evidence=False` the forbidden
+    list was the registered secrets alone, and `redact()` registers no text:
+    it is a pixel control, and the value stays in the DOM that the ARIA tree
+    dumps. The dump published it in the clear.
+
+    Every other take in this file leaves evidence on, so no assertion could
+    reach it — the config-hidden path, verbatim. Two literals, and they fail
+    for different reasons, which is what makes the pair diagnostic:
+
+      REDACT_SECRET   rendered by `#api-key`, which is `redact()`ed and
+                      **not** registered. This is the documented use of
+                      `redact()`, and the only thing that can mask it out of a
+                      text dump is the harvest.
+      REDACT_CONTROL  rendered by `#api-key-control`, which is never redacted
+                      and **is** registered here. `scrub()`/`_secrets` covers
+                      it by a route the harvest has nothing to do with — so if
+                      this one leaks too, the masking is broken outright
+                      rather than missing its harvest half.
+    """
+    from demo_recording import Recorder
+
+    label = "crash-no-evidence"
+    out_dir = fresh_take_dir(out_root, label)
+    started = time.time()
+    raised: BaseException | None = None
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False, evidence=False) as rec:
+            rec.redact("#api-key")
+            rec.register_secret(REDACT_CONTROL)
+            rec.goto("/?secret=1")
+            rec.wait_for(CRASH_SELECTOR, timeout_s=2)
+    except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    failures = check_crash_take(
+        label,
+        out_dir,
+        started,
+        raised,
+        "TimeoutError",
+        "wait_for",
+        CRASH_SCREEN_WEB,
+    )
+
+    # The premise. Without it this is `crash-web` with a longer storyboard: if
+    # evidence were on, the harvest would have run on the per-beat path and the
+    # sweep below would pass for a reason that has nothing to do with the fix.
+    if (out_dir / "evidence").is_dir():
+        left = sorted(p.name for p in (out_dir / "evidence").glob("*.json"))
+        failures.append(
+            f"{label}: evidence={False!r} was passed and {left!r} were written "
+            f"anyway, so this take does not exercise the configuration the "
+            f"leak lives in"
+        )
+
+    dump = out_dir / "failure"
+    swept = 0
+    if dump.is_dir():
+        for path in sorted(dump.rglob("*")):
+            if not path.is_file():
+                continue
+            swept += 1
+            data = path.read_bytes()
+            for what, literal in (
+                ("the redacted, unregistered key", REDACT_SECRET),
+                ("the registered control key", REDACT_CONTROL),
+            ):
+                if leaked_in(data, literal):
+                    failures.append(
+                        f"{label}: {what} is readable in "
+                        f"failure/{path.name}. The crash dump is plain text "
+                        f"and redact() only covers pixels — with evidence off "
+                        f"nothing else harvests what the mask is hiding, so "
+                        f"this is the dump publishing exactly what the take "
+                        f"was told to hide."
+                    )
+    if not swept:
+        failures.append(
+            f"{label}: failure/ holds no files, so the byte sweep searched nothing"
+        )
+
+    # ...and the haystack is not degenerate. `check_crash_take` already
+    # requires the page's own heading in screen.txt; this requires the mask to
+    # have actually fired, so "the value is absent" cannot be true because the
+    # file is an apology instead of a page.
+    screen = dump / "screen.txt"
+    if screen.is_file():
+        text = screen.read_text()
+        if SECRET_MASK_EXPECTED not in text:
+            failures.append(
+                f"{label}: failure/screen.txt contains no "
+                f"{SECRET_MASK_EXPECTED!r}, so nothing in it was masked — the "
+                f"sweep above passed because the values were never captured, "
+                f"not because they were removed"
+            )
+    if not failures:
+        print(
+            f"smoke: {label} a crash dump written with evidence=False masks "
+            f"the redacted key and the registered one out of all {swept} of "
+            f"its files"
+        )
+    return failures
+
+
+def run_stale_media(out_root: Path, base_url: str) -> list[str]:
+    """A take that writes a beat log and no mp4, next to a previous run's mp4.
+
+    Issue #20 exactly: `_timeline_doc` probed `demo.mp4` whenever the file
+    existed, so a take that encoded nothing reported *the previous take's*
+    duration beside this take's beats — and `stitch()` offsets every later
+    segment's beats by that number.
+
+    Reaching the state honestly took some care. Conversion is the only
+    remaining way a take writes a timeline and no mp4, so the arm makes the
+    conversion fail for a reason that happens to real people: a `demo.mp4` this
+    process may read and may not overwrite. Nothing here is monkeypatched, the
+    recorder runs unmodified, and both halves of the premise are asserted below
+    — the planted file has to survive, and it has to be probeable. Without the
+    second, `duration: null` would also be true of a broken fix, and the
+    assertion would grade nothing.
+    """
+    from demo_recording import FAILURE_MARKER, Recorder, media_duration
+
+    out_dir = fresh_take_dir(out_root, "stale-media")
+    mp4 = out_dir / "demo.mp4"
+    planted = _plant_mp4(mp4)
+    try:
+        planted_duration = media_duration(mp4)
+    except Exception as exc:  # noqa: BLE001 - without this the arm is vacuous
+        return [
+            f"stale-media: the planted demo.mp4 is not probeable ({exc}), so "
+            f"'duration is null' would be true however _timeline_doc behaves"
+        ]
+    os.chmod(mp4, 0o444)
+    try:
+        with open(mp4, "ab"):
+            pass
+    except OSError:
+        pass
+    else:
+        os.chmod(mp4, 0o644)
+        return [
+            "stale-media: this process can still write a mode-444 file (are "
+            "you root?), so ffmpeg would overwrite the planted recording and "
+            "this arm would exercise nothing. Run the suite as a normal user."
+        ]
+
+    failures: list[str] = []
+    raised: BaseException | None = None
+    noise = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(noise):
+            with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+                rec.goto("/")
+                rec.caption(CRASH_CAPTION)
+    except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
+        raised = exc
+    finally:
+        os.chmod(mp4, 0o644)
+    said = noise.getvalue()
+    print(said, file=sys.stderr, end="")
+
+    if raised is None:
+        failures.append(
+            "stale-media: ffmpeg could not have written demo.mp4 and the take "
+            "reported success"
+        )
+    # The premise, both halves.
+    if not mp4.is_file() or mp4.read_bytes() != planted:
+        failures.append(
+            "stale-media: the planted demo.mp4 was overwritten after all, so "
+            "the take did encode one and every assertion below is about the "
+            "wrong thing"
+        )
+    json_path = out_dir / "timeline.json"
+    if not json_path.is_file():
+        failures.append(
+            "stale-media: a failed conversion took the beat log with it. The "
+            "beats were in memory and are still right; only the duration is "
+            "unknowable."
+        )
+    else:
+        doc = json.loads(json_path.read_text())
+        logged = doc.get("duration")
+        if logged is not None:
+            failures.append(
+                f"stale-media: this take encoded no mp4, and timeline.json "
+                f"reports duration {logged!r} — the planted recording measures "
+                f"{planted_duration:.2f}s, so that is a previous run's number "
+                f"printed beside this run's beats"
+            )
+        if doc.get("beats"):
+            pass
+        else:
+            failures.append("stale-media: the timeline has no beats at all")
+    # The stderr half of #20's fix: "say so on stderr".
+    #
+    # Matched on the *timeline writer's* two sentences rather than on
+    # `"duration: null"` anywhere in the output, and that is not fussiness.
+    # The first version searched the whole stderr blob for `duration: null` and
+    # `previous run's` — and passed with the message deleted, because the
+    # conversion warning a few lines earlier happens to contain both phrases.
+    # Fault injection caught it; a whole-document search for a claim about one
+    # message grades nothing.
+    for phrase in (
+        "this take encoded no mp4, so timeline.json says duration: null",
+        "this timeline does not describe it",
+    ):
+        if phrase not in said:
+            failures.append(
+                f"stale-media: the timeline writer never said {phrase!r} on "
+                f"stderr. A null in a JSON file nobody opened is not a report, "
+                f"and the reason it matters is that the demo.mp4 in the folder "
+                f"is somebody else's."
+            )
+    # Review frames are extracted off `media`, so an ungated run would have
+    # photographed the *planted* recording and handed a reviewer a sheet of
+    # frames from a different video under this take's beat names.
+    frames_dir = out_dir / "frames"
+    extracted = (
+        sorted(p.name for p in frames_dir.glob("*.png")) if frames_dir.is_dir() else []
+    )
+    if extracted:
+        failures.append(
+            f"stale-media: {extracted!r} were extracted from a demo.mp4 this "
+            f"take did not write — every one of them is a frame of the "
+            f"previous run"
+        )
+    marker = out_dir / FAILURE_MARKER
+    if not marker.is_file():
+        failures.append(f"stale-media: no {FAILURE_MARKER}")
+    elif "is a *previous* run's" not in marker.read_text():
+        failures.append(
+            f"stale-media: {FAILURE_MARKER} does not say the demo.mp4 beside "
+            f"it belongs to an earlier run: "
+            f"{' '.join(marker.read_text().split())[:200]!r}"
+        )
+    if not failures:
+        print(
+            f"smoke: stale-media a take that encoded nothing reports "
+            f"duration: null beside a {planted_duration:.1f}s file it did not "
+            f"write, extracts no frames from it, and says so on stderr and in "
+            f"{FAILURE_MARKER}"
+        )
+    return failures
+
+
+def run_marker_cleared(out_root: Path, base_url: str) -> list[str]:
+    """A take that succeeds into a folder a failed one left behind.
+
+    The other half of #46. A marker that outlives the run it describes is the
+    same lie inverted, and a `failure/` from two takes ago is worse than that:
+    it is a plaintext dump of a page, which may hold exactly the value the new
+    take was rewritten to hide.
+    """
+    from demo_recording import FAILURE_MARKER, Recorder
+
+    out_dir = fresh_take_dir(out_root, "marker-cleared")
+    marker = out_dir / FAILURE_MARKER
+    marker.write_text(f"# stale marker\n\n{STALE_MARK}\n")
+    dump = out_dir / "failure"
+    dump.mkdir()
+    (dump / "failure.json").write_text(json.dumps({"stale": STALE_MARK}) + "\n")
+    (dump / "screen.txt").write_text(f"a previous take's page text: {STALE_MARK}\n")
+
+    failures: list[str] = []
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=False) as rec:
+            rec.goto("/")
+            rec.caption(CRASH_CAPTION)
+    except BaseException as exc:  # noqa: BLE001 - a raising take is a failure
+        return [f"marker-cleared: the take raised {type(exc).__name__}: {exc}"]
+
+    if not (out_dir / "demo.mp4").is_file():
+        return ["marker-cleared: the take wrote no demo.mp4, so it did not succeed"]
+    if marker.is_file():
+        failures.append(
+            f"marker-cleared: {FAILURE_MARKER} survived a take that wrote a "
+            f"fresh demo.mp4. It says this folder is not the output of a "
+            f"successful take, beside one that is — and a marker that is "
+            f"sometimes wrong is a marker nobody reads."
+        )
+    left = (
+        [
+            p.name
+            for p in sorted(dump.glob("*"))
+            if p.is_file() and STALE_MARK in p.read_text(errors="replace")
+        ]
+        if dump.is_dir()
+        else []
+    )
+    if left:
+        failures.append(
+            f"marker-cleared: a previous take's failure dump {left!r} is still "
+            f"here after a clean take. It is a plaintext account of a page, "
+            f"and this is the same hazard a stale evidence/ file is."
+        )
+    if not failures:
+        print(
+            f"smoke: marker-cleared a successful take removed the "
+            f"{FAILURE_MARKER} and the failure/ dump a previous run left"
+        )
+    return failures
+
+
+def check_secret_floor(out_dir: Path) -> list[str]:
+    """`register_secret()` refuses a value too short to mean anything (#42).
+
+    No browser: `Recorder.__init__` resolves configuration and touches nothing,
+    and both checks below raise before the page is used. Tested **at** the
+    floor and one character under it, because a floor only tested from well
+    inside is a constant nothing pins.
+    """
+    from demo_recording import SECRET_MIN_LEN, Recorder, Secret, SecretLeak
+
+    failures: list[str] = []
+    rec = Recorder(out_dir, base_url="http://127.0.0.1:1", speech=False)
+
+    try:
+        rec.register_secret(SHORT_SECRET)
+    except ValueError as exc:
+        message = str(exc)
+        if SHORT_SECRET in message:
+            failures.append(
+                "register_secret: the refusal quotes the value it refused, "
+                "which puts it in every terminal, CI log and bug report that "
+                "reports the failure"
+            )
+        if str(len(SHORT_SECRET)) not in message:
+            failures.append(
+                f"register_secret: the refusal does not name the length it "
+                f"got, so an author cannot tell how far under the floor they "
+                f"are: {message[:200]!r}"
+            )
+        if str(SECRET_MIN_LEN) not in message:
+            failures.append(
+                f"register_secret: the refusal does not name the floor "
+                f"({SECRET_MIN_LEN}): {message[:200]!r}"
+            )
+        if "redact" not in message:
+            failures.append(
+                f"register_secret: the refusal does not point at redact(), "
+                f"which is the control for a value this short: {message[:200]!r}"
+            )
+    except Exception as exc:  # noqa: BLE001 - anything else is the wrong error
+        failures.append(
+            f"register_secret({len(SHORT_SECRET)} chars): expected ValueError, "
+            f"got {type(exc).__name__}: {exc}"
+        )
+    else:
+        failures.append(
+            f"register_secret: a {len(SHORT_SECRET)}-character value was "
+            f"accepted. scrub() then replaces those characters in beat "
+            f"selectors, still filenames, caption text and every line of "
+            f"terminal output — and the corruption reads as redaction working."
+        )
+
+    # The Secret route to the same registry. `type_into(sel, Secret(v))` and
+    # `send(Secret(v))` register for you, so a floor that only guarded the
+    # direct call would not guard the way most storyboards get there.
+    try:
+        rec.register_secret(Secret(SHORT_SECRET))
+    except ValueError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        failures.append(
+            f"register_secret(Secret): expected ValueError, got "
+            f"{type(exc).__name__}: {exc}"
+        )
+    else:
+        failures.append(
+            "register_secret: a short value wrapped in Secret() got past the "
+            "floor, so type_into() and send() bypass it"
+        )
+
+    # ...and the other side of the boundary, one character up. Without this the
+    # floor could be any number at all and this function would still pass.
+    try:
+        rec.register_secret(FLOOR_SECRET)
+    except Exception as exc:  # noqa: BLE001
+        failures.append(
+            f"register_secret: a value exactly at the {SECRET_MIN_LEN}-"
+            f"character floor was refused ({type(exc).__name__}: {exc}) — the "
+            f"floor is off by one"
+        )
+    else:
+        if FLOOR_SECRET not in rec.secrets:
+            failures.append(
+                "register_secret: a value at the floor was accepted without "
+                "being registered"
+            )
+
+    # -- caption(Secret(...)) ------------------------------------------------
+    for verb, call in (
+        ("caption()", lambda: rec.caption(Secret(CAPTION_SECRET))),
+        ("interlude()", lambda: rec.interlude(Secret(CAPTION_SECRET))),
+    ):
+        try:
+            call()
+        except SecretLeak as exc:
+            message = str(exc)
+            if verb not in message:
+                failures.append(
+                    f"{verb}: the refusal does not name the verb that was "
+                    f"called: {message[:200]!r}"
+                )
+            if CAPTION_SECRET in message:
+                failures.append(f"{verb}: the refusal quotes the Secret's value")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(
+                f"{verb}: a Secret produced {type(exc).__name__}: "
+                f"{str(exc)[:160]!r}. That is one of the three obscure deaths "
+                f"issue #42 is about — none of them says what is wrong."
+            )
+        else:
+            failures.append(
+                f"{verb}: a Secret was accepted. A caption is burned into "
+                f"every frame and spoken aloud, which is the one thing a "
+                f"Secret must never be."
+            )
+
+    # The control that keeps the two above from grading nothing: an ordinary
+    # string must *not* raise SecretLeak here. (It raises AttributeError
+    # instead — there is no page — which is exactly the point: the refusal
+    # above is about the type, not about every call to caption().)
+    try:
+        rec.caption("An ordinary narrator line.")
+    except SecretLeak:
+        failures.append(
+            "caption(): a plain string raised SecretLeak, so the Secret "
+            "assertions above would pass against a caption() that refuses "
+            "everything"
+        )
+    except Exception:  # noqa: BLE001 - expected: this recorder has no page
+        pass
+
+    if not failures:
+        print(
+            f"smoke: register_secret refuses {len(SHORT_SECRET)} characters "
+            f"and accepts {len(FLOOR_SECRET)}, and caption()/interlude() "
+            f"refuse a Secret by name"
+        )
+    return failures
+
+
+def check_refused_take_marker(out_root: Path) -> list[str]:
+    """The marker on the path where it is the *only* thing written (#46).
+
+    `redaction-unmatched` above plants a demo.mp4, gets refused for a mask it
+    cannot verify, and by design keeps nothing: no mp4, no timeline, no
+    evidence, no failure dump. What it does not touch is the planted recording
+    — which is the folder issue #46 describes, and the one where a marker is
+    the entire defence. Read off that take's directory rather than recording
+    another one.
+    """
+    from demo_recording import FAILURE_MARKER
+
+    out_dir = out_root / "redaction-unmatched"
+    if not out_dir.is_dir():
+        return [
+            "refused-take-marker: redaction-unmatched did not run, so this "
+            "grades nothing"
+        ]
+    failures: list[str] = []
+    marker = out_dir / FAILURE_MARKER
+    if not marker.is_file():
+        failures.append(
+            f"refused-take-marker: a take that could not verify its mask wrote "
+            f"no {FAILURE_MARKER}. It keeps nothing of its own by design, so "
+            f"the folder is left holding a previous run's demo.mp4 and nothing "
+            f"at all that says so — which is exactly issue #46."
+        )
+    else:
+        text = marker.read_text()
+        if "is a *previous* run's" not in text:
+            failures.append(
+                f"refused-take-marker: {FAILURE_MARKER} does not say the "
+                f"demo.mp4 beside it is an earlier run's: "
+                f"{' '.join(text.split())[:200]!r}"
+            )
+        if CLOSED_SECRET in text:
+            failures.append(
+                f"refused-take-marker: {FAILURE_MARKER} contains the key the "
+                f"take was refused for"
+            )
+    if (out_dir / "failure").is_dir():
+        left = sorted(p.name for p in (out_dir / "failure").glob("*"))
+        failures.append(
+            f"refused-take-marker: a refused take wrote a failure dump "
+            f"{left!r}. It is plaintext page text from a take whose mask could "
+            f"not be verified — the one artifact that must never survive."
+        )
+    if not failures:
+        print(
+            f"smoke: refused-take-marker a take that kept nothing still left "
+            f"{FAILURE_MARKER} explaining the demo.mp4 it did not write"
+        )
+    return failures
+
+
+def run_failure(out_root: Path) -> list[str]:
+    """Every take about what a *failed* take leaves behind."""
+    failures = check_secret_floor(fresh_take_dir(out_root, "secret-floor"))
+    with fixture_server() as base_url:
+        failures += run_crash_web(out_root, base_url)
+        failures += run_crash_no_evidence(out_root, base_url)
+        failures += run_crash_interrupt(out_root, base_url)
+        failures += run_crash_between(out_root, base_url)
+        failures += run_stale_media(out_root, base_url)
+        failures += run_marker_cleared(out_root, base_url)
+    failures += run_crash_terminal(out_root)
+    return failures
+
+
 # -- entry point -------------------------------------------------------------
+
+# One suite at a time, per machine. Two concurrent runs share the CPU, the GPU-
+# less software encoder and the page cache, and the bars that measure *time* —
+# REDACT_DURATION_S, MAX_BLANK_RUN_S — go red on a recorder that is working
+# perfectly. Two such false failures cost an afternoon on this box, and worse:
+# they made a genuine intermittent bug undiagnosable, because every red run had
+# a second, more plausible explanation. Issue #78 is about widening or
+# rebuilding those bars and stays open; this is only about not lying to
+# whoever is reading them.
+#
+# `flock`, not a pidfile: the kernel releases it when the process dies however
+# it dies, so there is no staleness to clean up and no window where a crashed
+# run blocks the next one. Unix only, like the rest of this harness.
+SMOKE_LOCK = Path(tempfile.gettempdir()) / "demo-video-smoke.lock"
+
+
+@contextmanager
+def only_one_suite(allow_concurrent: bool) -> Iterator[None]:
+    """Hold the machine-wide suite lock, or refuse."""
+    handle = open(SMOKE_LOCK, "w")  # noqa: SIM115 - held for the whole run
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            others = subprocess.run(
+                ["pgrep", "-af", "smoke"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout
+            mine = str(os.getpid())
+            lines = [
+                ln
+                for ln in others.splitlines()
+                if "tests/smoke" in ln and not ln.startswith(f"{mine} ")
+            ]
+            print(
+                f"smoke: ANOTHER RUN HOLDS {SMOKE_LOCK}.\n"
+                f"  Two suites on one machine share the CPU and the software "
+                f"encoder, and the timing bars in this file (REDACT_DURATION_S, "
+                f"MAX_BLANK_RUN_S) fail on a recorder that is working — see "
+                f"issue #78. A red run under contention is worse than no run.\n"
+                + (
+                    "  Looks like: " + "\n               ".join(lines) + "\n"
+                    if lines
+                    else "  (pgrep found no other tests/smoke; the holder may "
+                    "have a different command line.)\n"
+                )
+                + "  Wait for it, or pass --allow-concurrent if you know the "
+                "other run is not recording.",
+                file=sys.stderr,
+            )
+            if not allow_concurrent:
+                raise SmokeFailure(
+                    "refusing to run a second smoke suite on this machine"
+                ) from None
+        yield
+    finally:
+        handle.close()
 
 
 def main() -> int:
@@ -8729,6 +9857,18 @@ def main() -> int:
         help="record only the per-beat evidence take (issue #9)",
     )
     parser.add_argument(
+        "--failure-only",
+        action="store_true",
+        help="record only the takes that do not finish (issues #11/#20/#24/#46)",
+    )
+    parser.add_argument(
+        "--allow-concurrent",
+        action="store_true",
+        help="run even when another suite holds the machine lock. The timing "
+        "bars in this file fail under contention (issue #78), so a run that "
+        "needs this flag cannot be read as a verdict.",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         help="where recordings land (default: a fresh temp dir). The web/ and "
@@ -8751,6 +9891,7 @@ def main() -> int:
             ("--redaction-only", args.redaction_only),
             ("--segments-only", args.segments_only),
             ("--evidence-only", args.evidence_only),
+            ("--failure-only", args.failure_only),
         )
         if on
     ]
@@ -8784,33 +9925,8 @@ def main() -> int:
 
     failures: list[str] = []
     try:
-        if only in (None, "--web-only"):
-            failures += run_web(out_root)
-        if only in (None, "--redaction-only"):
-            failures += run_redaction(out_root)
-        if only in (None, "--terminal-only"):
-            failures += run_terminal(out_root)
-        if only in (None, "--segments-only"):
-            failures += run_segments(out_root)
-        # After the graded takes, never instead of them: these five record
-        # nothing worth looking at, and if a recorder is broken the messages
-        # above are the ones that say how.
-        if only in (None, "--web-only"):
-            failures += run_web_problems(out_root)
-            failures += run_strict_web(out_root)
-        if only in (None, "--web-only", "--evidence-only"):
-            failures += run_evidence(out_root)
-        if only in (None, "--terminal-only"):
-            failures += run_terminal_problems(out_root)
-            failures += run_terminal_wrap(out_root)
-            failures += run_terminal_race(out_root)
-            failures += run_strict_terminal(out_root)
-        # Both flags reach it: it is a terminal take and a redaction take, and
-        # whichever half somebody is changing is the half they will run.
-        if only in (None, "--terminal-only", "--redaction-only"):
-            failures += run_terminal_redaction(out_root)
-        if only in (None, "--determinism-only"):
-            failures += run_determinism(out_root)
+        with only_one_suite(args.allow_concurrent):
+            failures += run_phases(only, out_root)
     except SmokeFailure as exc:
         failures.append(str(exc))
 
@@ -8827,6 +9943,45 @@ def main() -> int:
     else:
         print(f"smoke: recordings kept in {out_root}")
     return 0
+
+
+def run_phases(only: str | None, out_root: Path) -> list[str]:
+    """Every phase the chosen flag selects, in order."""
+    failures: list[str] = []
+    if only in (None, "--web-only"):
+        failures += run_web(out_root)
+    if only in (None, "--redaction-only"):
+        failures += run_redaction(out_root)
+    if only in (None, "--terminal-only"):
+        failures += run_terminal(out_root)
+    if only in (None, "--segments-only"):
+        failures += run_segments(out_root)
+    # After the graded takes, never instead of them: these five record
+    # nothing worth looking at, and if a recorder is broken the messages
+    # above are the ones that say how.
+    if only in (None, "--web-only"):
+        failures += run_web_problems(out_root)
+        failures += run_strict_web(out_root)
+    if only in (None, "--web-only", "--evidence-only"):
+        failures += run_evidence(out_root)
+    if only in (None, "--terminal-only"):
+        failures += run_terminal_problems(out_root)
+        failures += run_terminal_wrap(out_root)
+        failures += run_terminal_race(out_root)
+        failures += run_strict_terminal(out_root)
+    # Both flags reach it: it is a terminal take and a redaction take, and
+    # whichever half somebody is changing is the half they will run.
+    if only in (None, "--terminal-only", "--redaction-only"):
+        failures += run_terminal_redaction(out_root)
+    if only in (None, "--determinism-only"):
+        failures += run_determinism(out_root)
+    # What a take that did *not* finish leaves behind. Last, because every
+    # phase above records a take that works, and reading "crash-web wrote no
+    # demo.mp4" before "web wrote no demo.mp4" would send somebody to the
+    # wrong place.
+    if only in (None, "--failure-only"):
+        failures += run_failure(out_root)
+    return failures
 
 
 if __name__ == "__main__":

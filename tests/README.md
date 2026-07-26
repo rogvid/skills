@@ -36,9 +36,21 @@ tests/smoke --determinism-only    # just the three re-recording takes
 tests/smoke --redaction-only      # just the secret-redaction takes
 tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --evidence-only       # just the per-beat evidence takes
+tests/smoke --failure-only        # just the takes that do not finish
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
+
+**One suite at a time, per machine.** The script takes an exclusive `flock` on
+`$TMPDIR/demo-video-smoke.lock` and refuses to start while another run holds
+it. This is not tidiness: two suites share the CPU and the software encoder,
+and the bars that measure *time* — `REDACT_DURATION_S`, `MAX_BLANK_RUN_S` — go
+red on a recorder that is working perfectly. Two such false failures cost an
+afternoon, and worse, they made a genuine intermittent bug undiagnosable
+because every red run had a second, more plausible explanation.
+[#78](https://github.com/rogvid/skills/issues/78) is about the bars themselves
+and stays open. `--allow-concurrent` overrides the refusal; a run that needed
+it cannot be read as a verdict.
 
 Prerequisites: `uv`, `ffmpeg`/`ffprobe` on PATH, and Chromium for Playwright
 (`uv run --with playwright playwright install chromium`; add `--with-deps` on a
@@ -138,8 +150,8 @@ all (see Known gaps).
 
 ## What it asserts
 
-Eight independent axes, because a recorder can fail on any one of them while
-looking perfect on the other seven.
+Nine independent axes, because a recorder can fail on any one of them while
+looking perfect on the other eight.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -1335,10 +1347,73 @@ two, and reverting the elasticity puts that string back in the log.
 `tests/smoke --evidence-only` records just the evidence take and the refusal
 take, which is what makes an injection loop over this axis affordable.
 
+### Failure artifacts — what a take that did *not* finish leaves behind
+
+Every axis above records a take that works. This one records six that do not,
+and grades one sentence: **after an abnormal exit, every artifact present is
+either current, or absent, or explicitly marked stale.**
+
+| take | the way out of the `with` | what it grades |
+|---|---|---|
+| `crash-web` | a `wait_for()` timeout | the common case: mp4, timeline, `failure/`, marker |
+| `crash-no-evidence` | a `wait_for()` timeout, `evidence=False` | that the crash dump masks a `redact()`ed value that was never registered. The only thing that reads what the mask hides is a harvest off the live page, and per-beat evidence — which does that on the clean path — is switched off here |
+| `crash-terminal` | a `wait_for_text()` timeout | the same, where `failure/screen.txt` is the *only* account of what went wrong — a TUI's state is not recoverable from a frame |
+| `crash-interrupt` | `KeyboardInterrupt` inside a `pause` beat | `BaseException`, not `Exception`. A handler written for the latter misses a Ctrl-C entirely, and a Ctrl-C on a hung demo is exactly the take somebody is about to look at |
+| `crash-between` | a raise in storyboard code, no beat open | the *absence* of a confidently wrong attribution: no beat may claim a failure it did not cause |
+| `stale-media` | ffmpeg cannot write `demo.mp4` | `duration: null` beside a previous run's recording, no review frames off it, and a stderr line saying so |
+| `marker-cleared` | it succeeds, into a folder a failure left | the marker and the stale dump are removed. A marker that outlives its run is the same lie inverted |
+
+Plus `refused-take-marker`, which reads the directory `redaction-unmatched`
+leaves rather than recording again — that is the only path that writes
+*nothing*, which is what makes the marker the whole defence there.
+
+Three things about how these are built are worth knowing before trusting them:
+
+- **`stale-media` reaches its state without monkeypatching anything.** The
+  recorder runs unmodified; a real, probeable `demo.mp4` is planted and made
+  mode-444, so ffmpeg fails for a reason that happens to people (a file this
+  process may read and may not overwrite) and the stale recording survives to
+  be probed. Both halves of that premise are asserted: the planted file has to
+  still be there afterwards, and it has to be probeable — without the second,
+  `duration is null` would also be true of a broken fix and the assertion would
+  grade nothing. The arm refuses to run as root rather than passing silently.
+- **The beat-`error` check is a bound in both directions.** Exactly one beat
+  may carry `error` on the three arms that fail inside a verb, and *none* may
+  on the arm that fails between them. Blanket-stamping every beat fails it just
+  as removing the key does.
+- **`failure/last-frame.png` is graded for picture, not existence.** ffmpeg
+  writes a file for a blank video too, so it is scored on luma standard
+  deviation against the same 6.0 floor the web stills use — which transitively
+  says `demo.mp4` has a picture where it stopped.
+
+The secret-input checks (`register_secret`'s 8-character floor,
+`caption(Secret(...))`) run in the same phase and record nothing: both raise
+before a page is used, so they cost a `Recorder(...)` construction and no
+browser. The floor is tested **at** 8 characters and **at** 7, because a floor
+only tested from well inside it is a constant nothing pins.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
+
+- **The failure arms do not cover a dead browser.** If Chromium itself goes
+  away, the final redaction check cannot run, the take is treated as
+  unverifiable, and it keeps nothing but the marker — which is the correct
+  policy and is not exercised here. What *is* exercised is the storyboard
+  raising while the page is alive, which is the ordinary case.
+- **The `SecretLeak` raised out of `_build_failure` is unreachable in the
+  suite.** `crash-no-evidence` grades the dump's masking on a page holding a
+  redacted value and a registered one, and finds neither. What nothing reaches
+  is the *refusal* — a dump that still holds a forbidden literal after masking,
+  which must raise and leave no `failure/`, no mp4 and no timeline. The
+  masking would have to be broken for that path to run.
+- **A conversion failure writes no `failure/` dump**, only the marker, the
+  timeline with `duration: null` and the stderr line. The dump is built from
+  the exception that came out of the `with`, before conversion is attempted,
+  so a failure that happens *after* that point has nowhere to land. Stated
+  rather than fixed: building it afterwards would mean a mask refusal could
+  arrive with the mp4 already on disk.
 
 - **A total stylesheet failure is below the luma floor.** Measured with real
   screenshots: unstyled-HTML fallback scores 9.97, a sparse white page 3.54, an
