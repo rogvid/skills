@@ -1,0 +1,67 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Read the support queue from the command line.
+
+    ./tickets list
+    ./tickets show TQ-104
+
+Reads the same data/tickets.json the web front end serves.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+DATA = Path(__file__).resolve().parent / "data" / "tickets.json"
+
+
+def load() -> list[dict]:
+    return json.loads(DATA.read_text())
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    rows = load()
+    print(f"{'ID':<8} {'STATUS':<10} TITLE")
+    for t in rows:
+        print(f"{t['id']:<8} {t['status']:<10} {t['title']}")
+    print(f"\n{len(rows)} tickets")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    for t in load():
+        if t["id"].upper() == args.id.upper():
+            print(f"{t['id']}  {t['title']}")
+            print(f"status     {t['status']}")
+            print(f"requester  {t['requester']}")
+            print(f"opened     {t['opened']}")
+            print()
+            print(t["body"])
+            return 0
+    print(f"no such ticket: {args.id}", file=sys.stderr)
+    return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="tickets", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_list = sub.add_parser("list", help="list the queue")
+    p_list.set_defaults(func=cmd_list)
+
+    p_show = sub.add_parser("show", help="show one ticket")
+    p_show.add_argument("id")
+    p_show.set_defaults(func=cmd_show)
+
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -43,6 +43,16 @@ or installed. (You can still pull one directly by path if you want to try it.)
 
 *Nothing in development right now.*
 
+## Examples
+
+[`examples/`](examples/) holds applications the skills are exercised against.
+They are not skills and are not installed: `examples/` contains no `SKILL.md`,
+so the installer's one-level-deep root walk never sees it.
+
+| Example | What it is |
+|---|---|
+| [`ticket-queue`](examples/ticket-queue/) | A deliberately boring support-ticket queue — a web front end and a CLI over one JSON file — recorded by the `demo-video` reference PR ([#64](https://github.com/rogvid/skills/issues/64)). |
+
 ## Issues
 
 Planned work, bugs, and design proposals live in

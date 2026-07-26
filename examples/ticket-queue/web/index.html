@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ticket queue</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#queue">Skip to the queue</a>
+
+    <header class="topbar">
+      <h1 id="queue-heading">Support queue</h1>
+      <p class="subtitle">Tickets waiting on the support team.</p>
+    </header>
+
+    <main class="layout">
+      <section id="queue" aria-labelledby="queue-heading">
+        <ul id="ticket-list" class="ticket-list"></ul>
+      </section>
+
+      <aside id="detail" class="detail" aria-live="polite">
+        <p class="detail-empty">Select a ticket to see the detail.</p>
+      </aside>
+    </main>
+
+    <div id="assign-modal" class="modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-label="Assign ticket">
+        <h2>Assign ticket</h2>
+        <label for="assignee">Assign to</label>
+        <select id="assignee">
+          <option>Support rota</option>
+          <option>Billing</option>
+          <option>Platform</option>
+        </select>
+        <div class="modal-actions">
+          <button id="assign-cancel" type="button">Cancel</button>
+          <button id="assign-confirm" type="button" class="primary">Assign</button>
+        </div>
+      </div>
+    </div>
+
+    <p id="live-status" class="visually-hidden" role="status"></p>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
