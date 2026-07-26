@@ -1409,6 +1409,95 @@ class Recorder(_DemoBase):
                 f"was written."
             )
 
+    def _failure_screen(self) -> str | None:
+        """The page's accessibility tree, for `failure/screen.txt` (issue #11).
+
+        The DOM the issue asks for, in the form the rest of this package
+        already publishes it: `aria_snapshot` is semantic, an order of
+        magnitude smaller than the markup, and — unlike `document.body
+        .outerHTML` — carries neither inline `<script>` text nor `srcdoc`
+        documents that were never on screen. The URL and title go with it,
+        because "which page was it even on" is the first question a crash
+        raises and neither is recoverable from a frame.
+
+        Captured independently of `evidence=…`. Per-beat evidence answers "what
+        did the page look like at the end of beat 7"; this answers "what did it
+        look like when it died", which is a different moment — the failing
+        verb ran after that capture — and it has to be there when evidence is
+        switched off, because a crash is when it is wanted most.
+
+        Called from `__exit__` **before** `_verify_redaction_final()`, so the
+        mask this text is checked against is the same one the verifier is about
+        to vouch for.
+
+        **It harvests, and that is what makes the dump maskable at all.**
+        `_evidence_forbidden()` is the registered secrets *plus*
+        `self._evidence_masks`, and the only thing that ever filled that set
+        was `_evidence_payload` — which runs under `if self._evidence_on`. So
+        with `evidence=False` the forbidden list collapsed to the registered
+        secrets alone, and `redact()` registers no text: it is a pixel control
+        that covers where a value renders and leaves the value in the DOM,
+        which is exactly what an ARIA tree dumps. Measured on one storyboard
+        run twice with only the flag differing, `redact("#api-key")` and no
+        `register_secret()`: with evidence on, no file held the key; with it
+        off, `failure/screen.txt` held the line `- code: sk-live-FAKE…` in the
+        clear. That is not a dead branch — `evidence=False` is a documented
+        kwarg and env var, and `_write_evidence` *recommends* it on stderr for
+        apps with large accessibility trees, i.e. precisely the apps whose
+        dump is biggest.
+
+        The harvest runs on **both sides** of the snapshot and the two must
+        agree, exactly as `_evidence_payload` does and for the same reason: a
+        card rewritten on a `setInterval` hands the harvest one value and the
+        snapshot the next, and a mask built from a reading the snapshot never
+        saw is a mask with a hole in it. Both readings feed the mask either
+        way; if they will not settle, the page text is withheld and says so,
+        rather than being written from a mask known to be out of date.
+
+        No `_checkpoint()` first, unlike `_evidence_payload`, and deliberately.
+        `_harvest()` re-resolves the registered selectors itself rather than
+        trusting the marker, so it does not need a freshly applied mask — and a
+        checkpoint here would raise `SecretLeak` inside `_capture_failure_screen`,
+        whose whole job is to never raise. `_verify_redaction_final()` runs on
+        the very next statement and re-syncs; a mask that has come off fails
+        the take there, where the refusal is not swallowed.
+        """
+        if not self._redacted:
+            return self._failure_page_text()
+        for _ in range(EVIDENCE_HARVEST_TRIES):
+            before, outside = self._harvest()
+            text = self._failure_page_text()
+            after, outside_after = self._harvest()
+            self._evidence_masks.update(before)
+            self._evidence_masks.update(after)
+            # Bounded like the per-beat path, and erring the same way: past the
+            # bound the recorder stops learning that a string renders in the
+            # clear, which over-masks rather than under-masks.
+            if len(self._evidence_outside) < EVIDENCE_OUTSIDE_MAX:
+                self._evidence_outside.add(outside)
+                self._evidence_outside.add(outside_after)
+            if set(before) == set(after):
+                return text
+        return (
+            f"[demo-video: what redact() is covering changed "
+            f"{EVIDENCE_HARVEST_TRIES} times while this page was being read at "
+            f"the end of the take, so the mask could not be built from what "
+            f"the snapshot actually saw. No page text was written for this "
+            f"failure. The last frame, the console log and the failing beat "
+            f"are unaffected.]"
+        )
+
+    def _failure_page_text(self) -> str:
+        """The ARIA tree, the URL and the title, as one document."""
+        aria, aria_format = self._aria(self.page.locator("body"))
+        head = [f"url: {self.page.url}"]
+        try:
+            head.append(f"title: {self.page.title()}")
+        except Exception:  # noqa: BLE001 - a dying page still has a URL
+            head.append("title: (unreadable)")
+        head.append(f"aria_format: {aria_format}")
+        return "\n".join([*head, "", aria or "(no accessibility snapshot)"])
+
     def _before_shot(self) -> None:
         """Re-assert and re-verify the mask immediately before a still.
 

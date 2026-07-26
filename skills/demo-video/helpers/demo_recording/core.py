@@ -379,6 +379,23 @@ def _clock_epoch_ms(value: str) -> int:
 # tool mangled my output".
 SECRET_MASK = "[redacted]"
 
+# Shortest value `register_secret()` will accept.
+#
+# The floor is not a guess about what a secret looks like — it is a bound on
+# what registering one *costs everything else*. A registered value is replaced
+# by `scrub()` wherever it appears: in a beat's `selector`, in a still's
+# filename, in caption text, in every line of terminal output, and in every
+# evidence file. `register_secret("1234")` therefore rewrites a `:nth-child(1234)`
+# selector, an account number in an unrelated table, and the `1234` in a
+# timestamp — and the damage reads exactly like redaction working, which is the
+# one failure mode that never gets noticed.
+#
+# Eight, because that is where a literal stops colliding with ordinary output by
+# accident and starts being a value somebody chose. Below it the honest control
+# is `redact()`, which covers the pixels an element paints and touches no text
+# at all — so a four-digit PIN is still hideable, just not by find-and-replace.
+SECRET_MIN_LEN = 8
+
 
 class SecretLeak(RuntimeError):
     """A registered secret reached something that leaves the machine.
@@ -535,6 +552,13 @@ def tts_clip(
 #                          merged demo: only if it was on for every segment)
 #   issues        list   — the problems the take recorded (see "take issues")
 #   issue_count   int    — how many were seen; > len(issues) only if capped
+#   failure       dict?  — **absent** from a take that exited cleanly, which is
+#                          what makes its presence mean something. On an
+#                          abnormal exit: `type` and `message` of what came out
+#                          of the `with`, `beat` (index of the beat whose verb
+#                          raised, or null when the failure happened between
+#                          beats) and that beat's `verb`. See "failure
+#                          artifacts" below.
 #
 # Beat
 #   index     int    — position in `beats`, 0-based. Renumbered by `stitch`, so
@@ -563,6 +587,14 @@ def tts_clip(
 #                      evidence capture is off. See "per-beat evidence" below
 #   exit_code int?   — TerminalRecorder `run` beats only: the shell's status
 #                      for that command, or null if it could not be read
+#   error     dict?  — **absent** on a verb that returned. Present, with the
+#                      exception's `type` and its scrubbed `message`, on a verb
+#                      that raised. Absent-on-success rather than
+#                      `error: null`-on-success on purpose: a consumer asking
+#                      "did this beat do what it says" wants the answer to be
+#                      structurally missing when there is nothing to say, and
+#                      a take recorded before this key existed then reads the
+#                      same way as one that succeeded. See issue #24.
 #
 # Only the verb a storyboard calls becomes a beat. The verbs recorders build
 # out of other verbs (`click` glides with `move_to`, `type_into` clicks first)
@@ -846,10 +878,47 @@ def render_timeline_md(doc: dict) -> str:
         "Written by the demo-video recorder when it stitched the segments "
         "below — do not edit it by hand, re-stitch instead."
         if segments
+        else "Written by the demo-video recorder when the take that produced "
+        "it *failed* — do not edit it by hand, fix the storyboard and "
+        "re-record."
+        if doc.get("failure")
         else "Written by the demo-video recorder on every clean exit — do not "
         "edit it by hand, re-record instead.",
         "",
     ]
+    # Before the beat table, not after it. A reader who opens this file after a
+    # crash is reading it *because* something went wrong, and a timeline that
+    # only mentions the failure in a footnote is the artifact-lies problem in
+    # miniature — the table above it looks like an ordinary take's.
+    failure = doc.get("failure")
+    if isinstance(failure, dict):
+        where = (
+            f"beat {failure['beat']} (`{_md_cell(failure.get('verb'))}`)"
+            if failure.get("beat") is not None
+            else "between beats — no verb was running, so no beat is blamed"
+        )
+        out += [
+            "## This take did not finish",
+            "",
+            f"It came out of the `with` block on a "
+            f"**{_md_cell(failure.get('type'))}**, at {where}.",
+            "",
+            f"> {_md_cell(failure.get('message'))}",
+            "",
+            f"Everything below was still written — a broken take is the one "
+            f"somebody wants to look at. `{FAILURE_DIR}/` beside this file has "
+            f"the last frame, the console log, the page text and the failing "
+            f"beat; `{FAILURE_MARKER}` says the same thing to anyone who only "
+            f"opens the folder."
+            + (
+                ""
+                if doc.get("duration") is not None
+                else f" **No mp4 was encoded by this take**, so `duration` is "
+                f"null; any `{doc.get('media') or 'demo.mp4'}` in this folder "
+                f"is a previous run's."
+            ),
+            "",
+        ]
     if segments:
         spans = ", ".join(
             f"`{s.get('segment')}` "
@@ -879,11 +948,20 @@ def render_timeline_md(doc: dict) -> str:
         ]
     for beat in beats:
         target = beat.get("selector")
+        # A beat whose verb raised is marked in the table itself, not only in
+        # the JSON. `t_start` and `t_end` are stamped either way, so without
+        # this the row is indistinguishable from a row that worked (issue #24).
+        error = beat.get("error")
         cells = [
             str(beat.get("index")),
             _fmt_t(beat.get("t_start")),
             _fmt_t(beat.get("t_end")),
-            f"`{_md_cell(beat.get('verb'))}`",
+            f"`{_md_cell(beat.get('verb'))}`"
+            + (
+                f" **raised {_md_cell(error.get('type'))}**"
+                if isinstance(error, dict)
+                else ""
+            ),
             f"`{_md_cell(target)}`" if target else "",
         ]
         if shows_exit:
@@ -1008,6 +1086,73 @@ SCENE_MAX_EXTRA = 3
 # Keep the last frame inside the file: an -ss exactly at the duration decodes
 # nothing.
 _FRAME_EDGE_S = 0.05
+
+
+# -- failure artifacts (issues #11, #20, #24, #32, #46) ----------------------
+#
+# What a take leaves behind when it does not finish. The rule the whole section
+# is built to satisfy: **after an abnormal exit, every artifact present is
+# either current, or absent, or explicitly marked stale.** Three things used to
+# violate it, and all three lived in `__exit__`:
+#
+#   * a take that raised converted nothing and wrote nothing, so the one
+#     recording anybody wanted to look at was deleted with `.video/` (#32).
+#     In CI there is no screen, so that means blind retries.
+#   * `_timeline_doc()` probed `demo.mp4` unconditionally, so a take that wrote
+#     no mp4 reported the *previous* take's duration beside this take's beats
+#     (#20) — and `stitch()` offsets segment timelines by exactly that number.
+#   * a failed re-record left the previous run's `demo.mp4` sitting in the
+#     folder looking current (#46), which in a review gate produces a confident
+#     approval of something that was never recorded.
+#
+# What is written now, on any abnormal exit the recorder is allowed to keep
+# artifacts from:
+#
+#   demo.mp4              the partial recording, converted from the webm that
+#                         was already in hand
+#   timeline.json/.md     the beats, with `error` on the one that raised (#24)
+#                         and `failure` on the envelope
+#   failure/              this section: a self-contained account of the crash
+#   demo-video-FAILED.md  the marker (#46), written whether or not anything
+#                         else was, and deleted by the next take that succeeds
+#
+# **The redaction ordering is the constraint that shapes all of it.** A crash
+# dump of a page mid-secret is the worst leak path this package has, and
+# `_verify_redaction_final()` — the thing that decides whether *any* of it may
+# be kept — runs after `_stop()` and vouches for the page as it then is.
+# So nothing here reads the page after that point:
+#
+#   * the last frame is extracted from `demo.mp4` with ffmpeg. It is a frame of
+#     the recording the verifier already vouched for, so it inherits the whole
+#     guarantee and costs no page access at all;
+#   * the DOM / terminal screen is read **once, before** the verifier runs
+#     (`_failure_screen()`), buffered in memory, and only masked and written
+#     after the verifier has passed;
+#   * the console log and the failing beat were in memory the whole time.
+#
+# Everything textual then goes through `_evidence_forbidden()` — the registered
+# secrets *and* the harvested rendered text of everything `redact()` covers —
+# is masked with it, and is checked with `_evidence_holds()` over the serialized
+# bytes. A document that still holds a forbidden literal raises `SecretLeak`,
+# and it raises it while the dump is still in memory, so the failure cannot
+# leave half a directory behind. That is the same shape `_build_evidence()` /
+# `_write_evidence()` already have, for the same reason.
+FAILURE_DIR = "failure"
+FAILURE_SCHEMA = 1
+
+# The marker (#46). Named visibly rather than as the dotfile the issue sketched
+# (`.demo-video-failed`): the artifact it exists to contradict is a `demo.mp4`
+# somebody is about to watch, and a hidden file next to it is exactly as easy
+# to miss as the problem. `ls` shows this one, and so does a file browser.
+FAILURE_MARKER = "demo-video-FAILED.md"
+
+# How much of an exception message reaches the marker and the dump. A
+# `wait_for_text()` timeout quotes a thousand characters of terminal screen,
+# and a Playwright error quotes the selector, a call log and a page snippet;
+# past a point that is a file nobody opens rather than a report. The timeline's
+# per-beat `error.message` is **not** capped — it is the machine-readable copy
+# and something may want to match on it — so nothing is lost by capping here.
+FAILURE_MESSAGE_CHARS = 2_000
 
 
 def frames_paths(out_dir: Path | str) -> tuple[Path, Path, Path]:
@@ -1249,8 +1394,9 @@ def render_frames_md(manifest: dict) -> str:
         "One frame per beat of the demo — per thing the storyboard did — rather "
         "than one every N seconds, so nothing the demo does is missed and a "
         "held frame is photographed once. Read them in order. Written by the "
-        "demo-video recorder on every clean exit; re-record rather than editing "
-        "it.",
+        "demo-video recorder whenever it encodes an mp4 — which now includes a "
+        "take that crashed, whose recording stops where the storyboard gave up "
+        "(see `failure/`); re-record rather than editing it.",
         "",
         "**They are not captioned, on purpose.** The recorder knows which line "
         "was on screen during each *beat*, but the beat log and the video run "
@@ -1488,6 +1634,18 @@ class _DemoBase:
         # Stills this take wrote, so a take that fails to verify its mask can
         # take them back off disk (they are full-bleed, and may hold it).
         self._shots: list[Path] = []
+        # Did *this* take encode an mp4? Not "is there an mp4 in the folder" —
+        # that question has a stale answer, and every consumer of it was
+        # reading the previous run's file: `duration` in timeline.json (issue
+        # #20), the review frames extracted off `media`, and the last frame in
+        # `failure/`. Set in `_convert`, after ffmpeg returns.
+        self._converted = False
+        # The medium's screen, read once on the failure path *before* the final
+        # redaction check vouches for it, and turned into a file only if that
+        # check passes. See the "failure artifacts" section.
+        self._failure_screen_text: str | None = None
+        self._failure_json: dict | None = None
+        self._failure_docs: list[tuple[Path, str]] = []
         # Per-beat evidence (see "per-beat evidence" above). Buffered as
         # (beat record, medium payload) and only turned into files on a clean
         # exit — nothing plaintext reaches the disk before the mask has been
@@ -1595,11 +1753,30 @@ class _DemoBase:
 
         Typing a `Secret` registers it for you; call this directly for a value
         the demo does not type but the app displays, or that a command prints.
+
+        Values shorter than `SECRET_MIN_LEN` are refused. Registering one is
+        find-and-replace over every text artifact the take writes, and a short
+        literal matches ordinary output — see `SECRET_MIN_LEN`. The error names
+        the length, never the value: an exception message ends up in terminal
+        scrollback, CI logs and bug reports, which is the set of places this
+        method exists to keep the value out of.
         """
         for value in values:
             text = value.reveal() if isinstance(value, Secret) else value
             if not isinstance(text, str) or not text:
                 raise ValueError("register_secret() takes non-empty strings")
+            if len(text) < SECRET_MIN_LEN:
+                raise ValueError(
+                    f"register_secret() was given a {len(text)}-character "
+                    f"value, and the floor is {SECRET_MIN_LEN}. Registering is "
+                    f"a literal find-and-replace over the beat log, the still "
+                    f"filenames, the caption text, every line of terminal "
+                    f"output and every evidence file — a value this short "
+                    f"matches things that are not it (a selector, an index, a "
+                    f"timestamp), and the corruption reads as redaction "
+                    f"working. To hide a short value on screen use redact(), "
+                    f"which covers the pixels and rewrites no text."
+                )
             if text not in self._secrets:
                 self._secrets.append(text)
 
@@ -1645,14 +1822,35 @@ class _DemoBase:
             return [self._scrub_deep(item) for item in value]
         return value
 
-    def _no_secrets(self, text: str, where: str) -> None:
+    def _no_secrets(self, text: "str | Secret", where: str) -> None:
         """Raise unless `text` is free of every registered secret.
 
         The message never contains the secret: it names the leak site and
         quotes the *scrubbed* line, which is enough to find the offending
         storyboard line without writing the value into a terminal, a CI log,
         or a bug report.
+
+        A `Secret` handed in where a string belongs is refused here rather than
+        left to fail somewhere downstream, and this is the single choke point
+        every authored-text verb already goes through — `caption`,
+        `interlude`, `terminal`, `terminal_close`, `run`, `key`, `send`, and
+        `_prepare_line`. `Secret` is deliberately not a `str` (see its
+        docstring), so `caption(Secret(v))` used to die three different obscure
+        deaths depending on whether the registry happened to be empty: a
+        `TypeError: argument of type 'Secret' is not iterable` from `secret in
+        text`, or a serialization failure much later, or nothing until the
+        value reached the TTS cache. None of them said what was wrong.
         """
+        if isinstance(text, Secret):
+            raise SecretLeak(
+                f"{where} was given a Secret, and a Secret is the one thing it "
+                f"can never take: a caption is burned into every frame and "
+                f"spoken aloud, and the other authored-text verbs are drawn on "
+                f"screen the same way. Secret() exists to be typed, not shown "
+                f"— pass it to type_into() or send(). If the *words* need to "
+                f"mention it, reword them; if the value has to be on screen "
+                f"and hidden, that is redact()."
+            )
         if not text:
             return
         for secret in self.secrets:
@@ -1764,6 +1962,15 @@ class _DemoBase:
         if exc_type is None:
             self._finish_line(tail=0.5)  # don't end mid-sentence
         self._stop()
+        # The one page read the failure path adds, and it goes **here**: after
+        # `_stop()` has flushed whatever the medium was withholding, and before
+        # the verifier below vouches for the page. Reading it after the
+        # verifier would be dumping page text that nothing had checked — a
+        # post-verification window, which is the class of hole this ordering
+        # exists to close. Buffered in memory; it becomes a file only if the
+        # verifier passes and only after `_build_failure` has masked it.
+        if exc_type is not None:
+            self._capture_failure_screen()
         try:
             self._verify_redaction_final()
         except SecretLeak as leak:
@@ -1791,9 +1998,30 @@ class _DemoBase:
         # beat, touches no page, and writes no file. Nothing here can add
         # content to the recording after the verifier has vouched for it, which
         # is the property the ordering above exists to protect.
-        if exc_type is None and unmasked is None:
+        #
+        # It runs on the **failure** path too now, and that is issue #11 step 1
+        # rather than a liberty: every beat in the timeline this take is about
+        # to write carries an `evidence` path, so writing that timeline while
+        # skipping this would point every beat at a file that is not there.
+        # The refusal is unchanged — a document that cannot be made safe raises
+        # SecretLeak here, before anything has been written, and then nothing
+        # is.
+        #
+        # `failure/` is built in the same breath and for the same reason: a
+        # crash dump of a page mid-secret is the worst leak path this package
+        # has, so it is masked, checked and refused in memory rather than
+        # written and regretted.
+        failure: dict | None = (
+            None if exc_type is None else self._failure_summary(exc_type, exc)
+        )
+        leaked = unmasked is not None or (
+            exc_type is not None and issubclass(exc_type, SecretLeak)
+        )
+        if not leaked:
             try:
                 self._build_evidence()
+                if failure is not None:
+                    self._build_failure(failure)
             except SecretLeak as leak:
                 unmasked = leak
             except Exception as exc_build:  # noqa: BLE001 - same verdict
@@ -1808,16 +2036,48 @@ class _DemoBase:
                     f"recorder cannot say whether it holds a registered or "
                     f"redacted value. This take wrote no mp4."
                 )
-        clean = exc_type is None and unmasked is None
+        # **`keep`, not `clean`** — and that one word is issue #11 (with #32).
+        # The old guard was `exc_type is None`, so a storyboard that raised
+        # threw away the webm the browser already had in hand, wrote no beat
+        # log for beats that were sitting in memory, and left nothing at all
+        # behind. In CI, where there is no screen to look at, that means blind
+        # retries — and #3 had already settled the principle in the other
+        # direction: a strict take fails *after* writing every artifact,
+        # because a broken take is precisely the one somebody wants to see.
+        #
+        # What still keeps nothing is a leak, and only a leak. That distinction
+        # is the whole of `leaked` above: an unverifiable mask means the
+        # recording, the stills and the beat log may each hold the value, and
+        # an artifact nobody can vouch for is worse than no artifact.
+        keep = not leaked and unmasked is None
+        convert_error: BaseException | None = None
         video = self.page.video
         self._context.close()
         webm = Path(video.path()) if video else None
         self._browser.close()
         self._pw.stop()
         try:
-            if clean and webm and webm.exists():
-                self._convert(webm)
-            if clean:
+            if keep and webm and webm.exists():
+                try:
+                    self._convert(webm)
+                except Exception as exc_convert:  # noqa: BLE001 - see below
+                    # ffmpeg failing must not also cost the beat log. It is the
+                    # only remaining way a take writes a timeline and no mp4,
+                    # and it is exactly the state issue #20 is about: the
+                    # folder may still hold a *previous* run's demo.mp4, and
+                    # `_timeline_doc` now reports `duration: null` rather than
+                    # that file's length. Re-raised at the end if nothing else
+                    # is already on its way out.
+                    convert_error = exc_convert
+                    print(
+                        f"demo-video: WARNING — ffmpeg could not convert this "
+                        f"take's recording ({type(exc_convert).__name__}: "
+                        f"{exc_convert}). The beat log is still written, with "
+                        f"duration: null; no review frames were extracted, "
+                        f"because the only mp4 here would be a previous run's.",
+                        file=sys.stderr,
+                    )
+            if keep:
                 # Before the timeline, because every beat in it carries an
                 # `evidence` path: a timeline pointing at files that are not
                 # there yet is the one ordering a reader can be caught by.
@@ -1825,10 +2085,19 @@ class _DemoBase:
                 # The beat log is the durable, diffable record of the take — it
                 # outlives the mp4, which is not committed. Written after
                 # conversion so `duration` is the encoder's answer, not a guess.
-                doc = self._timeline_doc()
+                doc = self._timeline_doc(failure)
                 json_path, _ = write_timeline(self.out_dir, doc)
                 print(f"wrote {json_path} ({len(self._beats)} beats)")
-                self._write_beat_frames(doc)
+                if failure is not None:
+                    self._write_failure()
+                # Only off a recording *this* take encoded. `beat_frames()`
+                # otherwise reads `media` out of the timeline, finds a previous
+                # run's demo.mp4 sitting there, and hands a reviewer a sheet of
+                # frames from a different recording under this take's beat
+                # names — the same lie as the stale `duration` (issue #20), one
+                # directory down.
+                if self._converted:
+                    self._write_beat_frames(doc)
         finally:
             # Whatever went wrong above, don't leave .video/ behind — the
             # next take into this directory would trip over it.
@@ -1849,6 +2118,50 @@ class _DemoBase:
                 exc_type is not None and issubclass(exc_type, SecretLeak)
             ):
                 self._discard_artifacts()
+            # The marker (#46), and its removal, in the one place that runs on
+            # every path out of `__exit__`.
+            #
+            # The condition is "this take did not write its own complete set of
+            # artifacts", and it is deliberately wider than "the storyboard
+            # raised". Three ways to get there, and the second is the one the
+            # issue is actually about:
+            #
+            #   exc_type        the storyboard raised. demo.mp4 is this take's,
+            #                   partial, and the marker says so.
+            #   unmasked        the mask could not be verified, so this take
+            #                   keeps *nothing* — and what it does not touch is
+            #                   what a previous run left in the same folder.
+            #                   That folder is the one in #46: a watchable
+            #                   demo.mp4, an emptied images/, and last week's
+            #                   timeline.json. The marker is the entire defence
+            #                   there, because it is the only file written.
+            #   convert_error   the storyboard finished and ffmpeg did not, so
+            #                   the timeline is this week's and any mp4 is not.
+            #
+            # A strict failure is none of these: it writes every artifact and
+            # they are all current, so its marker is cleared like any success's.
+            marker_failure = failure
+            if marker_failure is None and unmasked is not None:
+                marker_failure = {
+                    "type": type(unmasked).__name__,
+                    "message": str(unmasked)[:FAILURE_MESSAGE_CHARS],
+                    "beat": None,
+                    "verb": None,
+                }
+            if marker_failure is None and convert_error is not None:
+                marker_failure = {
+                    "type": type(convert_error).__name__,
+                    "message": str(convert_error)[:FAILURE_MESSAGE_CHARS],
+                    "beat": None,
+                    "verb": None,
+                }
+            if marker_failure is not None:
+                self._write_failure_marker(marker_failure)
+                if failure is not None:
+                    self._report_failure(failure, wrote_dump=keep)
+            else:
+                self._clear_failure_marker()
+                self._clear_failure_dir()
             # Always, strict or not, crashed or not: the problems a take
             # recorded are the one thing nobody thinks to go looking for, so
             # they have to arrive unasked.
@@ -1878,6 +2191,13 @@ class _DemoBase:
                 print(f"demo-video: {unmasked}", file=sys.stderr)
                 return
             raise unmasked
+        # A storyboard that raised propagates its own exception — returning
+        # None from here is what lets it. Only when nothing is already on its
+        # way out does the encoder failure get to be the take's verdict; it
+        # must not replace a wait_for_text() timeout, which is the message that
+        # says what to fix.
+        if exc_type is None and convert_error is not None:
+            raise convert_error
         if exc_type is None and self._strict and self._fatal_count:
             raise StrictTakeFailed(self._strict_message())
 
@@ -2147,6 +2467,29 @@ class _DemoBase:
         self._beats.append(record)
         try:
             yield record
+        except BaseException as raised:
+            # A verb that threw did not do what its beat says it did, and the
+            # `finally` below closes the record either way — so without this
+            # the beat carries a plausible `t_start`, a plausible `t_end`, and
+            # nothing at all to tell it from one that returned. That was
+            # invisible while an exception meant no timeline was written; it
+            # stops being invisible the moment anything catches, which is what
+            # `__exit__` now does (issue #11), and it is a lie a conformance
+            # gate reading this file would believe (issue #12).
+            #
+            # `BaseException`, not `Exception`: a Ctrl-C on a hung demo is
+            # exactly the take somebody is about to go looking at, and
+            # `KeyboardInterrupt` does not derive from `Exception`.
+            #
+            # Scrubbed at record time as well as on the way out. The message is
+            # not the recorder's: `wait_for_text()` quotes a thousand
+            # characters of terminal screen into its timeout, and that screen
+            # can hold anything the program printed.
+            record["error"] = {
+                "type": type(raised).__name__,
+                "message": self.scrub(str(raised)),
+            }
+            raise
         finally:
             # Captured before `t_end` is stamped, so the round trips it costs
             # are accounted for *inside* the beat that paid for them and no
@@ -2562,20 +2905,491 @@ class _DemoBase:
                 file=sys.stderr,
             )
 
+    # -- failure artifacts (see the section at the top of this file) --------
+
+    def _failure_screen(self) -> str | None:
+        """The medium's page text, for a failure dump. None if it has none.
+
+        Called on the failure path only, **after `_stop()` and before
+        `_verify_redaction_final()`** — that slot is the whole design. After
+        `_stop()` because a medium can be sitting on output (the terminal
+        scrubber withholds a trailing fragment and flushes it there), so an
+        earlier reading is not the screen the recording ends on. Before the
+        verifier because the verifier is what decides whether any of this may
+        be kept: read after it, this would be page text nothing has vouched
+        for, which is the exact hole PR #58 was blocked on.
+        """
+        return None
+
+    def _capture_failure_screen(self) -> None:
+        """Buffer `_failure_screen()`. Never raises.
+
+        A page that is already gone is the ordinary reason a take is failing,
+        so a dump that cannot read it says so and carries the console log, the
+        last frame and the failing beat instead. Losing those as well because
+        the DOM was unreadable would be losing the whole point.
+        """
+        try:
+            self._failure_screen_text = self._failure_screen()
+        except Exception as exc:  # noqa: BLE001 - a dump is not a recording
+            self._failure_screen_text = (
+                f"[demo-video: the page text could not be read at the end of "
+                f"this take — {type(exc).__name__}: {exc}]"
+            )
+
+    def _failed_beat(self) -> dict | None:
+        """The beat whose verb raised, or None if the failure was between beats.
+
+        Reads `error`, which `_beat` stamps (issue #24), rather than assuming
+        the last beat is the culprit — a storyboard can raise in its own code
+        between two verbs, and blaming the last beat that *worked* is exactly
+        the confidently-wrong attribution `_attributed_beat` refuses to make
+        for issues.
+        """
+        for beat in reversed(self._beats):
+            if "error" in beat:
+                return beat
+        return None
+
+    def _failure_summary(self, exc_type: type, exc: BaseException | None) -> dict:
+        """What came out of the `with`, and which beat it came out of.
+
+        Unscrubbed: every consumer (`_timeline_doc`, the dump, the marker)
+        masks it on the way to its own file, and each has a different mask.
+        """
+        beat = self._failed_beat()
+        message = str(exc) if exc is not None else ""
+        return {
+            "type": exc_type.__name__,
+            "message": message[:FAILURE_MESSAGE_CHARS],
+            "beat": None if beat is None else beat.get("index"),
+            "verb": None if beat is None else beat.get("verb"),
+        }
+
+    def _failure_doc(self, failure: dict) -> dict:
+        """The machine-readable half of `failure/`, masked and checked.
+
+        Same order and same reasons as `_evidence_doc`: mask first, check the
+        serialized bytes last, raise rather than write. Nothing in here is read
+        from the page — `screen` was buffered before the verifier ran, the
+        issues and the beats have been in memory since they happened, and the
+        media is named rather than opened.
+        """
+        forbidden = self._evidence_forbidden()
+        beat = self._failed_beat()
+        doc: dict = {
+            "schema": FAILURE_SCHEMA,
+            "generated_by": "demo-video",
+            "recorder": type(self).__name__,
+            "segment": self.segment,
+            "when": _dt.datetime.now(_dt.timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+            "failure": failure,
+            # The failing beat in full, not just its index: this file is meant
+            # to answer "which beat, and what was on screen" without anyone
+            # having to open timeline.json and count.
+            "beat": None if beat is None else dict(beat),
+            "beats_recorded": len(self._beats),
+            # What the app said it was doing wrong, whether or not strict was
+            # on. A crash and a console error one beat earlier are the same
+            # story surprisingly often.
+            "issues": [dict(issue) for issue in self._issues],
+            "issue_count": self._issue_count,
+            "media": self._media_path().name,
+            "screen_captured": self._failure_screen_text is not None,
+        }
+        doc = self._evidence_scrub_deep(self._scrub_deep(doc), forbidden)  # type: ignore[assignment]
+        blob = json.dumps(doc, ensure_ascii=False)
+        held = self._evidence_holds(blob, forbidden)
+        if held is not None:
+            raise SecretLeak(
+                f"the failure dump still holds a {len(held)}-character value "
+                f"that is registered or redacted, after masking — so the "
+                f"recorder cannot vouch for what it was about to write. A "
+                f"crash dump of a page mid-secret is the worst leak path this "
+                f"package has, so it is refused whole: no failure/, no mp4, no "
+                f"timeline and no evidence were written."
+            )
+        return doc
+
+    def _failure_md(self, doc: dict) -> str:
+        """The human half. Pure function of the document above, so it inherits
+        its masking rather than re-deriving it."""
+        failure = doc.get("failure") or {}
+        beat = doc.get("beat") or {}
+        where = (
+            f"beat {failure.get('beat')} (`{_md_cell(failure.get('verb'))}`"
+            + (f", target `{_md_cell(beat.get('selector'))}`" if beat.get("selector") else "")
+            + ")"
+            if failure.get("beat") is not None
+            else "between beats — no verb was running when it happened"
+        )
+        out = [
+            "# This take did not finish",
+            "",
+            f"`{doc.get('recorder')}` · {doc.get('when')} · "
+            f"{doc.get('beats_recorded')} beats recorded",
+            "",
+            f"**{_md_cell(failure.get('type'))}** at {where}.",
+            "",
+            f"> {_md_cell(failure.get('message')) or '(no message)'}",
+            "",
+            "## What is here",
+            "",
+            "| file | what it is |",
+            "|---|---|",
+            "| `failure.json` | this, machine-readable: the failing beat in "
+            "full, every issue the take recorded, and what was written |",
+        ]
+        if doc.get("media_written_by_this_take"):
+            out.append(
+                f"| `last-frame.png` | the final frame of "
+                f"`{doc.get('media')}` — what was on screen when it stopped |"
+            )
+        if doc.get("screen_captured"):
+            out.append(
+                "| `screen.txt` | the page's accessibility tree (web) or the "
+                "rendered terminal buffer, read at the end of the take |"
+            )
+        out += ["", "## What the app said", ""]
+        issues = doc.get("issues") or []
+        if not issues:
+            out.append(
+                "Nothing. No console errors, failed requests or non-zero exits "
+                "were recorded, so the app did not announce this."
+            )
+        else:
+            for issue in issues:
+                seat = (
+                    "before the first beat"
+                    if issue.get("beat") is None
+                    else f"beat {issue['beat']} (`{_md_cell(issue.get('verb'))}`)"
+                )
+                out.append(
+                    f"- **{_md_cell(issue.get('kind'))}** — {seat} at "
+                    f"{_fmt_t(issue.get('t'))}s: {_md_cell(issue.get('message'))}"
+                )
+            total = doc.get("issue_count", len(issues))
+            if total > len(issues):
+                out.append(f"- …and {total - len(issues)} more, not recorded.")
+        out += [
+            "",
+            "## The recording",
+            "",
+            (
+                f"`{doc.get('media')}` beside this folder is **this** take's "
+                f"partial recording — the webm the browser had in hand when the "
+                f"storyboard gave up, converted rather than discarded."
+                if doc.get("media_written_by_this_take")
+                else f"**This take encoded no mp4.** Any `{doc.get('media')}` in "
+                f"the folder above is a *previous* run's and is not a recording "
+                f"of this failure — see `{FAILURE_MARKER}`."
+            ),
+            "",
+        ]
+        return "\n".join(out).rstrip() + "\n"
+
+    def _build_failure(self, failure: dict) -> None:
+        """Turn the crash into documents. Writes nothing.
+
+        Separate from writing for the reason `_build_evidence` is: a document
+        that cannot be made safe raises here, before the first byte, so a
+        refusal cannot leave half a `failure/` behind.
+
+        It therefore runs **before** `_convert`, which is why the two facts
+        that depend on whether the mp4 was encoded — `media_written_by_this_take`
+        and the last frame — are filled in by `_write_failure` instead. Writing
+        them here produced a dump that said "this take encoded no mp4" beside
+        an mp4 this take had just encoded, which is the class of lie this whole
+        change exists to remove. They are a boolean and a file name; deferring
+        them cannot introduce a literal the masking above did not see.
+        """
+        out = self.out_dir / FAILURE_DIR
+        self._failure_json = self._failure_doc(failure)
+        docs: list[tuple[Path, str]] = []
+        screen = self._failure_screen_text
+        if screen is not None:
+            # Its own file rather than a JSON field: a terminal buffer or an
+            # ARIA tree is what somebody greps, and `\n` written as the two
+            # characters `\` and `n` is not greppable. Masked and checked with
+            # the same list and the same matcher as everything else.
+            forbidden = self._evidence_forbidden()
+            masked = self._evidence_mask(screen, forbidden)
+            held = self._evidence_holds(masked, forbidden)
+            if held is not None:
+                raise SecretLeak(
+                    f"the failure dump's page text still holds a {len(held)}-"
+                    f"character value that is registered or redacted, after "
+                    f"masking. No failure/, no mp4 and no timeline were written."
+                )
+            capped, _ = _cap_text(masked, EVIDENCE_MAX_SCREEN)
+            docs.append((out / "screen.txt", capped))
+        self._failure_docs = docs
+
+    def _write_failure(self) -> None:
+        """Put the built dump on disk, plus the last frame of the recording.
+
+        The frame comes out of the mp4 with ffmpeg rather than off the page:
+        it is a frame of the recording `_verify_redaction_final()` already
+        vouched for, so it inherits that guarantee whole and reads nothing
+        after the verifier ran. Gated on `self._converted`, not on the file
+        existing — a previous run's demo.mp4 is not a picture of this crash
+        (issue #20).
+        """
+        if self._failure_json is None:
+            return
+        out = self.out_dir / FAILURE_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        # The one thing `_build_failure` could not know, filled in by the code
+        # that does. See its docstring.
+        doc = dict(self._failure_json)
+        doc["media_written_by_this_take"] = self._converted
+        written = 0
+        for path, text in [
+            (out / "failure.json", json.dumps(doc, indent=2, ensure_ascii=False) + "\n"),
+            (out / "failure.md", self._failure_md(doc)),
+            *self._failure_docs,
+        ]:
+            path.write_text(text)
+            written += 1
+        frame = out / "last-frame.png"
+        frame.unlink(missing_ok=True)  # a previous failure's, if any
+        if self._converted:
+            mp4 = self._media_path()
+            at = 0.0
+            try:
+                at = max(0.0, media_duration(mp4) - _FRAME_EDGE_S)
+            except (subprocess.CalledProcessError, ValueError, OSError):
+                at = 0.0
+            if _extract(mp4, at, frame):
+                written += 1
+            else:
+                print(
+                    f"demo-video: WARNING — could not extract the last frame "
+                    f"of {mp4.name} into {FAILURE_DIR}/. The rest of the dump "
+                    f"is there.",
+                    file=sys.stderr,
+                )
+        print(f"wrote {out} ({written} files)")
+
+    def _write_failure_marker(self, failure: dict) -> None:
+        """Say, in the demo folder itself, that this take failed (issue #46).
+
+        The one artifact that is written on **every** abnormal exit, including
+        the one where nothing else is: a take that could not verify its mask
+        writes no mp4 and no timeline, and what it does not touch is what a
+        *previous* run left in the same directory. A folder holding a watchable
+        `demo.mp4`, an empty `images/`, and a `timeline.json` from the run
+        before reads as a successful take with missing stills — and the video
+        is a recording of different code. In a review gate that produces a
+        confident approval of something that was never recorded.
+
+        Never raises, and that is deliberate: the absence of this file means
+        "the last take succeeded", so failing to write it is itself the lie it
+        exists to prevent. Text that cannot be masked is dropped from it rather
+        than allowed to stop it.
+        """
+        marker = self.out_dir / FAILURE_MARKER
+        mp4 = self._media_path()
+        stale = mp4.exists() and not self._converted
+        try:
+            forbidden = self._evidence_forbidden()
+            message = self._evidence_mask(
+                self.scrub(str(failure.get("message") or "")), forbidden
+            )
+            if self._evidence_holds(message, forbidden) is not None:
+                message = (
+                    "(withheld: the message still held a registered or "
+                    "redacted value after masking)"
+                )
+        except Exception:  # noqa: BLE001 - the marker must be written regardless
+            message = "(withheld: the message could not be masked)"
+        when = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        beat = failure.get("beat")
+        where = (
+            f"beat {beat} (`{failure.get('verb')}`)"
+            if beat is not None
+            else "between beats"
+        )
+        lines = [
+            "# This demo folder is not the output of a successful take",
+            "",
+            f"The last take run here failed at {when}, at {where}, with "
+            f"**{failure.get('type')}**:",
+            "",
+            f"> {' '.join(str(message).split())[:600] or '(no message)'}",
+            "",
+        ]
+        if stale:
+            lines += [
+                f"**`{mp4.name}` in this folder is a *previous* run's.** This "
+                f"take encoded no mp4, so what is here is a recording of "
+                f"different code, and so is anything derived from it — "
+                f"`timeline.json`, `frames/`, `images/`. Do not review them as "
+                f"though they described this take.",
+                "",
+            ]
+        elif self._converted:
+            lines += [
+                f"`{mp4.name}` **is** this take's recording — a partial one, "
+                f"cut off where the storyboard gave up. `{FAILURE_DIR}/` has "
+                f"the last frame, the console log and the failing beat.",
+                "",
+            ]
+        else:
+            lines += [
+                f"There is no `{mp4.name}` in this folder: this take wrote "
+                f"none, and no previous run left one.",
+                "",
+            ]
+        lines += [
+            "This file is written by the demo-video recorder on any abnormal "
+            "exit, and **deleted by the next take that succeeds** — so its "
+            "presence always describes the most recent run. Do not commit it "
+            "and do not delete it by hand; re-record instead.",
+            "",
+        ]
+        try:
+            marker.write_text("\n".join(lines))
+        except OSError as exc:
+            print(
+                f"demo-video: WARNING — could not write {marker} ({exc}), so "
+                f"nothing in this folder says the take failed",
+                file=sys.stderr,
+            )
+
+    def _clear_failure_dir(self) -> list[str]:
+        """Take a previous run's `failure/` off disk. Returns what went.
+
+        Same reasoning as `_clear_stale_evidence`, and the same hazard: this
+        directory holds a text dump of the page — an ARIA tree or a terminal
+        buffer — so a stale one sitting beside a *fresh* take is both a lie
+        about which run failed and a file that may hold the very value this
+        take was rewritten to hide. Bounded to the names `_write_failure`
+        writes, never the directory, so nothing anybody put here is touched.
+        """
+        directory = self.out_dir / FAILURE_DIR
+        gone: list[str] = []
+        if not directory.is_dir():
+            return gone
+        for name in ("failure.json", "failure.md", "screen.txt", "last-frame.png"):
+            path = directory / name
+            try:
+                if path.is_file():
+                    path.unlink()
+                    gone.append(f"{FAILURE_DIR}/{name}")
+            except OSError:  # noqa: PERF203 - report what could not be removed
+                print(
+                    f"demo-video: WARNING — could not delete {path}, which is "
+                    f"a previous take's failure dump and may hold a value this "
+                    f"take redacts",
+                    file=sys.stderr,
+                )
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            directory.rmdir()
+        except OSError:
+            pass
+        return gone
+
+    def _clear_failure_marker(self) -> None:
+        """Take a previous run's marker off disk once a take succeeds.
+
+        The other half of #46 and not an optional one: a marker left beside a
+        freshly-written demo.mp4 is the same lie inverted, and it is the one
+        that makes people stop believing the marker at all.
+        """
+        marker = self.out_dir / FAILURE_MARKER
+        try:
+            if marker.is_file():
+                marker.unlink()
+                print(
+                    f"demo-video: this take wrote its own artifacts, so the "
+                    f"{FAILURE_MARKER} a previous run left here is gone",
+                    file=sys.stderr,
+                )
+        except OSError as exc:
+            print(
+                f"demo-video: WARNING — could not delete {marker} ({exc}). It "
+                f"describes a previous run, not this one.",
+                file=sys.stderr,
+            )
+
+    def _report_failure(self, failure: dict, wrote_dump: bool) -> None:
+        """Say on stderr which beat killed the take and where to look.
+
+        The exception itself propagates and is what a caller sees, but it is
+        raised by the storyboard and cannot name the recorder's own artifacts.
+        Nothing else in the output says "beat 7" or "look in failure/".
+        """
+        beat = failure.get("beat")
+        where = (
+            f"beat {beat} — {failure.get('verb')}()"
+            if beat is not None
+            else "between beats; no verb was running"
+        )
+        print(
+            f"demo-video: this take FAILED at {where}, with "
+            f"{failure.get('type')}. "
+            + (
+                f"Everything it had was still written: "
+                f"{self._media_path().name if self._converted else 'no mp4'}, "
+                f"timeline.json, and {FAILURE_DIR}/ (last frame, console log, "
+                f"page text, failing beat). {FAILURE_MARKER} says so in the "
+                f"folder itself."
+                if wrote_dump
+                else f"Nothing was kept — see the message above. "
+                f"{FAILURE_MARKER} says so in the folder itself."
+            ),
+            file=sys.stderr,
+        )
+
     def _media_path(self) -> Path:
         """The mp4 this take converts to on exit."""
         name = f"{self.segment}.seg.mp4" if self.segment else "demo.mp4"
         return self.out_dir / name
 
-    def _timeline_doc(self) -> dict:
-        """This take's beat log as a timeline document (see TIMELINE_SCHEMA)."""
+    def _timeline_doc(self, failure: dict | None = None) -> dict:
+        """This take's beat log as a timeline document (see TIMELINE_SCHEMA).
+
+        `failure`, when given, lands on the envelope as `failure` and is
+        omitted entirely otherwise — see TIMELINE_SCHEMA.
+        """
         mp4 = self._media_path()
         duration = None
-        if mp4.exists():
+        # `self._converted`, not `mp4.exists()` (issue #20). Re-recording into
+        # a folder that already holds an older demo.mp4 is the ordinary way
+        # this skill is used — `record.py` is committed so it can be re-run —
+        # and a take that wrote no mp4 used to probe that file and report the
+        # *previous* take's duration next to this take's beats. Silently, with
+        # nothing for a consumer to tell it by, and `stitch()` offsets every
+        # later segment's beats by exactly this number.
+        if self._converted:
             try:
                 duration = round(media_duration(mp4), 3)
             except (subprocess.CalledProcessError, ValueError, OSError):
                 duration = None  # a timeline without it still beats none
+                print(
+                    f"demo-video: WARNING — {mp4.name} was written but ffprobe "
+                    f"could not measure it, so timeline.json says "
+                    f"duration: null. The beats are still right; anything "
+                    f"that needs the length has to probe the file itself.",
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "demo-video: this take encoded no mp4, so timeline.json says "
+                "duration: null and nothing was measured. "
+                + (
+                    f"There *is* a {mp4.name} in {self.out_dir} — it is a "
+                    f"previous run's, and this timeline does not describe it."
+                    if mp4.exists()
+                    else f"There is no {mp4.name} in {self.out_dir}."
+                ),
+                file=sys.stderr,
+            )
         # Scrubbed again on the way out, over the whole log. `_beat` scrubs
         # what is registered *at the time the beat runs*, which is nothing at
         # all for a value registered later in the take — and registering late
@@ -2592,8 +3406,15 @@ class _DemoBase:
         # the clear in the committed log is the worse half of that pair.
         #
         # Note the coupling this creates: with `evidence=False` nothing
-        # harvests, so this falls back to `scrub()` alone. Turning evidence off
-        # is turning off the only thing that reads what redact() hides.
+        # harvests *on the clean path*, so this falls back to `scrub()` alone
+        # there. Turning evidence off is turning off the only thing that reads
+        # what redact() hides.
+        #
+        # The failure path is the exception, and it has to be: `_failure_screen`
+        # harvests regardless of the flag, because `failure/screen.txt` is a
+        # text dump of the page and `redact()` never protected text. That is
+        # also why a timeline written after a crash is masked at least as well
+        # as one written after a clean take, never worse.
         forbidden = self._evidence_forbidden()
         beats = [
             self._evidence_scrub_deep(self._scrub_deep(beat), forbidden)
@@ -2607,7 +3428,7 @@ class _DemoBase:
             self._evidence_scrub_deep(self._scrub_deep(issue), forbidden)
             for issue in self._issues
         ]
-        return {
+        doc: dict = {
             "schema": TIMELINE_SCHEMA,
             "generated_by": "demo-video",
             "recorder": type(self).__name__,
@@ -2630,6 +3451,14 @@ class _DemoBase:
             "issues": issues,
             "issue_count": self._issue_count,
         }
+        # Absent on a clean take, so a successful take's timeline.json is
+        # byte-for-byte what it was before this key existed — and so that its
+        # presence is the whole signal, with no `failure: null` to skim past.
+        if failure is not None:
+            doc["failure"] = self._evidence_scrub_deep(
+                self._scrub_deep(failure), forbidden
+            )
+        return doc
 
     # -- shared storyboard verbs -------------------------------------------
 
@@ -2736,6 +3565,10 @@ class _DemoBase:
         stale = self._stale_evidence()
         self._clear_stale_evidence()
         gone: list[str] = [f"{EVIDENCE_DIR}/{p.name}" for p in stale if not p.exists()]
+        # A previous run's failure dump, for exactly the same reason: it is a
+        # text dump of the page, this take wrote none (the documents never left
+        # memory), and the folder may hold the last one's.
+        gone += self._clear_failure_dir()
         for path in self._shots + [self.out_dir / ".frame.png"]:
             try:
                 if path.is_file():
@@ -2749,11 +3582,14 @@ class _DemoBase:
                 )
         print(
             "demo-video: the take could not verify its mask, so it wrote no "
-            "mp4, no timeline and no evidence, and deleted "
+            "mp4, no timeline, no evidence and no failure dump, and deleted "
             + (", ".join(gone) if gone else "nothing (it had written nothing)")
-            + ". The raw capture in .video/ is gone too. (Per-beat evidence is "
-            "held in memory until a clean exit precisely so there is nothing "
-            "to take back here — it is the one artifact that is plain text.)",
+            + f". The raw capture in .video/ is gone too. (Per-beat evidence "
+            f"and the failure dump are held in memory until the mask has been "
+            f"vouched for, precisely so there is nothing to take back here — "
+            f"they are the artifacts that are plain text.) {FAILURE_MARKER} "
+            f"has been written, because anything a *previous* run left in this "
+            f"folder is still there and is not this take's.",
             file=sys.stderr,
         )
 
@@ -2864,6 +3700,11 @@ class _DemoBase:
                 "-r", "25", "-movflags", "+faststart", str(mp4)]
         subprocess.run(cmd, check=True)
         self._postprocess(mp4)
+        # Only now. Everything that reads `duration`, extracts a review frame,
+        # or pulls the last frame into `failure/` asks this flag rather than
+        # `mp4.exists()`, because the file may be a previous take's and the
+        # flag cannot be (issue #20).
+        self._converted = True
         spoken = f", {len(self._lines)} spoken lines" if self._speech else ""
         print(f"wrote {mp4} ({mp4.stat().st_size // 1024} kB{spoken})")
 
