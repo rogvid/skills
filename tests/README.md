@@ -83,9 +83,11 @@ smoke: PASSED
 
 Re-running into the same `--out-dir` is safe: the take subdirectories
 (`web/`, `terminal/`, `segments/`, `redaction/`, `terminal-redaction/`,
-`web-problems/`, `terminal-problems/`, `terminal-race/`, `web-strict/`,
-`terminal-strict/`, `determinism-a/`, `determinism-b/`, `determinism-off/`)
-are deleted before each take. Only the first two are graded
+`terminal-cursor-leak-clean/`, `terminal-cursor-leak-crash/`,
+`terminal-cursor-leak-tail/`, `web-problems/`, `terminal-problems/`,
+`terminal-race/`, `web-strict/`, `terminal-strict/`, `determinism-a/`,
+`determinism-b/`, `determinism-off/`) are deleted before each take. Only the
+first two are graded
 on their video; the rest are short and exist to break, or to reproduce, in one
 specific way each. That is not tidiness — every artifact assertion works by
 path, so without it a leftover `demo.mp4` from the previous run would grade a
@@ -760,14 +762,15 @@ they share a column, and the take is graded on the pixels of those rows:
 | `str` | a `ghp_`-shaped token written **one character at a time** | shape detection *across quiet boundaries* |
 | `pau` | an `sk-`-shaped token **paused 0.4 s mid-value** | the same |
 | `anc` | a `ghp_`-shaped token paused after its **first character** | the same, plus the token-boundary rule |
+| `slw` | a `ghp_`-shaped token paused **past** the hold window | nothing — it is the documented limit, graded as one |
 | `aws` | an `AKIA`-shaped token nobody registered | shape detection alone |
 | `jwt` | a JWT nobody registered | shape detection alone |
 | `pwd` | `send(Secret(...))`, echoed back by the PTY | the registry, one character per read |
 | `ctl` | never registered, matches no shape | nothing — it is the reference |
 | `ref` | the literal string `[redacted]` | nothing — it is the reference |
 
-The `str`, `pau` and `anc` rows are the ones a scrubber that flushes on an
-idle poll gets wrong, and they are why the printer is a shell script rather
+The `str`, `pau`, `anc` and `slw` rows are the ones a scrubber that flushes on
+an idle poll gets wrong, and they are why the printer is a shell script rather
 than a `printf`.
 Capping `os.read()` cannot manufacture a *time* boundary: capped reads come
 back-to-back off a full buffer and the scrubber never sees the PTY go idle
@@ -775,6 +778,18 @@ mid-value. `str` writes at 5 ms per character, which is slower than the
 recorder drains, so `select()` reports nothing ready between every character.
 `pau` and `anc` stop dead in the middle of a token — `anc` after one
 character, where nothing yet says "credential" and only *where it sits* does.
+
+`slw` stops for longer than the recorder will hold, and is the only row that
+must come out **legible**. That is not a gap in the take, it is the take
+grading a gap: `SKILL.md` says shape detection has a clock, and the clock has
+to be measurable from outside as well as inside. `pau` pauses 2.0 s and must be
+masked, `slw` pauses 4.0 s and must not; together they pin `_ANCHORED_HOLD_S`
+(3.0 s) from both sides, with a second of margin either way because the
+quantity the recorder measures is wall-clock idle time on a loaded CI box.
+Injected at 5.0 s, `slw` comes out masked and the take says the documented
+limit moved; injected at 1.0 s, `pau` and `anc` come out legible at 41-45
+against the mask. Before this pair, `_ANCHORED_HOLD_S` could be set to any
+value above ~0.45 s and the whole suite still passed.
 
 **The split across `os.read()` boundaries is forced, not hoped for**, and that
 is the assertion the acceptance criterion turns on. `capped_pty_reads()`
@@ -872,20 +887,34 @@ a *registered* value, held with no clock — the echo arrives one character per
 read with an idle pump between each, so releasing those would print a password
 one character at a time).
 
-**And a value the stream can never show contiguous must kill the take.**
-`terminal-cursor-leak/` is its own recording because it has to *die*. A
-program that writes `ESC[6;1Hcup <head>` and then `ESC[6;13H<tail>` puts the
-registered value on screen as one word while no substring of the byte stream
-contains it — the premise is asserted, not assumed, by requiring the value to
-be on the finished screen. The scrubber cannot see that; documented as
-uncovered, and uncovered has to mean *refused*, so `_verify_redaction_final()`
-reads the finished terminal buffer (visible screen *and* scrollback) before
-anything is converted and raises `SecretLeak`. The take must leave no
-`demo.mp4`, no `timeline.json`, no still and nothing in `.video/`, and the
-message must say the value was found *on screen* without quoting it. With that
-check removed the take records a normal mp4 with the key legible in every
-frame, `issues: []` and `strict=True` satisfied — the quietest failure in this
-harness, and the injection prints exactly that.
+**And a value the stream can never show contiguous must kill the take — on
+every way out of the `with`.** A program that writes `ESC[6;1Hcup <head>` and
+then `ESC[6;13H<tail>` puts the registered value on screen as one word while
+no substring of the byte stream contains it; the premise is asserted, not
+assumed, by requiring the value to be on the finished screen. The scrubber
+cannot see that. Documented as uncovered, and uncovered has to mean *refused*,
+so `_verify_redaction_final()` reads the finished terminal buffer (visible
+screen *and* scrollback) and raises `SecretLeak`. No `demo.mp4`, no
+`timeline.json`, no still, nothing in `.video/`, and a message that says the
+value was found *on screen* without quoting it.
+
+Three recordings, because "every way out" is three different bugs and the
+first version of this check only covered the first:
+
+| arm | how the `with` ends | what it caught |
+|---|---|---|
+| `clean` | the storyboard finishes | with the check removed: a normal mp4, the key legible in every frame, `issues: []`, `strict=True` satisfied — the quietest failure in this harness |
+| `crash` | the storyboard raises after the value is on screen | the check was gated on `exc_type is None`, so a `wait_for_text()` timeout or a Ctrl-C skipped it entirely and **kept the still** — 129 kB of PNG with the key on it. On the web side the same structure is harmless because a still is CSS-masked when it is taken; here a still is the raw screen |
+| `tail` | the value lands *after* the last verb, inside the window a narrated take holds open so it does not end mid-sentence | the check ran before that window and before the scrubber's final flush, so it vouched for a screen the recording does not end on. Injected, it writes an 82 kB mp4 and a timeline and reports nothing wrong |
+
+The `crash` arm asserts the recorder re-raises what the *storyboard* threw
+rather than a leak report: the timeout is the message that says what to fix,
+and the leak has already cost the artifacts, which is the part that matters.
+
+The `tail` arm needs a narration tail and the smoke run has no
+`ELEVENLABS_API_KEY`, so it sets `_line_end` directly — the one field
+`_finish_line()` reads, and the one `_start_line()` sets from
+`media_duration(clip)`. Same code path, no key required.
 
 ## Known gaps
 
@@ -978,10 +1007,13 @@ knows is missing is worse than one that is openly absent.
   painting in two passes, a terminal-wrapped line — is not contiguous on
   screen and is deliberately not matched (see SKILL.md). Nothing here records
   such a program, so the harness does not measure how common that is.
-- **Shape detection is graded on one shape.** `ghp_` is the only one of the
-  four patterns a take actually prints; `sk-`, `AKIA` and the JWT shape are
-  exercised only as tail fragments and by the pattern list being read at all.
-  A regression in one of the other three passes.
+- **Shape detection is graded on how a token is *split*, not on the pattern
+  list.** All four patterns are printed unregistered and pixel-graded — `ghp_`
+  on the `shp`, `str` and `anc` rows, `sk-` on `pau`, `AKIA` on `aws`, a JWT
+  on `jwt` — so removing any one of them fails the take. What is not covered
+  is the *inside* of each pattern: one spelling of each shape is printed, so a
+  regression that narrowed `gh[pousr]_` to `ghp_`, or dropped `ASIA` from the
+  AWS pattern, still passes.
 - **Nothing checks a non-bash shell.** The exit status arrives through `$?` and
   `\#` expanded in `PS1`, which is bash behaviour; zsh needs `PROMPT_SUBST` and
   would leave every `exit_code` null. Only `/bin/bash` is recorded here — the

@@ -917,6 +917,12 @@ TERM_SHAPE = "ghp_SHAP00000000000000000000"
 TERM_STREAMED = "ghp_STRM00000000000000000000"
 TERM_PAUSED = "sk-live-PAUS0000000000000000"
 TERM_ANCHOR_SPLIT = "ghp_ANCH00000000000000000000"
+# Paused past _ANCHORED_HOLD_S, and therefore **expected on screen in the
+# clear**. It is the only value in this take that is, apart from the two
+# references — deliberately, because "shape detection has a clock" is a
+# documented limit and a limit nobody grades is a limit that quietly moves.
+# Absent from TERM_LITERALS and from TERM_MASKED_ROWS for the same reason.
+TERM_SLOW = "ghp_SLOW00000000000000000000"
 TERM_AWS = "AKIAAWSK00000000000000000000"
 TERM_JWT = "eyJKV0TAAA.eyJzdWJBQUE.SIGN0"
 TERM_TYPED = "pw-live-SEND0000000000000000"
@@ -1020,11 +1026,23 @@ TERM_REFERENCE_ROW = "ref"
 # password one character at a time. The three arms are asserted separately:
 # this row, the `str`/`pau` rows, and the `pwd` row.
 TERM_HELD_LINE = "hld xe"
-# ...and how long the screen may lag behind the program for it. A fragment in
-# the middle of a word goes out on the first quiet poll, so this is the pump
-# interval plus slack. Held on the *anchored* clock instead — which is what a
-# rule that could not tell `hld xe` from `hld gh` would do — it arrives at
-# three seconds and this fails. Without the release it never arrives at all.
+# ...and how long the release may take, measured from the `ref` row — the
+# printf immediately before it — rather than from the start of the script.
+#
+# That framing is the fix for a bar that used to be quietly meaningless. The
+# comment here claimed "the pump interval plus slack", but the timer started
+# before the printer ran, so what it actually measured was the printer's own
+# runtime: every `sleep` in the script plus the recorder's frame holds, with
+# the release somewhere in the noise. Measured 0.835 s idle and 1.053 s under
+# 16-way saturation against a 1.5 s bar — 1.4x headroom on a 2-core GitHub
+# runner recording video through Chromium, which is a flake waiting to happen,
+# and it got worse the moment the `slw` row added a four-second sleep (8.2 s
+# against the same bar).
+#
+# Timed from the previous `printf` there is nothing in between, so the
+# quantity is the release itself: measured 0.1-0.3 s. The failure it has to
+# catch adds a whole _ANCHORED_HOLD_S (3.0 s) on top. The bar sits between
+# them with room on both sides.
 TERM_HELD_MAX_WAIT_S = 1.5
 
 # The pwd row only exists once send() has typed into `read`; the other five
@@ -1055,9 +1073,23 @@ MAX_TERM_MASK_DELTA = {"still": 3.0, "video": 6.0}
 # mid-token — the exact condition that made shape detection a no-op, and one
 # the read cap cannot manufacture. 5 ms is the fastest rate measured leaking.
 TERM_STREAM_MS = 5
-# ...and a single long pause mid-token, past any grace a fragment could be
-# given, for the case where a program computes between two writes.
-TERM_PAUSE_S = 0.4
+# A single long pause mid-token, for the case where a program computes between
+# two writes — and one of the two values that pin the recorder's
+# `_ANCHORED_HOLD_S` (3.0 s) from either side.
+#
+# This one sits *inside* the window and must come out masked; TERM_SLOW_PAUSE_S
+# below sits outside it and must come out legible. Both are needed. With only
+# this one, `_ANCHORED_HOLD_S` could be raised to any value at all and nothing
+# would notice; with only the other, it could be lowered to ~0.5. A full second
+# of margin either side of 3.0, because the quantity the recorder actually
+# measures is wall-clock idle time on a CI box recording video through
+# Chromium, not the sleep the printer asked for.
+TERM_PAUSE_S = 2.0
+# ...and the same pause past the far edge of that window. This one is a
+# *documented leak*: SKILL.md says a program that pauses longer than three
+# seconds inside a token defeats shape matching, and this is the arm that
+# holds that sentence to its word. See TERM_SLOW.
+TERM_SLOW_PAUSE_S = 4.0
 MIN_TERM_DISTINCT_DELTA = {"still": 12.0, "video": 12.0}
 MIN_TERM_CONTROL_EDGE = {"still": 6.0, "video": 5.0}
 TERM_REDACT_SAMPLE_FPS = 2
@@ -5441,6 +5473,12 @@ def term_printer_script(mask: str) -> str:
     first three characters of `str` is a coin flip, and the run where it does
     not is a run where nothing tested that rule.
 
+    `slw` is the same cut, TERM_SLOW_PAUSE_S long, and it is the only row here
+    that must come out **legible**. The recorder's hold on a shape fragment is
+    bounded — it has to be, or a screen ending in `e` renders short forever —
+    and `slw` measures that bound from the outside while `pau` measures it
+    from the inside. Neither alone says where three seconds is.
+
     The last two lines are the other half of the scrubber's contract — see
     TERM_HELD_LINE. `read` keeps the program alive so the PTY stays silent
     with an unterminated line on screen.
@@ -5465,6 +5503,9 @@ def term_printer_script(mask: str) -> str:
             f"printf 'anc %s'\n"
             f"sleep {TERM_PAUSE_S}\n"
             f"printf '%s\\n' '{TERM_ANCHOR_SPLIT[1:]}'\n"
+            f"printf 'slw %s'\n"
+            f"sleep {TERM_SLOW_PAUSE_S}\n"
+            f"printf '%s\\n' '{TERM_SLOW[TERM_ANSI_CUT:]}'\n"
             f"printf 'aws %s\\n' '{TERM_AWS}'\n"
             f"printf 'jwt %s\\n' '{TERM_JWT}'\n"
             f"printf 'ctl %s\\n' '{TERM_CONTROL}'\n"
@@ -5474,6 +5515,7 @@ def term_printer_script(mask: str) -> str:
         )
         .replace("printf 'pau %s'", f"printf 'pau %s' '{pause_head}'")
         .replace("printf 'anc %s'", f"printf 'anc %s' '{TERM_ANCHOR_SPLIT[:1]}'")
+        .replace("printf 'slw %s'", f"printf 'slw %s' '{TERM_SLOW[:TERM_ANSI_CUT]}'")
     )
 
 
@@ -5585,6 +5627,19 @@ def record_terminal_redaction(out_dir: Path, work_dir: Path) -> tuple[list[str],
                     r"^key \[redacted\]$",
                     "the screen never showed a masked `key` row",
                 ),
+                # The last *complete* line the printer writes, and the one
+                # immediately before the held fragment. Waiting for it here is
+                # what makes the number below mean something: the printer
+                # sleeps for seconds on the `pau`, `anc` and `slw` rows, and a
+                # timer started before all that measures the script's runtime
+                # with the release buried in its noise. From here to the next
+                # pattern there is nothing between the two `printf`s.
+                (
+                    f"^{re.escape(TERM_REFERENCE_ROW)} {re.escape(SECRET_MASK)}$",
+                    "the screen never showed the `ref` row, so the release "
+                    "timed below could not be isolated from the printer's own "
+                    "runtime",
+                ),
                 (
                     f"^{re.escape(TERM_HELD_LINE)}$",
                     f"the screen never showed {TERM_HELD_LINE!r}, which the "
@@ -5596,7 +5651,7 @@ def record_terminal_redaction(out_dir: Path, work_dir: Path) -> tuple[list[str],
             ):
                 began = time.monotonic()
                 try:
-                    rec.wait_for_text(pattern, timeout_s=10)
+                    rec.wait_for_text(pattern, timeout_s=20)
                 except RuntimeError as exc:
                     b.fail_if(True, f"{why} — {' '.join(str(exc).split())[:200]}")
                 waited[pattern] = time.monotonic() - began
@@ -5605,6 +5660,9 @@ def record_terminal_redaction(out_dir: Path, work_dir: Path) -> tuple[list[str],
             # quiet poll and the screen is never behind the program. Held on
             # the clock the token-boundary fragments get, it would arrive three
             # seconds late — which no assertion about the final screen can see.
+            #
+            # Measured from the `ref` row, one `printf` earlier, so this is the
+            # release and nothing else.
             lag = waited[f"^{re.escape(TERM_HELD_LINE)}$"]
             b.fail_if(
                 lag > TERM_HELD_MAX_WAIT_S,
@@ -5627,6 +5685,25 @@ def record_terminal_redaction(out_dir: Path, work_dir: Path) -> tuple[list[str],
                     f"let it through, so it is in every frame drawn from that "
                     f"buffer and in what wait_for_text() reads",
                 )
+            # The documented limit, asserted as a limit. SKILL.md says a
+            # program that pauses longer than three seconds inside a token
+            # defeats shape matching; this row is that program. Graded
+            # positively — it must be on screen *in the clear* — because a
+            # "not covered" paragraph nobody grades is a paragraph that goes
+            # quietly out of date the first time somebody tunes the constant.
+            # Together with the `pau` row, which pauses TERM_PAUSE_S and must
+            # be masked, it pins _ANCHORED_HOLD_S from both sides: raise it and
+            # this fails, lower it and `pau` does.
+            b.fail_if(
+                f"slw {TERM_SLOW}" not in screen,
+                f"the token paused {TERM_SLOW_PAUSE_S}s mid-value is not on "
+                f"screen in the clear. That is the documented limit of shape "
+                f"detection — the hold is bounded, or a screen ending in `e` "
+                f"renders short forever — and it is graded here so the bound "
+                f"cannot move without somebody deciding to move it. Either "
+                f"the recorder now holds longer than SKILL.md says, or the "
+                f"row never rendered at all",
+            )
             b.fail_if(
                 f"{TERM_CONTROL_ROW} {TERM_CONTROL}" not in screen,
                 "the unregistered control value is not on screen intact. It is "
@@ -6110,39 +6187,68 @@ TERM_CURSOR_SCRIPT = (
     "printf '\\033[6;__COL__H%s\\n' '__TAIL__'\n"
 )
 
+# The same two writes, backgrounded behind a sleep, so they land *after* the
+# storyboard's last verb has returned — inside the window `_finish_line()`
+# holds open at the end of a narrated take. See the `tail` arm below.
+TERM_CURSOR_LATE_SCRIPT = (
+    "#!/bin/sh\n"
+    "(sleep __DELAY__\n"
+    " printf '\\033[6;1Hcup %s' '__HEAD__'\n"
+    " printf '\\033[6;__COL__H%s\\n' '__TAIL__') &\n"
+)
 
-def check_cursor_screen_leak(out_root: Path, work_dir: Path) -> list[str]:
-    """A value the stream cannot show is contiguous must fail the take.
+# How long the late writer waits, and how long the simulated narration tail
+# runs. The write has to land strictly inside the tail: after the storyboard's
+# last verb, before the recorder stops pumping.
+TERM_LATE_WRITE_S = 1.2
+TERM_LATE_TAIL_S = 3.0
 
-    Its own take because it has to *die*. The scrubber matches substrings of
-    the byte stream, and a program that positions the cursor twice puts a
-    value on screen without ever putting it in one substring — measured, and
-    documented in SKILL.md as uncovered. Uncovered has to mean *refused*: the
-    recorder reads the finished terminal buffer before it converts anything,
-    and a registered value found there kills the take the way an unverifiable
-    CSS mask does on the web side.
 
-    Without that check this take records a normal mp4, with the key legible in
-    every frame, `issues: []`, and `strict=True` satisfied — which is the
-    quietest failure in this whole harness.
+class _StoryboardFailed(RuntimeError):
+    """What a storyboard raises when a sync verb gives up.
+
+    Its own class only so the `crash` arm below can tell "the take re-raised
+    what the storyboard threw" from "something else went wrong", which a bare
+    RuntimeError cannot.
     """
-    if os.name != "posix":
-        return []
+
+
+def _cursor_leak_take(
+    out_root: Path, work_dir: Path, arm: str
+) -> tuple[list[str], BaseException | None, str, Path]:
+    """Record one cursor-leak take. Returns (failures, raised, screen, dir).
+
+    Three arms, one body, because the guarantee SKILL.md states is
+    unconditional and each arm is a different way out of the `with`:
+
+      `clean`  the storyboard finishes. The historical case.
+      `crash`  the storyboard raises after the value is on screen — a
+               wait_for_text() timeout, a Ctrl-C on a hung demo. `__exit__`
+               used to skip the screen check entirely on this path and keep
+               the still, which on the terminal side is the raw screen with
+               the key legible on it.
+      `tail`   the value lands *after* the last verb, in the window a narrated
+               take holds open to avoid ending mid-sentence. The check used to
+               run before that window, so the frames it vouched for were not
+               the frames that got recorded.
+    """
     from demo_recording import SecretLeak, TerminalRecorder
 
-    label = "terminal-cursor-leak"
+    label = f"terminal-cursor-leak-{arm}"
     out_dir = fresh_take_dir(out_root, label)
-    script = work_dir / "cursor-write"
     head, tail = TERM_CURSOR[:TERM_ANSI_CUT], TERM_CURSOR[TERM_ANSI_CUT:]
     # The column the second write starts at: "cup " plus the head, one-based.
     # Off by one and the two pieces overlap, the value on screen is not the
     # registered one, and the take proves nothing while looking fine — which
     # is what the premise assertion below is for.
     column = len("cup ") + len(head) + 1
+    template = TERM_CURSOR_LATE_SCRIPT if arm == "tail" else TERM_CURSOR_SCRIPT
+    script = work_dir / "cursor-write"
     script.write_text(
-        TERM_CURSOR_SCRIPT.replace("__HEAD__", head)
+        template.replace("__HEAD__", head)
         .replace("__TAIL__", tail)
         .replace("__COL__", str(column))
+        .replace("__DELAY__", f"{TERM_LATE_WRITE_S}")
     )
     script.chmod(0o755)
 
@@ -6154,50 +6260,48 @@ def check_cursor_screen_leak(out_root: Path, work_dir: Path) -> list[str]:
             rec.register_secret(TERM_CURSOR)
             rec.run("./cursor-write")
             rec.wait_for_prompt(timeout_s=20)
-            # Taken on purpose, and required to be gone afterwards: a still is
-            # written long before the take ends, and the web half shipped a
-            # round where a refused take left its stills on disk holding the
-            # value it had refused to write an mp4 for.
-            rec.shot("01-cursor")
-            screen = rec._screen()
+            if arm == "tail":
+                # Nothing is on screen yet — the writer is still sleeping —
+                # so a check that ran here would pass, which is the point.
+                if TERM_CURSOR in rec._screen():
+                    failures.append(
+                        f"{label}: the late writer had already written by the "
+                        f"time the storyboard ended, so this arm is the "
+                        f"`clean` arm with extra steps. Raise "
+                        f"TERM_LATE_WRITE_S above the take's own runtime."
+                    )
+                # The narration tail, without narration. `_finish_line()`
+                # reads exactly one field — `_line_end`, which `_start_line()`
+                # sets from `media_duration(clip)` — and idles until it
+                # passes, pumping the PTY the whole way. Setting it directly
+                # is the same code path a spoken line takes, and it is the
+                # only way to reach it here: the smoke run has no
+                # ELEVENLABS_API_KEY, so `speech=True` records silently and
+                # the tail is zero.
+                rec._line_end = time.monotonic() + TERM_LATE_TAIL_S
+            else:
+                # Taken on purpose, and required to be gone afterwards: a still
+                # is written long before the take ends, and the web half
+                # shipped a round where a refused take left its stills on disk
+                # holding the value it had refused to write an mp4 for.
+                rec.shot("01-cursor")
+                screen = rec._screen()
+            if arm == "crash":
+                raise _StoryboardFailed(
+                    "the storyboard gave up after the value reached the screen"
+                )
     except SecretLeak as exc:
         raised = exc
+    except _StoryboardFailed as exc:
+        raised = exc
     except Exception as exc:  # noqa: BLE001 - any other failure is a failure
-        return [f"{label}: expected SecretLeak, got {type(exc).__name__}: {exc}"]
+        failures.append(f"{label}: unexpected {type(exc).__name__}: {exc}")
+    return failures, raised, screen, out_dir
 
-    if raised is None:
-        failures.append(
-            f"{label}: a registered value written at two cursor positions is "
-            f"contiguous on screen and in no substring of the stream. The "
-            f"scrubber cannot see it — that is documented — so the recorder "
-            f"has to refuse the take at teardown instead. It returned "
-            f"normally, which means it wrote an mp4 with the key legible in "
-            f"every frame and reported nothing wrong."
-        )
-    else:
-        if TERM_CURSOR in str(raised):
-            failures.append(
-                f"{label}: the SecretLeak quotes the value it caught, which "
-                f"puts it in every log that reports the failure"
-            )
-        if "screen" not in str(raised):
-            failures.append(
-                f"{label}: the failure does not say the value was found on "
-                f"screen, so a reader cannot tell it from a mask that failed "
-                f"to apply: {str(raised)[:120]!r}"
-            )
-    # The premise, asserted rather than assumed. If the two halves ever ended
-    # up adjacent in the byte stream the scrubber would have masked them, the
-    # screen would be clean, nothing would raise — and the failure above would
-    # be reported against a take that never contained a leak to catch.
-    if TERM_CURSOR not in screen:
-        failures.append(
-            f"{label}: the value never reached the terminal screen, so this "
-            f"take exercised nothing. It is supposed to be written in two "
-            f"pieces at two cursor positions and land contiguously; check "
-            f"TERM_CURSOR_SCRIPT against the terminal's width and the row it "
-            f"writes to."
-        )
+
+def _cursor_leak_artifacts(label: str, out_dir: Path) -> list[str]:
+    """Nothing this take wrote may survive it."""
+    failures = []
     for name, path in (
         ("demo.mp4", out_dir / "demo.mp4"),
         ("timeline.json", out_dir / "timeline.json"),
@@ -6219,10 +6323,88 @@ def check_cursor_screen_leak(out_root: Path, work_dir: Path) -> list[str]:
             f"{label}: raw capture left behind in .video/: {leftovers!r} — it "
             f"holds the frames the mp4 was refused for"
         )
+    return failures
+
+
+def check_cursor_screen_leak(out_root: Path, work_dir: Path) -> list[str]:
+    """A value the stream cannot show is contiguous must fail the take.
+
+    Its own takes because they have to *die*. The scrubber matches substrings
+    of the byte stream, and a program that positions the cursor twice puts a
+    value on screen without ever putting it in one substring — measured, and
+    documented in SKILL.md as uncovered. Uncovered has to mean *refused*: the
+    recorder reads the finished terminal buffer before it converts anything,
+    and a registered value found there kills the take the way an unverifiable
+    CSS mask does on the web side.
+
+    Without that check the `clean` arm records a normal mp4, with the key
+    legible in every frame, `issues: []`, and `strict=True` satisfied — which
+    is the quietest failure in this whole harness. The other two arms are the
+    ways out of the `with` that the check used to miss entirely; see
+    `_cursor_leak_take`.
+    """
+    if os.name != "posix":
+        return []
+    from demo_recording import SecretLeak
+
+    failures: list[str] = []
+    for arm in ("clean", "crash", "tail"):
+        label = f"terminal-cursor-leak-{arm}"
+        problems, raised, screen, out_dir = _cursor_leak_take(out_root, work_dir, arm)
+        failures += problems
+        # `crash` re-raises what the storyboard threw — the recorder must not
+        # bury a wait_for_text() timeout under a leak report, because the
+        # timeout is what tells the author what to fix. The leak still has to
+        # cost the artifacts, which is what _cursor_leak_artifacts grades.
+        want = _StoryboardFailed if arm == "crash" else SecretLeak
+        if raised is None:
+            failures.append(
+                f"{label}: a registered value written at two cursor positions "
+                f"is contiguous on screen and in no substring of the stream. "
+                f"The scrubber cannot see it — that is documented — so the "
+                f"recorder has to refuse the take at teardown instead. It "
+                f"returned normally, which means it wrote an mp4 with the key "
+                f"legible in every frame and reported nothing wrong."
+            )
+        elif not isinstance(raised, want):
+            failures.append(
+                f"{label}: expected {want.__name__}, got "
+                f"{type(raised).__name__}: {str(raised)[:160]!r}"
+            )
+        elif isinstance(raised, SecretLeak):
+            if TERM_CURSOR in str(raised):
+                failures.append(
+                    f"{label}: the SecretLeak quotes the value it caught, "
+                    f"which puts it in every log that reports the failure"
+                )
+            if "screen" not in str(raised):
+                failures.append(
+                    f"{label}: the failure does not say the value was found "
+                    f"on screen, so a reader cannot tell it from a mask that "
+                    f"failed to apply: {str(raised)[:120]!r}"
+                )
+        # The premise, asserted rather than assumed. If the two halves ever
+        # ended up adjacent in the byte stream the scrubber would have masked
+        # them, the screen would be clean, nothing would raise — and the
+        # failure above would be reported against a take that never contained
+        # a leak to catch. Only the arms that read the screen mid-take can say
+        # this; `tail` writes after the last verb, and its evidence that the
+        # value reached the screen *is* the refusal.
+        if arm == "clean" and TERM_CURSOR not in screen:
+            failures.append(
+                f"{label}: the value never reached the terminal screen, so "
+                f"this take exercised nothing. It is supposed to be written "
+                f"in two pieces at two cursor positions and land "
+                f"contiguously; check TERM_CURSOR_SCRIPT against the "
+                f"terminal's width and the row it writes to."
+            )
+        failures += _cursor_leak_artifacts(label, out_dir)
     if not failures:
         print(
             "smoke: terminal-redaction a value the stream never carried whole "
-            "is caught on the finished screen and fails the take"
+            "is caught on the finished screen and fails the take — on a clean "
+            "exit, on a storyboard that raised, and on a write that lands in "
+            "the narration tail"
         )
     return failures
 

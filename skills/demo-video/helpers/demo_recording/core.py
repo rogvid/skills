@@ -1239,16 +1239,44 @@ class _DemoBase:
         # browser and the Playwright driver still get torn down — then
         # re-raised at the end, having skipped conversion. A take that cannot
         # prove it masked what it was told to writes no mp4.
+        #
+        # The order of the next three statements is the whole guarantee, and
+        # every one of them was wrong once:
+        #
+        #   * the narration tail runs **first**. It holds the frame open so a
+        #     take does not end mid-sentence, and it pumps — a terminal take's
+        #     child process is still running and still writing. Verifying
+        #     before it vouched for frames that were not the frames recorded.
+        #   * `_stop()` runs **second**, because a medium can be sitting on
+        #     output: the terminal's stream scrubber withholds any trailing
+        #     fragment that might still grow into a secret, and flushes it
+        #     here. Verifying before that read a screen the recording does not
+        #     end on.
+        #   * the check runs **last, on every path out of the `with`**, not
+        #     only the clean one. A storyboard that raises — a wait_for_text()
+        #     timeout, a Ctrl-C on a hung demo — used to skip it altogether
+        #     and keep its stills, and a terminal still is the raw screen.
         unmasked: BaseException | None = None
         if exc_type is None:
-            try:
-                self._verify_redaction_final()
-            except SecretLeak as leak:
-                unmasked = leak
-            else:
-                self._finish_line(tail=0.5)  # don't end mid-sentence
-        clean = exc_type is None and unmasked is None
+            self._finish_line(tail=0.5)  # don't end mid-sentence
         self._stop()
+        try:
+            self._verify_redaction_final()
+        except SecretLeak as leak:
+            unmasked = leak
+        except Exception as exc_check:  # noqa: BLE001 - unverifiable is not clean
+            # The check itself broke — a dead page, a closed context. On a
+            # clean take that is a leak by another name: nothing can vouch for
+            # the frames, so nothing is kept. On a take that had already
+            # failed it is almost certainly a consequence of *that* failure,
+            # so the artifacts still go, but the original exception is what
+            # the author gets to read.
+            unmasked = SecretLeak(
+                f"the take's redaction could not be verified at the end "
+                f"({type(exc_check).__name__}: {exc_check}), so nothing can "
+                f"vouch for what is in the frames. This take wrote no mp4."
+            )
+        clean = exc_type is None and unmasked is None
         video = self.page.video
         self._context.close()
         webm = Path(video.path()) if video else None
@@ -1301,7 +1329,16 @@ class _DemoBase:
         #
         # So the leak is raised first and suppresses everything, and the strict
         # verdict is only reached when there was no leak to suppress it.
+        #
+        # Except over a storyboard that had already raised. Replacing a
+        # wait_for_text() timeout with a leak report costs the author the one
+        # message that says what to fix, and the leak has already cost the
+        # artifacts — which is the part that matters. So it is said loudly and
+        # the original exception is left to propagate.
         if unmasked is not None:
+            if exc_type is not None:
+                print(f"demo-video: {unmasked}", file=sys.stderr)
+                return
             raise unmasked
         if exc_type is None and self._strict and self._fatal_count:
             raise StrictTakeFailed(self._strict_message())

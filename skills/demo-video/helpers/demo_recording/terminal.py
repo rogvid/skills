@@ -201,15 +201,26 @@ _EXIT_RE = re.compile(re.escape(_EXIT_OSC) + r"(-?\d+);(\d+)\x07")
 #      *inert* sequences removed, and a match found there is mapped back to raw
 #      offsets, because the text written to xterm has to be the raw one.
 #
-#      Inert means "does not move the cursor", and that is the whole test —
-#      text either side of such a sequence lands in adjacent cells, so a token
-#      broken by one is one token on screen. Colour and style (SGR), mode
-#      set/reset (`\x1b[?25l` — every spinner library hides the cursor
+#      Inert is a **fixed list**, not a predicate, and the difference is the
+#      whole honesty of this comment. What it lists: colour and style (SGR),
+#      mode set/reset (`\x1b[?25l` — every spinner library hides the cursor
 #      mid-line), erase-to-end-of-line, window-title OSC, charset and keypad
-#      selection. Two of those (`\x1b[1K`, `\x1b[2K`) do wipe cells the token
-#      already occupied, so joining across them can mask a value the viewer
-#      would never have seen whole. That direction is deliberate: over-masking
-#      costs a demo a redacted word, under-masking costs it the key.
+#      selection. Text either side of one of those lands in adjacent cells, so
+#      a token broken by one is one token on screen and is caught.
+#
+#      It is *not* "every sequence that does not move the cursor", and reading
+#      it that way is how this ends up over-trusted. Measured leaks, each of
+#      them inert on screen and none of them matched here: a CSI with an
+#      intermediate byte (`\x1b[1 q`), a DCS string (`\x1bPxx\x1b\\`), and an
+#      OSC aborted by ESC instead of BEL (`\x1b]0;t\x1b[0m`). A registered
+#      value split by one of those still dies at `_verify_redaction_final`; a
+#      shape-matched one goes into the frames. Issue #71.
+#
+#      In the other direction two members of the list (`\x1b[1K`, `\x1b[2K`)
+#      wipe cells the token already occupied, so joining across them can mask
+#      a value the viewer would never have seen whole. That trade is
+#      deliberate — over-masking costs a demo a redacted word, under-masking
+#      costs it the key — but it is a trade, not a proof. Issue #66.
 #
 #      What is **not** stripped is anything that moves the cursor: `\r`,
 #      `\x1b[H`, `\x1b[3;15H`, and `\x1b[2J` (which homes it). Masking
@@ -864,6 +875,14 @@ class TerminalRecorder(_DemoBase):
         scrollback — and refuses the take if a registered value is in it: no
         mp4, no timeline, and the stills discarded, exactly as an unverifiable
         CSS mask does.
+
+        "Finished" is load-bearing and is `__exit__`'s job, not this one's:
+        by the time this runs the narration tail has been held (which pumps a
+        child that is still writing) and `_stop()` has flushed whatever the
+        scrubber was withholding. Called any earlier, it vouches for a screen
+        the recording does not end on. It also runs on the paths *out* of a
+        storyboard that raised — a still is written long before a take ends,
+        and here a still is the raw screen.
 
         Registered values only. A shape match is a heuristic, and failing a
         take on a heuristic would mean an innocent-looking token nobody

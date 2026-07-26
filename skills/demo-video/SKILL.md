@@ -418,14 +418,27 @@ with TerminalRecorder(Path(__file__).parent) as rec:
   text `wait_for_text()` and `wait_for_prompt()` match against. It holds when
   the value is chopped across `os.read()` boundaries (the recorder holds back
   any trailing fragment that could still complete one, with no time limit) and
-  when an escape sequence is printed *inside* it, as long as that sequence
-  does not move the cursor — see below.
+  when one of a **listed set** of escape sequences is printed *inside* it —
+  colour and style, cursor show/hide, erase-to-end-of-line, window-title OSC,
+  charset and keypad selection. Not "any sequence that does not move the
+  cursor": that is the shape of the rule, not its reach, and sequences outside
+  the list are where it stops. See below for both halves.
 - **…and what the stream cannot express, the recorder refuses.** Before it
   writes anything, the take reads the finished terminal — visible screen and
   scrollback — and raises `SecretLeak` if a registered value is in it: no mp4,
   no timeline, no stills. That is the backstop for the case the scrubber
   cannot see (a value written in two pieces at two cursor positions), and it
   is why "not covered" below means "the take dies", not "it records the key".
+
+  "Finished" and "no stills" both mean it. The check runs after the narration
+  tail and after the recorder has flushed whatever it was still holding, so
+  it reads the screen the recording actually ends on — and it runs on every
+  way out of the `with`, including a storyboard that raised. A
+  `wait_for_text()` that timed out still gets its stills taken back, because
+  a still is written long before a take ends and a terminal still is the raw
+  screen. When that happens the timeout is what gets raised, not the leak:
+  the leak is printed, and the message that says what to fix is the one you
+  wanted.
 - **Shape detection is a safety net under that, not a substitute for it.**
   Four patterns are masked whether or not anyone registered them:
 
@@ -522,12 +535,22 @@ set of paths — four on the web, one in the terminal — and nothing else:
 - **The terminal scrubber has its own list, and it is not short.** Everything
   under **Redaction in a terminal demo** above holds; here is what it does not
   reach.
-  - **A value split by something that moves the cursor is not masked — and it
-    can be perfectly legible.** Matching runs against a copy with the *inert*
-    sequences removed: colour and style (SGR), mode set/reset (`\x1b[?25l`,
-    which every spinner emits), erase-to-end-of-line, window-title OSC,
-    charset and keypad selection. None of those moves the cursor, so a token
-    broken by one is contiguous on screen and is caught.
+  - **A value split by an escape the scrubber does not know is not masked —
+    and it can be perfectly legible.** Matching runs against a copy with the
+    *inert* sequences removed, and that is a **fixed list**: colour and style
+    (SGR), mode set/reset (`\x1b[?25l`, which every spinner emits),
+    erase-to-end-of-line, window-title OSC, charset and keypad selection. A
+    token broken by one of those is contiguous on screen and is caught.
+
+    A token broken by a non-cursor-moving sequence that is *not* on the list
+    is not. Measured, each of these renders the value as one word on screen
+    while the scrubber writes it in the clear: a CSI with an intermediate byte
+    (`\x1b[1 q`, the cursor-style escape), a DCS string (`\x1bPxx\x1b\\`), and
+    an OSC aborted by an ESC rather than a BEL (`\x1b]0;t\x1b[0m`). For a
+    *registered* value the final screen check below still kills the take, so
+    the guarantee holds — the recording is refused rather than leaked. For a
+    value that only shape detection was hiding, nothing catches it and it is
+    in the frames.
 
     Cursor movement is different. `\x1b[3;1Hsk-live-` followed by
     `\x1b[3;15HKEY…` puts the value on screen as one word while no substring
