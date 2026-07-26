@@ -5,7 +5,7 @@
 # ///
 """Read the support queue from the command line.
 
-    ./tickets list
+    ./tickets list [--status open|waiting|escalated]
     ./tickets show TQ-104
 
 Reads the same data/tickets.json the web front end serves.
@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parent / "data" / "tickets.json"
+STATUSES = ("open", "waiting", "escalated")
 
 
 def load() -> list[dict]:
@@ -27,6 +28,15 @@ def load() -> list[dict]:
 
 def cmd_list(args: argparse.Namespace) -> int:
     rows = load()
+    if args.status is not None:
+        if args.status not in STATUSES:
+            print(
+                f"unknown status: {args.status} "
+                f"(expected one of {', '.join(STATUSES)})",
+                file=sys.stderr,
+            )
+            return 2
+        rows = [t for t in rows if t["status"] == args.status]
     print(f"{'ID':<8} {'STATUS':<10} TITLE")
     for t in rows:
         print(f"{t['id']:<8} {t['status']:<10} {t['title']}")
@@ -53,6 +63,11 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_list = sub.add_parser("list", help="list the queue")
+    p_list.add_argument(
+        "--status",
+        default=None,
+        help=f"show only tickets with this status ({', '.join(STATUSES)})",
+    )
     p_list.set_defaults(func=cmd_list)
 
     p_show = sub.add_parser("show", help="show one ticket")
