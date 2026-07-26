@@ -318,7 +318,7 @@ recorded a console error, an uncaught exception, or a non-zero exit — see
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
 | `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search) |
 | `wait_for(selector)` | Wait for something the app does on its own |
-| `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears |
+| `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition) |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
 | `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. See **Redacting secrets**. |
 | `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. **Refuses values under 8 characters** — see **Redacting secrets**. |
@@ -1256,6 +1256,34 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 | `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI-stripped) matches `pattern`; `^`/`$` anchor to screen lines. |
 | `rec.page` | The live Playwright page (escape hatch). `rec._write(str)` sends raw bytes to the PTY. |
 
+### Opening a terminal segment on a title card
+
+**Pass `interlude=` to the constructor — do not make `interlude()` the
+storyboard's first statement.**
+
+```python
+with TerminalRecorder(
+    out_dir, segment="part2",
+    interlude="…the same thing, on the command line.",
+    interlude_hold=2.8,          # optional; the default
+) as rec:
+    rec.caption("Same filter, one command.")
+    rec.run("orders --city Berlin")
+```
+
+The recorder starts capturing when it creates the page, which is before any
+storyboard statement can paint anything — so a card raised by the first verb
+arrives ~290 ms late and the segment opens on an empty terminal with a lone
+prompt. `interlude=` raises the card from a context init script instead,
+before the page has painted at all, and the PTY, the terminal's own setup and
+the shell's first prompt all happen behind it. The recorder also **takes it
+down** when `interlude_hold` is up, so there is no `interlude("")` to forget.
+
+It records an ordinary `interlude` beat, so `timeline.json` reads the same
+either way. `Recorder` (web) has no such argument and does not need one: its
+page is blank until `goto()`, so there is no "before" to flash — and a card
+painted before that first `goto()` would be destroyed by it.
+
 ### Driving the four patterns
 
 - **Non-interactive CLI:** `run(cmd)` → `wait_for_prompt()`.
@@ -1309,7 +1337,9 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    `Recorder(out_dir, segment="part1")`, poll between segments until the
    work is done, open the next segment with `rec.interlude("…a few minutes
    later…")` on `about:blank` before navigating, and `stitch()` into
-   demo.mp4. `stitch()` also merges the segments' beat logs into one
+   demo.mp4. A **terminal** segment takes its opening card as
+   `TerminalRecorder(interlude="…")` instead — see **Opening a terminal
+   segment on a title card**. `stitch()` also merges the segments' beat logs into one
    `timeline.json` / `timeline.md`, so a segmented demo commits the same two
    files as any other — you do not have to do anything for that.
 2. **Write `record.py`** in the demo folder as a short storyboard. Capture

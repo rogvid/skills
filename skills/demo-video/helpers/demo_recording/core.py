@@ -67,19 +67,28 @@ window.__demoCaption = (text) => {
 
 # Interlude: a full-screen title card for jumps over real-world time the
 # recording skips (minutes of background work between two segments).
+#
+# The card's styling is a module constant because a *second* thing builds this
+# same element: a segment that opens on a card raises it from an init script,
+# before the recorder's own setup and before the page has painted at all
+# (issue #110, and see terminal.py's `_OPENING_CARD_JS`). Both have to produce
+# an element `__demoInterlude` will then recognise and fade out, which means
+# one id and one stylesheet, in one place.
+INTERLUDE_ID = "__demo_interlude"
+INTERLUDE_CSS = (
+    "position: fixed; inset: 0; display: flex; align-items: center;"
+    " justify-content: center; background: #1c1a17; color: #f7f4ee;"
+    " font: 500 30px/1.5 system-ui, sans-serif; text-align: center;"
+    " padding: 0 12%; z-index: 2147483647; opacity: 0;"
+    " transition: opacity .45s ease; pointer-events: none;"
+)
 _INTERLUDE_JS = """
 window.__demoInterlude = (text) => {
-  let el = document.getElementById('__demo_interlude');
+  let el = document.getElementById('__ID__');
   if (!el) {
     el = document.createElement('div');
-    el.id = '__demo_interlude';
-    el.style.cssText = `
-      position: fixed; inset: 0; display: flex; align-items: center;
-      justify-content: center; background: #1c1a17; color: #f7f4ee;
-      font: 500 30px/1.5 system-ui, sans-serif; text-align: center;
-      padding: 0 12%; z-index: 2147483647; opacity: 0;
-      transition: opacity .45s ease; pointer-events: none;
-    `;
+    el.id = '__ID__';
+    el.style.cssText = '__CSS__';
     document.body.appendChild(el);
   }
   el.textContent = text;
@@ -1898,7 +1907,10 @@ class _DemoBase:
                 _CAPTION_JS.replace("__CAPFONT__", str(self._caption_font_px))
                 .replace("__CAPBOTTOM__", str(self._caption_bottom_px))
             )
-            self._context.add_init_script(_INTERLUDE_JS)
+            self._context.add_init_script(
+                _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID)
+                .replace("__CSS__", INTERLUDE_CSS)
+            )
             self._context.add_init_script(_BRIDGE_JS)
             # Medium-specific init scripts (cursor, spotlight, ...).
             self._init_context(self._context)
