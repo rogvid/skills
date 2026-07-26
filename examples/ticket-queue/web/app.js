@@ -2,8 +2,11 @@
 
 let tickets = [];
 let selectedId = null;
+let activeStatus = "all";
 
 const listEl = document.getElementById("ticket-list");
+const headingEl = document.getElementById("queue-heading");
+const filterEl = document.getElementById("status-filter");
 const detailEl = document.getElementById("detail");
 const liveEl = document.getElementById("live-status");
 const modalEl = document.getElementById("assign-modal");
@@ -12,8 +15,15 @@ function statusPill(status) {
   return `<span class="pill pill-${status}">${status}</span>`;
 }
 
+function visibleTickets() {
+  if (activeStatus === "all") return tickets;
+  return tickets.filter((t) => t.status === activeStatus);
+}
+
 function renderList() {
-  listEl.innerHTML = tickets
+  const shown = visibleTickets();
+  headingEl.textContent = `Support queue (${shown.length})`;
+  listEl.innerHTML = shown
     .map(
       (t) => `
       <li>
@@ -62,6 +72,16 @@ function render() {
   renderList();
   renderDetail();
 }
+
+filterEl.addEventListener("click", (ev) => {
+  const button = ev.target.closest("button[data-status]");
+  if (!button) return;
+  activeStatus = button.dataset.status;
+  for (const b of filterEl.querySelectorAll("button[data-status]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.status === activeStatus));
+  }
+  render();
+});
 
 listEl.addEventListener("click", (ev) => {
   const button = ev.target.closest(".ticket");

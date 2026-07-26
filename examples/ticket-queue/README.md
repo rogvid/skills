@@ -14,8 +14,9 @@ holds no `SKILL.md`, so the CLI's one-level-deep root walk does not see it.
 `skills/script-conventions/SKILL.md`).
 
 ```sh
-./serve                 # http://127.0.0.1:8901
+./serve                            # http://127.0.0.1:8901
 ./tickets list
+./tickets list --status open       # open | waiting | escalated
 ./tickets show TQ-104
 ```
 
@@ -27,6 +28,17 @@ holds no `SKILL.md`, so the CLI's one-level-deep root walk does not see it.
 | `tickets` | the CLI over the same data |
 | `web/` | one page — queue on the left, ticket detail on the right |
 | `data/tickets.json` | seven seeded tickets, `open` or `waiting` |
+| `demos/` | recorded demos: a `record.py` storyboard and its beat log per feature |
 
 The data is fixed and the UI computes nothing from the clock, so a recording
 of it reproduces without `deterministic=True`.
+
+## Re-recording a demo
+
+The video is not committed. With the `demo-video` skill installed (it is in
+this repo at `skills/demo-video`, and the storyboards find it there):
+
+```sh
+./serve --port 8901 &
+uv run demos/2026-07-26-status-filter/record.py
+```
