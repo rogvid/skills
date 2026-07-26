@@ -49,8 +49,11 @@ smoke: web first caption 'A small dashboard.' logged at 3.03s, on screen at 2.95
 smoke: web closing caption 'Recorded end to end.' logged at 17.03s, on screen at 16.99s (-40 ms)
 smoke: web beat clock holds across the take (+40 ms)
 smoke: web timeline.json ok (23 beats)
+smoke: web each review frame shows its own beat's caption state (10 captioned frames from 11.2, 4 bare ones to 3.3; 9 within 0.75s of a caption change and not graded)
+smoke: web frames/ ok (23 beat frames, each byte-identical to the demo.mp4 frame it claims to be)
 smoke: web healthy app under strict=True records no problems
 smoke: redaction #api-key is blurred in every frame of demo.mp4 (worst 1.5 vs control 52.0, 3%)
+smoke: redaction all 9 masked elements are blurred in the review frames (18 gradable of 31; worst #a4-card 0.2 vs control 21.8 in beat-23.png, 1%, bar 7%)
 smoke: redaction still 01-key-blurred.png ok (key 1.0, token 2.9, control 39.3)
 smoke: redaction .tts/ holds 2 clips — the narrated lines, and nothing for the refused one
 smoke: redaction no artifact holds either secret verbatim
@@ -122,10 +125,8 @@ all (see Known gaps).
 
 ## What it asserts
 
-Six independent axes, because a recorder can fail on any one of them while
-looking perfect on the other five.
-Five independent axes, because a recorder can fail on any one of them while
-looking perfect on the other four.
+Eight independent axes, because a recorder can fail on any one of them while
+looking perfect on the other seven.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -290,6 +291,118 @@ When the measurement cannot be made the run says which reason it was: a caption
 that was never drawn, a video that slid further than the search window can see,
 or a run-up that was not quiet. They look identical from inside the window, and
 only the first is the recorder losing a caption.
+
+**Review frames** — the `frames/` a reviewer is actually handed: one PNG per
+beat, and `frames.md` embedding them in order. What is graded is what the
+recorder claims, and it deliberately claims very little:
+
+- **One frame per beat, named for it.** Counted against the hand-written
+  `WEB_BEATS`/`TERMINAL_BEATS`, so a dropped frame, a doubled one or an
+  off-by-one name fails without a pixel being read. Every file on disk is named
+  by the manifest and vice versa.
+- **Each frame is the moment it says it is.** Two halves, and only together.
+  Its timestamp must be its beat's midpoint, computed *here* from
+  `timeline.json` — not imported from the recorder, because a check that
+  re-derives its expectation from the constants it is grading moves whenever
+  they do. And the PNG must be that frame: the harness **cuts the same second
+  out of `demo.mp4` again and compares the bytes**. 56 of 56 identical across
+  the three graded takes — 23 web, 18 terminal, and 15 off the stitched
+  `segments/` demo; one frame away (40 ms) is already a different file.
+
+  Exact rather than approximate, because approximate does not work here. A PNG
+  and a decoded video frame reach a luma reduction through different colour
+  conversions and sit ~1.0 mean luma apart *when they are the same frame*,
+  while two moments three seconds apart in this fixture differ by 0.87 (a
+  filtered table and a refreshed one are mostly the same white page). A
+  threshold loose enough to absorb the first cannot see the second — measured,
+  by injecting exactly that and watching it pass.
+- **The sheet leaks no storyboard.** `frames.md` goes to a *context-free*
+  reviewer who is asked what story the pictures tell. It is searched for every
+  caption in `WEB_CAPTIONS`/`TERMINAL_CAPTIONS` and every selector in the beat
+  list, and finding any of them is a failure; `frames.json` must carry no
+  `caption`, `verb` or `selector` key, because a manifest that duplicates the
+  storyboard is how it ends up back on the sheet.
+- **A re-run clears the previous run's frames**, and only those. `beat_frames()`
+  is called a second time with a planted `beat-99.png` and a planted file it did
+  not write: the first must be gone, the second must survive, and the frame list
+  must be identical. SKILL.md advertises the re-run and step 6 tells a reviewer
+  to read the whole directory, so a storyboard that lost beats between runs
+  must not leave plausible-looking frames from a demo that no longer exists.
+- **A single segment's timeline gets no frames — and only that.** Graded by
+  handing `beat_frames()` this take's own timeline with a segment name on it:
+  it must write nothing and say why. Both reasons are properties of that
+  document, not of the world around it: its beats are numbered from zero, so
+  two segments collide on `beat-00.png`, and its `media` is a `.seg.mp4` that
+  `stitch()` deletes on its way to `demo.mp4`. Neither survives the merge, so
+  the **stitched** demo gets frames like any other take — the `segments/` take
+  runs the whole of this axis, `_check_frame_captions()` included, against the
+  15-beat merged timeline `stitch()` writes.
+- **Frame N shows beat N** — issue #8's acceptance criterion, and the only
+  claim here about a frame's *content*. For every beat the hand-written
+  storyboard says had a caption bar up, the frame must show one; for every beat
+  it says had none, the frame must not. Decided by ranking rather than by a
+  threshold: each frame's caption band is reduced and measured against the
+  take's own first caption-off frame, and every captioned frame must sit
+  further from that baseline than every uncaptioned one, by at least
+  `MIN_ALIGN_BAND_DELTA`. Observed margins: web 8.1, terminal 2.3, segments
+  16.6. A recorder that stopped drawing the bar, or extraction that returned
+  one picture for every beat, collapses the two groups together and the margin
+  goes to zero — there is nothing to tune past it.
+
+  **One bit per frame, deliberately.** *Which* caption is a stronger claim and
+  this band cannot carry it: two of the fixture's own terminal captions sit 1.5
+  mean luma apart against a 1.0 floor, so a check that named them would be
+  reporting noise. That is [#60](https://github.com/rogvid/skills/issues/60).
+
+  **And a stated tolerance, which is the honest part.** The video runs ahead of
+  the beat log ([#18](https://github.com/rogvid/skills/issues/18)), so a frame
+  cut at a beat's midpoint shows a moment slightly later in the story than that
+  beat. Frames within `FRAME_CAPTION_GUARD_S` — the same `MAX_CAPTURE_LOSS_S`
+  the skew bars use, 750 ms — of a caption *change* are therefore not graded:
+  that close, the log and the video genuinely disagree about which side of the
+  change a frame is on. This is not theoretical. Set the guard to zero and the
+  suite fails on `segments/beat-13.png`, the frame for a 50 ms `shot()` beat
+  that ends 25 ms before a caption clears: the video is ~80 ms ahead, so the
+  entire beat is already past the change and the frame shows the *next* beat's
+  screen. `MIN_GRADED_CAPTION_FRAMES` and a one-of-each-class rule keep the
+  guard from turning the check off — set it to 3 s instead and the suite fails
+  with "only 0 of 23 review frames … were graded".
+
+**What is still not graded: which caption a frame shows.** The recorder makes
+no such claim, and neither does this file. An earlier round graded a caption
+printed under each frame by reading the caption bar back out of the pixels;
+that measurement worked, and the thing it was measuring did not. The recorder
+inferred which caption a frame showed by locating caption transitions in the
+video, and review found the inference mislabelling frames on ordinary
+storyboards: two captions of the same length change under 0.25 mean luma in the
+band against a 1.5 floor, an app repainting under the bar supplies a stronger
+and earlier edge than the caption does, and a mid-take `goto()` destroys the
+bar while logging no caption change to measure. The claim was withdrawn rather
+than tuned — see [#60](https://github.com/rogvid/skills/issues/60), which is
+what earning it back would take.
+
+**Scene-change detection**, the fallback for what the storyboard did not
+script, is graded directly against `demo.mp4` rather than through a take: no
+beat in either storyboard runs the 3 s the recorder needs before it reaches for
+it, and stretching one to provoke it would cost every run the seconds. It must
+see the largest change a take contains and stay quiet where nothing moves.
+
+The positive half — at least one cut somewhere in the video — is **web only**,
+and that is about the medium rather than a convenience. The biggest thing that
+happens to the web frame is the caption bar arriving, at 0.023–0.026 against
+the recorder's 0.02 threshold, while *nothing* in the terminal take reaches it:
+its largest change is two lines of shell output on a dark background at 0.011,
+against an idle 0.004. At a threshold separating those, an ordinary terminal
+repaint would be reported as a cut. Tracked in
+[#57](https://github.com/rogvid/skills/issues/57), which proposes scoring the
+app's rect instead of the whole composited frame.
+
+The quiet half runs on both, over the stretch after the **last beat's logged
+end** — where the recording holds its closing frame until it stops. Anchored
+there rather than in the middle of the take because the video only ever runs
+*ahead* of the beat log (#18), so the real end of that beat is at or before
+this; a first version picked "the middle of the longest pause beat" and a take
+that stalled 540 ms slid a caption change into it on the first run.
 
 **Problems** — what the recorder saw *behind* the pixels. This is the axis the
 other four are structurally blind to: a demo of an app throwing `TypeError` on
@@ -625,11 +738,53 @@ ordered above it in the top layer, and only the hit test at the next checkpoint
 notices. And the attack the fixture runs is the two ordinary ones, not an
 adversary.
 
+The **review frames** (`frames/`, issue #8) are a fifth artifact on disk and
+are graded on pixels like the rest. They are frames of `demo.mp4`, so they
+inherit its mask by construction — which is a reason to expect them clean, not
+a reason to skip measuring them, and this file's whole premise is that
+"inherits it by construction" is a claim rather than evidence. **Every element
+the video is graded over** is scored in the frames too, each against its own
+control **in the same frame**, worst frame wins by *ratio*, same 7% text bar as
+the video — and `#if-key` carries the video's window with it, since it holds
+its secret only until the take navigates and an emptied iframe is not a masked
+one.
+
+For one round this graded `#api-key` alone, which was the wrong single element
+to pick: `#api-key` is clean in every run, and `#if-key` is the one measured
+leaking into `demo.mp4` intermittently ([#68](https://github.com/rogvid/skills/issues/68)).
+The frames are the artifact a reviewer is *handed*, so the element most likely
+to leak was the one they were least protected from.
+
+Only frames where the *control* is legible are graded, and the count of those
+is asserted (≥ 10 of ~31, per element). That skip is not a loophole while the
+control is what decides it: this take opens on `about:blank` for five
+`redact()` beats, raises the paint gate on purpose mid-take, and navigates
+once, so a handful of its frames legitimately show nothing at all — and a mask
+that blanked the whole recording takes the gradable count to zero and fails.
+
+And the take that *cannot* verify its mask must leave none of them behind:
+`check_unmatched_redaction` requires an empty `frames/` alongside the absent
+stills and the absent `.video/`.
+
+That assertion needs a **planted `demo.mp4`** to mean anything, and for one
+round it did not have one. `beat_frames()` returns "there is no demo.mp4 to
+extract frames from" *before* it creates `frames/`, and a refused take never
+converts its webm — so "no review frames survived" was true whatever the exit
+path did, and the `if clean:` guard that is supposed to keep frames off a
+refused take could be deleted without a single assertion moving. It now writes
+a real two-second mp4 into the directory first, which makes that guard the only
+thing standing between the refusal and a `frames/` directory. The mp4 check
+changes with it, from "the file does not exist" to "the file is still the one
+we planted" — the same claim, since conversion writes over it, and equally
+sharp.
+
 The two text paths are checked by searching bytes, not by asking the recorder:
 
 - every file the take wrote — `timeline.json`, `timeline.md`, the stills, the
-  mp4, the narration clips — is read and searched for both literals, with no
-  exemptions, so a leak path nobody anticipated still shows up;
+  mp4, the narration clips, `frames/` and its two manifests — is read and
+  searched for both literals, with no exemptions, so a leak path nobody
+  anticipated still shows up. It is an `rglob`, not a list, which is why the
+  review frames were covered by it the moment they existed;
 - `.tts/` must hold **exactly** the clips for the lines that were narrated —
   not merely "nothing for the refused line", which is also true of an empty
   directory. The innocent line's clip existing is what makes the refused line's
@@ -960,6 +1115,27 @@ knows is missing is worse than one that is openly absent.
   Between them a recorder that drew the wrong caption at the right moment would
   be caught, but only because two separate checks happen to overlap — no single
   assertion reads pixels back as text, and none is going to without OCR.
+- **A review frame is graded for whether a caption was on screen, not for
+  which.** `_check_frame_captions()` closes the "nothing says which beat a frame
+  shows" gap only as far as one bit goes: a captioned beat's frame must show a
+  bar and an uncaptioned one's must not. Two beats carrying *different* captions
+  are indistinguishable to it, so a stall that slid a frame from one captioned
+  beat to another captioned beat still passes. Tracked in
+  [#60](https://github.com/rogvid/skills/issues/60), which would make the
+  mapping readable off the frame instead of inferred.
+- **Frames within 750 ms of a caption change are not graded for content at
+  all**, and on these storyboards that is 8-9 of every take's frames. The
+  exclusion is real coverage lost, not a formality: it is exactly where #18's
+  drift puts a frame on the wrong side of a change, and where the harness
+  therefore cannot tell a recorder bug from the capture. `check_beat_frames()`
+  still grades those frames for placement and for byte-identity against
+  `demo.mp4`; only the pixel claim is withheld.
+- **No storyboard beat is long enough to make the recorder run scene
+  detection.** `SCENE_MIN_SPAN_S` is 3 s and the longest beat either take
+  performs is a 2 s `pause`, so the *manifest* half of that check — scene
+  frames only inside long beats — is vacuous today and says so where it is
+  written. The mechanism is graded directly instead (see **Review frames**),
+  which is what stops the vacuity from being total.
 - **The wall-clock regression cannot be fault-injected.** The recorders time
   beats with `time.monotonic()`; using `time.time()` only misreports when the
   system clock actually steps, which no assertion here can provoke. It is not
@@ -1206,13 +1382,23 @@ the crop and looking at it before it was believed.
   is a caption) so the timeline check knows to expect it. `record_segments`
   works the same way, except that its list is `SEGMENT_BEATS_FULL` and carries
   a third column, the segment the beat belongs to. Those lists are
-  deliberately hand-maintained; see **Timeline** above for why. Adding a beat
+  deliberately hand-maintained; see **Timeline** above for why — and
+  `WEB_BEATS` is also what the **Review frames** axis counts frames against and
+  searches `frames.md` for, so a stale entry there fails twice. Adding a beat
   lengthens the take; keep it inside the duration window, or widen the window
   deliberately. **Every interaction gets a `b.expect(...)` naming what it
   should have changed** — a beat with no post-condition is a beat that passes
   when the verb is a no-op. Anything that leaves the page still for more than a
   second also wants a look at `TICKER_JS`: idle is what makes the screencast
   lose time, and adding idle is how the timing bar was made flaky once already.
+- **A new caption, interlude or selector** — it goes in the hand-written lists
+  (`WEB_CAPTIONS`, `SEGMENT_INTERLUDES`, the beat list), and the **Review
+  frames** axis then requires `frames.md` *not* to contain it. That is the
+  intended direction: the sheet a context-free reviewer reads must not name the
+  thing they are being asked to discover. A caption also moves the boundaries
+  `_check_frame_captions()` guards, so adding one near the end of a storyboard
+  can push frames out of the graded set — watch the "not graded" count in the
+  pass line, and `MIN_GRADED_CAPTION_FRAMES` is the floor, not a dial.
 - **Anything in the page that must keep moving** — a second ticker, an
   animation a take is *about* — has to carry `data-demo-video-animate`, or the
   recorder's determinism rule lands it on its final frame the moment it
