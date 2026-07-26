@@ -636,12 +636,26 @@ EVIDENCE_LIMITS = {
 }
 EVIDENCE_TRUNCATED = "\n…[demo-video: truncated here, {n} more characters]"
 
+# What `html` says instead of markup when a registered or redacted value is
+# interleaved with elements inside it. Spelled out rather than left null, so a
+# reader can tell "no spotlight was up" from "the markup was withheld".
+EVIDENCE_HTML_WITHHELD = (
+    "[demo-video: markup withheld — a registered or redacted value is split "
+    "across elements here, and there is no safe way to edit it out of the "
+    "serialization. The ARIA snapshot above is unaffected.]"
+)
+
 # Harvested text shorter than this is not used as a mask. `redact()` pointed at
 # an element rendering "$" would otherwise replace every dollar sign in every
 # evidence file, which costs the evidence its meaning and hides nothing: a
 # one-character secret is not one. Registered secrets are masked at any length
 # — `register_secret()` was told, explicitly, that the value matters.
 EVIDENCE_MIN_MASK_LEN = 2
+
+# Print a warning past this much evidence in one take. Not a cap — the
+# per-field budgets are the cap — but a large accessibility tree times a long
+# storyboard is a real cost (issue #49) and it should not arrive silently.
+EVIDENCE_DIR_WARN_BYTES = 2_000_000
 
 
 def evidence_name(index: int, segment: str | None = None) -> str:
@@ -1459,6 +1473,12 @@ class _DemoBase:
         self._evidence_on = True if evidence is None else bool(evidence)
         self._evidence: list[tuple[dict, dict]] = []
         self._evidence_masks: set[str] = set()
+        # Text the page renders *outside* every redacted subtree, deduplicated
+        # across beats. A harvested string found in here is rendered in the
+        # clear somewhere, so masking it would only damage the evidence — see
+        # `_evidence_forbidden`.
+        self._evidence_outside: set[str] = set()
+        self._evidence_res: dict[str, re.Pattern[str]] = {}
         self._evidence_docs: list[tuple[Path, dict]] = []
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
@@ -2102,11 +2122,15 @@ class _DemoBase:
         finally:
             # Captured before `t_end` is stamped, so the round trips it costs
             # are accounted for *inside* the beat that paid for them and no
-            # unexplained gap opens up between one beat and the next.
-            if self._evidence_on:
-                self._capture_evidence(record)
-            record["t_end"] = round(time.monotonic() - self._t0, 3)
-            self._in_beat = False
+            # unexplained gap opens up between one beat and the next. Nested
+            # try/finally so `t_end` is stamped even when the capture refuses
+            # (a SecretLeak out of a medium's payload is fatal, on purpose).
+            try:
+                if self._evidence_on:
+                    self._capture_evidence(record)
+            finally:
+                record["t_end"] = round(time.monotonic() - self._t0, 3)
+                self._in_beat = False
 
     def _write_beat_frames(self, doc: dict) -> None:
         """Extract this take's review frames (a no-op for a segment).
@@ -2131,17 +2155,22 @@ class _DemoBase:
         return {}
 
     def _capture_evidence(self, beat: dict) -> None:
-        """Buffer one beat's evidence. Never raises.
+        """Buffer one beat's evidence.
 
-        A capture failure must not lose a take that is otherwise fine — the
-        beat gets a file saying what went wrong instead, which keeps the
-        `evidence` pointer on every beat pointing at something real. The one
-        failure that is *not* survivable — a redacted element whose rendered
-        text could not be read, and therefore could not be masked — is handled
-        in the medium's payload, which returns `omitted` rather than raising.
+        Raises only SecretLeak, and that exclusion is the whole point of the
+        handler below rather than an afterthought. A broad `except` here would
+        swallow one — this runs in a `finally`, and everything a medium's
+        payload touches (the mask, the page) is a place SecretLeak comes from.
+        Catching it would turn a control that used to kill a take into one that
+        prints a line and lets the mp4 be written. Every other failure is a
+        diagnostic and must not lose an otherwise fine take: the beat gets a
+        file saying what went wrong, which keeps the `evidence` pointer on
+        every beat pointing at something real.
         """
         try:
             payload = self._evidence_payload()
+        except SecretLeak:
+            raise
         except Exception as exc:  # noqa: BLE001 - a diagnostic must not kill a take
             payload = {"error": f"{type(exc).__name__}: {exc}"}
             print(
@@ -2152,32 +2181,77 @@ class _DemoBase:
             )
         self._evidence.append((beat, payload))
 
+    @staticmethod
+    def _flatten(text: str) -> str:
+        """Whitespace collapsed to single spaces, ends trimmed."""
+        return " ".join(text.split())
+
     def _evidence_forbidden(self) -> tuple[str, ...]:
         """Every literal that must not appear in an evidence file, longest first.
 
         Two sources, and the second is the reason this exists at all:
 
           * `self.secrets` — text somebody registered. `scrub()` already covers
-            this everywhere else.
+            this everywhere else, and nothing below can drop one: the author
+            said explicitly that the value matters.
           * `self._evidence_masks` — the *rendered text of everything redact()
             is covering*, read out of the page as the take ran. `redact()` is a
             pixel control: it hides where a value renders and leaves the value
             in the DOM, so a text dump of that DOM is not protected by it at
             all. This is what makes evidence inherit redaction.
 
+        **A harvested string is only used as a mask if it appears nowhere
+        outside the redacted subtrees**, and without that rule this feature
+        destroys the artifact it exists to produce. Harvesting *every* node of a
+        redacted card also harvests its label: `redact("#revenue-card")` around
+        a `<span>Revenue</span>` would otherwise register "Revenue" as a global
+        forbidden literal and rewrite every unrelated paragraph in every file as
+        `[redacted] for the quarter was $128,400`. Worse, a card holding
+        `sk-<i>live</i>-CHLD…` harvests the text nodes "sk-" and "live" on their
+        own and rewrites every other key on the page.
+
+        The rule is not a heuristic about what a secret looks like: a string
+        that also renders *in the clear* somewhere the mask does not cover is,
+        by construction, not being hidden by that mask — it is in the frames, in
+        the stills and in the video. Masking it in a text file buys nothing and
+        costs the file its meaning. What is left is exactly what only exists
+        behind the mask.
+
         Longest first so overlapping values (a token, and the header line
         holding it) mask the larger one whole instead of leaving its tail.
         """
+        outside = "\n".join(self._evidence_outside)
         literals = set(self._secrets)
-        literals |= {
-            text for text in self._evidence_masks
-            if len(text.strip()) >= EVIDENCE_MIN_MASK_LEN
-        }
+        for text in self._evidence_masks:
+            flat = self._flatten(text)
+            if len(flat) < EVIDENCE_MIN_MASK_LEN:
+                continue
+            if flat in outside:
+                continue  # rendered in the clear elsewhere: not this mask's
+            literals.add(text)
         return tuple(sorted(literals, key=len, reverse=True))
+
+    def _evidence_re(self, literal: str) -> "re.Pattern[str]":
+        """`literal` as a pattern whose whitespace is elastic.
+
+        The harvest reads `textContent`, which carries the source's own
+        indentation: a value on its own line in hand-written HTML comes back as
+        `'\\n      wombatxray7714\\n    '`. An ARIA tree renders the same value
+        as `- code: wombatxray7714`, and `str.replace` between those two finds
+        nothing at all — the single most ordinary shape there is, leaking in
+        every file. So every run of whitespace in the literal matches any run of
+        whitespace in the text, and the ends are trimmed before matching.
+        """
+        pattern = self._evidence_res.get(literal)
+        if pattern is None:
+            tokens = [re.escape(t) for t in literal.split()]
+            pattern = re.compile(r"\s+".join(tokens) if tokens else re.escape(literal))
+            self._evidence_res[literal] = pattern
+        return pattern
 
     def _evidence_mask(self, text: str, forbidden: tuple[str, ...]) -> str:
         for literal in forbidden:
-            text = text.replace(literal, SECRET_MASK)
+            text = self._evidence_re(literal).sub(SECRET_MASK, text)
         return text
 
     def _evidence_scrub_deep(self, value: object, forbidden: tuple[str, ...]) -> object:
@@ -2224,6 +2298,20 @@ class _DemoBase:
         }
         doc.update(payload)
         doc = self._evidence_scrub_deep(doc, forbidden)  # type: ignore[assignment]
+        # Markup is the one field a substring mask cannot finish the job on. A
+        # value written `harbor<b>zenith</b>7725` has a `textContent` the mask
+        # finds and an `outerHTML` it does not, and only elements the *mask*
+        # reached are elided structurally (web.py) — a `register_secret()` value
+        # split across tags in an ordinary paragraph is reached by neither. So
+        # the tags are stripped and the bare text re-checked, and markup that
+        # still holds a forbidden value is withheld rather than published: the
+        # field is a convenience, and there is no safe way to edit a value out
+        # of markup that interleaves it with elements.
+        html = doc.get("html")
+        if isinstance(html, str):
+            bare = re.sub(r"<[^>]*>", "", html)
+            if any(self._evidence_re(lit).search(bare) for lit in forbidden):
+                doc["html"] = EVIDENCE_HTML_WITHHELD
         truncated: list[str] = []
         for field, limit in EVIDENCE_LIMITS.items():
             text = doc.get(field)
@@ -2270,16 +2358,72 @@ class _DemoBase:
             for beat, payload in self._evidence
         ]
 
+    def _stale_evidence(self, keep: set[Path] | None = None) -> list[Path]:
+        """This take's own evidence files that this take is not writing.
+
+        Only files this take's naming owns — `beat-NN.json` for a whole demo,
+        `<segment>.seg.beat-NN.json` for a segment — so re-recording one segment
+        of a multi-segment demo does not delete the others.
+        """
+        directory = self.out_dir / EVIDENCE_DIR
+        if not directory.is_dir():
+            return []
+        prefix = f"{self.segment}.seg." if self.segment else ""
+        mine = re.compile(rf"^{re.escape(prefix)}beat-\d+\.json$")
+        keep = keep or set()
+        return [
+            path
+            for path in sorted(directory.glob("*.json"))
+            if mine.match(path.name) and path not in keep
+        ]
+
+    def _clear_stale_evidence(self, keep: set[Path] | None = None) -> None:
+        """Delete evidence a previous take into this directory left behind.
+
+        Re-recording into the same folder is how this skill is *meant* to be
+        used — `record.py` is committed precisely so it can be re-run — and a
+        take that adds `redact()` (or simply has fewer beats than the last one)
+        would otherwise leave the previous take's files sitting beside its own,
+        holding the very value the new take was written to hide. Nothing else
+        here has that shape: the mp4 is overwritten, and a still is only kept
+        because it might be a committed guide. Evidence is never committed, so
+        there is no such thing as one worth keeping.
+        """
+        for path in self._stale_evidence(keep):
+            try:
+                path.unlink()
+            except OSError:
+                print(
+                    f"demo-video: WARNING — could not delete {path}, which is "
+                    f"a previous take's evidence and may hold a value this "
+                    f"take redacts",
+                    file=sys.stderr,
+                )
+
     def _write_evidence(self) -> None:
+        # Runs even when there is nothing to write, and even with evidence
+        # switched off: a previous take's files are the hazard, not this one's.
+        keep = {path for path, _ in self._evidence_docs}
+        self._clear_stale_evidence(keep)
         if not self._evidence_docs:
             return
         (self.out_dir / EVIDENCE_DIR).mkdir(parents=True, exist_ok=True)
         for path, doc in self._evidence_docs:
             path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        total = sum(path.stat().st_size for path, _ in self._evidence_docs)
         print(
             f"wrote {self.out_dir / EVIDENCE_DIR} "
-            f"({len(self._evidence_docs)} beats)"
+            f"({len(self._evidence_docs)} beats, {total // 1024} kB)"
         )
+        if total > EVIDENCE_DIR_WARN_BYTES:
+            print(
+                f"demo-video: evidence/ is {total // 1024} kB over "
+                f"{len(self._evidence_docs)} beats. The per-field caps are "
+                f"working, but this app's accessibility tree is large — pass "
+                f"Recorder(evidence=False) (or DEMO_VIDEO_EVIDENCE=0) if the "
+                f"round trips are costing more than the files are worth.",
+                file=sys.stderr,
+            )
 
     def _media_path(self) -> Path:
         """The mp4 this take converts to on exit."""
@@ -2302,12 +2446,30 @@ class _DemoBase:
         # before the registration keep the value (no recorder can un-paint a
         # caption), but the files this skill tells people to commit do not
         # have to.
-        beats = [self._scrub_deep(beat) for beat in self._beats]
+        #
+        # ...and against what redact() turned out to be covering, which
+        # `scrub()` alone does not know about. The harvest exists for the
+        # evidence files, but timeline.json and timeline.md are the files this
+        # skill tells people to *commit* — a caption or a selector holding a
+        # redacted element's text coming back `[redacted]` in evidence and in
+        # the clear in the committed log is the worse half of that pair.
+        #
+        # Note the coupling this creates: with `evidence=False` nothing
+        # harvests, so this falls back to `scrub()` alone. Turning evidence off
+        # is turning off the only thing that reads what redact() hides.
+        forbidden = self._evidence_forbidden()
+        beats = [
+            self._evidence_scrub_deep(self._scrub_deep(beat), forbidden)
+            for beat in self._beats
+        ]
         # The issue log too: it quotes console messages, request URLs and
         # process output — none of it authored, all of it capable of carrying
         # a secret the app printed, and all of it written into the same two
         # committed files.
-        issues = [self._scrub_deep(issue) for issue in self._issues]
+        issues = [
+            self._evidence_scrub_deep(self._scrub_deep(issue), forbidden)
+            for issue in self._issues
+        ]
         return {
             "schema": TIMELINE_SCHEMA,
             "generated_by": "demo-video",
@@ -2428,7 +2590,15 @@ class _DemoBase:
         rather than claiming a general cleanup, because "cleaned up" without a
         list is exactly the sentence people believe and do not check.
         """
-        gone: list[str] = []
+        # A previous take's evidence, before anything else. This take wrote
+        # none — the documents never left memory — but the folder may hold the
+        # last take's, and the reason this take is failing is usually that
+        # somebody has just added a `redact()` for a value those files contain.
+        # Unlike a still, no evidence file is ever a committed artifact, so
+        # there is nothing here worth preserving.
+        stale = self._stale_evidence()
+        self._clear_stale_evidence()
+        gone: list[str] = [f"{EVIDENCE_DIR}/{p.name}" for p in stale if not p.exists()]
         for path in self._shots + [self.out_dir / ".frame.png"]:
             try:
                 if path.is_file():

@@ -40,9 +40,12 @@ and a real terminal session (voice on):
 - **`evidence/beat-NN.json`** — what was on screen at every beat, in text:
   the page's ARIA tree (or the terminal's rendered screen), the spotlight
   target's markup, capped and explicitly truncated. An agent reviewing the
-  demo reads what the app said instead of inferring it from pixels. Plain
-  text, so it is masked against registered secrets *and* against whatever
-  `redact()` is covering — and it is **not committed**; `SKILL.md` says why.
+  demo reads what the app said instead of inferring it from pixels. It is
+  plain text, which makes it the one artifact a pixel control cannot protect
+  for free — so the recorder reads what `redact()` is covering out of the page
+  and masks *that* out too, refuses to write page text it cannot vouch for,
+  and clears what a previous take left behind. It is **not committed**;
+  `SKILL.md` explains both decisions and what they still do not cover.
 - **A recording that reproduces, when you ask for it** — the browser's
   timezone and locale are always pinned, and `Recorder(deterministic=True)`
   additionally freezes the page's clock and flattens animations, so the same

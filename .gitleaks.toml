@@ -58,6 +58,36 @@ The words, and what each fixture element they belong to is for:
   SDCT  #sd-token-control  the same, inside the shadow root
   LATE  a caption          set before the value in it was registered
 
+...and the ?evidence=1 panel (issue #9), whose shapes leak into a *text* dump
+of the page rather than into a picture of it:
+
+  WSPC  #ev-ws-key         indented on its own line in hand-written markup
+  BLED  #ev-bleed-key      in a card whose label also renders outside it
+  CHLD  #ev-child-key      split into text nodes that are ordinary on their own
+  LBLD  #ev-label-src      an accessible name sourced from outside the subtree
+  SLOT  #ev-slot-light     light DOM slotted into a redacted shadow host
+  VALU  #ev-value-key      an input value that lives on the property
+  TICK  #ev-tick-key       rewritten every 25 ms with a value nothing has seen
+  ATTR  #ev-spot-attrs     a data-* attribute the page never renders
+  JSON  #ev-spot-attrs     the same, inside a JSON blob in another attribute
+
+...and three that never render at all — they exist only inside tests/smoke, one
+per assertion about how the writer handles a value it was told about:
+
+  PRNT  a printed line      echoed by a command in the terminal take, where
+                            register_secret() is the only defence (issue #5)
+  STAL  a planted file      a previous take's evidence, which a re-record into
+                            the same folder has to delete
+  CUTT  a padded list item  positioned so the markup cap cuts through it, which
+                            is the only place "mask, then cap" is observable.
+                            It is the one with more than sixteen zeroes — that
+                            length is what makes the straddle arithmetic land,
+                            hence the wider run below
+
+The word list is what keeps this narrow, not the run length: every literal is a
+four-letter word followed by nothing but zeroes, and lengthening the run admits
+no string the word list did not already admit.
+
 The terminal half of redaction (issue #5) adds a family of its own, and they
 are not all `sk-live-` shaped because the shapes themselves are what is being
 tested. **No allowlist entry was added for any of them, and none is needed** —
@@ -95,5 +125,5 @@ neither. Verified by running gitleaks over the whole tree, not assumed.
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
 regexes = [
-  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT)0{4,16}''',
+  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT|WSPC|BLED|CHLD|LBLD|SLOT|VALU|TICK|ATTR|JSON|PRNT|STAL|CUTT)0{4,24}''',
 ]

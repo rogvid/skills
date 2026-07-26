@@ -39,9 +39,13 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 | `timeline.md` | The same log rendered for humans, stills embedded | yes |
 | `guide.md` | Optional written guide embedding the stills | yes |
 | `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
+| `evidence/beat-NN.json` | **A working file, not an artifact.** What was on screen at each beat, in text — read by the reviewing agent in the same run that produced it, then thrown away. Greppable plaintext of a real app's DOM | **no** — gitignore it |
 | `frames/` | Review frames pulled out of `demo.mp4`, plus the sheet you hand a reviewer | **no** — a working file of a review; `beat_frames(out_dir)` regenerates it |
 
-The storyboard is the durable artifact, not the video. See **Commit the
+The storyboard is the durable artifact, not the video. The last two rows are
+neither: they are inputs to a review that happens once, derived from a video
+that is itself not committed, and both are in this repo's `.gitignore`
+([#50](https://github.com/rogvid/skills/issues/50)). See **Commit the
 storyboard, not the media** in the Process section.
 
 ## Setup (once per project)
@@ -609,6 +613,10 @@ set of paths — four on the web, one in the terminal — and nothing else:
     recorder reads what each redacted element renders and masks that text out
     of every evidence file. Read **Per-beat evidence** before trusting it, and
     do not commit `evidence/`.
+  - What that harvest reads is also masked out of `timeline.json` and
+    `timeline.md`, which *are* committed. Without it a caption or a selector
+    holding a redacted element's text would come back `[redacted]` in the
+    evidence and in the clear in the file you are asked to check in.
 - **A screenshot the storyboard takes itself** — `rec.page.screenshot(...)`
   rather than `rec.shot(...)` — still goes through the page, so the CSS mask
   applies; but any artifact your storyboard writes by hand (a `page.content()`
@@ -808,16 +816,16 @@ off.
   "aria": "- banner:\n  - heading \"Northwind Ops\" [level=1]\n- text: Revenue $128,400 …",
   "scope_aria": "- text: $128,400",
   "html": "<div id=\"kpi-rev\">$128,400</div>",
-  "redacted": ["#api-key"],
   "truncated": [], "limits": { "aria": 12000, "html": 8000 } }
 ```
 
 | Field | What it is |
 |---|---|
 | `aria` | **`Recorder`**: the page's ARIA snapshot — a compact YAML tree of roles and accessible names, the same thing `expect(...).toMatchAriaSnapshot` compares. Semantic, ~10× smaller than the markup, and stable across restyling, which is why it is preferred over raw HTML |
-| `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML`. All three are null when no spotlight is up |
+| `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML` with every value-bearing attribute stripped. All three are null when no spotlight is up |
 | `screen` | **`TerminalRecorder`**: the rendered screen, ANSI resolved by xterm.js, scrollback included — the same text `wait_for_text()` matches against |
 | `truncated` / `limits` | which fields were cut, and at what budget. A cut field also says so inline where it stops |
+| `omitted` | present *instead of* the page text when the recorder would have had to guess — see below. `timeline.json` is unaffected |
 
 **`outerHTML` is only ever the spotlight target's, never the page's.** A whole
 document's markup is an order of magnitude bigger than its ARIA tree and
@@ -845,22 +853,61 @@ carry across:
   with `[redacted]`, as everywhere else;
 - **the rendered text of everything `redact()` is covering** is read out of the
   page as the take runs — the matched element and every node under it, shadow
-  roots at every depth, `::before`/`::after` content, input values, and
-  value-bearing attributes — and every occurrence of any of it is replaced
-  too, in every beat's evidence, including beats recorded before the value
-  first appeared. `redact()` never tells the recorder what the element *says*,
-  so this is the step that turns a pixel control into a text one;
+  roots at every depth, light DOM assigned into a `<slot>`, `::before`/`::after`
+  content, input values, value-bearing attributes, and any element an
+  `aria-labelledby` points at, however far away it is — and every occurrence of
+  any of it is replaced too, in every beat's evidence, including beats recorded
+  before the value first appeared. `redact()` never tells the recorder what the
+  element *says*, so this is the step that turns a pixel control into a text
+  one. Whitespace is elastic on both sides of the match: `textContent` carries
+  the source's own indentation and an ARIA tree does not, and a value on its own
+  line in hand-written HTML is otherwise the most ordinary leak there is;
 - markup is elided structurally as well as by substring, because a value split
   across tags (`sk-live-<b>FAKE</b>`) has a `textContent` a string mask finds
-  and an `outerHTML` it does not.
+  and an `outerHTML` it does not. Where the split value is a *registered* one
+  rather than a redacted element's, the markup is **withheld** for that beat
+  with a line saying so — there is no safe way to edit a value out of a
+  serialization that interleaves it with elements;
+- `outerHTML` also drops every value-bearing attribute — `data-*`, `title`,
+  `alt`, `placeholder`, `aria-label`, `href`, `src` — from every element, not
+  just redacted ones. An attribute nothing renders was in no frame, no still,
+  no caption and no narration clip, so serializing it would make evidence the
+  only place it exists.
+
+**A harvested string is only used as a mask if it renders nowhere outside the
+mask.** Harvesting every node of a redacted card also harvests its label, and
+`redact("#revenue-card")` would otherwise register "Revenue" as a forbidden
+literal and rewrite every unrelated paragraph in every file. That rule is not a
+guess about what a secret looks like: a string that renders in the clear
+somewhere the mask does not cover is already in the frames and the stills, so
+masking it in a text file buys nothing and costs the file its meaning.
+
+"Renders outside" is narrower than it sounds, and each exclusion was a leak:
+hidden elements do not count (an `aria-labelledby` source can be `display:none`
+and still name a redacted element), `<script>` text does not count (it is
+source, not screen), light DOM slotted into a redacted element counts as
+*inside* it, and **the recorder's own caption bar does not count at all** —
+captioning a redacted value would otherwise exempt it from masking everywhere,
+turning one mistake in the frames into the same mistake in `timeline.json`.
 
 Nothing reaches the disk until the take exits cleanly and the mask has been
 verified: the documents are built in memory and written beside `timeline.json`,
-so a take that dies on a `SecretLeak` has no evidence file to delete. If a
-document cannot be made safe — or if the recorder cannot read what `redact()`
-is hiding for a given beat — it fails the take, or writes that beat's evidence
-as `{"omitted": …}` with no page text in it, rather than writing something it
-cannot vouch for.
+so a take that dies on a `SecretLeak` has no evidence file to delete — and a
+take that *succeeds* first deletes any evidence a previous recording into the
+same folder left behind, since re-running `record.py` into the same directory is
+the normal way to use this skill and yesterday's files would otherwise sit there
+holding the value you just added a `redact()` for. If a document cannot be made
+safe, the take fails.
+
+**A page that repaints while it is being read gets no page text.** The ARIA
+snapshot is a protocol call and the harvest is a page evaluation, so they cannot
+be one operation: a card rewritten on a 25 ms interval — a countdown, a ticker,
+a rotating token — hands the harvest one value and the snapshot the next. The
+harvest is therefore taken on both sides of the snapshot and the two must agree;
+if they will not settle, that beat's evidence is written as `{"omitted": …}`
+with no `aria`, `scope_aria` or `html` in it. On a page where something inside a
+redacted region never holds still, expect most beats to come back that way —
+`timeline.json` is unaffected, and it is the safe direction.
 
 **What it still does not cover:**
 
@@ -869,10 +916,21 @@ cannot vouch for.
   whole terminal, scrubbed for registered secrets only. A command that
   *prints* a value nobody registered writes it here verbatim — the same
   exposure the recording already has, in a form that greps.
-- **`url` and `title` are scrubbed, not redacted.** A token in a query string
-  that nobody registered lands in the file.
-- **Only exact substrings match**, the same limit `register_secret()` has:
-  the same value rendered with different whitespace is a different string.
+- **`url` and `title` go through the registered-secret scrub and nothing
+  else.** A token in a query string that nobody registered lands in the file —
+  `redact()` cannot name it, because nothing renders it, and the harvest that
+  turns redaction into text masking therefore never sees it. If your demo
+  navigates through a magic link, a `?token=`, or a session id in a path,
+  `register_secret()` it: that is the author's job and there is no mechanism
+  here that does it for you
+  ([issue #50](https://github.com/rogvid/skills/issues/50)).
+- **Accessible names are still names.** `alt` and `title` become an element's
+  accessible name, so they are in `aria` by design even though they are
+  stripped from `html`. That is what a screen-reader user perceives; if it is a
+  secret, redact the element.
+- **Only exact substrings match**, modulo whitespace — the same limit
+  `register_secret()` has. A value rendered with a soft hyphen, or split across
+  two elements that are not both redacted, is a different string.
 - **The ARIA snapshot needs Playwright ≥ 1.49.** Older versions get a null
   `aria` and an `aria_format` saying so, rather than a fallback nobody tests.
 
@@ -1182,6 +1240,11 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    **Review frames** above): a `click('#refresh')` in the margin answers
    the question you are asking before they look at anything.
 
+   A tmpdir, or `frames/` beside `demo.mp4` if the reviewer needs a stable
+   path. Either way they are working files — `frames/` is gitignored for the
+   same reason `evidence/` is, and for the same reason the mp4 they came out
+   of is.
+
    Dispatch a subagent told NOTHING about the feature (any context-free
    reviewer works: a fresh session or process fed only `frames/`, if the
    harness has no subagents): read the frames in order; reply with
@@ -1217,7 +1280,9 @@ with TerminalRecorder(Path(__file__).parent) as rec:
    from the two by `beat_frames(out_dir)` — anchor the pattern to the demo
    folder rather than writing a bare `frames/`, which matches a directory
    of that name anywhere in the repo), `.tts/` narration caches, and
-   `<demo folder>/evidence/`.
+   `<demo folder>/evidence/` — the last two are **working files**, inputs to
+   a review that happens once, and the file table at the top of this skill
+   says so in the same column that says the mp4 is not committed.
 
    **`evidence/` is not committed either, and for a stronger reason than the
    mp4.** It is regenerated wholesale on every take, so it would churn

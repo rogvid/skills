@@ -294,6 +294,13 @@
  *   ?entropy=1        renders four clock readings (Date, Intl, the Date
  *                     constructor, and one posted back by a Worker) and a
  *                     spinning shape — what determinism pins down (issue #10)
+ *   ?evidence=1       renders the shapes that leak into a *text* dump of the
+ *                     page but not into a picture of it: whitespace-padded
+ *                     markup, an accessible name sourced from outside the
+ *                     subtree, slotted light DOM, a property-only input
+ *                     value, a value rewritten every 25 ms, a value split
+ *                     across elements, and value-bearing attributes nothing
+ *                     renders (issue #9)
  */
 
 // Three fixed snapshots. #refresh cycles through them in order, so a
@@ -720,6 +727,113 @@ if (params.has("gate-attack")) {
     });
   }, 16);
   setTimeout(function () { clearInterval(attack); }, 2000);
+}
+
+if (params.has("evidence")) {
+  // Per-beat evidence (issue #9) is a *text* dump of the page, so it leaks in
+  // shapes that no pixel assertion has ever had to care about. Each element
+  // here is one of those shapes, and every one of them reached an evidence
+  // file readable before it existed.
+  //
+  // Its own hook rather than rows in `?secret=1`, because that panel's exact
+  // rect is what the redaction take measures sharpness over: adding to it
+  // moves the crops and silently regrades the pixel assertions.
+  //
+  // The keys are written into the *markup* below rather than assigned from JS
+  // on purpose. `el.textContent = "…"` produces one unpadded text node, which
+  // is precisely the case that does *not* leak — the fixture was passing by
+  // accident until this panel was written the way a human writes HTML.
+  var ev = document.createElement("div");
+  ev.id = "ev-panel";
+  ev.style.cssText =
+    "position:fixed;top:8px;left:8px;width:520px;z-index:5;background:#fff;" +
+    "border:1px solid #d8d2c6;border-radius:8px;padding:8px 10px;" +
+    "font:12px/1.5 ui-monospace,monospace;color:#1c1a17;";
+  ev.innerHTML = [
+    // L1 — a value on its own line, indented, the way hand-written HTML puts
+    // it. textContent comes back "\n      sk-live-WSPC…\n    " while the ARIA
+    // tree says "sk-live-WSPC…", and a plain str.replace between the two
+    // finds nothing at all.
+    '<div id="ev-ws-card"><span class="lbl">Whitespace key</span>',
+    '  <code id="ev-ws-key">',
+    '    sk-live-WSPC00000000',
+    '  </code>',
+    '</div>',
+    // The mirror defect: a redacted card whose *label* is an ordinary word
+    // that also renders, unredacted, elsewhere on the page. Harvesting every
+    // node of the card registers "Revenue" as a mask unless the harvest knows
+    // what else the page renders.
+    '<div id="ev-bleed-card"><span class="lbl">Revenue</span>',
+    '  <code id="ev-bleed-key">sk-live-BLED00000000</code>',
+    '</div>',
+    // "live" is in here on purpose too: the split key below breaks into the
+    // text nodes "sk-", "live" and "-CHLD…", and a harvest that masked every
+    // one of them would rewrite every other key on the page.
+    '<p id="ev-bleed-outside">Revenue for the quarter was steady, and the ',
+    'feed is live.</p>',
+    // ...and the same defect one level meaner: a key whose own characters are
+    // split into text nodes that are each ordinary strings on their own.
+    '<div id="ev-child-card"><span class="lbl">Split key</span>',
+    '  <code id="ev-child-key">sk-<i>live</i>-CHLD00000000</code>',
+    '</div>',
+    // L2 — the accessible name comes from an element *outside* the redacted
+    // subtree, so no walk of that subtree can find it.
+    // display:none on purpose: aria-labelledby names a hidden element just as
+    // happily as a visible one, so this value is on nobody's screen and in
+    // nobody's frame — and it is still the redacted card's accessible name.
+    '<span id="ev-label-src" style="display:none">sk-live-LBLD00000000</span>',
+    // role= is load-bearing: a plain <div> has no role, so an ARIA snapshot
+    // shows no accessible name for it and the shape would prove nothing. With
+    // a role, the hidden element's text *is* this card's name in the tree.
+    '<div id="ev-labelled-card" role="group" aria-labelledby="ev-label-src">',
+    '  <span class="lbl">Labelled elsewhere</span></div>',
+    // L4 — light DOM slotted into a redacted element that lives *inside* a
+    // shadow root. The redacted element is #ev-slot-inner below, whose own
+    // textContent is empty: the value is a light child of the host, painted
+    // through the <slot>. It is inside the redaction in the flattened tree and
+    // outside it in the DOM, and only one of those is what renders.
+    '<div id="ev-slot-card"><span id="ev-slot-light">',
+    'sk-live-SLOT00000000</span></div>',
+    // An input value that lives on the *property*. Set from JS below, with no
+    // `value` attribute at all, so reading attributes finds nothing.
+    '<div id="ev-value-card"><span class="lbl">Field</span>',
+    '  <input id="ev-value-key" readonly></div>',
+    // L3 — rewritten every 5 ms with a value nothing has seen before, which
+    // is what a countdown, a ticker or a rotating token does.
+    '<div id="ev-tick-card"><span class="lbl">Rotating</span>',
+    '  <code id="ev-tick-key">sk-live-TICK00000000</code></div>',
+    // L5/L6 live in a spotlight target that is deliberately NOT redacted.
+    // Their values are registered as secrets instead, which is the other half
+    // of the contract: register_secret() has to reach markup too.
+    '<div id="ev-spot-split">a token: harbor<b>zenith</b>7725 </div>',
+    '<div id="ev-spot-attrs" data-token="sk-live-ATTR00000000"',
+    '  data-cfg=\'{"key":"sk-live-JSON00000000"}\'>nothing rendered here</div>'
+  ].join("\n");
+  document.body.appendChild(ev);
+
+  // The slot host: a shadow root whose <slot> renders the light child above,
+  // wrapped in the element the take actually redacts.
+  var slotHost = document.getElementById("ev-slot-card");
+  var slotRoot = slotHost.attachShadow({ mode: "open" });
+  slotRoot.innerHTML =
+    '<span class="lbl">Slotted</span> ' +
+    '<span id="ev-slot-inner"><slot></slot></span>';
+
+  // Property, not attribute: `getAttribute("value")` returns null for this.
+  document.getElementById("ev-value-key").value = "sk-live-VALU00000000";
+
+  // A fresh value every 5 ms. Deliberately faster than the ~15 ms a capture
+  // spends reading the page (harvest, ARIA snapshot, harvest): at 25 ms the
+  // three round trips often fit between two ticks, and the recorder's refusal
+  // to straddle a repaint went untested about half the time.
+  var tick = 0;
+  setInterval(function () {
+    var el = document.getElementById("ev-tick-key");
+    if (el) {
+      tick += 1;
+      el.textContent = "sk-live-TICK" + String(tick).padStart(8, "0");
+    }
+  }, 5);
 }
 
 if (params.has("console-error")) {

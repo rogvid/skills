@@ -630,12 +630,22 @@ _CSS_ONLY_JS = """(sel) => {
 # generated content has no node to hold it — and Chromium *does* put it in the
 # accessibility tree, so it reaches an evidence file by a route no walk of the
 # DOM would find.
+# It returns **both halves in one pass**: what the redacted subtrees render,
+# and what everything else renders. The second is not a nicety — see
+# `_evidence_forbidden`: a harvested string that also appears outside the mask
+# is rendered in the clear, so masking it costs the evidence its meaning and
+# hides nothing. Computing them apart would let the page move in between and
+# make the two disagree about which is which.
 _EVIDENCE_HARVEST_JS = r"""(selectors) => {
   const MARK = '__MARK__';
+  const COVER = '__COVER__';
   const ATTRS = ['value', 'title', 'alt', 'placeholder', 'aria-label',
                  'content', 'srcdoc', 'data-value'];
-  const out = [];
-  const push = (s) => { if (typeof s === 'string' && s.trim()) out.push(s); };
+  const inside = [];
+  const outside = [];
+  const add = (bucket, s) => {
+    if (typeof s === 'string' && s.trim()) bucket.push(s);
+  };
   const roots = [document];
   const findRoots = (root) => {
     let all;
@@ -645,54 +655,165 @@ _EVIDENCE_HARVEST_JS = r"""(selectors) => {
     }
   };
   findRoots(document);
-  // Every node the subtree renders through, shadow roots at every depth.
-  const walk = (node, acc) => {
-    if (!node) return acc;
+
+  // Everything the mask is covering, found the same two ways the mask itself
+  // works: the marker it stamps, and the registered selectors re-resolved.
+  const marked = [];
+  for (const root of roots) {
+    for (const sel of selectors.concat(['[' + MARK + ']'])) {
+      let hits = [];
+      try { hits = root.querySelectorAll(sel); } catch (e) { continue; }
+      for (const hit of hits) if (marked.indexOf(hit) === -1) marked.push(hit);
+    }
+  }
+  // Ancestry in the **flattened** tree, which is the one that renders:
+  // `contains()` stops at a shadow boundary, and a light node assigned to a
+  // <slot> is painted wherever the slot is, not where the DOM puts it. Walking
+  // the DOM instead would call a value slotted into a redacted wrapper
+  // "rendered in the clear", exempt it from masking, and publish it.
+  const covered = (node) => {
+    let n = node;
+    while (n) {
+      if (marked.indexOf(n) !== -1) return true;
+      if (n.assignedSlot) { n = n.assignedSlot; continue; }
+      if (n.nodeType === 11) { n = n.host || null; continue; }
+      n = n.parentNode;
+    }
+    return false;
+  };
+
+  // Every node a subtree renders through: light descendants, shadow roots at
+  // every depth, and — because a shadow root renders its host's light children
+  // wherever a <slot> puts them — whatever is assigned to each slot.
+  const walk = (node, acc, seen) => {
+    if (!node || seen.indexOf(node) !== -1) return acc;
+    seen.push(node);
     acc.push(node);
     let kids = [];
     try { kids = node.querySelectorAll ? node.querySelectorAll('*') : []; }
     catch (e) { kids = []; }
     for (const kid of kids) {
-      acc.push(kid);
-      if (kid.shadowRoot) walk(kid.shadowRoot, acc);
+      if (seen.indexOf(kid) === -1) { seen.push(kid); acc.push(kid); }
+      if (kid.shadowRoot) walk(kid.shadowRoot, acc, seen);
+      if (kid.tagName === 'SLOT' && kid.assignedNodes) {
+        let slotted = [];
+        try { slotted = kid.assignedNodes({flatten: true}); } catch (e) { slotted = []; }
+        for (const node2 of slotted) walk(node2, acc, seen);
+      }
     }
-    if (node.shadowRoot) walk(node.shadowRoot, acc);
+    if (node.shadowRoot) walk(node.shadowRoot, acc, seen);
     return acc;
   };
-  const harvest = (el) => {
-    for (const node of walk(el, [])) {
-      push(node.textContent);
-      if (typeof node.value === 'string') push(node.value);
-      // Individual text nodes as well as the concatenation: an accessible
-      // name is built per element, so the pieces are what a tree shows.
-      for (const child of node.childNodes || []) {
-        if (child.nodeType === 3) push(child.nodeValue);
-      }
-      if (node.nodeType !== 1) continue;  // a shadow root has no attrs or style
-      for (const a of ATTRS) {
-        try { push(node.getAttribute(a)); } catch (e) { /* exotic attr */ }
-      }
-      for (const which of ['::before', '::after']) {
-        let content;
-        try { content = getComputedStyle(node, which).content; }
-        catch (e) { continue; }
-        if (!content || content === 'none' || content === 'normal') continue;
-        push(content);
-        // Computed `content` comes back quoted and escaped; the tree shows
-        // the string itself, so push that too.
-        const quoted = /^"([\s\S]*)"$/.exec(content);
-        if (quoted) push(quoted[1].replace(/\\(.)/g, '$1'));
+
+  const readPseudo = (bucket, node) => {
+    for (const which of ['::before', '::after']) {
+      let content;
+      try { content = getComputedStyle(node, which).content; }
+      catch (e) { continue; }
+      if (!content || content === 'none' || content === 'normal') continue;
+      add(bucket, content);
+      // Computed `content` comes back quoted and escaped; the tree shows the
+      // string itself, so add that too.
+      const quoted = /^"([\s\S]*)"$/.exec(content);
+      if (quoted) add(bucket, quoted[1].replace(/\\(.)/g, '$1'));
+    }
+  };
+
+  const readNode = (bucket, node) => {
+    add(bucket, node.textContent);
+    if (typeof node.value === 'string') add(bucket, node.value);
+    // Individual text nodes as well as the concatenation: an accessible name
+    // is built per element, so the pieces are what a tree shows.
+    for (const child of node.childNodes || []) {
+      if (child.nodeType === 3) add(bucket, child.nodeValue);
+    }
+    if (node.nodeType !== 1) return;  // a shadow root has no attrs or style
+    for (const a of ATTRS) {
+      try { add(bucket, node.getAttribute(a)); } catch (e) { /* exotic attr */ }
+    }
+    readPseudo(bucket, node);
+    // An accessible name can be built from an element the subtree does not
+    // contain. aria-labelledby/describedby are the two ways to say so, and the
+    // text they point at reaches an ARIA snapshot as this node's own name.
+    for (const rel of ['aria-labelledby', 'aria-describedby']) {
+      let ids;
+      try { ids = (node.getAttribute(rel) || '').split(/\s+/); } catch (e) { continue; }
+      for (const id of ids) {
+        if (!id) continue;
+        let ref = null;
+        try {
+          const root = node.getRootNode();
+          ref = root.getElementById ? root.getElementById(id)
+                                    : document.getElementById(id);
+        } catch (e) { ref = null; }
+        if (ref) { add(bucket, ref.textContent); readPseudo(bucket, ref); }
       }
     }
   };
+
+  for (const el of marked) {
+    for (const node of walk(el, [], [])) readNode(inside, node);
+  }
+  // ...and everything the page *renders* that the mask is not covering.
+  //
+  // "Renders" is load-bearing and was learned the hard way. A first version
+  // collected the text of every node, which included the page's own inline
+  // `<script>` — so every literal in the fixture's source counted as "on
+  // screen in the clear" and four keys stopped being masked at all. A hidden
+  // element is the same mistake in miniature: an `aria-labelledby` source can
+  // be `display:none` and still supply a redacted element's accessible name,
+  // and exempting it because its text "appears outside" would be exempting it
+  // on the strength of text nobody can read.
+  const NOT_RENDERED = {SCRIPT: 1, STYLE: 1, TEMPLATE: 1, NOSCRIPT: 1,
+                        LINK: 1, META: 1, HEAD: 1, TITLE: 1};
+  // The recorder's own furniture does not get a vote on what the *app* renders
+  // in the clear. The caption bar is the one that matters: a storyboard that
+  // captions a redacted card's value puts that value into an element outside
+  // the mask, and counting it here would exempt the value from masking in
+  // every evidence file *and* in timeline.json — turning one authoring mistake
+  // in the frames, which no recorder can undo, into the same mistake in the
+  // files this skill tells people to commit, which it can.
+  const CHROME = '__MARKER_IDS__';
+  const chrome = (node) => {
+    let n = node;
+    while (n) {
+      if (n.nodeType === 1) {
+        const id = n.id || '';
+        if (id.slice(0, CHROME.length) === CHROME) return true;
+        if (id.slice(0, 6) === '__term') return true;
+        try { if (n.hasAttribute(COVER)) return true; } catch (e) { /* ignore */ }
+      }
+      if (n.nodeType === 11) { n = n.host || null; continue; }
+      n = n.parentNode;
+    }
+    return false;
+  };
+  const rendered = (node) => {
+    if (NOT_RENDERED[node.tagName]) return false;
+    if (chrome(node)) return false;
+    try {
+      if (typeof node.checkVisibility === 'function') return node.checkVisibility();
+    } catch (e) { /* fall through */ }
+    return true;
+  };
   for (const root of roots) {
-    for (const sel of selectors.concat(['[' + MARK + ']'])) {
-      let hits = [];
-      try { hits = root.querySelectorAll(sel); } catch (e) { continue; }
-      for (const hit of hits) harvest(hit);
+    let all = [];
+    try { all = root.querySelectorAll('*'); } catch (e) { continue; }
+    for (const node of all) {
+      if (covered(node) || !rendered(node)) continue;
+      for (const child of node.childNodes || []) {
+        if (child.nodeType === 3) add(outside, child.nodeValue);
+      }
+      if (typeof node.value === 'string') add(outside, node.value);
+      for (const a of ATTRS) {
+        try { add(outside, node.getAttribute(a)); } catch (e) { /* exotic */ }
+      }
+      readPseudo(outside, node);
     }
   }
-  return out;
+  const flat = (list) => list.map((s) => s.split(/\s+/).join(' ').trim())
+                             .filter((s) => s).join('\n');
+  return {inside: inside, outside: flat(outside)};
 }"""
 
 # The spotlight target's markup, cleaned, from a *clone* — nothing here may
@@ -717,6 +838,16 @@ _EVIDENCE_HARVEST_JS = r"""(selectors) => {
 # would leave it in the markup whole.
 _EVIDENCE_HTML_JS = r"""(el, opts) => {
   const [MARK, COVER, SELECTORS, MASK] = opts;
+  // Value-bearing attributes. Every one of these can hold a string the page
+  // never rendered — a `data-token`, a `data-cfg` holding a whole JSON config,
+  // an `href` carrying a session id — and none is structure. Stripped from
+  // *every* element, not only redacted ones: `redact()` covers where a value
+  // renders, and an attribute that renders nowhere was never in a frame, a
+  // still, a caption or the TTS cache. Serializing it here would make this
+  // feature the only place it exists. `id`, `class`, `role` and `style` stay,
+  // because they are what makes the markup worth reading.
+  const VALUED = ['value', 'title', 'alt', 'placeholder', 'aria-label',
+                  'href', 'src', 'srcdoc', 'content', 'action', 'poster'];
   const clone = el.cloneNode(true);
   const drop = (root, sel) => {
     let hits = [];
@@ -725,34 +856,78 @@ _EVIDENCE_HTML_JS = r"""(el, opts) => {
   };
   drop(clone, 'script,style,template,noscript,link,meta');
   drop(clone, '[' + COVER + '],[id^="__demo"],[id^="__term"]');
-  let framed = [];
-  try { framed = clone.querySelectorAll('[srcdoc]'); } catch (e) { framed = []; }
-  for (const node of framed) node.setAttribute('srcdoc', MASK);
-  const hide = (node) => {
-    for (const a of ['value', 'title', 'alt', 'placeholder', 'aria-label',
-                     'href', 'src', 'srcdoc', 'content', 'data-value']) {
+  const strip = (node) => {
+    for (const a of VALUED) {
       try { node.removeAttribute(a); } catch (e) { /* exotic attr */ }
     }
-    node.textContent = MASK;
+    // Every data-* attribute, whatever it is called. A whitelist would only
+    // ever be a list of the ones somebody happened to think of.
+    let names = [];
+    try { names = Array.prototype.slice.call(node.attributes || [])
+      .map((a) => a.name); } catch (e) { names = []; }
+    for (const name of names) {
+      if (name.slice(0, 5) === 'data-') {
+        try { node.removeAttribute(name); } catch (e) { /* ignore */ }
+      }
+    }
   };
-  for (const sel of SELECTORS.concat(['[' + MARK + ']'])) {
-    let hits = [];
-    try { hits = clone.querySelectorAll(sel); } catch (e) { continue; }
-    for (const hit of hits) hide(hit);
-    // querySelectorAll never returns the root it was called on, and the root
-    // is exactly the element a storyboard spotlights and redacts together.
-    try { if (clone.matches && clone.matches(sel)) hide(clone); }
-    catch (e) { /* an ancestor-relative selector cannot match a clone */ }
+  const hide = (node) => {
+    // textContent replaces the whole subtree, so every descendant of a
+    // redacted element goes with it — which is what makes redacting a wrapper
+    // enough.
+    node.textContent = MASK;
+    strip(node);
+  };
+  const isRedacted = (node) => {
+    if (node.nodeType !== 1) return false;
+    if (node.hasAttribute && node.hasAttribute(MARK)) return true;
+    for (const sel of SELECTORS) {
+      try { if (node.matches && node.matches(sel)) return true; }
+      catch (e) { /* an ancestor-relative selector cannot match here */ }
+    }
+    return false;
+  };
+  // Elide *before* stripping attributes, because the marker is itself a
+  // data-* attribute and stripping would take it with everything else.
+  //
+  // The spotlight target may be a *descendant* of what was redacted —
+  // `wear()` marks only the element a selector matched, so spotlighting the
+  // value inside a redacted card lands here with nothing in the clone marked
+  // at all. Ancestry is checked on the live element, across shadow
+  // boundaries, and covers the whole clone when it hits.
+  let ancestor = el;
+  let inherited = false;
+  while (ancestor) {
+    if (isRedacted(ancestor)) { inherited = true; break; }
+    if (ancestor.nodeType === 11) { ancestor = ancestor.host || null; continue; }
+    ancestor = ancestor.parentNode;
   }
+  if (inherited) {
+    hide(clone);
+  } else {
+    let nodes = [];
+    try { nodes = Array.prototype.slice.call(clone.querySelectorAll('*')); }
+    catch (e) { nodes = []; }
+    for (const node of nodes) if (isRedacted(node)) hide(node);
+  }
+  let all = [];
+  try { all = [clone].concat(Array.prototype.slice.call(
+    clone.querySelectorAll('*'))); } catch (e) { all = [clone]; }
+  for (const node of all) strip(node);
   return clone.outerHTML;
 }"""
 
-# Transient frame failures, classified the same way `_mask_selector` does:
-# frames come and go several times a second on ad-slot- and embed-heavy apps,
-# and a diagnostic must not be the reason a take dies.
-_EVIDENCE_TRANSIENT = (
-    "detach", "navigat", "execution context was destroyed", "target closed",
-)
+# How many times a beat's capture is retried when the redacted region moves
+# while it is being read. Three, because the window is two round trips wide
+# (~30 ms) and anything that will not hold still across three of those is a
+# page whose mask cannot be built from a snapshot at all — at which point the
+# beat's page text is dropped rather than written from a stale mask.
+EVIDENCE_HARVEST_TRIES = 3
+
+# How many distinct "what the page renders outside the mask" readings to keep.
+# One per beat on a static page, one per *change* on a live one — and it is
+# held for the whole take, so it needs a ceiling.
+EVIDENCE_OUTSIDE_MAX = 200
 
 
 class Recorder(_DemoBase):
@@ -1221,38 +1396,26 @@ class Recorder(_DemoBase):
 
     # -- evidence (issue #9) ------------------------------------------------
 
-    def _redacted_rendered_text(self) -> list[str]:
-        """Everything the mask is covering, as text, across every frame.
+    def _harvest(self) -> tuple[list[str], str]:
+        """(what the mask covers, what the page renders outside it).
 
-        Raises if the *main* frame cannot be read. A sub-frame that refuses is
-        logged and skipped: frames detach and re-attach constantly on
-        embed-heavy apps, and nothing a sub-frame renders reaches an evidence
-        file anyway — the ARIA snapshot is taken of the top document's `body`
-        and stops at an `iframe` node, and the markup dump replaces `srcdoc`
-        wholesale. Harvesting sub-frames is defence in depth, so failing to is
-        survivable; failing on the main frame is not.
+        **The main frame only, and that is not an omission.** Nothing a
+        sub-frame renders can reach an evidence file: `aria_snapshot` is taken
+        of the top document's `body` and stops at the `iframe` node, and the
+        markup dump strips `srcdoc` along with every other value-bearing
+        attribute. Harvesting sub-frames was written first and removed — it was
+        code whose only defence was an argument that nothing needs it, which is
+        the kind that rots. The claim is held up instead by the byte sweep in
+        tests/smoke, which requires the fixture's in-iframe key to be absent
+        from every evidence file.
         """
-        found: list[str] = []
-        script = _EVIDENCE_HARVEST_JS.replace("__MARK__", REDACT_MARK_ATTR)
-        frames = list(self.page.frames)
-        main = self.page.main_frame
-        for frame in frames:
-            try:
-                found += frame.evaluate(script, self._redacted) or []
-            except Exception as exc:  # noqa: BLE001 - classified, then re-raised
-                if frame is main:
-                    raise
-                detail = str(exc)
-                if not any(t in detail.lower() for t in _EVIDENCE_TRANSIENT):
-                    raise
-                print(
-                    f"demo-video: a sub-frame could not be read while "
-                    f"collecting what redact() hides ({type(exc).__name__}); "
-                    f"nothing it renders reaches an evidence file, and the "
-                    f"next beat tries again.",
-                    file=sys.stderr,
-                )
-        return found
+        script = (
+            _EVIDENCE_HARVEST_JS.replace("__MARK__", REDACT_MARK_ATTR)
+            .replace("__COVER__", REDACT_COVER_ATTR)
+            .replace("__MARKER_IDS__", "__demo")
+        )
+        found = self.page.evaluate(script, self._redacted) or {}
+        return list(found.get("inside") or []), str(found.get("outside") or "")
 
     def _aria(self, locator) -> tuple[str | None, str]:
         """(snapshot, format) for one locator's accessibility tree.
@@ -1267,34 +1430,8 @@ class Recorder(_DemoBase):
             return None, "unavailable: this Playwright predates 1.49"
         return locator.aria_snapshot(), "aria-yaml"
 
-    def _evidence_payload(self) -> dict:
-        """What was on screen at the end of this beat, as text.
-
-        The ARIA snapshot is the primary artifact and the page's is always
-        taken: it is what lets a reviewer say what was on screen without
-        decoding a frame. `outerHTML` is the spotlight target's only — never
-        the page's — because the markup of a whole document is an order of
-        magnitude larger than its ARIA tree and carries script text and
-        `srcdoc` documents that were never on screen at all.
-        """
-        # The marker attribute the elision below matches on is stamped by the
-        # mask, and the mask is re-asserted at checkpoints. Take one now so the
-        # page's idea of what is covered is not one re-render out of date.
-        self._checkpoint()
-        if self._redacted:
-            try:
-                self._evidence_masks.update(self._redacted_rendered_text())
-            except Exception as exc:  # noqa: BLE001 - refuse, never guess
-                # The one failure that must not degrade into a written file:
-                # without this text the writer cannot mask what redact() is
-                # hiding, and a DOM dump is not protected by a pixel cover.
-                return {
-                    "omitted": (
-                        f"the recorder could not read what redact() is "
-                        f"covering ({type(exc).__name__}), so no page text was "
-                        f"captured for this beat"
-                    )
-                }
+    def _capture_page(self) -> dict:
+        """One pass: the ARIA snapshot, the URL, and the spotlight target."""
         aria, aria_format = self._aria(self.page.locator("body"))
         payload: dict = {
             "scope": self._spotlit,
@@ -1304,7 +1441,6 @@ class Recorder(_DemoBase):
             "aria": aria,
             "scope_aria": None,
             "html": None,
-            "redacted": list(self._redacted),
         }
         if self._spotlit:
             target = self.page.locator(self._spotlit).first
@@ -1314,6 +1450,73 @@ class Recorder(_DemoBase):
                 [REDACT_MARK_ATTR, REDACT_COVER_ATTR, self._redacted, SECRET_MASK],
             )
         return payload
+
+    def _evidence_payload(self) -> dict:
+        """What was on screen at the end of this beat, as text.
+
+        The ARIA snapshot is the primary artifact and the page's is always
+        taken: it is what lets a reviewer say what was on screen without
+        decoding a frame. `outerHTML` is the spotlight target's only — never
+        the page's — because the markup of a whole document is an order of
+        magnitude larger than its ARIA tree and carries script text and
+        `srcdoc` documents that were never on screen at all.
+
+        **The harvest and the snapshot are separate round trips, and a page
+        that repaints between them is a leak.** `aria_snapshot()` is a
+        protocol call, not something a page evaluation can produce, so they
+        cannot literally be one operation. A card rewritten on a 25 ms
+        `setInterval` — a countdown, a ticker, a rotating token — hands the
+        harvest one value and the snapshot the next, and the mask is then built
+        from a value the snapshot does not contain.
+
+        So the harvest is taken on *both* sides of the snapshot and the two
+        must agree. If they do not, the redacted region moved while the page
+        was being read and this beat's capture is retried; if it will not
+        settle, the beat's page text is dropped rather than written from a mask
+        that is known to be out of date. Both harvests feed the mask either
+        way, so a value seen on either side is masked everywhere.
+
+        A checkpoint first, and the *ordering* is the point rather than the
+        frequency — `_checkpoint()` is throttled and `_idle` calls it anyway.
+        What is about to happen is a read of the text of everything `redact()`
+        covers, turned into the mask every evidence file and both timeline
+        files are scrubbed against. Taking that reading a quarter-second after
+        the last time anyone asked the browser whether the cover is still on
+        the elements means building the mask from a stale idea of what is
+        hidden. It also puts a cannot-verify-the-mask refusal on this path for
+        real rather than in principle: `_capture_evidence` runs in a `finally`
+        and must let a `SecretLeak` through, and this is where one comes from.
+        """
+        self._checkpoint()
+        if not self._redacted:
+            return self._capture_page()
+        for attempt in range(EVIDENCE_HARVEST_TRIES):
+            before, outside = self._harvest()
+            payload = self._capture_page()
+            after, outside_after = self._harvest()
+            self._evidence_masks.update(before)
+            self._evidence_masks.update(after)
+            # Bounded, because a page whose content changes every beat yields a
+            # distinct "outside" every time and this would otherwise grow with
+            # the storyboard. Past the bound the recorder stops learning that a
+            # string renders in the clear, which over-masks — the safe
+            # direction, and the one worth erring in.
+            if len(self._evidence_outside) < EVIDENCE_OUTSIDE_MAX:
+                self._evidence_outside.add(outside)
+                self._evidence_outside.add(outside_after)
+            if set(before) == set(after):
+                return payload
+            if attempt == EVIDENCE_HARVEST_TRIES - 1:
+                return {
+                    "omitted": (
+                        f"what redact() is covering changed "
+                        f"{EVIDENCE_HARVEST_TRIES} times while this beat's "
+                        f"page text was being read, so the mask could not be "
+                        f"built from what the snapshot actually saw. No page "
+                        f"text was captured for this beat."
+                    )
+                }
+        raise AssertionError("unreachable")
 
     # -- storyboard verbs ---------------------------------------------------
 
