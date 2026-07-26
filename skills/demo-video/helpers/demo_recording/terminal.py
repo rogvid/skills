@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import codecs
 import fcntl
+import json
 import os
 import pty
 import re
@@ -35,7 +36,16 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .core import SECRET_MASK, Secret, SecretLeak, _beat_verb, _DemoBase, _env
+from .core import (
+    INTERLUDE_CSS,
+    INTERLUDE_ID,
+    SECRET_MASK,
+    Secret,
+    SecretLeak,
+    _beat_verb,
+    _DemoBase,
+    _env,
+)
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
 
@@ -123,6 +133,69 @@ window.__demoTermInit = (opts) => {
 # Soft, low-saturation pastel gradient behind the window — present enough to
 # frame the terminal, calm enough not to pull focus.
 _TERM_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
+
+# -- opening on a card (issue #110) ------------------------------------------
+#
+# A terminal segment that opens with `interlude()` shows a flash of bare
+# terminal first, and the gap is structural rather than a pacing mistake:
+# `__enter__` starts Chromium's screencast when it creates the page, and a
+# storyboard cannot paint anything before its own first statement. Measured on
+# the reference demo: the segment's first frame at 37.76 s, the card at
+# 38.05 s, and an empty window with a lone prompt in between. The web recorder
+# does not show it only because it has nothing on screen until `goto()` — there
+# is no "before" to flash.
+#
+# So the card stops being something a storyboard has to remember to do first
+# and becomes a property of the recorder: `TerminalRecorder(interlude="…")`
+# paints it from an **init script**, which runs before the page's own scripts
+# on every document including Chromium's initial one. That is earlier than any
+# Python statement can reach — earlier than `pty.openpty()`, earlier than
+# xterm.js is injected — so the card is up in the recording's first frame and
+# the whole of the recorder's own setup happens behind it.
+#
+# It is also the answer to the *other* end of the same seam. #91 was this card
+# left up for the rest of a take, because a storyboard remembered
+# `interlude(text)` and not `interlude("")`. A card the recorder raises is a
+# card the recorder clears — see `_open_on_card`.
+#
+# It builds the element rather than calling `__demoInterlude`, and the whole
+# difference is one line: the card is appended **already opaque**.
+# `__demoInterlude` creates it at `opacity: 0` and raises it, which is a 450 ms
+# fade — and a card that fades in over the recorder's setup is showing exactly
+# what it exists to cover. An element whose computed opacity has been 1 since
+# it entered the tree has no transition to run, so that is structural here
+# rather than a flag somebody could turn off. Everything else about it — the
+# id, the styling — is core's, so `interlude("")` finds this element and fades
+# it out like any other.
+#
+# (What the suite can say about that last point is limited, and tests/README.md
+# says where: on this box the fade-in variant is invisible in the recording
+# too, because injecting xterm.js takes longer than 450 ms and Chromium's
+# screencast has emitted nothing by then. Being opaque by construction is what
+# keeps that from being the thing holding the fix up.)
+_OPENING_CARD_JS = """
+(() => {
+  const build = () => {
+    // `document.body` is null on Chromium's initial empty document, where init
+    // scripts first run — the same guard the background paint above needs, and
+    // for the same reason (issue #25).
+    if (!document.body || document.getElementById('__ID__')) return;
+    const el = document.createElement('div');
+    el.id = '__ID__';
+    el.style.cssText = '__CSS__';
+    el.style.opacity = '1';
+    el.textContent = __TEXT__;
+    document.body.appendChild(el);
+  };
+  if (document.body) build();
+  else addEventListener('DOMContentLoaded', build);
+})();
+"""
+
+# How long the opening card is held before it fades, when nothing says
+# otherwise. The same default `interlude()` uses, because it is the same card
+# doing the same job.
+OPENING_CARD_HOLD_S = 2.8
 
 # Named keys -> the bytes a terminal program expects. Ctrl-<letter> is
 # handled generically (C-a..C-z -> 0x01..0x1a).
@@ -613,6 +686,12 @@ class TerminalRecorder(_DemoBase):
     Geometry: the recording size (viewport) drives the xterm.js grid via the
     fit addon; the resulting cols/rows are pushed to the PTY winsize so TUIs
     render correctly. `font_size` tunes how much fits on screen.
+
+    `interlude="…"` opens the segment on a full-screen title card, raised
+    before capture starts and cleared by the recorder when `interlude_hold`
+    seconds are up. Use it instead of an `interlude()` as the storyboard's
+    first statement: the storyboard's first statement is already ~290 ms too
+    late, and the viewer sees an empty terminal before the card (issue #110).
     """
 
     def __init__(
@@ -635,6 +714,8 @@ class TerminalRecorder(_DemoBase):
         locale: str | None = None,
         evidence: bool | None = None,
         type_delay_ms: int = 45,
+        interlude: str | None = None,
+        interlude_hold: float = OPENING_CARD_HOLD_S,
     ) -> None:
         # A branded, distinctive default prompt so wait_for_prompt's marker
         # is unlikely to collide with command output.
@@ -681,6 +762,10 @@ class TerminalRecorder(_DemoBase):
         # token one character at a time goes idle between every character.
         self._last_data_at = time.monotonic()
         self._withheld_warned = False
+        # The card this segment opens on, if it opens on one. See
+        # _OPENING_CARD_JS.
+        self._opening = interlude
+        self._opening_hold = interlude_hold
 
     # -- setup / teardown ---------------------------------------------------
 
@@ -701,6 +786,19 @@ class TerminalRecorder(_DemoBase):
             " if (document.body) b(); else addEventListener('DOMContentLoaded', b); })();"
             .replace("__BG__", _TERM_BG)
         )
+        # After the background paint and before anything else: the card is
+        # opaque and covers the whole viewport, so what is behind it only has
+        # to be the right colour for the fade *out*. Registered here rather
+        # than evaluated in `_start()` because `_start()` navigates
+        # (`goto("about:blank")`), and an init script is the only thing that
+        # survives a navigation and precedes the first paint of what follows
+        # it.
+        if self._opening is not None:
+            context.add_init_script(
+                _OPENING_CARD_JS.replace("__ID__", INTERLUDE_ID)
+                .replace("__CSS__", INTERLUDE_CSS)
+                .replace("__TEXT__", json.dumps(self._opening))
+            )
 
     def _start(self) -> None:
         master, slave = pty.openpty()
@@ -744,10 +842,38 @@ class TerminalRecorder(_DemoBase):
              "fontSize": self._font_size},
         )
         self._set_winsize(int(dims["rows"]), int(dims["cols"]))
-        # Just enough to catch the shell's first prompt — keep it short so a
-        # segment that opens with a transition doesn't dwell on a bare, empty
-        # terminal before the transition covers it.
+        # Just enough to catch the shell's first prompt. It used to be kept
+        # short so a segment opening on a transition would not dwell on a bare
+        # terminal; with `interlude=` that dwell happens behind the card, and
+        # without it there is no card for the length of this to matter to.
         self._idle(0.15)
+        if self._opening is not None:
+            self._open_on_card()
+
+    def _open_on_card(self) -> None:
+        """Hold the card the init script raised, then take it down.
+
+        Everything before this ran behind it — the PTY, the xterm.js
+        injection, the shell's first prompt — which is the point: the segment
+        opens on intent rather than on an empty window (issue #110).
+
+        Taking it down is the other half of the same seam. #91 was this card
+        left up for the rest of a take because a storyboard remembered
+        `interlude(text)` and not `interlude("")`; a card the recorder raises
+        is a card the recorder clears, and there is no ordering left for a
+        storyboard to get wrong.
+
+        It records an ordinary `interlude` beat, so a merged timeline reads the
+        same whether the card came from here or from the verb.
+        """
+        text = self._opening or ""
+        self._no_secrets(text, "TerminalRecorder(interlude=…)")
+        clip = self._prepare_line(text)
+        with self._beat("interlude", selector="card", caption=text):
+            self._start_line(clip)
+            self.pause(self._opening_hold)
+            self.page.evaluate("() => window.__demoInterlude('')")
+            self.pause(0.6)
 
     def _stop(self) -> None:
         # Whatever _take_exit_markers held back as a possible half-marker was

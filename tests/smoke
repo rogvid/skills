@@ -45,11 +45,19 @@ and grades each take on separate axes:
 Playwright 1.49 or newer: evidence uses `locator.aria_snapshot()`, and the
 `page.accessibility` API that predates it has since been removed.
 
+7. **Polish** — how the recording *looks*: the spotlight leaves an element the
+   way it arrived, and a terminal segment opens on its title card rather than
+   on a bare prompt. The only axis here graded on defects a human found by
+   watching rather than a test found by measuring (issues #110 and #111), and
+   the only one whose take records with `deterministic=False`, because the
+   determinism rule flattens the transition it is about.
+
     tests/smoke                 # every take
     tests/smoke --web-only
     tests/smoke --terminal-only
     tests/smoke --determinism-only
     tests/smoke --redaction-only
+    tests/smoke --polish-only
     tests/smoke --out-dir /tmp/smoke
 
 Narration is forced off (`speech=False`) for the web and terminal takes: CI has
@@ -121,7 +129,18 @@ MIN_PNG_BYTES = 5_000
 # therefore checked separately via getComputedStyle rather than by pixels.
 # "segments" is the web recorder against the same fixture, composited the same
 # way, so it takes the web numbers here and in the two dicts below.
-MIN_CONTENT_STDDEV = {"web": 6.0, "terminal": 2.0, "segments": 6.0}
+MIN_CONTENT_STDDEV = {
+    "web": 6.0,
+    "terminal": 2.0,
+    "segments": 6.0,
+    # The two takes that grade how a recording *looks* (issues #110/#111) are
+    # the same two media against the same fixture, so they take the same
+    # numbers. They are here only as a floor under the frame-shape assertions
+    # that follow: neither of those can tell a black take from a working one,
+    # because "nothing changed" is what a black take also reports.
+    "spotlight": 6.0,
+    "terminal-opening": 2.0,
+}
 
 # Pixel proof that the caption bar reached the screen, as the mean absolute
 # luma change in the caption band between two stills taken back to back — one
@@ -805,6 +824,163 @@ MAX_MERGE_OFFSET_ERROR_S = 0.1
 # by the boundary, and neither is satisfied by a constant shift of any
 # segment's beats — which is what this bar, at any width, cannot say.
 MAX_CROSS_SEGMENT_DRIFT_S = MAX_CAPTURE_LOSS_S
+
+# -- how the recording looks (issues #110 and #111) ---------------------------
+#
+# Two defects a human found by watching the reference demo, which is a first
+# for this project: everything else in this file grades something a viewer
+# cannot see. Both are therefore graded on *frames*, from the viewer's side —
+# what the picture does — and not on any property the recorder could report
+# about itself.
+#
+# ## The spotlight's exit (issue #111)
+#
+# `spotlight()` eased in over 250 ms and snapped out in one frame, because the
+# clear restored the element's whole `style` attribute in one assignment and
+# that removed `transition` in the same frame as `transform`. The asymmetry is
+# what read as wrong.
+#
+# **A transition is measured as the states it passes through**, which is the
+# one thing a snap cannot fake. Around each spotlight beat, every frame is
+# scored by how far it is from the *settled* frame at the end of the window, as
+# a fraction of how far the frame at the start of the window is. A transition
+# that eases spends several frames part of the way; one that snaps is either
+# fully one state or fully the other and spends none.
+#
+# It is deliberately not a count of frames that "changed", which was the first
+# version of this and is not the same claim. A hard cut in H.264 rings for a
+# frame or two afterwards, so a snap also produces two or three consecutive
+# frames that differ from each other — while producing no frame that is
+# *partly* one state and partly the other. Measured on this fixture, intermediate
+# frames per window (see the fault injections in tests/README.md):
+#
+#                                       enter   exit
+#   eased (this recorder), 4 takes       3-4     3-4
+#   the pre-#111 clear, injected         3-4      0
+#   recorded with deterministic=True       0      0
+#
+# The enter is the control and is deliberately *not* the thing under test: it
+# eased before this change and eases after it, so it reads 4 either way. A run
+# where the exit is the only empty one is a reading about the exit; a run where
+# both are empty is a reading about the measurement, and says so in its own
+# message.
+#
+# **This take records with `deterministic=False`, and it has to.** The
+# determinism rule flattens every transition to 1 ms with `!important`, so
+# under it both directions snap and both are correct — an assertion in a
+# deterministic take cannot fail for this reason and would be grading nothing.
+# It is the one take in this file that needs the recorder's default.
+SPOTLIGHT_TARGET = "#kpi-rev"
+
+# Grown around the element before the rect is mapped into the video, in page
+# pixels: the ring sits 3 px outside it at a 3 px offset and the scale pushes
+# another ~1%, so a crop of the element's own box would miss most of what the
+# spotlight actually changes.
+SPOTLIGHT_PAD_PX = 14
+
+# What counts as "part of the way", as a fraction of the window's total change.
+# Both ends are generous: a frame within 12% of either settled state is called
+# settled, so encoder ringing after a hard cut — measured at 7% — cannot be
+# read as an eased frame, and neither can the last frame of a real transition.
+SPOTLIGHT_MID_BAND = (0.12, 0.88)
+
+# How many intermediate frames a transition must pass through. A 250 ms ease at
+# 25 fps puts 3-4 frames inside the band; a snap puts none there, because there
+# is no intermediate state for a frame to be in. The bar is between them and
+# the broken reading is a hard zero rather than a small number.
+MIN_SPOTLIGHT_MID_FRAMES = 2
+
+# How much the window's two ends must differ before anything is concluded from
+# the frames between them. The spotlight moves this crop by ~21 mean luma; a
+# window whose ends agree is one where the highlight never went on or never
+# came off, and every "intermediate" fraction computed against it is noise
+# divided by noise.
+SPOTLIGHT_MIN_TOTAL = 5.0
+
+# The window each spotlight beat is measured over, as (before, after) its
+# `t_start`. Wide on both sides on purpose. Before: the screencast can lose
+# wall time, so a beat's frames can sit slightly *earlier* in the video than
+# the log says (issue #18, measured at ~0.1 s with the ticker running). After:
+# a clear that has nothing to animate falls through to its timeout instead of
+# `transitionend`, and lands ~370 ms late — which is a broken take, and the
+# window has to be wide enough to catch it rather than miss it and report the
+# right answer for the wrong reason.
+SPOTLIGHT_WINDOW_S = (0.5, 1.0)
+
+# The storyboard's own pacing. Long enough that the two spotlight windows above
+# cannot overlap, and that each has quiet either side of it.
+SPOTLIGHT_HOLD_S = 1.5
+SPOTLIGHT_DURATION_S = (5.0, 30.0)
+
+# **The clearing verb waits out its own exit transition**, and this is where
+# that decision is pinned. Not a restatement of the frame assertions above: a
+# recorder that animates the exit but returns from `spotlight()` in the middle
+# of it satisfies every one of them — measured, by injecting exactly that, and
+# it passed a version of this take that only compared the element's inline
+# style before and after. It passed because the verb ends in a 300 ms pause, so
+# a style read *after* the verb is 300 ms too late to see a restore that was
+# still pending when it returned.
+#
+#   the verb waits          0.55 s   (250 ms transition + the verb's 300 ms)
+#   the verb returns early  0.31 s   (the 300 ms pause and nothing else)
+#
+# A lower bound on a wait is the one kind of timing bar a loaded machine cannot
+# turn red: contention only ever makes this larger. It is *also* below what a
+# deterministic take would read (0.33 s), which is deliberate — the enter
+# control above fires on that too, and two assertions naming the same cause
+# from different sides is how a determinism flip stays impossible to miss.
+MIN_SPOTLIGHT_CLEAR_S = 0.45
+
+# ## The card a terminal segment opens on (issue #110)
+#
+# `TerminalRecorder.__enter__` starts capturing before a storyboard can paint
+# anything, so a segment whose first statement was `interlude()` opened on
+# ~290 ms of empty terminal — measured on the reference demo, part2 starting at
+# 37.76 s and the card painting at 38.05 s. `TerminalRecorder(interlude="…")`
+# raises the card from an init script instead, before the page has a frame.
+#
+# Graded on frames, because the acceptance criterion is about frames: *no
+# bare-terminal frames before the card*. A timestamp comparison is a proxy for
+# that and would still pass on a card that was painted on time and drawn
+# transparent.
+#
+# The discriminator is one corner of the frame, outside the terminal window:
+#
+#   the card         a full-bleed #1c1a17 rectangle          luma ~26
+#   bare terminal    the recorder's pastel gradient          luma ~225
+#
+# An order of magnitude apart, and neither number is a threshold anybody tuned
+# — they are two constants in the recorder's own styling. The corner is read
+# off the live `#__term_win` box rather than hardcoded, so a change to the
+# window chrome carries it.
+OPENING_CARD = "…and the same thing, on the command line."
+
+# Held long enough that the dark prefix below has 2.5x of margin over its bar,
+# and short enough that this take stays a few seconds.
+OPENING_HOLD_S = 2.5
+
+# 20 fps is plenty for a card that is up for seconds, and keeps the sweep to a
+# few hundred frames.
+OPENING_SAMPLE_FPS = 20
+
+# What counts as the card, and what counts as the gradient behind it. The gap
+# between them is deliberately enormous and deliberately empty: a frame that
+# lands between the two is the card mid-fade, and the assertions below refuse
+# to call that either one.
+OPENING_CARD_MAX_LUMA = 60.0
+OPENING_BARE_MIN_LUMA = 150.0
+
+# How much of the video must be card before anything else. The card is held for
+# OPENING_HOLD_S, so a healthy take reads ~2.5 s here; the bar is at 1.0 s,
+# which leaves room for a screencast that stalls (issue #18) without leaving
+# room for a card that arrives after the terminal does.
+MIN_OPENING_CARD_S = 1.0
+
+# Frames the corner sweep must produce before anything is concluded from it. A
+# sweep of three frames would satisfy every assertion below by accident.
+MIN_OPENING_FRAMES = 40
+
+OPENING_DURATION_S = (5.0, 30.0)
 
 # -- per-beat evidence (issue #9) ---------------------------------------------
 #
@@ -2707,6 +2883,169 @@ def record_segments(
         rec.caption("")
 
     return b.problems, video_rect, still_rect, size
+
+
+def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
+    """A spotlight put up and taken down again, with quiet either side.
+
+    Recorded with the recorder's **default** (`deterministic=False`), which no
+    other take in this file does on purpose. The determinism rule flattens
+    every CSS transition to 1 ms, so under it the spotlight's enter and its
+    exit both snap — correctly and consistently — and an assertion about
+    easing has nothing to say. Issue #111 is only visible in a take that
+    records real motion.
+    """
+    from demo_recording import Recorder
+
+    b = Beats("spotlight")
+
+    with Recorder(
+        out_dir, base_url=base_url, speech=False, strict=True, deterministic=False
+    ) as rec:
+        rec.goto("/")
+        rec.wait_for(SPOTLIGHT_TARGET)
+        # The ticker, but not start_ticker(): that helper also asserts the
+        # determinism CSS is in force, and this take deliberately records
+        # without it. What the ticker is for here is only that the screencast
+        # keeps emitting frames through the quiet stretches, so the windows
+        # below sit where the beat log says they do.
+        rec.page.evaluate(TICKER_JS)
+        b.fail_if(
+            not rec.page.evaluate("() => !!document.getElementById('__smoke_ticker')"),
+            "the compositor ticker did not attach — the windows this take "
+            "measures its two transitions in are not trustworthy",
+        )
+        # Nothing else may move in the element's rect, or a frame that differs
+        # from the one before it stops meaning "the spotlight is moving".
+        rec.pause(SPOTLIGHT_HOLD_S)
+
+        style_before = rec.page.locator(SPOTLIGHT_TARGET).first.evaluate(
+            "el => [el.hasAttribute('style'), el.getAttribute('style')]"
+        )
+        rec.spotlight(SPOTLIGHT_TARGET)
+        lit = rec.page.locator(SPOTLIGHT_TARGET).first.evaluate(
+            "el => getComputedStyle(el).transform"
+        )
+        # Cheap, and it separates "the exit did not animate" from "the
+        # spotlight never went on in the first place", which look identical in
+        # a frame sweep that finds nothing.
+        b.fail_if(
+            lit in ("none", "", None),
+            f"spotlight({SPOTLIGHT_TARGET!r}) left the element's computed "
+            f"transform at {lit!r} — the highlight never went on, so the exit "
+            f"measurement below is about nothing",
+        )
+        rec.pause(SPOTLIGHT_HOLD_S)
+
+        clearing = time.monotonic()
+        rec.spotlight()
+        cleared_in = time.monotonic() - clearing
+        # #111's second half, and the one no pixel can see: the element is
+        # handed back exactly as it was found, byte for byte, including having
+        # no style attribute at all when it started with none.
+        style_after = rec.page.locator(SPOTLIGHT_TARGET).first.evaluate(
+            "el => [el.hasAttribute('style'), el.getAttribute('style')]"
+        )
+        b.fail_if(
+            style_after != style_before,
+            f"after spotlight() cleared, {SPOTLIGHT_TARGET}'s inline style is "
+            f"(has_attr, value) {style_after!r}, but it was {style_before!r} "
+            f"before the spotlight — the element was not returned as it was "
+            f"found. If only the flag differs, the clear is leaving an empty "
+            f"style attribute behind; if the value differs too, it is leaving "
+            f"the spotlight's own properties on the element.",
+        )
+        # ...and the decision that goes with it: the verb waits. See
+        # MIN_SPOTLIGHT_CLEAR_S for why the assertion above cannot say this.
+        b.fail_if(
+            cleared_in < MIN_SPOTLIGHT_CLEAR_S,
+            f"spotlight() cleared and returned in {cleared_in:.2f}s, under the "
+            f"{MIN_SPOTLIGHT_CLEAR_S}s bar — it did not wait out its own exit "
+            f"transition, so the next beat starts mid-fade and this beat's "
+            f"evidence records a style attribute that depends on when the "
+            f"compositor happened to fire. (A take that recorded with "
+            f"deterministic=True reads about this too; the enter control in "
+            f"check_spotlight_transitions says which of the two it is.)",
+        )
+        rec.pause(SPOTLIGHT_HOLD_S)
+
+        box = rec.page.locator(SPOTLIGHT_TARGET).first.bounding_box()
+        if box is None:
+            raise SmokeFailure(
+                f"{SPOTLIGHT_TARGET} has no box — tests/fixture/index.html "
+                f"changed and this take is aimed at nothing"
+            )
+        pad = SPOTLIGHT_PAD_PX
+        page_rect: Rect = (
+            int(box["x"]) - pad,
+            int(box["y"]) - pad,
+            int(box["width"]) + 2 * pad,
+            int(box["height"]) + 2 * pad,
+        )
+        geom = dict(rec._geom)
+        size = (rec._size["width"], rec._size["height"])
+
+    return b.problems, {
+        "rect": to_video_rect(page_rect, geom, size),
+        "app": (geom["appx"], geom["appy"], geom["appw"], geom["apph"]),
+        "size": size,
+    }
+
+
+def record_terminal_opening(out_dir: Path) -> tuple[list[str], dict]:
+    """A terminal segment opened with `TerminalRecorder(interlude=…)`.
+
+    Deliberately the shape issue #110 measured on the reference demo: a
+    terminal segment whose first thing on screen is a title card. The
+    storyboard says nothing about the card — that is the whole point of the
+    constructor argument — so everything the assertions read comes from the
+    recorder's own behaviour.
+    """
+    from demo_recording import TerminalRecorder
+
+    b = Beats("terminal-opening")
+
+    with TerminalRecorder(
+        out_dir,
+        speech=False,
+        strict=True,
+        deterministic=True,
+        interlude=OPENING_CARD,
+        interlude_hold=OPENING_HOLD_S,
+    ) as rec:
+        start_ticker(b, rec.page)
+        rec.caption("The card came up before the terminal did.")
+        rec.run("echo opened on a card")
+        try:
+            rec.wait_for_prompt(timeout_s=15)
+        except RuntimeError as exc:
+            b.fail_if(True, f"the shell prompt never came back — {exc}")
+        rec.pause(0.6)
+        rec.caption("")
+
+        win = rec.page.locator("#__term_win").bounding_box()
+        host = rec.page.locator("#__term_host").bounding_box()
+        if win is None or host is None:
+            raise SmokeFailure(
+                "#__term_win/#__term_host has no box — the terminal window "
+                "never rendered, so there is no margin to read the card out of"
+            )
+        app: Rect = (
+            int(host["x"]),
+            int(host["y"]),
+            int(host["width"]),
+            int(host["height"]),
+        )
+        size = (rec._size["width"], rec._size["height"])
+
+    # The strip of background to the right of the terminal window. Outside the
+    # window on purpose — inside it the card and the terminal are both dark and
+    # the two are told apart by their text, which is not a robust thing to
+    # measure. Also the opposite corner from TICKER_JS's 8x8 element, so the
+    # ticker cannot contribute a single level to this.
+    right = int(win["x"] + win["width"])
+    corner: Rect = (right + 8, 0, max(8, size[0] - right - 16), 50)
+    return b.problems, {"corner": corner, "app": app, "size": size}
 
 
 class EntropyTake(NamedTuple):
@@ -4797,6 +5136,241 @@ def check_healthy(label: str, out_dir: Path) -> list[str]:
     return failures
 
 
+def video_fps(mp4: Path) -> float:
+    """The recording's own frame rate, from the container.
+
+    Read rather than assumed, and the frames below are decoded at the source's
+    rate rather than through an `fps=` filter. A resample onto a grid that does
+    not share the video's phase duplicates frames, and a duplicated frame is
+    indistinguishable from a frame in which nothing moved — which is exactly
+    the thing being measured. Sampling this measurement's own artefact was
+    worth two readings of the same healthy take that differed by half.
+    """
+    out = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "csv=p=0",
+            str(mp4),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    num, _, den = out.partition("/")
+    rate = float(num) / float(den or 1)
+    if not 1.0 <= rate <= 240.0:
+        raise SmokeFailure(f"{mp4} reports an implausible frame rate {out!r}")
+    return rate
+
+
+def _transition_shape(frames: list[bytes], fps: float, t_start: float) -> dict:
+    """How far through a transition each frame of one spotlight window is.
+
+    Nothing here is imported from the recorder. It is a picture, two settled
+    states either side of it, and the question of whether anything was ever
+    part way between them.
+    """
+    before, after = SPOTLIGHT_WINDOW_S
+    lo = max(0, int((t_start - before) * fps))
+    hi = min(len(frames), int((t_start + after) * fps) + 1)
+    window = frames[lo:hi]
+    if len(window) < 2:
+        return {"frames": len(window), "total": 0.0, "mid": []}
+    settled = window[-1]
+    total = frame_difference(window[0], settled)
+    low, high = SPOTLIGHT_MID_BAND
+    mid = []
+    if total > 0:
+        for frame in window:
+            share = frame_difference(frame, settled) / total
+            if low < share < high:
+                mid.append(round(share, 3))
+    return {"frames": len(window), "total": total, "mid": mid}
+
+
+def check_spotlight_transitions(out_dir: Path, info: dict) -> list[str]:
+    """The spotlight leaves the way it arrived (issue #111).
+
+    Both spotlight beats are measured the same way, and the enter is the
+    control: it eased before this change and eases after it, so a reading where
+    only the exit passes through nothing is a reading about the exit.
+    """
+    failures: list[str] = []
+    mp4 = out_dir / "demo.mp4"
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    beats = [b for b in doc.get("beats", []) if b.get("verb") == "spotlight"]
+    if len(beats) != 2:
+        return [
+            f"spotlight: the take logged {len(beats)} spotlight beat(s), "
+            f"expected 2 (one to put the highlight up, one to take it down) — "
+            f"there is nothing to measure"
+        ]
+    enter, clear = beats
+    if enter.get("selector") != SPOTLIGHT_TARGET or clear.get("selector") is not None:
+        failures.append(
+            f"spotlight: the two spotlight beats target "
+            f"{enter.get('selector')!r} and {clear.get('selector')!r}, expected "
+            f"{SPOTLIGHT_TARGET!r} and None — they are not the enter and the "
+            f"exit, so the reading below is mislabelled"
+        )
+    fps = video_fps(mp4)
+    # One decode of the whole recording, sliced by frame index afterwards. Two
+    # seeks into the same file would each carry their own rounding, and the two
+    # windows would then be measured on grids that do not agree.
+    frames = gray_frames(mp4, rect=info["rect"])
+    readings: dict[str, dict] = {}
+    for name, beat in (("enter", enter), ("exit", clear)):
+        t_start = beat.get("t_start")
+        if not isinstance(t_start, (int, float)):
+            failures.append(
+                f"spotlight: the {name} beat has t_start {t_start!r}, so its "
+                f"window cannot be placed in the video"
+            )
+            continue
+        readings[name] = _transition_shape(frames, fps, float(t_start))
+    span = sum(SPOTLIGHT_WINDOW_S)
+    for name, shape in readings.items():
+        # Two ways the reading below can be about nothing, each with its own
+        # message: too few frames in the window, or two ends that agree.
+        want = int(span * fps * 0.6)
+        if shape["frames"] < want:
+            failures.append(
+                f"spotlight: the {name} window holds {shape['frames']} of the "
+                f"video's {len(frames)} frames, expected at least {want} at "
+                f"{fps:.0f} fps — the recording is short of the window, so what "
+                f"is measured in it is not the transition"
+            )
+        if shape["total"] < SPOTLIGHT_MIN_TOTAL:
+            failures.append(
+                f"spotlight: the {name} window's two ends differ by only "
+                f"{shape['total']:.2f} mean luma over {info['rect']}, under the "
+                f"{SPOTLIGHT_MIN_TOTAL} floor — the highlight did not go on or "
+                f"did not come off in this window at all, and every fraction "
+                f"computed against it is noise over noise"
+            )
+    if "enter" in readings and len(readings["enter"]["mid"]) < MIN_SPOTLIGHT_MID_FRAMES:
+        failures.append(
+            f"spotlight: the *enter* transition passed through "
+            f"{len(readings['enter']['mid'])} intermediate frame(s) "
+            f"{readings['enter']['mid']}, under the "
+            f"{MIN_SPOTLIGHT_MID_FRAMES} bar. This is the control, not the "
+            f"thing under test: either the spotlight is not being drawn, or "
+            f"this take lost its `deterministic=False` and the motion rule "
+            f"flattened the transition to 1 ms. Until it passes, the exit "
+            f"reading below proves nothing."
+        )
+    if "exit" in readings:
+        mid = readings["exit"]["mid"]
+        if len(mid) < MIN_SPOTLIGHT_MID_FRAMES:
+            failures.append(
+                f"spotlight: clearing the spotlight passed through {len(mid)} "
+                f"intermediate frame(s) {mid}, under the "
+                f"{MIN_SPOTLIGHT_MID_FRAMES} bar, while the enter passed "
+                f"through {len(readings.get('enter', {}).get('mid', []))}. The "
+                f"highlight snaps out instead of easing out (issue #111) — the "
+                f"clear is removing `transition` in the same frame as the "
+                f"properties it is meant to animate, so the element is either "
+                f"fully highlighted or fully normal and never in between."
+            )
+    if not failures:
+        print(
+            f"smoke: spotlight eases both ways (enter "
+            f"{len(readings['enter']['mid'])} intermediate frames, exit "
+            f"{len(readings['exit']['mid'])})"
+        )
+    return failures
+
+
+def check_opening_card(out_dir: Path, info: dict) -> list[str]:
+    """A terminal segment opens on its card, not on a bare terminal (#110).
+
+    Three statements about one sweep of one corner of the frame, and each is
+    broken by a different mistake:
+
+      * the *first* frame is the card — a card raised at the storyboard's first
+        statement, or faded in rather than painted, fails here;
+      * every frame up to the first bare-terminal one is card, and there is at
+        least MIN_OPENING_CARD_S of them — a card that arrives after the
+        terminal does fails here;
+      * the corner does end up bare — a card that is never taken down (#91's
+        half of this seam) fails here, and without it the first two are equally
+        true of a recorder that painted a black rectangle and stopped.
+    """
+    failures: list[str] = []
+    mp4 = out_dir / "demo.mp4"
+    corner = info["corner"]
+    frames = gray_frames(mp4, rect=corner, sample_fps=OPENING_SAMPLE_FPS)
+    luma = [sum(f) / len(f) for f in frames]
+    if len(luma) < MIN_OPENING_FRAMES:
+        return [
+            f"terminal-opening: the corner sweep decoded {len(luma)} frames at "
+            f"{OPENING_SAMPLE_FPS} fps over {corner}, under the "
+            f"{MIN_OPENING_FRAMES} floor — every statement below would be "
+            f"satisfied by a video too short to hold the card at all"
+        ]
+
+    def kind(value: float) -> str:
+        if value <= OPENING_CARD_MAX_LUMA:
+            return "card"
+        if value >= OPENING_BARE_MIN_LUMA:
+            return "bare"
+        return "between"
+
+    if kind(luma[0]) != "card":
+        failures.append(
+            f"terminal-opening: the recording's first frame reads "
+            f"{luma[0]:.1f} mean luma in the corner at {corner}, which is "
+            f"{kind(luma[0])!r} and not the card (card <= "
+            f"{OPENING_CARD_MAX_LUMA}, bare terminal >= "
+            f"{OPENING_BARE_MIN_LUMA}). The segment opens on the terminal and "
+            f"the card arrives afterwards — issue #110."
+        )
+    # The prefix ends at the first frame that is not card — including a frame
+    # that is neither, which is the card mid-fade and is not "before the card"
+    # by any reading.
+    prefix = 0
+    while prefix < len(luma) and kind(luma[prefix]) == "card":
+        prefix += 1
+    prefix_s = prefix / OPENING_SAMPLE_FPS
+    if prefix_s < MIN_OPENING_CARD_S:
+        failures.append(
+            f"terminal-opening: the card covers only the first {prefix_s:.2f}s "
+            f"of the recording ({prefix} frames at {OPENING_SAMPLE_FPS} fps), "
+            f"under the {MIN_OPENING_CARD_S}s bar for a card held "
+            f"{OPENING_HOLD_S}s. Frame {prefix} reads {luma[min(prefix, len(luma) - 1)]:.1f} "
+            f"— the viewer sees the terminal before the card that is supposed "
+            f"to be covering it."
+        )
+    bare = [i for i, value in enumerate(luma) if kind(value) == "bare"]
+    if not bare:
+        failures.append(
+            f"terminal-opening: the corner never reaches "
+            f"{OPENING_BARE_MIN_LUMA} mean luma in "
+            f"{len(luma) / OPENING_SAMPLE_FPS:.1f}s — the card the recorder "
+            f"raised is never taken down (issue #91), and the whole take is "
+            f"behind it. Corner range {min(luma):.1f}..{max(luma):.1f}."
+        )
+    elif kind(luma[-1]) != "bare":
+        failures.append(
+            f"terminal-opening: the recording's last frame reads {luma[-1]:.1f} "
+            f"in the corner ({kind(luma[-1])!r}) — the card came back, or never "
+            f"finished fading"
+        )
+    if not failures:
+        print(
+            f"smoke: terminal-opening card covers the first {prefix_s:.2f}s "
+            f"(corner {luma[0]:.0f} -> {luma[-1]:.0f}), then clears"
+        )
+    return failures
+
+
 # Longest stretch of blank frames a redacted take may record, in seconds.
 # The first-paint gate legitimately blanks the window while the mask is
 # resolved and verified — measured at 0.30-0.55 s per navigation — so this is
@@ -5855,6 +6429,47 @@ def run_web(out_root: Path) -> list[str]:
         + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_evidence("web", out_dir, WEB_EVIDENCE, WEB_EVIDENCE_SCOPE)
         + check_healthy("web", out_dir)
+    )
+
+
+def run_spotlight(out_root: Path) -> list[str]:
+    """The spotlight's enter and exit, in a take that records real motion."""
+    out_dir = fresh_take_dir(out_root, "spotlight")
+    with fixture_server() as base_url:
+        try:
+            problems, info = record_spotlight(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"spotlight: Recorder raised {type(exc).__name__}: {exc}"]
+    mp4 = out_dir / "demo.mp4"
+    if not mp4.is_file():
+        return problems + [f"spotlight: {mp4} was never written"]
+    return (
+        problems
+        + _check_video("spotlight", mp4, SPOTLIGHT_DURATION_S, keep_top(info["app"]))
+        + check_spotlight_transitions(out_dir, info)
+        + check_healthy("spotlight", out_dir)
+    )
+
+
+def run_terminal_opening(out_root: Path) -> list[str]:
+    """A terminal segment that opens on a card rather than on a bare prompt."""
+    out_dir = fresh_take_dir(out_root, "terminal-opening")
+    try:
+        problems, info = record_terminal_opening(out_dir)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [
+            f"terminal-opening: TerminalRecorder raised {type(exc).__name__}: {exc}"
+        ]
+    mp4 = out_dir / "demo.mp4"
+    if not mp4.is_file():
+        return problems + [f"terminal-opening: {mp4} was never written"]
+    return (
+        problems
+        + _check_video(
+            "terminal-opening", mp4, OPENING_DURATION_S, keep_top(info["app"])
+        )
+        + check_opening_card(out_dir, info)
+        + check_healthy("terminal-opening", out_dir)
     )
 
 
@@ -9862,6 +10477,12 @@ def main() -> int:
         help="record only the takes that do not finish (issues #11/#20/#24/#46)",
     )
     parser.add_argument(
+        "--polish-only",
+        action="store_true",
+        help="record only the two takes that grade how a recording looks "
+        "(issues #110 and #111)",
+    )
+    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -9892,6 +10513,7 @@ def main() -> int:
             ("--segments-only", args.segments_only),
             ("--evidence-only", args.evidence_only),
             ("--failure-only", args.failure_only),
+            ("--polish-only", args.polish_only),
         )
         if on
     ]
@@ -9959,6 +10581,13 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # After the graded takes, never instead of them: these five record
     # nothing worth looking at, and if a recorder is broken the messages
     # above are the ones that say how.
+    # How the recording *looks* (issues #110/#111). Reachable from the medium
+    # flags as well as from --polish-only, because whoever is changing the
+    # spotlight is running --web-only.
+    if only in (None, "--web-only", "--polish-only"):
+        failures += run_spotlight(out_root)
+    if only in (None, "--terminal-only", "--polish-only"):
+        failures += run_terminal_opening(out_root)
     if only in (None, "--web-only"):
         failures += run_web_problems(out_root)
         failures += run_strict_web(out_root)

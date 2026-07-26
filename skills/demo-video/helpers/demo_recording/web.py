@@ -162,14 +162,74 @@ window.__demoTerminalHide = () => {
 };
 """
 
+# How long the spotlight's enter and exit take. One constant, used as the
+# element's `transition` and as the shape of the timer that backs the exit up,
+# so the two cannot drift apart.
+SPOTLIGHT_TRANSITION = "all .25s ease"
+
+# Grace on top of the element's *computed* transition time before the exit
+# gives up waiting for `transitionend` and restores the style anyway. Covers a
+# compositor that delivers the event a frame or two late; too small and the
+# last sliver of the fade is cut off, too large and a property that never
+# transitioned at all stalls the verb.
+SPOTLIGHT_EXIT_SLACK_MS = 120
+
 # Spotlight: a highlight ring + slight scale on one element, pointing the
 # viewer at the evidence a caption is talking about (reason lines, chips).
+#
+# **The exit is animated by the same transition the entrance used**, and the
+# order below is the whole of issue #111. Restoring `__spotPrev` in one
+# `setAttribute` is what guarantees the element is handed back exactly as it
+# was found — including an inline style the app itself set — but it also
+# removes `transition` in the *same frame* as it removes `transform` and
+# `outline`, so there is nothing left to animate the exit with. The spotlight
+# eased in over 250 ms and snapped out in one frame, and the asymmetry is what
+# read as broken.
+#
+# So the spotlight's own properties are reverted individually, while the
+# transition is still on the element, and the wholesale restore waits for
+# `transitionend`. Two details that are not decoration:
+#
+#   * `transitionend` does not fire when nothing actually changed, so a timer
+#     backs it up. Its length comes from the element's own *computed*
+#     transition time rather than from a constant, which is what keeps
+#     `deterministic=True` cheap: the motion rule flattens transitions to 1 ms
+#     with `!important`, so a deterministic take's exit is over in a
+#     millisecond and the fallback never runs. A hardcoded 400 ms would have
+#     charged every deterministic take — `tests/smoke` included — nearly half a
+#     second per clear for a transition that had already finished.
+#   * the ring fades by animating its *colour* to alpha 0 rather than by
+#     clearing the `outline` shorthand. `outline-style` is not an animatable
+#     property, so clearing it makes the ring vanish in one frame while the
+#     scale eases — half a snap, which is the bug wearing a smaller hat.
+#     `background` and `transform` are cleared outright, because removing an
+#     inline declaration transitions to the value underneath it and that value
+#     is the one the element is supposed to return to.
 _SPOTLIGHT_JS = """
-window.__demoSpotlight = (el) => {
-  window.__demoSpotlightClear();
+window.__demoSpotlightMs = (el) => {
+  // What the browser says this element's transition costs, not what this file
+  // asked for. The determinism rule overrides it with `!important`.
+  let cs;
+  try { cs = getComputedStyle(el); } catch (e) { return 0; }
+  const worst = (value) => (value || '').split(',').reduce((max, part) => {
+    const text = part.trim();
+    const n = parseFloat(text);
+    if (!isFinite(n)) return max;
+    return Math.max(max, /ms$/.test(text) ? n : n * 1000);
+  }, 0);
+  return worst(cs.transitionDuration) + worst(cs.transitionDelay);
+};
+window.__demoSpotlight = async (el) => {
+  // Awaited: a second spotlight on the *same* element would otherwise read
+  // `__spotPrev` off a style attribute the pending exit has not finished
+  // reverting, and then the exit's restore would wipe the new highlight.
+  await window.__demoSpotlightClear();
   window.__spotEl = el;
-  window.__spotPrev = el.getAttribute('style') || '';
-  el.style.transition = 'all .25s ease';
+  // `getAttribute`, not `getAttribute(...) || ''` — an element that had no
+  // style attribute at all must get none back, or "returned exactly as found"
+  // is one `style=""` short of true.
+  window.__spotPrev = el.getAttribute('style');
+  el.style.transition = '__TRANSITION__';
   el.style.outline = '3px solid rgba(__ACCENT__,.85)';
   el.style.outlineOffset = '3px';
   el.style.borderRadius = '6px';
@@ -177,10 +237,36 @@ window.__demoSpotlight = (el) => {
   el.style.transform = 'scale(1.02)';
 };
 window.__demoSpotlightClear = () => {
-  if (window.__spotEl) {
-    window.__spotEl.setAttribute('style', window.__spotPrev);
-    window.__spotEl = null;
-  }
+  const el = window.__spotEl;
+  if (!el) return Promise.resolve(false);
+  const prev = window.__spotPrev;
+  window.__spotEl = null;
+  window.__spotPrev = null;
+  el.style.outlineColor = 'rgba(__ACCENT__,0)';
+  el.style.background = '';
+  el.style.transform = '';
+  const restore = () => {
+    if (prev === null || prev === undefined) el.removeAttribute('style');
+    else el.setAttribute('style', prev);
+  };
+  const ms = window.__demoSpotlightMs(el);
+  if (!(ms > 0)) { restore(); return Promise.resolve(true); }
+  return new Promise((resolve) => {
+    let done = false;
+    // Hoisted, so `finish` can unsubscribe it.
+    function onEnd(event) { if (event.target === el) finish(); }
+    const finish = () => {
+      if (done) return;
+      done = true;
+      el.removeEventListener('transitionend', onEnd);
+      restore();
+      resolve(true);
+    };
+    // This element's own transition only. A descendant's bubbles up here too,
+    // and one that finishes early would restore the style mid-fade.
+    el.addEventListener('transitionend', onEnd);
+    setTimeout(finish, ms + __SLACK_MS__);
+  });
 };
 """
 
@@ -1039,7 +1125,11 @@ class Recorder(_DemoBase):
             _TERMINAL_JS.replace("__TERM_TITLE__", self._terminal_title)
             .replace("__TERM_PROMPT__", self._terminal_prompt)
         )
-        context.add_init_script(_SPOTLIGHT_JS.replace("__ACCENT__", self._accent))
+        context.add_init_script(
+            _SPOTLIGHT_JS.replace("__ACCENT__", self._accent)
+            .replace("__TRANSITION__", SPOTLIGHT_TRANSITION)
+            .replace("__SLACK_MS__", str(SPOTLIGHT_EXIT_SLACK_MS))
+        )
 
     def _start(self) -> None:
         # Any navigation raises the paint gate, and only a checkpoint lowers
@@ -1706,8 +1796,33 @@ class Recorder(_DemoBase):
     @_beat_verb("spotlight")
     def spotlight(self, selector: str | None = None) -> None:
         """Highlight one element while the caption talks about it;
-        spotlight() with no argument clears it."""
+        spotlight() with no argument clears it.
+
+        **The verb waits out the exit transition.** Clearing a spotlight now
+        animates (issue #111), and a verb that returned mid-fade would hand the
+        next beat a half-restored element: this beat's evidence records the
+        spotlight target's `outerHTML` *including its style attribute*, and
+        `redact()`'s observer re-asserts the mask off the same attribute. Both
+        would then read a value that depends on when the compositor happened to
+        fire, which is not a thing a storyboard can be written against. So when
+        this returns, the previous element's inline style is byte-identical to
+        what the spotlight found.
+
+        What it costs is bounded and self-calibrating rather than a flat
+        charge: the wait is the element's *computed* transition time, so a
+        clear takes ~250 ms longer than it used to on an ordinary take and ~1 ms
+        longer under `deterministic=True`, where the motion rule flattens
+        transitions. Measured end to end, including the verb's own `pause(0.3)`:
+        0.55 s against 0.31 s before, and 0.33 s deterministic. A storyboard
+        that moves a highlight from one element to the next pays it once — the
+        old element's exit runs, then the new one's entrance — and what it buys
+        is that the two are never on screen half-lit at the same time.
+        """
         self._checkpoint()
+        # `evaluate` resolves the promise the clear returns, so this line does
+        # not come back until the exit transition has run to its end and the
+        # style attribute has been put back. That is the whole of the paragraph
+        # above, and it is one word: `evaluate`.
         self.page.evaluate("() => window.__demoSpotlightClear()")
         if selector:
             self.page.locator(selector).first.evaluate(

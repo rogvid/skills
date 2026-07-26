@@ -37,6 +37,7 @@ tests/smoke --redaction-only      # just the secret-redaction takes
 tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --evidence-only       # just the per-beat evidence takes
 tests/smoke --failure-only        # just the takes that do not finish
+tests/smoke --polish-only         # just the two takes that grade how it looks
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -1346,6 +1347,94 @@ two, and reverting the elasticity puts that string back in the log.
 
 `tests/smoke --evidence-only` records just the evidence take and the refusal
 take, which is what makes an injection loop over this axis affordable.
+
+### How the recording looks — the spotlight's exit, and the card a terminal segment opens on
+
+Two takes, and the only two in this file that grade defects **a human found by
+watching**. Everything else here grades something a viewer cannot see; these
+grade the picture, from the viewer's side, out of nothing but pixels.
+
+`spotlight/` records with the recorder's **default**, `deterministic=False`,
+which no other take does. That is not a preference: the determinism rule
+flattens every CSS transition to 1 ms with `!important`, so under it the
+spotlight's enter and its exit both snap, both are correct, and an assertion
+about easing cannot fail for the reason it claims. Injecting `deterministic=True`
+into the take is one of the arms below, and it fires the control.
+
+**A transition is measured as the states it passes through.** Around each
+spotlight beat, every frame of the element's crop is scored by how far it is
+from the settled frame at the end of the window, as a fraction of how far the
+frame at the start of it is; a frame between 12% and 88% is one the transition
+was part way through. A snap produces none — not "few": there is no
+intermediate state for a frame to be in. The first version of this counted
+frames that *changed*, which is not the same claim and is not safe: a hard cut
+in H.264 rings for a frame or two afterwards, so a snap also produces three
+consecutive frames that differ from each other, and the bar had to sit
+uncomfortably close to them.
+
+|  | enter | exit |
+|---|---|---|
+| eased, four takes | 3-4 | 3-4 |
+| the pre-#111 clear, injected | 3-4 | **0** |
+| recorded with `deterministic=True` | **0** | **0** |
+
+The **enter is a control, not the thing under test**: it eased before the change
+and eases after it, so it reads 3-4 in every arm where the recorder is
+non-deterministic. A run where the exit is the only empty one is a reading about
+the exit; a run where both are empty is a reading about the take's settings, and
+says so in its own message.
+
+Two things pixels cannot say are asserted in the storyboard instead. The
+element's inline `style` must be **identical before and after** — attribute
+present or absent, and its value — which is #111's other half and is invisible
+in every frame. And `spotlight()`'s clear must **take at least 0.45 s**, which
+pins the decision that the verb waits out its own exit. That second one exists
+because injecting a clear that resolves early *passed* a version of this take
+that only compared the style: the verb ends in a 300 ms pause, so a style read
+after it is 300 ms too late to see a restore that was still pending. A lower
+bound on a wait is also the one timing bar contention cannot turn red.
+
+`terminal-opening/` records a segment opened with
+`TerminalRecorder(interlude=…)` and reads **one corner of the frame**, outside
+the terminal window, at 20 fps for the whole take:
+
+| | mean luma |
+|---|---|
+| the card (`#1c1a17`, full bleed) | 26 |
+| bare terminal (the recorder's pastel gradient) | 226 |
+
+Neither number is a threshold anybody tuned — they are two constants in the
+recorder's own styling, an order of magnitude apart, and the corner is read off
+the live `#__term_win` box rather than hardcoded. Three statements, each broken
+by a different mistake: the recording's **first** frame is card; the card
+covers at least the first second (it is held 2.5); and the corner **does** end
+up bare, which is the control — without it, the first two are equally true of a
+recorder that painted a black rectangle and stopped, and that is exactly
+[#91](https://github.com/rogvid/skills/issues/91).
+
+Nine injections, each one exact string in one file, with a driver that refuses
+to run unless the pattern matched exactly once:
+
+| injected | what fires |
+|---|---|
+| the pre-#111 clear (restore the whole style attribute in one assignment) | exit passes through 0 intermediate frames |
+| the individual reverts kept, but the attribute restored in the same frame | exit passes through 0 |
+| record the take with `deterministic=True` | the enter control reads 0, and says which of the two causes it is |
+| the enter's `transform` removed | "the highlight never went on, so the exit measurement is about nothing" |
+| the clear leaves `style=""` on an element that had no attribute | the before/after style comparison |
+| the clear's promise resolves before the transition ends | the 0.45 s bar |
+| the card raised 400 ms into the document instead of at document start | first frame is bare, and the prefix is 0.00 s |
+| the card built at `opacity: 0` like `interlude()` builds it | the same two, plus the content floor |
+| the card never cleared | "the corner never reaches 150 mean luma — the card is never taken down" |
+
+**What this does not catch**, and is a stated limit rather than an oversight: a
+card that *fades in* over 450 ms rather than being painted opaque is invisible
+here. Measured — a faded-in card and a painted one produce byte-identical
+corner readings for the first 14 frames, because the recorder spends longer
+than the fade injecting xterm.js before Chromium's screencast emits anything.
+The recorder has no fade-in path (the element is appended already opaque, so no
+transition can run), but the suite is relying on setup cost for that and would
+not notice if it changed.
 
 ### Failure artifacts — what a take that did *not* finish leaves behind
 
