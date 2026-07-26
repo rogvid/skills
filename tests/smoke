@@ -34,7 +34,9 @@ and grades each take on separate axes:
    for byte, and the one recorded with the recorder's *defaults* must not.
 5. **Redaction** — a registered secret reaches no frame, still, caption or TTS
    cache entry. Graded on pixel sharpness against an unredacted control key in
-   the same frame, and on a byte search of everything the take wrote.
+   the same frame, and on a byte search of everything the take wrote. The
+   terminal half (issue #5) grades the PTY scrubber the same way, against a
+   value split across `os.read()` boundaries on purpose.
 
     tests/smoke                 # every take
     tests/smoke --web-only
@@ -872,6 +874,230 @@ MAX_REDACTED_EDGE_RATIO = {"text": 0.07, "field": 0.25}
 # is scored and the *worst* one is graded, because one frame showing the key is
 # a leak: a paused video is a screenshot.
 REDACT_SAMPLE_FPS = 2
+
+# -- terminal redaction (issue #5) -------------------------------------------
+#
+# The terminal half of redaction is a different mechanism with a different
+# failure mode. There is no DOM to cover: the frames show whatever a real
+# program wrote to a real PTY, so the only intervention is a scrubber between
+# `os.read()` and `term.write()`. What that buys, and what this take grades:
+#
+#   * a *registered* secret printed by a command never reaches the terminal
+#     buffer, and therefore never reaches a frame, a still, or the screen text
+#     `wait_for_text()` reads;
+#   * neither does one **split across `os.read()` boundaries**, which is the
+#     acceptance criterion of #5 and is *forced* here rather than hoped for —
+#     see capped_pty_reads();
+#   * nor one with an ANSI colour escape **inside** it, which is what
+#     colourised output looks like;
+#   * a token nobody registered, matched only by its shape, is masked too;
+#   * `run()` and `send()` refuse authored text holding a registered secret,
+#     the way `caption()` and `terminal()` already do.
+#
+# Six values, all 28 characters wide so every one of them occupies the same
+# columns of the terminal grid and can be compared crop against crop. Spelled
+# like the web literals — a four-letter word and a run of zeroes, allowlisted
+# in .gitleaks.toml — because none of them is a credential.
+#
+#   TERM_PRINTED  registered, printed by a command
+#   TERM_ANSI     registered, printed with a colour escape inside it
+#   TERM_SHAPE    never registered. The `ghp_` shape net is all that hides it,
+#                 which is the point: it proves the net exists, separately
+#                 from the registry
+#   TERM_TYPED    sent as Secret(...) and echoed back by the PTY one character
+#                 per read — deliberately not shape-matching, so what masks it
+#                 can only be the registration `send()` did
+#   TERM_CONTROL  never registered, and matches no shape. The reference for
+#                 "there is legible text in this frame at all"
+TERM_PRINTED = "sk-live-PTYK0000000000000000"
+TERM_ANSI = "sk-live-ANSI0000000000000000"
+TERM_HIDE = "sk-live-HIDE0000000000000000"
+TERM_OSC = "sk-live-OSCT0000000000000000"
+TERM_SHAPE = "ghp_SHAP00000000000000000000"
+TERM_STREAMED = "ghp_STRM00000000000000000000"
+TERM_PAUSED = "sk-live-PAUS0000000000000000"
+TERM_ANCHOR_SPLIT = "ghp_ANCH00000000000000000000"
+# Paused past _ANCHORED_HOLD_S, and therefore **expected on screen in the
+# clear**. It is the only value in this take that is, apart from the two
+# references — deliberately, because "shape detection has a clock" is a
+# documented limit and a limit nobody grades is a limit that quietly moves.
+# Absent from TERM_LITERALS and from TERM_MASKED_ROWS for the same reason.
+TERM_SLOW = "ghp_SLOW00000000000000000000"
+TERM_AWS = "AKIAAWSK00000000000000000000"
+TERM_JWT = "eyJKV0TAAA.eyJzdWJBQUE.SIGN0"
+TERM_TYPED = "pw-live-SEND0000000000000000"
+TERM_CONTROL = "zz-live-TCTL0000000000000000"
+
+# Two more, each for a take of its own further down.
+#
+#   TERM_CURSOR  written in two pieces at two cursor positions. Contiguous on
+#                screen, contiguous in no substring of the stream — the case
+#                the scrubber cannot see and `_verify_redaction_final` must
+#                refuse.
+#   TERM_KEYED   spelled out through key(), one keystroke per character. The
+#                beat log records the keys joined by spaces, which no literal
+#                scrub can match, so the guard has to refuse the call.
+TERM_CURSOR = "sk-live-CURS0000000000000000"
+TERM_KEYED = "sk-live-KEYD0000000000000000"
+
+# Longer than the recorder's _MAX_HOLD (4096), so the fragment rule that holds
+# a growing token hits its ceiling mid-match. Graded on the screen text and
+# the byte sweep rather than on pixels: 4 kB of base64 wraps over fifty rows
+# and would scroll every measured row off screen.
+TERM_LONG_JWT = "eyJ" + "L" * 2100 + "." + "J" * 2100 + ".SIG"
+# ...and the needle to look for it with. A hold that hits its ceiling does not
+# leak the *whole* value — it writes out the leading characters, seven per
+# read, and keeps holding the last 4096. So the whole value is the wrong thing
+# to search for: measured, a take rendering the first 111 characters of this
+# token in the clear passes a check for the token itself.
+TERM_LONG_WITNESS = TERM_LONG_JWT[:64]
+
+# The same ceiling from the other side: a *registered* value longer than it.
+# Deliberately matching no shape, so the only thing that can hide it is the
+# registry — and the registry's hold is the one the ceiling must never clamp.
+# Clamping it (measured, by injection) writes all 4200 characters to the
+# screen seven at a time while the recorder reports nothing wrong.
+TERM_LONG_REGISTERED = "zz-long-" + "R" * 4200
+TERM_LONG_REG_WITNESS = TERM_LONG_REGISTERED[:64]
+
+# Where TERM_ANSI is cut in two by a colour escape. A literal substring match
+# on the byte stream sees `sk-live-ANSI` and `0000000000000000`, and neither
+# is the secret; only matching against an escape-stripped copy finds it.
+TERM_ANSI_CUT = 12
+
+# Every value that must not survive anywhere the take writes, and where it
+# came from. TERM_CONTROL is deliberately absent — it is *supposed* to be in
+# the frames, and a sweep that flagged it would be measuring nothing.
+TERM_LITERALS = {
+    "the key a command printed": TERM_PRINTED,
+    "the key printed with a colour escape inside it": TERM_ANSI,
+    "the key printed with a cursor-hide escape inside it": TERM_HIDE,
+    "the key printed with a window-title escape inside it": TERM_OSC,
+    "the ghp_-shaped token nobody registered": TERM_SHAPE,
+    "the ghp_-shaped token written one character at a time": TERM_STREAMED,
+    "the sk--shaped token paused in the middle": TERM_PAUSED,
+    "the ghp_-shaped token paused inside its anchor": TERM_ANCHOR_SPLIT,
+    "the AKIA-shaped token nobody registered": TERM_AWS,
+    "the JWT nobody registered": TERM_JWT,
+    "the leading characters of the over-long JWT": TERM_LONG_WITNESS,
+    "the leading characters of the over-long registered value": (TERM_LONG_REG_WITNESS),
+    "the password sent as Secret(...)": TERM_TYPED,
+}
+
+# Each line the take puts on screen is `<tag> <value>`, one tag per row, all
+# tags the same width so every value starts in the same column. `ref` renders
+# the mask itself, literally, and is the reference every masked row is
+# compared against: it is what `[redacted]` looks like in this font at this
+# size in this frame, measured rather than assumed.
+TERM_TAG_W = 4  # "key " and friends
+TERM_VALUE_CELLS = 28
+TERM_MASKED_ROWS = {
+    "key": "the key a command printed",
+    "ans": "the key with a colour escape inside it",
+    "hid": "the key with a cursor-hide escape inside it",
+    "osc": "the key with a window-title escape inside it",
+    "shp": "the shape-matched token, printed in one burst",
+    "str": "the shape-matched token, written one character at a time",
+    "pau": "the shape-matched token, paused mid-value",
+    "anc": "the shape-matched token, paused after its first character",
+    "aws": "the AKIA-shaped token",
+    "jwt": "the JWT-shaped token",
+    "pwd": "the password sent as Secret(...)",
+}
+TERM_CONTROL_ROW = "ctl"
+TERM_REFERENCE_ROW = "ref"
+
+# Printed with no trailing newline, by a program that then waits for input —
+# so the PTY goes silent with `gh` at the end of the stream. Those two
+# characters could still become a `ghp_` token, so the scrubber holds them,
+# and it has to let them go once the burst is over. Otherwise the screen
+# renders short of what the program wrote and every verb that syncs on the
+# screen — wait_for_text, wait_for_prompt — waits for text the recorder is
+# sitting on.
+#
+# `xe` and not `gh`, and that is the whole point of the case. Both are shape
+# fragments — `e` could begin a JWT — but this one sits *in the middle of a
+# word*, where a credential never starts, so the recorder writes it the moment
+# the PTY goes quiet and the screen is never short. A fragment at a token
+# boundary (`hld gh`) is where a key would start and is held for seconds
+# instead; a fragment that could complete a *registered* value is held with no
+# timeout at all, which is what stops the echo of send(Secret(...)) — one
+# character per read, with an idle pump between each — from printing a
+# password one character at a time. The three arms are asserted separately:
+# this row, the `str`/`pau` rows, and the `pwd` row.
+TERM_HELD_LINE = "hld xe"
+# ...and how long the release may take, measured from the `ref` row — the
+# printf immediately before it — rather than from the start of the script.
+#
+# That framing is the fix for a bar that used to be quietly meaningless. The
+# comment here claimed "the pump interval plus slack", but the timer started
+# before the printer ran, so what it actually measured was the printer's own
+# runtime: every `sleep` in the script plus the recorder's frame holds, with
+# the release somewhere in the noise. Measured 0.835 s idle and 1.053 s under
+# 16-way saturation against a 1.5 s bar — 1.4x headroom on a 2-core GitHub
+# runner recording video through Chromium, which is a flake waiting to happen,
+# and it got worse the moment the `slw` row added a four-second sleep (8.2 s
+# against the same bar).
+#
+# Timed from the previous `printf` there is nothing in between, so the
+# quantity is the release itself: measured 0.1-0.3 s. The failure it has to
+# catch adds a whole _ANCHORED_HOLD_S (3.0 s) on top. The bar sits between
+# them with room on both sides.
+TERM_HELD_MAX_WAIT_S = 1.5
+
+# The pwd row only exists once send() has typed into `read`; the other five
+# are on screen from the moment the printer ran.
+TERM_REDACT_SHOTS = ["01-printed", "02-typed"]
+TERM_REDACT_DURATION_S = (4.0, 40.0)
+
+# How the three-way pixel comparison is graded. Every crop is the same 28
+# cells of the same row height, taken at native resolution, and compared by
+# mean absolute luma difference:
+#
+#   * a masked row against the `ref` row must be *the same picture* — the
+#     terminal is rendering `[redacted]`, not a key. Measured 0.0-0.4 in the
+#     lossless stills and 0.3-1.6 in the mp4 (codec noise on identical text).
+#   * the `ctl` row against the same `ref` row must *not* be, and that is the
+#     calibration: it is a 28-character key in the same font at the same size
+#     in the same frame — exactly what a leak would look like — so it says the
+#     comparison can tell the two apart at all. Measured 30-40.
+#   * and the `ctl` row must be sharp, which is what stops every number above
+#     from passing on a blank recording or a terminal that rendered nothing.
+#
+# The bars sit in the gap between those bands, an order of magnitude from
+# either side.
+MAX_TERM_MASK_DELTA = {"still": 3.0, "video": 6.0}
+# Milliseconds between characters when the printer writes a token one at a
+# time. The recorder drains the PTY faster than that, so `select()` reports
+# nothing ready between every character and the scrubber sees a quiet boundary
+# mid-token — the exact condition that made shape detection a no-op, and one
+# the read cap cannot manufacture. 5 ms is the fastest rate measured leaking.
+TERM_STREAM_MS = 5
+# A single long pause mid-token, for the case where a program computes between
+# two writes — and one of the two values that pin the recorder's
+# `_ANCHORED_HOLD_S` (3.0 s) from either side.
+#
+# This one sits *inside* the window and must come out masked; TERM_SLOW_PAUSE_S
+# below sits outside it and must come out legible. Both are needed. With only
+# this one, `_ANCHORED_HOLD_S` could be raised to any value at all and nothing
+# would notice; with only the other, it could be lowered to ~0.5. A full second
+# of margin either side of 3.0, because the quantity the recorder actually
+# measures is wall-clock idle time on a CI box recording video through
+# Chromium, not the sleep the printer asked for.
+TERM_PAUSE_S = 2.0
+# ...and the same pause past the far edge of that window. This one is a
+# *documented leak*: SKILL.md says a program that pauses longer than three
+# seconds inside a token defeats shape matching, and this is the arm that
+# holds that sentence to its word. See TERM_SLOW.
+TERM_SLOW_PAUSE_S = 4.0
+MIN_TERM_DISTINCT_DELTA = {"still": 12.0, "video": 12.0}
+MIN_TERM_CONTROL_EDGE = {"still": 6.0, "video": 5.0}
+TERM_REDACT_SAMPLE_FPS = 2
+
+# Bytes per `os.read()` while the take records. Small enough that no 28-byte
+# value can arrive whole, so "split across two reads" is a fact of every run
+# rather than a race the harness hopes to win. See capped_pty_reads().
+TERM_READ_CAP = 7
 
 
 class SmokeFailure(Exception):
@@ -5139,6 +5365,1077 @@ def run_segments(out_root: Path) -> list[str]:
     )
 
 
+# -- the terminal redaction take (issue #5) ----------------------------------
+
+
+class _CappedReads:
+    """`os` for demo_recording.terminal, with every read capped and recorded.
+
+    Issue #5's acceptance criterion is a secret **split across two `os.read()`
+    boundaries**, and it says to force that rather than hope for it. A PTY
+    hands back whatever happens to be in the buffer, so on a quiet box a
+    `printf` usually arrives whole and a take that merely printed a key would
+    prove nothing about the carry buffer at all.
+
+    Capping every read at a handful of bytes makes the split a property of
+    every run, and keeping the fragments turns "it was split" from an
+    assumption into something the harness checks and prints. Only the module
+    global in demo_recording.terminal is replaced — patching `os.read` itself
+    would reach Playwright, ffmpeg and the harness's own file reads.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self._cap = cap
+        self.fragments: list[bytes] = []
+
+    def __getattr__(self, name: str):
+        return getattr(os, name)
+
+    def read(self, fd: int, size: int) -> bytes:
+        data = os.read(fd, min(size, self._cap))
+        self.fragments.append(data)
+        return data
+
+
+@contextmanager
+def capped_pty_reads(cap: int) -> Iterator[_CappedReads]:
+    import demo_recording.terminal as terminal_module
+
+    shim = _CappedReads(cap)
+    real = terminal_module.os
+    terminal_module.os = shim
+    try:
+        yield shim
+    finally:
+        terminal_module.os = real
+
+
+def fragments_spanned(fragments: list[bytes], needle: bytes) -> int:
+    """How many reads `needle` had to be reassembled from.
+
+    1 means a single read carried it whole — the case a per-chunk `scrub()`
+    already handles, and therefore the case that proves nothing. 0 means it is
+    not in the raw stream at all, which for a value a command printed means
+    the test is measuring the wrong thing.
+    """
+    joined = b"".join(fragments)
+    at = joined.find(needle)
+    if at < 0:
+        return 0
+    end, span, pos = at + len(needle), 0, 0
+    for fragment in fragments:
+        if pos < end and pos + len(fragment) > at:
+            span += 1
+        pos += len(fragment)
+    return span
+
+
+def _sh_char_by_char(tag: str, value: str, gap_ms: int) -> str:
+    """Shell that writes `<tag> <value>` one character at a time.
+
+    The reason this exists rather than a `printf`: the recorder drains the PTY
+    faster than a program this slow writes, so `select()` reports nothing
+    ready between every character. That quiet-boundary-inside-a-token is the
+    condition that turned shape detection into a no-op, and capping `os.read()`
+    cannot manufacture it — capped reads still come back-to-back off a full
+    buffer, and the scrubber never sees the PTY go idle mid-value.
+    """
+    chars = " ".join(f"'{c}'" for c in value)
+    return (
+        f"printf '{tag} '\n"
+        f'for c in {chars}; do printf %s "$c"; sleep {gap_ms / 1000:.3f}; done\n'
+        "printf '\\n'\n"
+    )
+
+
+def term_printer_script(mask: str) -> str:
+    """A shell script that prints one tagged value per line.
+
+    A script rather than a `run()` per value, for one reason that matters: a
+    command line is echoed on screen, and typing the values into one would
+    both trip `run()`'s own guard and put them in the frames by a path this
+    take is not about. It is written outside the take directory, so the byte
+    sweep grades what the *recorder* wrote and not what the harness did.
+
+    Four of the rows are a value cut in half by something. `ans` by a colour
+    escape, `hid` by a cursor-hide (`\x1b[?25l` — what every spinner library
+    emits mid-line), `osc` by a window-title escape. None of those moves the
+    cursor, so all three are one token on screen and none is a substring of
+    the stream.
+
+    Three more are cut in half by *time*, which is a boundary the read cap
+    cannot produce and which a scrubber that flushes on idle walks straight
+    through. `str` writes a token one character at a time; `pau` stops in the
+    middle of one for TERM_PAUSE_S; `anc` stops after its *first character*,
+    which is the harder half — one character is not yet a credential prefix,
+    and what keeps it is where it sits, not what it says. Leaving `anc` to
+    chance does not work: whether an ordinary pump boundary lands inside the
+    first three characters of `str` is a coin flip, and the run where it does
+    not is a run where nothing tested that rule.
+
+    `slw` is the same cut, TERM_SLOW_PAUSE_S long, and it is the only row here
+    that must come out **legible**. The recorder's hold on a shape fragment is
+    bounded — it has to be, or a screen ending in `e` renders short forever —
+    and `slw` measures that bound from the outside while `pau` measures it
+    from the inside. Neither alone says where three seconds is.
+
+    The last two lines are the other half of the scrubber's contract — see
+    TERM_HELD_LINE. `read` keeps the program alive so the PTY stays silent
+    with an unterminated line on screen.
+    """
+    head, tail = TERM_ANSI[:TERM_ANSI_CUT], TERM_ANSI[TERM_ANSI_CUT:]
+    hide_head, hide_tail = TERM_HIDE[:TERM_ANSI_CUT], TERM_HIDE[TERM_ANSI_CUT:]
+    osc_head, osc_tail = TERM_OSC[:TERM_ANSI_CUT], TERM_OSC[TERM_ANSI_CUT:]
+    pause_head = TERM_PAUSED[:TERM_ANSI_CUT]
+    pause_tail = TERM_PAUSED[TERM_ANSI_CUT:]
+    return (
+        (
+            "#!/bin/sh\n"
+            f"printf 'key %s\\n' '{TERM_PRINTED}'\n"
+            f"printf 'ans %s\\033[32m%s\\033[0m\\n' '{head}' '{tail}'\n"
+            f"printf 'hid %s\\033[?25l%s\\033[?25h\\n' '{hide_head}' '{hide_tail}'\n"
+            f"printf 'osc %s\\033]0;demo\\007%s\\n' '{osc_head}' '{osc_tail}'\n"
+            f"printf 'shp %s\\n' '{TERM_SHAPE}'\n"
+            + _sh_char_by_char("str", TERM_STREAMED, TERM_STREAM_MS)
+            + f"printf 'pau %s'\n"
+            f"sleep {TERM_PAUSE_S}\n"
+            f"printf '%s\\n' '{pause_tail}'\n"
+            f"printf 'anc %s'\n"
+            f"sleep {TERM_PAUSE_S}\n"
+            f"printf '%s\\n' '{TERM_ANCHOR_SPLIT[1:]}'\n"
+            f"printf 'slw %s'\n"
+            f"sleep {TERM_SLOW_PAUSE_S}\n"
+            f"printf '%s\\n' '{TERM_SLOW[TERM_ANSI_CUT:]}'\n"
+            f"printf 'aws %s\\n' '{TERM_AWS}'\n"
+            f"printf 'jwt %s\\n' '{TERM_JWT}'\n"
+            f"printf 'ctl %s\\n' '{TERM_CONTROL}'\n"
+            f"printf 'ref %s\\n' '{mask}'\n"
+            f"printf '{TERM_HELD_LINE}'\n"
+            "read -r _release\n"
+        )
+        .replace("printf 'pau %s'", f"printf 'pau %s' '{pause_head}'")
+        .replace("printf 'anc %s'", f"printf 'anc %s' '{TERM_ANCHOR_SPLIT[:1]}'")
+        .replace("printf 'slw %s'", f"printf 'slw %s' '{TERM_SLOW[:TERM_ANSI_CUT]}'")
+    )
+
+
+# The terminal grid, read off the live xterm.js instance: where the character
+# cells are on screen, and what is in each row of the viewport. Both are read
+# from the terminal itself rather than computed from the font size, so a
+# change to the window chrome or the font moves the measurement with it.
+_TERM_GRID_JS = """() => {
+  const term = window.__term;
+  const screen = document.querySelector('#__term_host .xterm-screen');
+  if (!term || !screen) return null;
+  const box = screen.getBoundingClientRect();
+  const buf = term.buffer.active;
+  const lines = [];
+  for (let y = 0; y < term.rows; y++) {
+    const line = buf.getLine(buf.viewportY + y);
+    lines.push(line ? line.translateToString(true) : '');
+  }
+  return {x: box.x, y: box.y, w: box.width, h: box.height,
+          cols: term.cols, rows: term.rows, lines: lines};
+}"""
+
+
+def term_row_rect(grid: dict, tag: str) -> Rect | None:
+    """Where the value on the `<tag> …` row is, in frame pixels.
+
+    Every row is measured over the same 28 cells starting at the same column,
+    so the crops are directly comparable: same size, same font, same frame.
+    """
+    row = next(
+        (i for i, line in enumerate(grid["lines"]) if line.startswith(f"{tag} ")),
+        None,
+    )
+    if row is None:
+        return None
+    cell_w = grid["w"] / grid["cols"]
+    cell_h = grid["h"] / grid["rows"]
+    return (
+        int(grid["x"] + TERM_TAG_W * cell_w),
+        int(grid["y"] + row * cell_h),
+        max(2, int(TERM_VALUE_CELLS * cell_w)),
+        max(2, int(cell_h)),
+    )
+
+
+def record_terminal_redaction(out_dir: Path, work_dir: Path) -> tuple[list[str], dict]:
+    """A terminal take whose program prints secrets four different ways.
+
+    Returns the post-condition failures plus what check_terminal_redaction
+    needs afterwards: where each row sits in the frame, when each value
+    reached the screen, and the evidence that the PTY really did chop the
+    values across reads.
+    """
+    from demo_recording import SECRET_MASK, Secret, SecretLeak, TerminalRecorder
+
+    b = Beats("terminal-redaction")
+
+    # Collected, never raised — the same reason record_terminal() does it: a
+    # take that aborts on a sync writes no mp4, and the mp4 is most of what is
+    # being graded here.
+    def expect_prompt(after: str) -> None:
+        try:
+            rec.wait_for_prompt(timeout_s=20)
+        except RuntimeError as exc:
+            b.fail_if(
+                True,
+                f"after {after}, the shell prompt never came back — "
+                f"{' '.join(str(exc).split())[:200]}",
+            )
+
+    printer = work_dir / "print-secrets"
+    printer.write_text(term_printer_script(SECRET_MASK))
+    printer.chmod(0o755)
+    long_printer = work_dir / "print-long"
+    long_printer.write_text(
+        "#!/bin/sh\n"
+        f"printf 'lng %s\\n' '{TERM_LONG_JWT}'\n"
+        f"printf 'lgr %s\\n' '{TERM_LONG_REGISTERED}'\n"
+    )
+    long_printer.chmod(0o755)
+
+    info: dict = {}
+    # Anything raised on the way out — the recorder's own last-word screen
+    # check, a strict verdict — is right to raise and wrong to let through
+    # here: it would throw away every post-condition collected above, and "the
+    # take raised" is a much worse bug report than "this row is in the buffer
+    # verbatim". Caught so both arrive.
+    exit_error: BaseException | None = None
+    try:
+        with (
+            capped_pty_reads(TERM_READ_CAP) as reads,
+            TerminalRecorder(out_dir, speech=False, strict=True) as rec,
+        ):
+            # Two of the four, before anything runs. The other two are the point
+            # of the take: TERM_SHAPE is never registered at all, and TERM_TYPED
+            # registers itself when send() is handed a Secret.
+            rec.register_secret(
+                TERM_PRINTED, TERM_ANSI, TERM_HIDE, TERM_OSC, TERM_LONG_REGISTERED
+            )
+            rec.caption("What a command prints, redacted on the way in.")
+            check_caption(b, rec.page, "What a command prints, redacted on the way in.")
+            rec.run("./print-secrets")
+            # The rendered screen, not the recorder's opinion of it. wait_for_text
+            # reads the xterm buffer, so this passing means the buffer holds the
+            # mask — and every frame is drawn from that same buffer.
+            waited = {}
+            for pattern, why in (
+                (
+                    r"^key \[redacted\]$",
+                    "the screen never showed a masked `key` row",
+                ),
+                # The last *complete* line the printer writes, and the one
+                # immediately before the held fragment. Waiting for it here is
+                # what makes the number below mean something: the printer
+                # sleeps for seconds on the `pau`, `anc` and `slw` rows, and a
+                # timer started before all that measures the script's runtime
+                # with the release buried in its noise. From here to the next
+                # pattern there is nothing between the two `printf`s.
+                (
+                    f"^{re.escape(TERM_REFERENCE_ROW)} {re.escape(SECRET_MASK)}$",
+                    "the screen never showed the `ref` row, so the release "
+                    "timed below could not be isolated from the printer's own "
+                    "runtime",
+                ),
+                (
+                    f"^{re.escape(TERM_HELD_LINE)}$",
+                    f"the screen never showed {TERM_HELD_LINE!r}, which the "
+                    f"program wrote with no newline before going quiet. The "
+                    f"scrubber is still holding its last characters back in case "
+                    f"they grow into a key — and every verb that syncs on the "
+                    f"screen is now waiting for text the recorder has",
+                ),
+            ):
+                began = time.monotonic()
+                try:
+                    rec.wait_for_text(pattern, timeout_s=20)
+                except RuntimeError as exc:
+                    b.fail_if(True, f"{why} — {' '.join(str(exc).split())[:200]}")
+                waited[pattern] = time.monotonic() - began
+            # Not just "it arrived": *when*. A fragment in the middle of a word
+            # is not where a credential starts, so it goes out on the first
+            # quiet poll and the screen is never behind the program. Held on
+            # the clock the token-boundary fragments get, it would arrive three
+            # seconds late — which no assertion about the final screen can see.
+            #
+            # Measured from the `ref` row, one `printf` earlier, so this is the
+            # release and nothing else.
+            lag = waited[f"^{re.escape(TERM_HELD_LINE)}$"]
+            b.fail_if(
+                lag > TERM_HELD_MAX_WAIT_S,
+                f"{TERM_HELD_LINE!r} took {lag:.1f}s to reach the screen (bar "
+                f"{TERM_HELD_MAX_WAIT_S}s). Its last characters are a shape "
+                f"fragment in the middle of a word, where no key starts; "
+                f"holding those on the same clock as a fragment at a token "
+                f"boundary makes every finished screen lag by that clock",
+            )
+            # Release the `read` the printer is parked on, and let it exit.
+            rec.send("")
+            expect_prompt("the printer's read")
+            screen = rec._screen()
+            for what, literal in TERM_LITERALS.items():
+                if literal in (TERM_TYPED, TERM_LONG_WITNESS, TERM_LONG_REG_WITNESS):
+                    continue  # not on screen yet
+                b.fail_if(
+                    literal in screen,
+                    f"{what} is in the terminal buffer verbatim — the scrubber "
+                    f"let it through, so it is in every frame drawn from that "
+                    f"buffer and in what wait_for_text() reads",
+                )
+            # The documented limit, asserted as a limit. SKILL.md says a
+            # program that pauses longer than three seconds inside a token
+            # defeats shape matching; this row is that program. Graded
+            # positively — it must be on screen *in the clear* — because a
+            # "not covered" paragraph nobody grades is a paragraph that goes
+            # quietly out of date the first time somebody tunes the constant.
+            # Together with the `pau` row, which pauses TERM_PAUSE_S and must
+            # be masked, it pins _ANCHORED_HOLD_S from both sides: raise it and
+            # this fails, lower it and `pau` does.
+            b.fail_if(
+                f"slw {TERM_SLOW}" not in screen,
+                f"the token paused {TERM_SLOW_PAUSE_S}s mid-value is not on "
+                f"screen in the clear. That is the documented limit of shape "
+                f"detection — the hold is bounded, or a screen ending in `e` "
+                f"renders short forever — and it is graded here so the bound "
+                f"cannot move without somebody deciding to move it. Either "
+                f"the recorder now holds longer than SKILL.md says, or the "
+                f"row never rendered at all",
+            )
+            b.fail_if(
+                f"{TERM_CONTROL_ROW} {TERM_CONTROL}" not in screen,
+                "the unregistered control value is not on screen intact. It is "
+                "the reference every pixel measurement here is taken against, "
+                "and a scrubber that masked everything would pass every leak "
+                "assertion in this take while recording nothing legible",
+            )
+            b.fail_if(
+                f"{TERM_REFERENCE_ROW} {SECRET_MASK}" not in screen,
+                f"the `{TERM_REFERENCE_ROW}` row does not hold {SECRET_MASK!r} — "
+                f"it is the picture every masked row is compared against, so "
+                f"without it nothing below is measured against anything",
+            )
+            printed_at = round(time.monotonic() - rec._t0, 3)
+            # Where the printer's own output ends in the read stream. The ANSI
+            # evidence below is taken over this prefix and no further: a later
+            # verb that typed the same value would put it in the stream by a path
+            # this take is not making a claim about.
+            printer_reads = len(reads.fragments)
+            rec.pause(0.8)
+            rec.shot(TERM_REDACT_SHOTS[0])
+
+            # The password path, and the one place the carry buffer is exercised
+            # by the recorder's own behaviour rather than by the read cap: the PTY
+            # echoes a typed character as it is typed, so this value arrives one
+            # character per read no matter how anything is configured.
+            rec.caption("A password typed as a Secret, echoed masked.")
+            check_caption(b, rec.page, "A password typed as a Secret, echoed masked.")
+            rec.run('read -r -p "pwd " PW')
+            rec.send(Secret(TERM_TYPED))
+            expect_prompt("send(Secret(...))")
+            b.fail_if(
+                TERM_TYPED not in rec.secrets,
+                "send(Secret(...)) typed the value without registering it, so a "
+                "caption or a narration line could still speak it",
+            )
+            b.fail_if(
+                TERM_TYPED in rec._screen(),
+                "the password the PTY echoed back is in the terminal buffer "
+                "verbatim — it arrives one character per read, which is exactly "
+                "the split a per-chunk scrub cannot see",
+            )
+            typed_at = round(time.monotonic() - rec._t0, 3)
+            rec.pause(0.8)
+            rec.shot(TERM_REDACT_SHOTS[1])
+
+            # Authored text. A command line and a typed answer are the terminal's
+            # `caption()`: the storyboard wrote them, the PTY echoes them, and the
+            # honest answer is to stop rather than to mask a command nobody could
+            # then read.
+            for verb, call in (
+                ("run", lambda: rec.run(f"echo {TERM_PRINTED}")),
+                ("send", lambda: rec.send(TERM_ANSI)),
+            ):
+                refused: Exception | None = None
+                try:
+                    call()
+                except SecretLeak as exc:
+                    refused = exc
+                b.fail_if(
+                    refused is None,
+                    f"{verb}() was handed a registered secret and typed it. It is "
+                    f"authored text echoed on screen — the same case terminal() "
+                    f"already refuses in the web recorder",
+                )
+                b.fail_if(
+                    refused is not None and str(refused).count("sk-live-") > 0,
+                    f"{verb}()'s SecretLeak quotes the secret it caught, which "
+                    f"puts the value in every log that reports the failure",
+                )
+            after = rec._screen()
+            for what, literal in TERM_LITERALS.items():
+                b.fail_if(
+                    literal in after,
+                    f"{what} reached the screen through a refused verb — the "
+                    f"guard has to run before the first keystroke, not after",
+                )
+
+            # A secret spelled out one keystroke at a time. `key()` is the one
+            # verb whose beat log entry a scrub cannot clean — the beat records
+            # the keys joined by spaces, and no literal match on the value can see
+            # `'s k - l i v e - …'` — so the only place to stop it is the call.
+            keyed: Exception | None = None
+            rec.register_secret(TERM_KEYED)
+            try:
+                rec.key(*TERM_KEYED)
+            except SecretLeak as exc:
+                keyed = exc
+            b.fail_if(
+                keyed is None,
+                "key() typed a registered secret one character at a time. Its "
+                "beat carries those characters space-separated into "
+                "timeline.json and timeline.md, which SKILL.md tells people to "
+                "commit, and nothing downstream can scrub that back out",
+            )
+            b.fail_if(
+                TERM_KEYED in rec._screen(),
+                "key() put a registered secret on screen before refusing",
+            )
+
+            grid = rec.page.evaluate(_TERM_GRID_JS)
+            if grid is None:
+                raise SmokeFailure(
+                    "terminal-redaction: the xterm.js grid could not be read, so "
+                    "no pixel assertion could be made"
+                )
+            rects: dict[str, Rect] = {}
+            for tag in [*TERM_MASKED_ROWS, TERM_CONTROL_ROW, TERM_REFERENCE_ROW]:
+                rect = term_row_rect(grid, tag)
+                if rect is not None:
+                    rects[tag] = rect
+            # Everything above is measured by pixels, so it had to happen while
+            # the rows stood still. This last case cannot: a token longer than the
+            # recorder's hold ceiling is 4 kB of base64, which wraps over fifty
+            # rows and scrolls every measured row off the screen. So it goes last,
+            # the video is graded only up to here, and it is checked on the screen
+            # text and the byte sweep instead.
+            graded_until = round(time.monotonic() - rec._t0, 3)
+            rec.run("./print-long")
+            expect_prompt("the long-token printer")
+            long_screen = rec._screen()
+            b.fail_if(
+                TERM_LONG_WITNESS in long_screen,
+                f"the first {len(TERM_LONG_WITNESS)} characters of a "
+                f"{len(TERM_LONG_JWT)}-character token are on screen. It is "
+                f"longer than the recorder's fragment ceiling, so the hold is "
+                f"clamped mid-match — and a clamp that lands inside a match "
+                f"writes the head of a credential and masks the tail",
+            )
+            b.fail_if(
+                TERM_LONG_REG_WITNESS in long_screen,
+                f"the first {len(TERM_LONG_REG_WITNESS)} characters of a "
+                f"{len(TERM_LONG_REGISTERED)}-character *registered* value are "
+                f"on screen. The ceiling that bounds a shape fragment must not "
+                f"bound this one: the registry is the guarantee, its hold is "
+                f"already bounded by the value's own length, and clamping it "
+                f"writes the whole value out seven characters at a time",
+            )
+            info = {
+                "rects": rects,
+                "printed_at": printed_at,
+                "typed_at": typed_at,
+                "graded_until": graded_until,
+                "caption_top": rec._size["height"] - 160,
+            }
+
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        exit_error = exc
+    if exit_error is not None:
+        b.fail_if(
+            True,
+            f"the take did not finish cleanly: {type(exit_error).__name__}: "
+            f"{exit_error}. A SecretLeak here is the right answer to a "
+            f"registered value on the finished screen, and the leak "
+            f"assertions above say which row it was.",
+        )
+    if not info:
+        # It died before it could say where anything was on screen, so there
+        # is nothing for the pixel checks to measure. The collected
+        # post-conditions are the report.
+        return b.problems, {}
+
+    # Read after the take, so it covers every byte the PTY produced. This is
+    # the evidence for the acceptance criterion, not a diagnostic: a run where
+    # every value happened to arrive whole would grade a carry buffer that was
+    # never used.
+    info["reads"] = len(reads.fragments)
+    info["spans"] = {
+        name: fragments_spanned(reads.fragments, value.encode())
+        for name, value in (("printed", TERM_PRINTED), ("typed", TERM_TYPED))
+    }
+    printed = b"".join(reads.fragments[:printer_reads])
+    info["ansi_interleaved"] = (
+        TERM_ANSI[:TERM_ANSI_CUT].encode()
+        + b"\x1b[32m"
+        + TERM_ANSI[TERM_ANSI_CUT:].encode()
+    ) in printed
+    info["ansi_whole_in_stream"] = TERM_ANSI.encode() in printed
+    return b.problems, info
+
+
+def _term_deltas(
+    source: Path,
+    rects: dict[str, Rect],
+    tags: list[str],
+    start: float | None,
+    fps: int | None,
+    duration: float | None = None,
+) -> tuple[dict[str, list[float]], list[float], str | None]:
+    """Per-tag distance from the `ref` row, plus the control's own sharpness.
+
+    Every crop is the same size and comes out of the same frames, so the
+    comparison is between two regions of one picture — no threshold tied to
+    what CI's font rendering does to a terminal.
+    """
+    frames: dict[str, list[bytes]] = {}
+    shape: tuple[int, int] | None = None
+    for tag in [*tags, TERM_CONTROL_ROW, TERM_REFERENCE_ROW]:
+        if tag not in rects:
+            return {}, [], f"the take never found the `{tag}` row on screen"
+        got, width, height = native_frames(
+            source, rects[tag], fps, normalise=False, start=start, duration=duration
+        )
+        if not got:
+            return {}, [], f"no frames could be sampled for the `{tag}` row"
+        frames[tag] = got
+        shape = (width, height)
+    assert shape is not None
+    reference = frames[TERM_REFERENCE_ROW]
+    deltas = {
+        tag: [
+            frame_difference(a, b) for a, b in zip(frames[tag], reference, strict=False)
+        ]
+        for tag in [*tags, TERM_CONTROL_ROW]
+    }
+    control_edges = [edge_energy(f, *shape) for f in frames[TERM_CONTROL_ROW]]
+    return deltas, control_edges, None
+
+
+def _check_term_pixels(
+    source: Path,
+    label: str,
+    kind: str,
+    rects: dict[str, Rect],
+    tags: list[str],
+    start: float | None,
+    fps: int | None,
+    duration: float | None = None,
+) -> list[str]:
+    """The three-way pixel check, over one artifact.
+
+    A masked row must be the same picture as the `ref` row; the `ctl` row must
+    not be; and the `ctl` row must be sharp. The second is what says the first
+    can fail, and the third is what says neither of them is a statement about
+    a blank recording.
+    """
+    deltas, control_edges, problem = _term_deltas(
+        source, rects, tags, start, fps, duration
+    )
+    if problem is not None:
+        return [f"terminal-redaction: {label}: {problem}"]
+    failures: list[str] = []
+    sharp = min(control_edges)
+    if sharp < MIN_TERM_CONTROL_EDGE[kind]:
+        # Everything else here is "these two crops match" or "these two crops
+        # differ", and both are true of two crops of nothing at all.
+        return [
+            f"terminal-redaction: {label}: the unregistered control value "
+            f"scores {sharp:.1f} edge energy (floor "
+            f"{MIN_TERM_CONTROL_EDGE[kind]}) — there is no legible text in "
+            f"this artifact, so nothing measured in it means anything"
+        ]
+    distinct = min(deltas[TERM_CONTROL_ROW])
+    if distinct < MIN_TERM_DISTINCT_DELTA[kind]:
+        # The calibration: a 28-character key against the mask, in the same
+        # frame, is what a leak would look like. If that comparison cannot
+        # separate them, "the masked row matches the mask" is worthless.
+        return [
+            f"terminal-redaction: {label}: the control row and the reference "
+            f"row differ by only {distinct:.1f} (bar "
+            f"{MIN_TERM_DISTINCT_DELTA[kind]}) — an unmasked 28-character "
+            f"value is not distinguishable from {'[redacted]'!r} here, so "
+            f"every 'this row is masked' reading below is vacuous"
+        ]
+    for tag in tags:
+        worst = max(deltas[tag])
+        if worst > MAX_TERM_MASK_DELTA[kind]:
+            failures.append(
+                f"terminal-redaction: {label}: {TERM_MASKED_ROWS[tag]} does "
+                f"not render as the mask — the worst of {len(deltas[tag])} "
+                f"frames differs from the `ref` row by {worst:.1f} (bar "
+                f"{MAX_TERM_MASK_DELTA[kind]}), where the unmasked control "
+                f"differs by {distinct:.1f}. Something other than "
+                f"'[redacted]' is on screen at that row"
+            )
+    if not failures:
+        print(
+            f"smoke: terminal-redaction {label}: {len(tags)} rows render as "
+            f"the mask (worst "
+            f"{max(max(deltas[t]) for t in tags):.1f}), the unmasked control "
+            f"differs by {distinct:.1f} and scores {sharp:.1f} sharp"
+        )
+    return failures
+
+
+def check_terminal_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
+    """Issue #5's acceptance criterion, one path at a time."""
+    from demo_recording import SECRET_MASK, media_duration
+
+    failures: list[str] = []
+    rects: dict[str, Rect] = info["rects"]
+    mp4 = out_dir / "demo.mp4"
+
+    # -- the split really happened -------------------------------------------
+    #
+    # Asserted before anything else, because every other assertion in this
+    # function is satisfied by a take where each value arrived in one read —
+    # and that take grades a scrubber with no carry buffer as a pass.
+    for name, spans in sorted(info["spans"].items()):
+        if spans < 2:
+            failures.append(
+                f"terminal-redaction: the {name} value was reassembled from "
+                f"{spans} os.read() fragment(s) out of {info['reads']}. This "
+                f"take exists to prove a secret split across read boundaries "
+                f"is caught; with the value arriving whole, a per-chunk "
+                f"scrub() passes and the carry buffer is untested"
+            )
+    if not info["ansi_interleaved"]:
+        failures.append(
+            "terminal-redaction: the raw PTY stream never carried the ANSI "
+            "case (value, colour escape, rest of value), so nothing here "
+            "tested matching across an escape sequence"
+        )
+    if info["ansi_whole_in_stream"]:
+        failures.append(
+            "terminal-redaction: the ANSI value appears whole in the raw "
+            "stream, which means the escape was not inside it — a literal "
+            "substring match would have found it and the case is not the one "
+            "it claims to be"
+        )
+    if not failures:
+        print(
+            f"smoke: terminal-redaction the printed key arrived in "
+            f"{info['spans']['printed']} os.read() fragments and the typed "
+            f"one in {info['spans']['typed']}, across {info['reads']} reads; "
+            f"the ANSI key was cut by a colour escape"
+        )
+
+    # -- every row is where the take said it was -----------------------------
+    wanted = [*TERM_MASKED_ROWS, TERM_CONTROL_ROW, TERM_REFERENCE_ROW]
+    missing = [tag for tag in wanted if tag not in rects]
+    if missing:
+        failures.append(
+            f"terminal-redaction: the rows {missing!r} were never found on "
+            f"screen, so their pixels were not graded at all"
+        )
+    # The recorder burns its caption bar across the bottom of the frame. A row
+    # that drifted into it would be measured against a crop of white caption
+    # text, which reads as a leak or hides one depending on which row moved.
+    for tag, rect in sorted(rects.items()):
+        if rect[1] + rect[3] > info["caption_top"]:
+            failures.append(
+                f"terminal-redaction: the `{tag}` row sits at y={rect[1]}, "
+                f"inside the caption band (from y={info['caption_top']}) — "
+                f"the crop is measuring burned-in caption text"
+            )
+
+    # -- artifacts -----------------------------------------------------------
+    if not mp4.is_file():
+        failures.append(f"terminal-redaction: {mp4} was never written")
+    elif mp4.stat().st_mtime < started_at - 1:
+        failures.append(f"terminal-redaction: {mp4} is stale — it predates this run")
+    elif mp4.stat().st_size < MIN_MP4_BYTES:
+        failures.append(f"terminal-redaction: {mp4} is only {mp4.stat().st_size} bytes")
+    else:
+        seconds = media_duration(mp4)
+        low, high = TERM_REDACT_DURATION_S
+        if not low <= seconds <= high:
+            failures.append(
+                f"terminal-redaction: demo.mp4 is {seconds:.1f}s, expected "
+                f"between {low:.0f}s and {high:.0f}s"
+            )
+
+    # -- leak path 1: the frames ---------------------------------------------
+    printed_rows = [t for t in TERM_MASKED_ROWS if t != "pwd"]
+    # Both windows end where the long-token row scrolls the screen. Past that
+    # the crops are over whatever slid into them, which reads as a leak or
+    # hides one depending on what it was.
+    printed_for = info["graded_until"] - info["printed_at"]
+    typed_for = info["graded_until"] - info["typed_at"]
+    if mp4.is_file() and not missing:
+        failures += _check_term_pixels(
+            mp4,
+            "demo.mp4, the rows a command printed",
+            "video",
+            rects,
+            printed_rows,
+            info["printed_at"],
+            TERM_REDACT_SAMPLE_FPS,
+            duration=printed_for,
+        )
+        failures += _check_term_pixels(
+            mp4,
+            "demo.mp4, the echoed password",
+            "video",
+            rects,
+            ["pwd"],
+            info["typed_at"],
+            TERM_REDACT_SAMPLE_FPS,
+            duration=typed_for,
+        )
+
+    # -- leak path 2: the stills ---------------------------------------------
+    for index, name in enumerate(TERM_REDACT_SHOTS):
+        png = out_dir / "images" / f"{name}.png"
+        if not png.is_file():
+            failures.append(f"terminal-redaction: still {png} was never captured")
+            continue
+        if png.stat().st_mtime < started_at - 1:
+            failures.append(f"terminal-redaction: still {png} is stale")
+            continue
+        if png.stat().st_size < MIN_PNG_BYTES:
+            failures.append(
+                f"terminal-redaction: still {png} is only {png.stat().st_size} bytes"
+            )
+            continue
+        if missing:
+            continue
+        # The password row only exists in the second still; the first was
+        # taken before send() ran.
+        tags = printed_rows if index == 0 else [*printed_rows, "pwd"]
+        failures += _check_term_pixels(
+            png, f"{name}.png", "still", rects, tags, None, None
+        )
+
+    # -- leak path 3: the beat log -------------------------------------------
+    timeline = out_dir / "timeline.json"
+    if not timeline.is_file():
+        failures.append("terminal-redaction: timeline.json was never written")
+    else:
+        beats = json.loads(timeline.read_text()).get("beats") or []
+        # A beat opens before its verb body runs, so both refusals are logged
+        # — with the command they refused as the `selector`. Asserted
+        # positively: "no beat holds the secret" is equally true of a log that
+        # dropped the beats.
+        masked = [b for b in beats if SECRET_MASK in (b.get("selector") or "")]
+        if len(masked) != 2:
+            failures.append(
+                f"terminal-redaction: {len(masked)} beats carry a scrubbed "
+                f"selector, expected 2 — the refused run() and the refused "
+                f"send() each held a registered value. Selectors logged: "
+                f"{[b.get('selector') for b in beats]!r}"
+            )
+        sent = [b for b in beats if b.get("verb") == "send"]
+        if len(sent) != 3:
+            failures.append(
+                f"terminal-redaction: {len(sent)} send beats, expected 3 "
+                f"(the bare Enter, the Secret, and the refused literal)"
+            )
+        # Exactly one of them was called with no string at all: the Secret.
+        # `Secret` is deliberately not a `str` so that `_verb_target` cannot
+        # pick it up and write the value into timeline.json, and this is the
+        # assertion that would notice it becoming one.
+        untargeted = [b for b in sent if b.get("selector") is None]
+        if len(untargeted) != 1:
+            failures.append(
+                f"terminal-redaction: {len(untargeted)} send beats logged no "
+                f"target, expected exactly 1 — send(Secret(...)). Selectors "
+                f"logged: {[b.get('selector') for b in sent]!r}"
+            )
+
+    # -- leak path 4: every byte the take wrote ------------------------------
+    swept = 0
+    for path in sorted(out_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        swept += 1
+        data = path.read_bytes()
+        for what, literal in TERM_LITERALS.items():
+            if literal.encode() in data:
+                failures.append(
+                    f"terminal-redaction: {what} appears verbatim in "
+                    f"{path.relative_to(out_dir)}"
+                )
+    if not failures:
+        print(
+            f"smoke: terminal-redaction none of the {len(TERM_LITERALS)} "
+            f"values appears verbatim in any of the {swept} files the take wrote"
+        )
+    return failures
+
+
+# Two `printf`s at two absolute cursor positions. Nothing between them is a
+# substring of the value, and on screen they are one word — which is the whole
+# point: the scrubber reads the stream and the viewer reads the screen, and
+# cursor addressing is where those two stop agreeing. `\033[6;1H` then
+# `\033[6;13H`, so the second lands exactly where the first stopped.
+TERM_CURSOR_SCRIPT = (
+    "#!/bin/sh\n"
+    "printf '\\033[6;1Hcup %s' '__HEAD__'\n"
+    "printf '\\033[6;__COL__H%s\\n' '__TAIL__'\n"
+)
+
+# The same two writes, backgrounded behind a sleep, so they land *after* the
+# storyboard's last verb has returned — inside the window `_finish_line()`
+# holds open at the end of a narrated take. See the `tail` arm below.
+TERM_CURSOR_LATE_SCRIPT = (
+    "#!/bin/sh\n"
+    "(sleep __DELAY__\n"
+    " printf '\\033[6;1Hcup %s' '__HEAD__'\n"
+    " printf '\\033[6;__COL__H%s\\n' '__TAIL__') &\n"
+)
+
+# How long the late writer waits, and how long the simulated narration tail
+# runs. The write has to land strictly inside the tail: after the storyboard's
+# last verb, before the recorder stops pumping.
+TERM_LATE_WRITE_S = 1.2
+TERM_LATE_TAIL_S = 3.0
+
+
+class _StoryboardFailed(RuntimeError):
+    """What a storyboard raises when a sync verb gives up.
+
+    Its own class only so the `crash` arm below can tell "the take re-raised
+    what the storyboard threw" from "something else went wrong", which a bare
+    RuntimeError cannot.
+    """
+
+
+def _cursor_leak_take(
+    out_root: Path, work_dir: Path, arm: str
+) -> tuple[list[str], BaseException | None, str, Path]:
+    """Record one cursor-leak take. Returns (failures, raised, screen, dir).
+
+    Three arms, one body, because the guarantee SKILL.md states is
+    unconditional and each arm is a different way out of the `with`:
+
+      `clean`  the storyboard finishes. The historical case.
+      `crash`  the storyboard raises after the value is on screen — a
+               wait_for_text() timeout, a Ctrl-C on a hung demo. `__exit__`
+               used to skip the screen check entirely on this path and keep
+               the still, which on the terminal side is the raw screen with
+               the key legible on it.
+      `tail`   the value lands *after* the last verb, in the window a narrated
+               take holds open to avoid ending mid-sentence. The check used to
+               run before that window, so the frames it vouched for were not
+               the frames that got recorded.
+    """
+    from demo_recording import SecretLeak, TerminalRecorder
+
+    label = f"terminal-cursor-leak-{arm}"
+    out_dir = fresh_take_dir(out_root, label)
+    head, tail = TERM_CURSOR[:TERM_ANSI_CUT], TERM_CURSOR[TERM_ANSI_CUT:]
+    # The column the second write starts at: "cup " plus the head, one-based.
+    # Off by one and the two pieces overlap, the value on screen is not the
+    # registered one, and the take proves nothing while looking fine — which
+    # is what the premise assertion below is for.
+    column = len("cup ") + len(head) + 1
+    template = TERM_CURSOR_LATE_SCRIPT if arm == "tail" else TERM_CURSOR_SCRIPT
+    script = work_dir / "cursor-write"
+    script.write_text(
+        template.replace("__HEAD__", head)
+        .replace("__TAIL__", tail)
+        .replace("__COL__", str(column))
+        .replace("__DELAY__", f"{TERM_LATE_WRITE_S}")
+    )
+    script.chmod(0o755)
+
+    failures: list[str] = []
+    raised: BaseException | None = None
+    screen = ""
+    try:
+        with TerminalRecorder(out_dir, speech=False) as rec:
+            rec.register_secret(TERM_CURSOR)
+            rec.run("./cursor-write")
+            rec.wait_for_prompt(timeout_s=20)
+            if arm == "tail":
+                # Nothing is on screen yet — the writer is still sleeping —
+                # so a check that ran here would pass, which is the point.
+                if TERM_CURSOR in rec._screen():
+                    failures.append(
+                        f"{label}: the late writer had already written by the "
+                        f"time the storyboard ended, so this arm is the "
+                        f"`clean` arm with extra steps. Raise "
+                        f"TERM_LATE_WRITE_S above the take's own runtime."
+                    )
+                # The narration tail, without narration. `_finish_line()`
+                # reads exactly one field — `_line_end`, which `_start_line()`
+                # sets from `media_duration(clip)` — and idles until it
+                # passes, pumping the PTY the whole way. Setting it directly
+                # is the same code path a spoken line takes, and it is the
+                # only way to reach it here: the smoke run has no
+                # ELEVENLABS_API_KEY, so `speech=True` records silently and
+                # the tail is zero.
+                rec._line_end = time.monotonic() + TERM_LATE_TAIL_S
+            else:
+                # Taken on purpose, and required to be gone afterwards: a still
+                # is written long before the take ends, and the web half
+                # shipped a round where a refused take left its stills on disk
+                # holding the value it had refused to write an mp4 for.
+                rec.shot("01-cursor")
+                screen = rec._screen()
+            if arm == "crash":
+                raise _StoryboardFailed(
+                    "the storyboard gave up after the value reached the screen"
+                )
+    except SecretLeak as exc:
+        raised = exc
+    except _StoryboardFailed as exc:
+        raised = exc
+    except Exception as exc:  # noqa: BLE001 - any other failure is a failure
+        failures.append(f"{label}: unexpected {type(exc).__name__}: {exc}")
+    return failures, raised, screen, out_dir
+
+
+def _cursor_leak_artifacts(label: str, out_dir: Path) -> list[str]:
+    """Nothing this take wrote may survive it."""
+    failures = []
+    for name, path in (
+        ("demo.mp4", out_dir / "demo.mp4"),
+        ("timeline.json", out_dir / "timeline.json"),
+        ("the still", out_dir / "images" / "01-cursor.png"),
+    ):
+        if path.exists():
+            failures.append(
+                f"{label}: {name} survived a take that could not vouch for "
+                f"what was on screen. SKILL.md says a SecretLeak keeps "
+                f"nothing."
+            )
+    leftovers = (
+        sorted(q.name for q in (out_dir / ".video").glob("*"))
+        if (out_dir / ".video").is_dir()
+        else []
+    )
+    if leftovers:
+        failures.append(
+            f"{label}: raw capture left behind in .video/: {leftovers!r} — it "
+            f"holds the frames the mp4 was refused for"
+        )
+    return failures
+
+
+def check_cursor_screen_leak(out_root: Path, work_dir: Path) -> list[str]:
+    """A value the stream cannot show is contiguous must fail the take.
+
+    Its own takes because they have to *die*. The scrubber matches substrings
+    of the byte stream, and a program that positions the cursor twice puts a
+    value on screen without ever putting it in one substring — measured, and
+    documented in SKILL.md as uncovered. Uncovered has to mean *refused*: the
+    recorder reads the finished terminal buffer before it converts anything,
+    and a registered value found there kills the take the way an unverifiable
+    CSS mask does on the web side.
+
+    Without that check the `clean` arm records a normal mp4, with the key
+    legible in every frame, `issues: []`, and `strict=True` satisfied — which
+    is the quietest failure in this whole harness. The other two arms are the
+    ways out of the `with` that the check used to miss entirely; see
+    `_cursor_leak_take`.
+    """
+    if os.name != "posix":
+        return []
+    from demo_recording import SecretLeak
+
+    failures: list[str] = []
+    for arm in ("clean", "crash", "tail"):
+        label = f"terminal-cursor-leak-{arm}"
+        problems, raised, screen, out_dir = _cursor_leak_take(out_root, work_dir, arm)
+        failures += problems
+        # `crash` re-raises what the storyboard threw — the recorder must not
+        # bury a wait_for_text() timeout under a leak report, because the
+        # timeout is what tells the author what to fix. The leak still has to
+        # cost the artifacts, which is what _cursor_leak_artifacts grades.
+        want = _StoryboardFailed if arm == "crash" else SecretLeak
+        if raised is None:
+            failures.append(
+                f"{label}: a registered value written at two cursor positions "
+                f"is contiguous on screen and in no substring of the stream. "
+                f"The scrubber cannot see it — that is documented — so the "
+                f"recorder has to refuse the take at teardown instead. It "
+                f"returned normally, which means it wrote an mp4 with the key "
+                f"legible in every frame and reported nothing wrong."
+            )
+        elif not isinstance(raised, want):
+            failures.append(
+                f"{label}: expected {want.__name__}, got "
+                f"{type(raised).__name__}: {str(raised)[:160]!r}"
+            )
+        elif isinstance(raised, SecretLeak):
+            if TERM_CURSOR in str(raised):
+                failures.append(
+                    f"{label}: the SecretLeak quotes the value it caught, "
+                    f"which puts it in every log that reports the failure"
+                )
+            if "screen" not in str(raised):
+                failures.append(
+                    f"{label}: the failure does not say the value was found "
+                    f"on screen, so a reader cannot tell it from a mask that "
+                    f"failed to apply: {str(raised)[:120]!r}"
+                )
+        # The premise, asserted rather than assumed. If the two halves ever
+        # ended up adjacent in the byte stream the scrubber would have masked
+        # them, the screen would be clean, nothing would raise — and the
+        # failure above would be reported against a take that never contained
+        # a leak to catch. Only the arms that read the screen mid-take can say
+        # this; `tail` writes after the last verb, and its evidence that the
+        # value reached the screen *is* the refusal.
+        if arm == "clean" and TERM_CURSOR not in screen:
+            failures.append(
+                f"{label}: the value never reached the terminal screen, so "
+                f"this take exercised nothing. It is supposed to be written "
+                f"in two pieces at two cursor positions and land "
+                f"contiguously; check TERM_CURSOR_SCRIPT against the "
+                f"terminal's width and the row it writes to."
+            )
+        failures += _cursor_leak_artifacts(label, out_dir)
+    if not failures:
+        print(
+            "smoke: terminal-redaction a value the stream never carried whole "
+            "is caught on the finished screen and fails the take — on a clean "
+            "exit, on a storyboard that raised, and on a write that lands in "
+            "the narration tail"
+        )
+    return failures
+
+
+def run_terminal_redaction(out_root: Path) -> list[str]:
+    if os.name != "posix":
+        return []
+    out_dir = fresh_take_dir(out_root, "terminal-redaction")
+    started = time.time()
+    # The shell starts in the process cwd, so the printer lives in a directory
+    # of its own that the recorder never writes to: `./print-secrets` stays
+    # short enough to type on camera, and the file holding the literals stays
+    # out of the byte sweep, which grades what the recorder wrote.
+    work_dir = Path(tempfile.mkdtemp(prefix="demo-video-smoke-printer-"))
+    previous = Path.cwd()
+    os.chdir(work_dir)
+    try:
+        problems, info = record_terminal_redaction(out_dir, work_dir)
+        problems += check_cursor_screen_leak(out_root, work_dir)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        return [
+            f"terminal-redaction: TerminalRecorder raised {type(exc).__name__}: {exc}"
+        ]
+    finally:
+        os.chdir(previous)
+        shutil.rmtree(work_dir, ignore_errors=True)
+    if not info:
+        return problems
+    return problems + check_terminal_redaction(out_dir, info, started)
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -5201,7 +6498,7 @@ def main() -> int:
     parser.add_argument(
         "--redaction-only",
         action="store_true",
-        help="record only the redaction take (issue #4)",
+        help="record only the redaction takes (issues #4 and #5)",
     )
     parser.add_argument(
         "--segments-only",
@@ -5281,6 +6578,10 @@ def main() -> int:
             failures += run_terminal_problems(out_root)
             failures += run_terminal_race(out_root)
             failures += run_strict_terminal(out_root)
+        # Both flags reach it: it is a terminal take and a redaction take, and
+        # whichever half somebody is changing is the half they will run.
+        if only in (None, "--terminal-only", "--redaction-only"):
+            failures += run_terminal_redaction(out_root)
         if only in (None, "--determinism-only"):
             failures += run_determinism(out_root)
     except SmokeFailure as exc:

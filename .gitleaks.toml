@@ -57,6 +57,41 @@ The words, and what each fixture element they belong to is for:
   TKCT  #token-control     a field's control — same chrome, never redacted
   SDCT  #sd-token-control  the same, inside the shadow root
   LATE  a caption          set before the value in it was registered
+
+The terminal half of redaction (issue #5) adds a family of its own, and they
+are not all `sk-live-` shaped because the shapes themselves are what is being
+tested. **No allowlist entry was added for any of them, and none is needed** —
+the `regexes` list below covers the web literals only. They are described here
+because this file's comments are the audit trail for every fake credential in
+the repo, and a value nobody wrote down is a value the next person has to
+re-derive:
+
+  PTYK  sk-live-…   registered, printed by a command under a PTY
+  ANSI  sk-live-…   the same, printed with a colour escape inside it
+  HIDE  sk-live-…   the same, cut by a cursor-hide escape
+  OSCT  sk-live-…   the same, cut by a window-title escape
+  PAUS  sk-live-…   the same shape, paused mid-value inside the hold window
+  SHAP  ghp_…       registered by nobody — the shape net is all that hides it
+  STRM  ghp_…       the same, written one character at a time
+  ANCH  ghp_…       the same, paused after its first character
+  SLOW  ghp_…       the same, paused *past* the hold window — the one value in
+                    the take that is supposed to render in the clear, because
+                    it grades a documented limit
+  CURS  sk-live-…   written at two cursor positions, which must kill the take
+  KEYD  sk-live-…   spelled out through key(), which must be refused
+  AKIA…             an AWS-shaped id nobody registered
+  eyJ….eyJ….        a JWT-shaped token nobody registered
+  SEND  pw-live-…   sent as Secret(...); deliberately matches no shape, so
+                    that what masks it can only be the registration
+  TCTL  zz-live-…   never registered and matching no shape, on purpose: it is
+                    the legible reference every masked row is measured against
+
+Same convention as above — a four-letter word and a run of zeroes — and the
+same reasoning: the default ruleset flags none of them. The GitHub rule wants
+exactly 36 characters after `ghp_` and these have 24; the AWS rule wants
+exactly 16 after `AKIA` and this has 24; the JWT rule wants 17 or more in each
+of the first two segments and needs the second to begin `ey`, and this one has
+neither. Verified by running gitleaks over the whole tree, not assumed.
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
 regexes = [
