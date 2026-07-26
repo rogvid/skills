@@ -560,7 +560,8 @@ MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0, "segments": 6.0}
 # Nothing here: a review frame is graded against the video by **re-extracting**
 # it, byte for byte, rather than by any measure of similarity. Both sides are
 # the same ffmpeg decoding the same mp4 at the same second, so the healthy
-# answer is an identical file — 41 of 41 across the two graded takes — and one
+# answer is an identical file — 56 of 56 across the three graded takes (23
+# web, 18 terminal, 15 off the stitched segments demo) — and one
 # frame away (40 ms) is already a different one. A luma comparison could not do
 # that: a PNG and a decoded frame reach the reduction through different colour
 # conversions and sit ~1.0 mean luma apart even when they are the same frame,
@@ -3901,15 +3902,36 @@ def _check_frame_captions(
 
     captioned = [(b, c, g) for b, c, g in graded if c]
     bare = [(b, c, g) for b, c, g in graded if not c]
-    if reference is None or not captioned or len(graded) < MIN_GRADED_CAPTION_FRAMES:
+    # Three separate ways for this check to end up grading nothing, reported
+    # separately. They overlap in practice — a guard wide enough to take the
+    # count under the floor usually empties a class too — and a single message
+    # covering all three cannot say which one fired, which makes it impossible
+    # to show the floor failing on its own.
+    coverage = (
+        f"{len(graded)} of {len(listed)} review frames ({len(captioned)} "
+        f"captioned, {len(bare)} not) sit more than {FRAME_CAPTION_GUARD_S}s "
+        f"clear of a caption change"
+    )
+    if reference is None:
         return [
-            f"{label}: only {len(graded)} of {len(listed)} review frames "
-            f"({len(captioned)} captioned, {len(bare)} not) sit more than "
-            f"{FRAME_CAPTION_GUARD_S}s clear of a caption change, so almost "
-            f"nothing about what the frames *show* was graded. Either the "
-            f"storyboard changed caption too often to grade, or every frame "
-            f"moved onto a boundary — which is the regression this floor is "
-            f"here to catch, not a reason to lower it"
+            f"{label}: {coverage}, and not one of them is a frame of an "
+            f"uncaptioned beat — so there is no caption-off baseline to "
+            f"measure the others against, and nothing about what the frames "
+            f"*show* could be graded at all"
+        ]
+    if not captioned:
+        return [
+            f"{label}: {coverage}, and not one of them is a frame of a "
+            f"captioned beat — so 'a captioned beat's frame shows a caption' "
+            f"was not tested on anything"
+        ]
+    if len(graded) < MIN_GRADED_CAPTION_FRAMES:
+        return [
+            f"{label}: {coverage}, under the {MIN_GRADED_CAPTION_FRAMES} this "
+            f"check needs to mean anything. Either the storyboard changed "
+            f"caption too often to grade, or every frame moved onto a "
+            f"boundary — which is the regression this floor is here to catch, "
+            f"not a reason to lower it"
         ]
 
     scored = [(frame_difference(reference, g), b, c) for b, c, g in graded]
@@ -4723,11 +4745,21 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
     #
     # They are frames of demo.mp4, so they inherit its mask by construction —
     # which is a reason to expect them clean, not a reason to skip measuring
-    # them. Graded exactly like the video is, over the same rects, because
-    # "frames of a masked video" is a claim about how the recorder extracts
-    # them, and the whole point of this file is not to take such claims on
-    # trust. The worst frame, not the median: a paused video is a screenshot,
-    # and so is a PNG.
+    # them. Graded over **every element the video is graded over**, against the
+    # same controls at the same font sizes, because "frames of a masked video"
+    # is a claim about how the recorder extracts them and the whole point of
+    # this file is not to take such claims on trust.
+    #
+    # One element was not enough, and it is not a hypothetical: #if-key is the
+    # one measured leaking into demo.mp4 intermittently (#68), and #api-key —
+    # the only one this check used to look at — is clean in every run of it.
+    # The frames are the artifact a reviewer is *handed*, so the element most
+    # likely to leak was the element they were least protected from.
+    #
+    # The worst frame, not the median: a paused video is a screenshot, and so
+    # is a PNG. Worst by *ratio* rather than by absolute edge energy, because
+    # the bar is a ratio — the two agree on this fixture only because the
+    # controls barely move between frames.
     review = sorted((out_dir / "frames").glob("beat-*.png"))
     if mp4.is_file() and not review:
         failures.append(
@@ -4736,53 +4768,102 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
         )
     elif review:
         geom, size = info["geom"], info["size"]
-        key_rect = to_video_rect(rects["#api-key"], geom, size)
-        control_rect = to_video_rect(rects["#api-key-control"], geom, size)
-        # A frame is only gradable where the *control* is legible in it. This
-        # take opens on about:blank (five `redact()` beats before the first
-        # navigation), raises the paint gate on purpose mid-take and navigates
-        # once, and in all three the page shows nothing — so the control reads
-        # zero and so would a key that was blazing. Skipping those is not a
-        # loophole as long as it is the control deciding and the count is
-        # asserted: a mask that blanked the whole recording takes the gradable
-        # count to zero.
-        graded_frames: list[tuple[str, float, float]] = []
-        blanked: list[str] = []
-        for png in review:
-            control = _edges(png, control_rect)[0]
-            if control < MIN_CONTROL_EDGE["still"]:
-                blanked.append(png.name)
-                continue
-            graded_frames.append((png.name, _edges(png, key_rect)[0], control))
-        bar = MAX_REDACTED_EDGE_RATIO["text"]
-        if len(graded_frames) < MIN_GRADED_REVIEW_FRAMES:
+        in_frame = {n: to_video_rect(rects[n], geom, size) for n in needed}
+        at: dict[str, float] = {}
+        try:
+            listing = json.loads((out_dir / "frames" / "frames.json").read_text())
+            at = {
+                str(f["file"]): float(f["t"])
+                for f in listing.get("frames") or []
+                if f.get("file") and isinstance(f.get("t"), (int, float))
+            }
+        except (OSError, ValueError, KeyError) as exc:
             failures.append(
-                f"redaction: only {len(graded_frames)} of {len(review)} review "
-                f"frames show a legible #api-key-control (floor "
-                f"{MIN_CONTROL_EDGE['still']}, at least "
-                f"{MIN_GRADED_REVIEW_FRAMES} needed) — {blanked!r} have no "
-                f"picture in them at all, and a blank frame passes any ratio "
-                f"taken against its own control"
+                f"redaction: frames.json could not be read ({exc}), so no "
+                f"review frame could be placed in time — #if-key holds its "
+                f"secret only until the take navigates, and grading it after "
+                f"that measures an emptied iframe"
             )
-        else:
-            where, worst_key, control = max(graded_frames, key=lambda row: row[1])
-            if worst_key > control * bar:
+        # Seven of the nine share #api-key-control and each reading is a
+        # process, so measure a control once per frame rather than once per
+        # element.
+        seen: dict[tuple[str, str], float] = {}
+
+        def control_edge(png: Path, control_name: str) -> float:
+            key = (png.name, control_name)
+            if key not in seen:
+                seen[key] = _edges(png, in_frame[control_name])[0]
+            return seen[key]
+
+        bar = MAX_REDACTED_EDGE_RATIO["text"]
+        worst: dict[str, tuple[str, float, float]] = {}
+        gradable = len(review)
+        for name, control_name in sorted(graded.items()):
+            # The same windows the video is graded over, applied per frame
+            # instead of per second: #if-key holds the secret only until the
+            # take navigates away, after which the iframe is empty — and an
+            # empty crop is not a masked one.
+            window = [
+                png
+                for png in review
+                if name != "#if-key"
+                or nav_at is None
+                or at.get(png.name, 0.0) <= nav_at
+            ]
+            # A frame is only gradable where the *control* is legible in it.
+            # This take opens on about:blank (five `redact()` beats before the
+            # first navigation), raises the paint gate on purpose mid-take and
+            # navigates once, and in all three the page shows nothing — so the
+            # control reads zero and so would a key that was blazing. Skipping
+            # those is not a loophole as long as it is the control deciding and
+            # the count is asserted: a mask that blanked the whole recording
+            # takes the gradable count to zero.
+            graded_frames: list[tuple[str, float, float]] = []
+            blanked: list[str] = []
+            for png in window:
+                control = control_edge(png, control_name)
+                if control < MIN_CONTROL_EDGE["still"]:
+                    blanked.append(png.name)
+                    continue
+                graded_frames.append(
+                    (png.name, _edges(png, in_frame[name])[0], control)
+                )
+            if len(graded_frames) < MIN_GRADED_REVIEW_FRAMES:
                 failures.append(
-                    f"redaction: #api-key is legible in the review frame "
-                    f"{where} — {worst_key:.1f} edge energy against "
-                    f"{control:.1f} for the unredacted control in the same "
-                    f"frame ({worst_key / control:.0%}, bar {bar:.0%}). The "
-                    f"frames handed to a reviewer are extracted from demo.mp4 "
-                    f"after the take, and are subject to the same mask as "
-                    f"everything else it wrote."
+                    f"redaction: only {len(graded_frames)} of {len(window)} "
+                    f"review frames show a legible {control_name} (floor "
+                    f"{MIN_CONTROL_EDGE['still']}, at least "
+                    f"{MIN_GRADED_REVIEW_FRAMES} needed), so {name} went "
+                    f"ungraded in the artifact a reviewer is handed — "
+                    f"{blanked!r} have no picture in them at all, and a blank "
+                    f"frame passes any ratio taken against its own control"
                 )
-            else:
-                print(
-                    f"smoke: redaction #api-key is blurred in all "
-                    f"{len(graded_frames)} gradable review frames of "
-                    f"{len(review)} (worst {worst_key:.1f} vs control "
-                    f"{control:.1f}, {worst_key / control:.0%})"
+                continue
+            gradable = min(gradable, len(graded_frames))
+            where, key_edge, control = max(
+                graded_frames, key=lambda row: row[1] / row[2]
+            )
+            worst[name] = (where, key_edge, control)
+            if key_edge > control * bar:
+                failures.append(
+                    f"redaction: {name} is legible in the review frame "
+                    f"{where} — {key_edge:.1f} edge energy against "
+                    f"{control:.1f} for {control_name}, the unredacted control "
+                    f"of the same kind and size in the same frame "
+                    f"({key_edge / control:.0%}, bar {bar:.0%}). The frames "
+                    f"handed to a reviewer are extracted from demo.mp4 after "
+                    f"the take, and are subject to the same mask as everything "
+                    f"else it wrote."
                 )
+        if worst and len(worst) == len(graded):
+            loudest = max(worst, key=lambda n: worst[n][1] / worst[n][2])
+            where, key_edge, control = worst[loudest]
+            print(
+                f"smoke: redaction all {len(worst)} masked elements are blurred "
+                f"in the review frames ({gradable} gradable of {len(review)}; "
+                f"worst {loudest} {key_edge:.1f} vs control {control:.1f} in "
+                f"{where}, {key_edge / control:.0%}, bar {bar:.0%})"
+            )
 
     # -- leak path 3: captions, and the beat log they land in ----------------
     timeline = out_dir / "timeline.json"
@@ -5499,6 +5580,43 @@ def run_determinism(out_root: Path) -> list[str]:
     return failures
 
 
+def _plant_mp4(path: Path) -> bytes:
+    """A small, real, decodable mp4 at `path`. Returns its bytes.
+
+    Exists for one assertion, and that assertion could not fail without it.
+    `beat_frames()` returns `skipped = "there is no demo.mp4 to extract frames
+    from"` **before** it creates `frames/`, so on a take that was refused —
+    which never converts its webm — "no review frames survived" was true no
+    matter what the exit path did. Removing the `if clean:` guard that is
+    supposed to keep frames off a refused take changed nothing observable:
+    there was nothing to extract from either way. Planting a real recording
+    first makes the guard the only thing standing between the refusal and a
+    `frames/` directory, which is what the check claims to be grading.
+
+    Deliberately not a stub of arbitrary bytes: `beat_frames()` writes its two
+    manifests even when every extraction fails, so a stub would prove the
+    directory appeared rather than that frames of a video were taken out of it.
+    """
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=gray:s=320x180:d=2:r=25",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path.read_bytes()
+
+
 def check_unmatched_redaction(out_root: Path, base_url: str) -> list[str]:
     """A take told to hide something it cannot reach must die, not record.
 
@@ -5515,6 +5633,12 @@ def check_unmatched_redaction(out_root: Path, base_url: str) -> list[str]:
     out_dir = fresh_take_dir(out_root, "redaction-unmatched")
     failures: list[str] = []
     raised: BaseException | None = None
+    # Planted before the take, so that "it wrote no review frames" is a claim
+    # about the exit path rather than about there being nothing to extract
+    # from — see _plant_mp4(). It also turns the mp4 assertion below from "the
+    # file does not exist" into "the file is still the one we put there",
+    # which is the same claim and equally sharp: conversion writes over this.
+    planted = _plant_mp4(out_dir / "demo.mp4")
     try:
         with Recorder(out_dir, base_url=base_url, speech=False) as rec:
             rec.redact("#sd-closed-key")
@@ -5540,11 +5664,18 @@ def check_unmatched_redaction(out_root: Path, base_url: str) -> list[str]:
             "redaction can least afford."
         )
     mp4 = out_dir / "demo.mp4"
-    if mp4.is_file():
+    if not mp4.is_file():
+        failures.append(
+            f"redaction-unmatched: the planted {mp4.name} is gone. Nothing in "
+            f"the recorder removes it, and without it the review-frame "
+            f"assertion below cannot fail — say so rather than passing"
+        )
+    elif mp4.read_bytes() != planted:
         failures.append(
             f"redaction-unmatched: {mp4} was written anyway ("
-            f"{mp4.stat().st_size} bytes) — a take that could not verify its "
-            f"mask must leave no recording behind"
+            f"{mp4.stat().st_size} bytes, over a {len(planted)}-byte "
+            f"placeholder) — a take that could not verify its mask must leave "
+            f"no recording behind"
         )
     stills = sorted(p.name for p in (out_dir / "images").glob("*.png"))
     if stills:
@@ -5557,10 +5688,12 @@ def check_unmatched_redaction(out_root: Path, base_url: str) -> list[str]:
     for leftover in (".frame.png",):
         if (out_dir / leftover).is_file():
             failures.append(f"redaction-unmatched: {leftover} survived the failed take")
-    # The review frames are frames of demo.mp4, so a take that wrote no mp4 must
-    # have written none of them either. Asserted rather than reasoned about:
-    # they are extracted on the way out, from the same exit path that decides
-    # whether the recording may be kept at all.
+    # The review frames are written on the way out, by the same exit path that
+    # decides whether the recording may be kept at all — so a take that was
+    # refused must leave none. There *is* an mp4 here, planted above, precisely
+    # so this can fail: without one the recorder skips extraction for a reason
+    # that has nothing to do with the refusal, and the guard could be deleted
+    # without a single assertion moving.
     review = (
         sorted(p.name for p in (out_dir / "frames").glob("*"))
         if (out_dir / "frames").is_dir()

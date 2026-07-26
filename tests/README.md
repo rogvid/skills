@@ -53,7 +53,7 @@ smoke: web each review frame shows its own beat's caption state (10 captioned fr
 smoke: web frames/ ok (23 beat frames, each byte-identical to the demo.mp4 frame it claims to be)
 smoke: web healthy app under strict=True records no problems
 smoke: redaction #api-key is blurred in every frame of demo.mp4 (worst 1.5 vs control 52.0, 3%)
-smoke: redaction #api-key is blurred in all 25 gradable review frames of 31 (worst 0.0 vs control 22.7, 0%)
+smoke: redaction all 9 masked elements are blurred in the review frames (18 gradable of 31; worst #a4-card 0.2 vs control 21.8 in beat-23.png, 1%, bar 7%)
 smoke: redaction still 01-key-blurred.png ok (key 1.0, token 2.9, control 39.3)
 smoke: redaction .tts/ holds 2 clips — the narrated lines, and nothing for the refused one
 smoke: redaction no artifact holds either secret verbatim
@@ -305,8 +305,9 @@ recorder claims, and it deliberately claims very little:
   `timeline.json` — not imported from the recorder, because a check that
   re-derives its expectation from the constants it is grading moves whenever
   they do. And the PNG must be that frame: the harness **cuts the same second
-  out of `demo.mp4` again and compares the bytes**. 41 of 41 identical across
-  the two graded takes; one frame away (40 ms) is already a different file.
+  out of `demo.mp4` again and compares the bytes**. 56 of 56 identical across
+  the three graded takes — 23 web, 18 terminal, and 15 off the stitched
+  `segments/` demo; one frame away (40 ms) is already a different file.
 
   Exact rather than approximate, because approximate does not work here. A PNG
   and a decoded video frame reach a luma reduction through different colour
@@ -741,23 +742,41 @@ The **review frames** (`frames/`, issue #8) are a fifth artifact on disk and
 are graded on pixels like the rest. They are frames of `demo.mp4`, so they
 inherit its mask by construction — which is a reason to expect them clean, not
 a reason to skip measuring them, and this file's whole premise is that
-"inherits it by construction" is a claim rather than evidence. `#api-key` is
-scored against `#api-key-control` **in the same frame**, worst frame wins, same
-7% text bar as the video.
+"inherits it by construction" is a claim rather than evidence. **Every element
+the video is graded over** is scored in the frames too, each against its own
+control **in the same frame**, worst frame wins by *ratio*, same 7% text bar as
+the video — and `#if-key` carries the video's window with it, since it holds
+its secret only until the take navigates and an emptied iframe is not a masked
+one.
+
+For one round this graded `#api-key` alone, which was the wrong single element
+to pick: `#api-key` is clean in every run, and `#if-key` is the one measured
+leaking into `demo.mp4` intermittently ([#68](https://github.com/rogvid/skills/issues/68)).
+The frames are the artifact a reviewer is *handed*, so the element most likely
+to leak was the one they were least protected from.
 
 Only frames where the *control* is legible are graded, and the count of those
-is asserted (≥ 10 of ~31). That skip is not a loophole while the control is
-what decides it: this take opens on `about:blank` for five `redact()` beats,
-raises the paint gate on purpose mid-take, and navigates once, so a handful of
-its frames legitimately show nothing at all — and a mask that blanked the whole
-recording takes the gradable count to zero and fails.
+is asserted (≥ 10 of ~31, per element). That skip is not a loophole while the
+control is what decides it: this take opens on `about:blank` for five
+`redact()` beats, raises the paint gate on purpose mid-take, and navigates
+once, so a handful of its frames legitimately show nothing at all — and a mask
+that blanked the whole recording takes the gradable count to zero and fails.
 
 And the take that *cannot* verify its mask must leave none of them behind:
 `check_unmatched_redaction` requires an empty `frames/` alongside the absent
-`demo.mp4`, the absent stills and the absent `.video/`. The frames are written
-on the way out, from the same exit path that decides whether the recording may
-be kept at all, so "it wrote no mp4" does not on its own say it wrote no frames
-of one.
+stills and the absent `.video/`.
+
+That assertion needs a **planted `demo.mp4`** to mean anything, and for one
+round it did not have one. `beat_frames()` returns "there is no demo.mp4 to
+extract frames from" *before* it creates `frames/`, and a refused take never
+converts its webm — so "no review frames survived" was true whatever the exit
+path did, and the `if clean:` guard that is supposed to keep frames off a
+refused take could be deleted without a single assertion moving. It now writes
+a real two-second mp4 into the directory first, which makes that guard the only
+thing standing between the refusal and a `frames/` directory. The mp4 check
+changes with it, from "the file does not exist" to "the file is still the one
+we planted" — the same claim, since conversion writes over it, and equally
+sharp.
 
 The two text paths are checked by searching bytes, not by asking the recorder:
 
