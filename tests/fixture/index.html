@@ -833,18 +833,18 @@ if (params.has("evidence")) {
     // which models `display` and `content-visibility` and nothing else. Only
     // the `display:none` case above was ever excluded, and that is the one
     // shape this fixture happened to use.
-    '<div id="ev-hide-card"><span class="lbl">Mirrored key</span>',
-    '  <code id="ev-hide-key">sk-live-HIDE00000000</code>',
+    '<div id="ev-veil-card"><span class="lbl">Mirrored key</span>',
+    '  <code id="ev-veil-key">sk-live-VEIL00000000</code>',
     '</div>',
     // A screen-reader-only clip: 1x1 with the content clipped away. In the
     // accessibility tree, on nobody\'s screen.
-    '<span id="ev-hide-sr" style="position:absolute;width:1px;height:1px;',
+    '<span id="ev-veil-sr" style="position:absolute;width:1px;height:1px;',
     'overflow:hidden;clip-path:inset(50%);white-space:nowrap">',
-    'sk-live-HIDE00000000</span>',
-    '<span id="ev-hide-opacity" style="opacity:0">sk-live-HIDE00000000</span>',
-    '<span id="ev-hide-vis" style="visibility:hidden">sk-live-HIDE00000000</span>',
-    '<span id="ev-hide-off" style="position:absolute;left:-9999px">',
-    'sk-live-HIDE00000000</span>',
+    'sk-live-VEIL00000000</span>',
+    '<span id="ev-veil-opacity" style="opacity:0">sk-live-VEIL00000000</span>',
+    '<span id="ev-veil-vis" style="visibility:hidden">sk-live-VEIL00000000</span>',
+    '<span id="ev-veil-off" style="position:absolute;left:-9999px">',
+    'sk-live-VEIL00000000</span>',
     // B3 — a registered secret containing an ampersand, which `outerHTML`
     // writes as `&amp;`. The mask searches for the raw literal and misses; the
     // withhold fallback strips tags but not entities and misses; the

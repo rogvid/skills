@@ -70,15 +70,13 @@ of the page rather than into a picture of it:
   LBLD  #ev-label-src      an accessible name sourced from outside the subtree
   SLOT  #ev-slot-light     light DOM slotted into a redacted shadow host
   VALU  #ev-value-key      an input value that lives on the property
-  TICK  #ev-tick-key       rewritten every 25 ms with a value nothing has seen
+  TICK  #ev-tick-key       rewritten every 5 ms with a value nothing has seen
   ATTR  #ev-spot-attrs     a data-* attribute the page never renders
   JSON  #ev-spot-attrs     the same, inside a JSON blob in another attribute
 
-...and three that never render at all — they exist only inside tests/smoke, one
+...and two that never render at all — they exist only inside tests/smoke, one
 per assertion about how the writer handles a value it was told about:
 
-  PRNT  a printed line      echoed by a command in the terminal take, where
-                            register_secret() is the only defence (issue #5)
   STAL  a planted file      a previous take's evidence, which a re-record into
                             the same folder has to delete
   CUTT  a padded list item  positioned so the markup cap cuts through it, which
@@ -92,9 +90,19 @@ comparing a registered value against a *transformation* of:
 
   HATT  #ev-attr-card      mirrored into title/data-value/aria-label and an
                            input value on siblings nothing redacts
-  HIDE  #ev-hide-card      mirrored into elements CSS hides four different ways
-  WRAP  a terminal line    split by a wrap at the last column
+  VEIL  #ev-veil-card      mirrored into elements CSS hides four different ways
+                           (**not** the terminal family's HIDE below — the two
+                           were the same tag for one rebase, and `sk-live-HIDE`
+                           with eight zeroes is a *prefix* of the terminal
+                           one's sixteen, so each take's byte sweep could have
+                           matched the other's literal)
   AMPS  #ev-spot-amp       contains an `&`, which outerHTML writes `&amp;`
+
+The wrap shape in `terminal-wrap/` is `zz-wrap-` + zeroes and gets **no**
+allowlist entry, for the same reason the terminal family below gets none: it
+matches no rule in the default set, and it cannot be `sk-live-` shaped because
+the stream scrubber's shape net would mask it before it ever reached the screen
+— which is the whole thing that take is trying to put there.
 
 `AMPS` is the one entry that is not "tag then zeroes": it is
 `sk-live-AMPS0000&sig=0000000000`, and the `&sig=` in the middle is the entire
@@ -142,6 +150,6 @@ neither. Verified by running gitleaks over the whole tree, not assumed.
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
 regexes = [
-  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT|WSPC|BLED|CHLD|LBLD|SLOT|VALU|TICK|ATTR|JSON|PRNT|STAL|CUTT|HATT|HIDE|WRAP)0{4,24}''',
+  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT|WSPC|BLED|CHLD|LBLD|SLOT|VALU|TICK|ATTR|JSON|STAL|CUTT|HATT|VEIL)0{4,24}''',
   '''sk-live-AMPS0000&sig=0000000000''',
 ]

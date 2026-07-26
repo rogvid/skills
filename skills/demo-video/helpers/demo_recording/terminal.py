@@ -899,19 +899,29 @@ class TerminalRecorder(_DemoBase):
                 f"take ({type(exc).__name__}), so nothing can vouch for what "
                 f"is in the frames. This take wrote no mp4."
             ) from exc
-        for secret in self.secrets:
-            if secret in screen:
-                raise SecretLeak(
-                    f"a registered secret ({len(secret)} chars) is on the "
-                    f"terminal screen at the end of the take, so it is in the "
-                    f"frames. The output scrubber masks what it can see in the "
-                    f"byte stream; a value written in two pieces at different "
-                    f"cursor positions is contiguous on screen and in no "
-                    f"substring of the stream, and nothing can mask that after "
-                    f"the fact. This take wrote no mp4, no timeline, and kept "
-                    f"no stills. Keep the value off the screen: print a "
-                    f"placeholder, or do not run the command that shows it."
-                )
+        # `_recoverable_secret`, not `secret in screen`. `_screen()` joins one
+        # buffer row per line and does not consult `isWrapped`, so a value
+        # crossing the last column is two rows with a newline through it —
+        # on screen contiguously, in this string not at all. A plain substring
+        # test sees neither half and vouches for a frame with the credential
+        # in it. That is the same blind spot the evidence mask had, in the
+        # check that decides whether the frames may be kept, so the two now
+        # share one matcher and cannot disagree.
+        found = self._recoverable_secret(screen)
+        if found is not None:
+            raise SecretLeak(
+                f"a registered secret ({len(found)} chars) is on the "
+                f"terminal screen at the end of the take, so it is in the "
+                f"frames. The output scrubber masks what it can see in the "
+                f"byte stream; a value written in two pieces at different "
+                f"cursor positions is contiguous on screen and in no "
+                f"substring of the stream, and a value the terminal wrapped "
+                f"is contiguous on screen and split by a newline here — "
+                f"nothing can mask either after the fact. This take wrote no "
+                f"mp4, no timeline, and kept no stills. Keep the value off "
+                f"the screen: print a placeholder, or do not run the command "
+                f"that shows it."
+            )
 
     def _take_exit_markers(self, text: str) -> str:
         """Strip the PS1 exit-status markers out of `text`, recording each.
@@ -1080,9 +1090,17 @@ class TerminalRecorder(_DemoBase):
         (e.g. "C-c"); or a single literal character ("q", "j", "/").
 
         Refuses a registered secret spelled out one keystroke at a time. That
-        is authored text like `run()`'s, and it is the one call whose beat log
-        entry a scrub cannot clean: the beat records the keys joined by
-        spaces, which no literal match on the value can see."""
+        is authored text like `run()`'s, and the beat opens before the refusal
+        — so the log records the keys **joined by spaces**, which is the value
+        with whitespace inserted between every character.
+
+        A literal match on the value cannot see that, and for one release this
+        docstring said a scrub therefore could not clean it. It can now: the
+        beat-log scrub matches a run of eight or more non-space characters with
+        whitespace allowed between them, because that is the same shape a
+        terminal line wrap produces (issue #9). The refusal is still the
+        control that matters — a secret spelled into a TUI is on screen — but
+        the log entry behind it is no longer in the clear."""
         self._no_secrets("".join(names), "key()")
         for name in names:
             seq = _KEYMAP.get(name)

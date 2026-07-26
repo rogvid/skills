@@ -80,8 +80,7 @@ smoke: evidence a registered secret spans the markup budget (chars 7984-8016 of 
 smoke: evidence ok (18 beats as shapes.seg.beat-NN.json, 12 leak shapes clean, 4 controls intact, 2 beat(s) refused a moving target)
 smoke: terminal-problems timeline.json records 2 problem(s), 2 of them fatal under strict — take still passed
 smoke: terminal-race exit status survives a shell that starts 1.2s late (logged 5)
-smoke: terminal-problems a printed secret is masked out of the screen dump, and the line around it survives
-smoke: terminal-wrap a registered secret split by a line wrap at column 120 (chars 112-140) is masked in both halves
+smoke: terminal-wrap a registered secret split by a line wrap at column 120 (chars 112-140) is still refused, and keeps nothing
 smoke: terminal-strict strict=True refused the take, naming beat 1 (run) (1 fatal issues, artifacts kept)
 smoke: determinism froze all four clocks identically in both takes
 smoke:   frozen  1/1/2025, 9:00:00 AM · 1735722000000
@@ -1018,11 +1017,14 @@ point, and both are checked on the screen text and the byte sweep against a
 leaks a *prefix*, and a take rendering the first 111 characters in the clear
 was measured passing a check for the token itself.
 
-**`key()` must refuse too.** It is the one verb whose beat log a scrub cannot
-clean: the beat records the keys joined by spaces, and no literal match on the
-value can see `'s k - l i v e - …'` in `timeline.json`. So the call raises
-rather than the log leaking, and the take asserts nothing reached the screen
-first.
+**`key()` must refuse too**, and its beat log used to leak whether it did or
+not. The beat opens before the refusal, so it records the keys joined by
+spaces, and no *literal* match on the value can see `'s k - l i v e - …'` in
+`timeline.json`. That is the same shape a terminal line wrap produces, and the
+beat-log scrub now matches it (issue #9): `terminal-redaction/` requires three
+scrubbed selectors, not two, and reverting the elasticity puts that string back
+in the committed log. The refusal is still the control that matters — a secret
+spelled into a TUI is on screen — but it is no longer the only one.
 
 **`run()` and `send()` must refuse.** Both are authored text echoed on camera,
 the terminal's `caption()`. Each is called with a registered value, must raise
@@ -1192,10 +1194,16 @@ the round that introduced it was reviewed:
 | `ATTR`, `JSON` | `data-*` attributes the page never renders, which only exist in evidence because the markup dump is a surface this feature created |
 | `BLED` | in a card whose *label* also renders outside it — the mirror defect, below — and **captioned** by the storyboard, which is the case that reaches `timeline.json` |
 | `HATT` | mirrored into `title`, `data-value`, `aria-label` and an input's `value` on siblings nothing redacts. The harvest read those when deciding what "renders in the clear", so a copy-to-clipboard button carrying the key it copies exempted that key from masking **everywhere**. None of those channels is painted by anything, and `_EVIDENCE_HTML_JS` already strips the same attributes out of `html` on exactly that reasoning — the feature contradicted itself for a round |
-| `HIDE` | the same trick in CSS: a `.sr-only` clip, `opacity:0`, `visibility:hidden`, `left:-9999px`. `checkVisibility()` called with no arguments reports all four visible; it models `display` and `content-visibility` and nothing else, and `display:none` was the one shape this fixture happened to use. Measured leaking into `timeline.json` and `timeline.md` as well as all six evidence files |
+| `VEIL` | the same trick in CSS: a `.sr-only` clip, `opacity:0`, `visibility:hidden`, `left:-9999px`. `checkVisibility()` called with no arguments reports all four visible; it models `display` and `content-visibility` and nothing else, and `display:none` was the one shape this fixture happened to use. Measured leaking into `timeline.json` and `timeline.md` as well as all six evidence files |
 | `AMPS` | a registered secret containing `&`, which `outerHTML` writes `&amp;`. The mask searched the raw literal, the withhold fallback stripped tags but not entities, and the end-of-document backstop was a plain `in` — all three missed, and the file came out with `aria` reading `token=[redacted]` and `html` carrying the value in full |
 
-One literal covers each of `HATT` and `HIDE` rather than one per channel, and
+`VEIL` is spelled that way because the terminal family already has a `HIDE`
+(a value cut by a cursor-hide escape), and `sk-live-HIDE` with eight zeroes is
+a **prefix** of the terminal one's sixteen — so each take's byte sweep would
+have matched the other's literal. Found by a rename in this repo doing exactly
+that.
+
+One literal covers each of `HATT` and `VEIL` rather than one per channel, and
 that is deliberate: every element in a family holds the same value, so any
 single channel regressing puts that value back into `outside` and un-masks it
 everywhere. One assertion, four shapes, and the failure names the family.
@@ -1283,36 +1291,49 @@ It is also the only take that records with `segment=`, so
 ([#22](https://github.com/rogvid/skills/issues/22)).
 
 `terminal-wrap/` is the take for the one transformation the terminal
-introduces on its own. `__termText()` walks the xterm.js buffer a row at a time
-and joins with newlines without consulting `isWrapped`, so a credential that
-crosses the last column arrives split — and the mask was elastic about
-whitespace the *literal* has and exact about whitespace the *text* has, so it
-matched neither half. The end-of-document backstop was a plain `in` over
-`json.dumps` output, where a newline is the two characters `\n`, so it missed in
-the same direction; a backstop that fails the way the thing it backs up fails is
-not one.
+introduces on its own. `_screen()` walks the xterm.js buffer a row at a time and
+joins with newlines without consulting `isWrapped`, so a credential crossing the
+last column is two rows with a newline through the middle: contiguous to a
+viewer, contiguous in the frames, and a substring of nothing. Two mechanisms
+missed it for that one reason — the evidence mask, and
+`_verify_redaction_final()`, which is the check that decides whether the mp4 may
+be written at all and which asked `secret in screen`. They now share one
+matcher and cannot disagree.
 
-`terminal-problems/` could never provoke it — `echo printed-below` plus a
-20-character secret is ~60 columns against a 120-column terminal — so this take
-measures `term.cols` at record time and pads the line so that
-`TERMINAL_WRAP_HEAD` characters of the secret land before the boundary. The
-geometry is asserted and printed (`chars 112-140` at column 120), because a take
-that quietly stopped wrapping would be a test of an ordinary echo. The sweep
-that grades it deletes whitespace from both sides before comparing, which is
-what a reader with `tr -d` does.
+Three things about the take are forced rather than chosen, and each was found by
+the take failing loudly:
 
-`terminal-problems/` carries the last piece: a command *prints* a registered
-secret, and the screen dump must mask it while the word printed beside it
-survives. `TerminalRecorder` has no `redact()` at all
-([#5](https://github.com/rogvid/skills/issues/5)), so `register_secret()` is
-the entire defence for its evidence. The surviving word is looked for in
-`screen` **only** — it is a word in the command, and the command is in the beat
-record embedded in the same file, so searching the file finds it whether or not
-one character of the terminal was captured. Written the easy way first, and an
-injected `{"screen": ""}` payload was measured passing it.
+- **the value is printed by a script**, not by a `run()` argument. A command
+  line is echoed, and a registered secret in one trips `run()`'s own guard
+  ([#5](https://github.com/rogvid/skills/issues/5));
+- **it is registered *after* it is printed.** The stream scrubber masks what it
+  knows about as the bytes go past, so a value registered up front never reaches
+  the buffer and the shape cannot exist. Late registration is the ordinary shape
+  of the mistake — a token rotates into output before the storyboard names it —
+  and what is on screen at the end of the take is in the frames whenever it was
+  registered;
+- **it is `zz-wrap-` shaped, not `sk-live-`.** The scrubber's shape net
+  (`sk-[A-Za-z0-9_-]{16,}` among others) masks an `sk-live-` value whether or not
+  anyone registered it, so such a value can never reach the screen. `zz-` matches
+  no shape, exactly as `terminal-redaction/`'s own `TCTL` control does.
 
-`tests/smoke --evidence-only` records just this take and the refusal take,
-which is what makes an injection loop over this axis affordable.
+The take measures `term.cols` at record time and pads so `TERMINAL_WRAP_HEAD`
+characters land before the boundary; the geometry is asserted and printed
+(`chars 112-140` at column 120), because a take that quietly stopped wrapping
+would be a test of an ordinary echo. It is graded on the refusal **and** on what
+survived it — `SKILL.md` promises a `SecretLeak` keeps nothing, and a terminal
+still is the raw screen.
+
+**The same elasticity closed a leak `key()` documented as unfixable.** `key()`
+refuses a registered secret spelled one keystroke at a time, but the beat opens
+before the refusal, so `timeline.json` recorded the keys **joined by spaces** —
+`s k - l i v e - K E Y D 0 0 …`, which is the value with whitespace inserted
+between every character and which no literal match could see. The docstring said
+so. `terminal-redaction/` now requires **three** scrubbed selectors rather than
+two, and reverting the elasticity puts that string back in the log.
+
+`tests/smoke --evidence-only` records just the evidence take and the refusal
+take, which is what makes an injection loop over this axis affordable.
 
 ## Known gaps
 
@@ -1421,11 +1442,14 @@ knows is missing is worse than one that is openly absent.
   rest of the line keeps its colour. In this fixture the colour is reset
   inside the same run, so removing that re-emission changes no pixel here.
   It is cosmetic either way — nothing about *what* is hidden depends on it.
-- **Only SGR-interleaved secrets are caught, and only that is tested.** A
-  value broken up by a cursor movement — a redrawn progress line, a TUI
-  painting in two passes, a terminal-wrapped line — is not contiguous on
-  screen and is deliberately not matched (see SKILL.md). Nothing here records
-  such a program, so the harness does not measure how common that is.
+- **Only SGR-interleaved secrets are caught by the *stream* scrubber, and only
+  that is tested.** A value broken up by a cursor movement — a redrawn progress
+  line, a TUI painting in two passes — is not contiguous in the stream and is
+  deliberately not matched there (see SKILL.md); what catches it is
+  `_verify_redaction_final()` on the finished screen. A **wrapped** line is the
+  mirror case: contiguous on screen, split in `_screen()`, and it used to defeat
+  that check too — `terminal-wrap/` is the take for it. Nothing here records a
+  redrawn progress line, so the harness does not measure how common that is.
 - **Shape detection is graded on how a token is *split*, not on the pattern
   list.** All four patterns are printed unregistered and pixel-graded — `ghp_`
   on the `shp`, `str` and `anc` rows, `sk-` on `pau`, `AKIA` on `aws`, a JWT
@@ -1576,9 +1600,10 @@ knows is missing is worse than one that is openly absent.
   rendered terminal and `register_secret()` is the only thing masked out of it,
   because `TerminalRecorder` has no `redact()` at all
   ([#5](https://github.com/rogvid/skills/issues/5)).
-  `terminal-problems/` proves the registered path reaches the screen dump and
-  `terminal-wrap/` proves it survives the line wrap; a value nobody registered
-  is written verbatim, and there is nothing yet to assert about it.
+  `terminal-redaction/` proves the registered path reaches the screen dump and
+  the byte sweep over every file the take wrote, evidence included; a value
+  nobody registered and matching no shape is written verbatim, and there is
+  nothing yet to assert about it.
 - **A crash that is not a `SecretLeak` skips the stale-evidence clearing**
   ([#79](https://github.com/rogvid/skills/issues/79)), the end-of-document
   guard runs after capping and so cannot see a literal cut in half by a budget

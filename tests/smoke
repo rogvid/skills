@@ -290,13 +290,6 @@ BETWEEN_BEATS_JS = "() => console.error('__M__')".replace("__M__", BETWEEN_BEATS
 # went wrong" inferred from any other signal.
 TERMINAL_FAILING_COMMAND = "(exit 3)"
 
-# A secret a *command prints*, and a plain marker printed beside it. The
-# terminal has no redact() (issue #5), so `register_secret()` is the whole
-# defence for its evidence — and the marker is what keeps "the secret is
-# absent" from being a statement about an empty screen dump.
-TERMINAL_PRINTED_MARKER = "printed-below"
-TERMINAL_PRINTED_SECRET = "sk-live-PRNT00000000"
-
 # ...and the same, printed on a line long enough to **wrap**. `__termText()`
 # emits one xterm.js buffer row per line joined with newlines and never consults
 # `isWrapped`, so a credential that crosses the last column arrives split:
@@ -311,7 +304,14 @@ TERMINAL_PRINTED_SECRET = "sk-live-PRNT00000000"
 # padded to the measured width of the terminal, deliberately, and the padding
 # is computed at record time from `term.cols` rather than guessed.
 TERMINAL_WRAP_MARKER = "wrapped-marker"
-TERMINAL_WRAP_SECRET = "sk-live-WRAP0000000000000000"
+# `zz-wrap-`, not `sk-live-`, and that is forced rather than stylistic. The
+# stream scrubber (#5) carries a shape net — `sk-[A-Za-z0-9_-]{16,}` among
+# others — which masks an `sk-live-` value on its way past whether or not
+# anyone registered it, so such a value can never reach the xterm buffer and
+# this shape cannot exist with one. `zz-` matches no shape, exactly as #58's
+# own `TCTL` control does, which is what lets it render and then wrap.
+# Twenty-eight characters, so the geometry below is the same arithmetic.
+TERMINAL_WRAP_SECRET = "zz-wrap-00000000000000000000"
 # How many characters of the secret land on the first row. Any value strictly
 # between 1 and len(secret) exercises the split; 8 keeps both halves long enough
 # to be obviously a fragment of one string in the failure message.
@@ -341,14 +341,6 @@ TERMINAL_RACE_SHELL = '#!/bin/sh\nsleep __DELAY__\nexec /bin/bash "$@"\n'
 # beat. Hand-written, like the beat lists: derived from the log it grades, it
 # would agree with the log no matter what the log said.
 TERMINAL_PROBLEM_EXIT_CODES = {
-    # The beat's `selector` is the command as *logged*, and the secret in it
-    # was registered before it was typed — so the timeline records the mask,
-    # not the value. `[redacted]` is core.py's SECRET_MASK, written out by hand
-    # for the same reason every other expectation in this file is: a value read
-    # off the code being graded agrees with it whatever it says. That this beat
-    # is here at all is a second assertion — the command a run() logs has to
-    # survive being scrubbed.
-    f"echo {TERMINAL_PRINTED_MARKER} [redacted]": 0,
     "echo ok": 0,
     TERMINAL_FAILING_COMMAND: 3,
     TERMINAL_UNWAITED[0]: 0,
@@ -969,14 +961,14 @@ EVIDENCE_BLOAT_JS = """(n) => {
 #         on siblings the take does not redact. The harvest read those when
 #         deciding what "renders in the clear", so any one of them exempted the
 #         key from masking everywhere — including timeline.json.
-#   HIDE  the same trick in CSS: an .sr-only clip, `opacity:0`,
+#   VEIL  the same trick in CSS: an .sr-only clip, `opacity:0`,
 #         `visibility:hidden` and `left:-9999px`. `checkVisibility()` called
 #         with no arguments reports every one of them visible.
 #   AMPS  a registered secret containing `&`, which `outerHTML` writes as
 #         `&amp;`. The mask, the withhold fallback and the end-of-document
 #         backstop were all raw substring tests and all three missed it.
 #
-# HATT and HIDE are one literal per *family* rather than per channel, and that
+# HATT and VEIL are one literal per *family* rather than per channel, and that
 # is deliberate: every element in a family holds the same value, so a single
 # channel regressing puts that value back into `outside` and un-masks it
 # everywhere. One assertion covers four shapes and names the family it broke.
@@ -991,7 +983,7 @@ EVIDENCE_SECRETS = {
     "the data-* attribute nothing renders": "sk-live-ATTR00000000",
     "the key inside a JSON attribute": "sk-live-JSON00000000",
     "the key mirrored into attributes nothing paints": "sk-live-HATT00000000",
-    "the key mirrored into elements CSS hides": "sk-live-HIDE00000000",
+    "the key mirrored into elements CSS hides": "sk-live-VEIL00000000",
     "the registered secret an ampersand escapes": "sk-live-AMPS0000&sig=0000000000",
 }
 # The elements the take redacts, and the two it registers as text instead.
@@ -1015,7 +1007,7 @@ EVIDENCE_REDACT = [
     # the question is whether the recorder agrees with the browser about where
     # that is.
     "#ev-attr-card",
-    "#ev-hide-card",
+    "#ev-veil-card",
 ]
 # `harborzenith7725` is split across tags; the second contains an `&`, which
 # only exists in the markup as `&amp;`.
@@ -1037,11 +1029,11 @@ EVIDENCE_REGISTER = ["harborzenith7725", "sk-live-AMPS0000&sig=0000000000"]
 # decoration. A sticky caption is copied into `beat.caption` in every evidence
 # file that follows, so a `keep` assertion that searched whole files would find
 # that sentence in all of them with **zero** page text captured — the same
-# hollow shape found in `check_terminal_evidence_secret` last round. With the
+# hollow shape found in the terminal's own screen assertion last round. With the
 # sentence here, "the mask did not eat the app" and "the log quoted itself" are
 # distinguishable, and the assertion searches page text only.
 EVIDENCE_BLEED_CAPTION = (
-    "The card shows sk-live-BLED00000000, mirrored at sk-live-HIDE00000000. "
+    "The card shows sk-live-BLED00000000, mirrored at sk-live-VEIL00000000. "
     "Revenue for the quarter was steady, and the feed is live."
 )
 # Planted in evidence/ *before* the take, as if a previous recording into the
@@ -5895,163 +5887,129 @@ def run_web_problems(out_root: Path) -> list[str]:
     return check_issues("web-problems", out_dir, WEB_PROBLEM_ISSUES)
 
 
-def check_terminal_evidence_secret(out_dir: Path) -> list[str]:
-    """A registered secret a command *printed* must not survive in `screen`.
-
-    The terminal's evidence is the whole rendered buffer, and it is the only
-    medium here with no `redact()` at all (issue #5) — so `register_secret()`
-    is the entire defence, and it has to be shown reaching the screen dump.
-    The word printed beside the secret is the anti-vacuity half: it is on the
-    same screen, it is not a secret, and a capture that wrote nothing satisfies
-    "the secret is absent" perfectly.
-
-    That half is looked for in **`screen` only**, never in the whole file. The
-    beat record embedded alongside carries the command as logged, and the
-    marker is a word in that command — so searching the file finds it whether
-    or not a single character of the terminal was captured. Written the easy
-    way first, and an injected `{"screen": ""}` payload was measured passing
-    it.
-
-    The secret is searched the other way round, over the whole file: the
-    absence of a credential is a claim about every byte written, not about one
-    field.
-    """
-    failures: list[str] = []
-    directory = out_dir / EVIDENCE_DIR_NAME
-    files = sorted(directory.glob("*.json"))
-    if not files:
-        return ["terminal-problems: the take wrote no evidence at all"]
-    holding = sorted(
-        p.name for p in files if leaked_in(p.read_bytes(), TERMINAL_PRINTED_SECRET)
-    )
-    if holding:
-        failures.append(
-            f"terminal-problems: a registered secret a command printed is "
-            f"readable in {holding!r}. TerminalRecorder has no redact(), so "
-            f"register_secret() is the only thing between a printed credential "
-            f"and this file."
-        )
-    screens = []
-    for path in files:
-        try:
-            screens.append(evidence_screen_text(json.loads(path.read_text())))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            failures.append(f"terminal-problems: {path.name} is not valid JSON")
-    if TERMINAL_PRINTED_MARKER not in "\n".join(screens):
-        failures.append(
-            f"terminal-problems: {TERMINAL_PRINTED_MARKER!r} is in no evidence "
-            f"file's `screen`, so the terminal holding the secret was never "
-            f"captured and its absence proves nothing. It is printed on the "
-            f"same line as the secret, so a screen dump that has one has both."
-        )
-    if not failures:
-        print(
-            "smoke: terminal-problems a printed secret is masked out of the "
-            "screen dump, and the line around it survives"
-        )
-    return failures
-
-
 def run_terminal_wrap(out_root: Path) -> list[str]:
-    """A registered secret printed across a terminal line wrap.
+    """A registered secret split by a line wrap must still be refused.
 
-    Its own take rather than another command in `terminal-problems/`, because
-    the line has to be as wide as the terminal and the terminal's width is
-    measured at record time — a beat whose `selector` is a command of
-    unpredictable length cannot be an entry in that take's hand-written
-    exit-code table.
+    Two mechanisms miss the same value for the same reason, and this take is
+    what makes them agree. `_screen()` walks the xterm.js buffer a row at a
+    time and joins with newlines without consulting `isWrapped`, so a
+    credential crossing the last column is two rows with a newline through the
+    middle: contiguous to a viewer, contiguous in the frames, and a substring
+    of nothing. `_verify_redaction_final()` — the check that decides whether
+    the mp4 may be written at all — asked `secret in screen`, and the evidence
+    mask asked the same question the same way. Both said no.
 
-    **The transformation is the point.** `__termText()` walks the xterm.js
-    buffer a row at a time and joins with newlines, without consulting
-    `isWrapped`, so a credential crossing the last column is two rows and a
-    newline goes through the middle of it. `_evidence_re` used to be
-    `r"\\s+".join(tokens)` — elastic about whitespace the *literal* has and
-    exact about whitespace the *text* has — so it matched neither half, and the
-    end-of-document backstop was a plain `in` over `json.dumps` output, where
-    the newline is the two characters `\\n`, so it missed in the same
-    direction. Measured: the value legible in the file, recoverable with
-    `tr -d '\\n'`, and a second unwrapped occurrence on the same screen masked
-    to `[redacted]` right beside it.
+    **Late registration is how the value gets onto the screen at all**, and it
+    is not a contrivance. The stream scrubber (#5) masks what it knows about
+    while the bytes go past, so a value registered up front never reaches the
+    buffer and this shape cannot exist. Registering *after* the command has
+    printed is the ordinary shape of the mistake: a token rotates into output
+    before the storyboard names it, or the author adds `register_secret()` on
+    the second run-through. What is on screen at the end of the take is what
+    is in the frames, whenever it was registered — which is exactly what the
+    final check is for.
 
-    Graded as a matched pair, and a third assertion for the premise: the take
-    computes where the secret lands and refuses to grade a line that did not
-    actually wrap, so this cannot quietly become a test of an ordinary echo.
+    Printed from a **script**, not a `run()` argument: a command line is
+    echoed, and typing the value into one trips `run()`'s own guard (#5) and
+    puts it in the frames by a path this take is not about. Same reasoning as
+    `term_printer_script()`.
+
+    Graded on the refusal and on what it kept: `SKILL.md` promises a
+    `SecretLeak` keeps nothing, and the geometry is asserted first so a take
+    that quietly stopped wrapping fails loudly rather than passing as a test
+    of an ordinary echo.
     """
     if os.name != "posix":
         return []
-    from demo_recording import TerminalRecorder
+    from demo_recording import SecretLeak, TerminalRecorder
 
     label = "terminal-wrap"
     out_dir = fresh_take_dir(out_root, label)
     failures: list[str] = []
     geometry: dict = {}
+    raised: BaseException | None = None
+    # Outside the take directory, so the "nothing was kept" sweep below grades
+    # what the recorder wrote and not what this harness did. The shell starts
+    # in the process cwd, so this is a chdir, the same way
+    # `run_terminal_redaction` reaches `./print-secrets`.
+    work_dir = Path(tempfile.mkdtemp(prefix="smoke-wrap-"))
+    script = work_dir / "print-wrapped"
+    previous = Path.cwd()
+    os.chdir(work_dir)
     try:
         with TerminalRecorder(out_dir, speech=False) as rec:
-            rec.register_secret(TERMINAL_WRAP_SECRET)
             cols = int(rec.page.evaluate("() => window.__term.cols"))
-            # The shell prints "<pad> <secret> <marker>" starting at column 0,
-            # so the secret starts at len(pad) + 1. Solve for the padding that
-            # puts TERMINAL_WRAP_HEAD of its characters before the boundary.
+            # The script prints "<pad> <secret> <marker>" from column 0, so the
+            # secret starts at len(pad) + 1. Solve for the padding that puts
+            # TERMINAL_WRAP_HEAD of its characters before the boundary.
             pad = "x" * max(0, cols - TERMINAL_WRAP_HEAD - 1)
-            line = f"{pad} {TERMINAL_WRAP_SECRET} {TERMINAL_WRAP_MARKER}"
             geometry = {
                 "cols": cols,
                 "starts_at": len(pad) + 1,
                 "ends_at": len(pad) + 1 + len(TERMINAL_WRAP_SECRET),
             }
+            script.write_text(
+                f"#!/bin/sh\nprintf '%s %s %s\\n' "
+                f"'{pad}' '{TERMINAL_WRAP_SECRET}' '{TERMINAL_WRAP_MARKER}'\n"
+            )
+            script.chmod(0o755)
             rec.caption("A long line wraps.")
-            rec.run(f"echo {line}")
+            rec.run("./print-wrapped")
             rec.wait_for_prompt(timeout_s=15)
             rec.pause(0.4)
-    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
-        return [f"{label}: TerminalRecorder raised {type(exc).__name__}: {exc}"]
+            # ...and only now is it a secret. The scrubber never saw it, so it
+            # is on the screen, wrapped, and the final check is the only thing
+            # left between it and a written mp4.
+            rec.register_secret(TERMINAL_WRAP_SECRET)
+    except SecretLeak as leak:
+        raised = leak
+    except Exception as exc:  # noqa: BLE001 - any other verdict is a failure
+        return [f"{label}: expected SecretLeak, got {type(exc).__name__}: {exc}"]
+    finally:
+        os.chdir(previous)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     # The premise, arithmetic rather than hoped for.
-    if not (geometry["starts_at"] < geometry["cols"] < geometry["ends_at"]):
+    if not geometry or not (
+        geometry["starts_at"] < geometry["cols"] < geometry["ends_at"]
+    ):
         failures.append(
-            f"{label}: the secret occupies columns {geometry['starts_at']}-"
-            f"{geometry['ends_at']} of a {geometry['cols']}-column terminal, so "
-            f"the line did not wrap through it and nothing below is being "
-            f"exercised"
+            f"{label}: the secret occupies columns {geometry.get('starts_at')}-"
+            f"{geometry.get('ends_at')} of a {geometry.get('cols')}-column "
+            f"terminal, so the line did not wrap through it and nothing below "
+            f"is being exercised"
         )
-
-    files = sorted((out_dir / EVIDENCE_DIR_NAME).glob("*.json"))
-    if not files:
-        return failures + [f"{label}: the take wrote no evidence at all"]
-    everything = sorted(p for p in out_dir.rglob("*") if p.is_file())
-    holding = sorted(
-        str(p.relative_to(out_dir))
-        for p in everything
-        if leaked_in(p.read_bytes(), TERMINAL_WRAP_SECRET)
+    if raised is None:
+        failures.append(
+            f"{label}: a registered secret was on the terminal screen at the "
+            f"end of the take, split across a line wrap, and the take finished "
+            f"cleanly. `_screen()` joins buffer rows with newlines and does not "
+            f"consult isWrapped, so `secret in screen` sees neither half — and "
+            f"the value is in the frames whole."
+        )
+    elif str(len(TERMINAL_WRAP_SECRET)) not in str(raised):
+        failures.append(
+            f"{label}: the take was refused with {str(raised)[:120]!r}, which "
+            f"does not name the {len(TERMINAL_WRAP_SECRET)}-character value "
+            f"this take planted — something else refused it and the wrap was "
+            f"never reached"
+        )
+    left = sorted(
+        str(q.relative_to(out_dir))
+        for q in out_dir.rglob("*")
+        if q.is_file() and q.name != MARKER_NAME
     )
-    if holding:
+    if left:
         failures.append(
-            f"{label}: the registered secret is recoverable from {holding!r} — "
-            f"in one piece, or in the two the wrap left once the whitespace "
-            f"between them is deleted"
-        )
-    # ...and the half that catches the wrap. The literal is *not* in the file
-    # as written — a newline is sitting in the middle of it — so a search for
-    # it says nothing. Delete the whitespace and look again.
-    screens = "\n".join(evidence_screen_text(json.loads(p.read_text())) for p in files)
-    if TERMINAL_WRAP_SECRET in re.sub(r"\s+", "", screens):
-        failures.append(
-            f"{label}: the registered secret is recoverable from the screen "
-            f"dump by deleting whitespace — the terminal wrapped it and the "
-            f"mask compared against the unwrapped form. It is one `tr -d` from "
-            f"plaintext, in a file whose whole purpose is to be grepped."
-        )
-    if TERMINAL_WRAP_MARKER not in screens:
-        failures.append(
-            f"{label}: {TERMINAL_WRAP_MARKER!r} is in no evidence file's "
-            f"`screen`, so the line holding the secret was never captured and "
-            f"its absence proves nothing"
+            f"{label}: {left!r} survived a take refused for a secret on screen. "
+            f"SKILL.md says a SecretLeak keeps nothing, and a terminal still is "
+            f"the raw screen."
         )
     if not failures:
         print(
             f"smoke: {label} a registered secret split by a line wrap at column "
             f"{geometry['cols']} (chars {geometry['starts_at']}-"
-            f"{geometry['ends_at']}) is masked in both halves"
+            f"{geometry['ends_at']}) is still refused, and keeps nothing"
         )
     return failures
 
@@ -6066,12 +6024,6 @@ def run_terminal_problems(out_root: Path) -> list[str]:
     try:
         with TerminalRecorder(out_dir, speech=False) as rec:
             rec.caption("Exit codes are recorded.")
-            # A secret a *command prints*. Registered before it is echoed, so
-            # the only thing that can keep it out of the screen dump is the
-            # writer applying `register_secret()` to the terminal payload.
-            rec.register_secret(TERMINAL_PRINTED_SECRET)
-            rec.run(f"echo {TERMINAL_PRINTED_MARKER} {TERMINAL_PRINTED_SECRET}")
-            rec.wait_for_prompt(timeout_s=15)
             rec.run("echo ok")
             rec.wait_for_prompt(timeout_s=15)
             rec.run(TERMINAL_FAILING_COMMAND)
@@ -6091,7 +6043,7 @@ def run_terminal_problems(out_root: Path) -> list[str]:
         out_dir,
         TERMINAL_PROBLEM_ISSUES,
         exit_codes=TERMINAL_PROBLEM_EXIT_CODES,
-    ) + check_terminal_evidence_secret(out_dir)
+    )
 
 
 def run_terminal_race(out_root: Path) -> list[str]:
@@ -7848,11 +7800,11 @@ def check_terminal_redaction(out_dir: Path, info: dict, started_at: float) -> li
         # positively: "no beat holds the secret" is equally true of a log that
         # dropped the beats.
         masked = [b for b in beats if SECRET_MASK in (b.get("selector") or "")]
-        if len(masked) != 2:
+        if len(masked) != 3:
             failures.append(
                 f"terminal-redaction: {len(masked)} beats carry a scrubbed "
-                f"selector, expected 2 — the refused run() and the refused "
-                f"send() each held a registered value. Selectors logged: "
+                f"selector, expected 3 — the refused run(), the refused send(), "
+                f"and the refused key(). Selectors logged: "
                 f"{[b.get('selector') for b in beats]!r}"
             )
         sent = [b for b in beats if b.get("verb") == "send"]
@@ -8418,7 +8370,7 @@ def run_evidence(out_root: Path) -> list[str]:
     written = sorted((out_dir / EVIDENCE_DIR_NAME).glob("*.json"))
     blob = "\n".join(p.read_text() for p in written)
     # The `keep` half is searched in the **page text only**, the same way
-    # `check_evidence` and `check_terminal_evidence_secret` search theirs, and
+    # `check_evidence` and `run_terminal_wrap` search theirs, and
     # for the same reason: every one of these strings is also in a caption or a
     # selector somewhere in the embedded beat record, so searching the whole
     # file would find them whether or not a character of the page was captured.

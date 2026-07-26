@@ -2339,6 +2339,24 @@ class _DemoBase:
         )
         return html_unescape(probe)
 
+    def _recoverable_secret(self, text: str) -> str | None:
+        """The first registered secret recoverable from `text`, or None.
+
+        The same matching an evidence file gets — whitespace elastic in both
+        directions, entity and serializer escapes resolved — pointed at a
+        medium's *finished output* rather than at a document, so a final
+        redaction check and the evidence writer cannot disagree about whether
+        a value is present.
+
+        A terminal screen is what needs it. `__termText()` joins xterm.js
+        buffer rows with newlines and does not consult `isWrapped`, so a
+        credential crossing the last column is two rows with a newline through
+        the middle, and `secret in screen` sees neither half — the same blind
+        spot the evidence mask had, in the check that decides whether the
+        frames are safe to keep.
+        """
+        return self._evidence_holds(text, tuple(self._secrets))
+
     def _evidence_holds(self, text: str, literals: "tuple[str, ...]") -> str | None:
         """The first forbidden literal still findable in `text`, or None.
 
