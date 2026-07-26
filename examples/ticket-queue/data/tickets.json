@@ -1,0 +1,58 @@
+[
+  {
+    "id": "TQ-101",
+    "title": "Invoice PDF is missing the tax line",
+    "status": "open",
+    "requester": "dana.olsen@northwind.example",
+    "opened": "2025-11-03",
+    "body": "The November invoice renders without the VAT row. Same account, October invoice was fine."
+  },
+  {
+    "id": "TQ-102",
+    "title": "Export to CSV times out on large accounts",
+    "status": "open",
+    "requester": "sam.reyes@northwind.example",
+    "opened": "2025-11-04",
+    "body": "Export of the full contact list returns a 504 after about ninety seconds."
+  },
+  {
+    "id": "TQ-103",
+    "title": "Cannot remove a seat from the team page",
+    "status": "waiting",
+    "requester": "mira.haas@northwind.example",
+    "opened": "2025-11-04",
+    "body": "The remove button is greyed out for one member. Asked the customer for a screenshot."
+  },
+  {
+    "id": "TQ-104",
+    "title": "Webhook retries stop after the first failure",
+    "status": "open",
+    "requester": "leo.fontaine@northwind.example",
+    "opened": "2025-11-05",
+    "body": "Delivery is attempted once, then the endpoint is marked dead. Expected five retries."
+  },
+  {
+    "id": "TQ-105",
+    "title": "Password reset mail lands in spam",
+    "status": "waiting",
+    "requester": "ana.petrova@northwind.example",
+    "opened": "2025-11-05",
+    "body": "Reported by three users on the same domain. Waiting on their mail administrator."
+  },
+  {
+    "id": "TQ-106",
+    "title": "Dashboard totals disagree with the report",
+    "status": "open",
+    "requester": "tom.iversen@northwind.example",
+    "opened": "2025-11-06",
+    "body": "The header total counts archived records, the report below does not."
+  },
+  {
+    "id": "TQ-107",
+    "title": "Add Norwegian to the language picker",
+    "status": "waiting",
+    "requester": "kira.lund@northwind.example",
+    "opened": "2025-11-06",
+    "body": "Feature request. Translations exist already, the option is just not listed."
+  }
+]

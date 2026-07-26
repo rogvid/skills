@@ -1,0 +1,269 @@
+:root {
+  --ink: #1f2430;
+  --muted: #6b7280;
+  --line: #e2e5ec;
+  --paper: #ffffff;
+  --page: #f6f7f9;
+  --accent: #eb6e14;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+}
+
+.skip-link:focus {
+  left: 8px;
+  top: 8px;
+  background: var(--paper);
+  padding: 6px 10px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.topbar {
+  padding: 20px 28px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+h1 {
+  margin: 0;
+  font-size: 21px;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 20px;
+  padding: 20px 28px;
+  align-items: start;
+}
+
+.ticket-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.ticket {
+  width: 100%;
+  text-align: left;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 74px 1fr 96px;
+  gap: 12px;
+  align-items: center;
+}
+
+.ticket:hover {
+  border-color: #cdd2dc;
+}
+
+.ticket[aria-current="true"] {
+  border-color: var(--accent);
+}
+
+.ticket-id {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ticket-title {
+  font-weight: 500;
+}
+
+.pill {
+  justify-self: end;
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--page);
+  color: var(--muted);
+}
+
+.pill-open {
+  background: #eef4ff;
+  color: #2b4d8f;
+  border-color: #d4e0f7;
+}
+
+.pill-waiting {
+  background: #fdf3e6;
+  color: #8a5a12;
+  border-color: #f2e0c4;
+}
+
+.pill-escalated {
+  background: #fdecec;
+  color: #97302f;
+  border-color: #f4cfcf;
+}
+
+.detail {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  min-height: 200px;
+}
+
+.detail-empty {
+  color: var(--muted);
+  margin: 0;
+}
+
+.detail h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.detail dl {
+  margin: 10px 0 0;
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 4px 10px;
+  font-size: 13px;
+}
+
+.detail dt {
+  color: var(--muted);
+}
+
+.detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.copy-email {
+  margin-left: 6px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: var(--page);
+  border-radius: 5px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+.detail-body {
+  margin: 12px 0 0;
+  font-size: 14px;
+}
+
+details {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+details pre {
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  overflow-x: auto;
+}
+
+.detail-actions {
+  margin-top: 14px;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.detail-actions button,
+.modal-actions button {
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 36, 48, 0.45);
+  display: grid;
+  place-items: center;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-card {
+  background: var(--paper);
+  border-radius: 10px;
+  padding: 18px 20px;
+  width: 320px;
+  box-shadow: 0 18px 40px rgba(31, 36, 48, 0.25);
+}
+
+.modal-card h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.modal-card label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.modal-card select {
+  width: 100%;
+  font: inherit;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.modal-actions {
+  margin-top: 16px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
