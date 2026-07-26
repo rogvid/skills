@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["playwright>=1.40"]
+# dependencies = ["playwright>=1.49"]
 # ///
 """End-to-end smoke test for the demo-video recorders.
 
@@ -37,6 +37,13 @@ and grades each take on separate axes:
    the same frame, and on a byte search of everything the take wrote. The
    terminal half (issue #5) grades the PTY scrubber the same way, against a
    value split across `os.read()` boundaries on purpose.
+6. **Evidence** — every beat left a text account of what was on screen, capped
+   and explicitly truncated, from which a reader can state what the frame
+   showed without decoding one. Its own leak path, because it is the only
+   artifact here that is *plain text* and `redact()` only covers pixels.
+
+Playwright 1.49 or newer: evidence uses `locator.aria_snapshot()`, and the
+`page.accessibility` API that predates it has since been removed.
 
     tests/smoke                 # every take
     tests/smoke --web-only
@@ -77,6 +84,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
+from html import unescape as html_unescape
 from pathlib import Path
 from typing import NamedTuple
 
@@ -281,6 +289,33 @@ BETWEEN_BEATS_JS = "() => console.error('__M__')".replace("__M__", BETWEEN_BEATS
 # rather than 1 because it proves the *status* was read rather than "something
 # went wrong" inferred from any other signal.
 TERMINAL_FAILING_COMMAND = "(exit 3)"
+
+# ...and the same, printed on a line long enough to **wrap**. `__termText()`
+# emits one xterm.js buffer row per line joined with newlines and never consults
+# `isWrapped`, so a credential that crosses the last column arrives split:
+# `"…sk-live-WRAP0000\n000000000000 wrapped-marker…"` — fully legible, and
+# recovered by anyone who pipes the file through `tr -d '\n'`. The mask missed
+# it, and so did the end-of-document backstop, which is the failure a backstop
+# exists to not have.
+#
+# The take before this one could never provoke it: `echo printed-below` plus a
+# 20-character secret is ~60 columns against a ~120-column terminal. A real
+# `env`, `aws configure get` or `curl -v` wraps every time. So this one is
+# padded to the measured width of the terminal, deliberately, and the padding
+# is computed at record time from `term.cols` rather than guessed.
+TERMINAL_WRAP_MARKER = "wrapped-marker"
+# `zz-wrap-`, not `sk-live-`, and that is forced rather than stylistic. The
+# stream scrubber (#5) carries a shape net — `sk-[A-Za-z0-9_-]{16,}` among
+# others — which masks an `sk-live-` value on its way past whether or not
+# anyone registered it, so such a value can never reach the xterm buffer and
+# this shape cannot exist with one. `zz-` matches no shape, exactly as #58's
+# own `TCTL` control does, which is what lets it render and then wrap.
+# Twenty-eight characters, so the geometry below is the same arithmetic.
+TERMINAL_WRAP_SECRET = "zz-wrap-00000000000000000000"
+# How many characters of the secret land on the first row. Any value strictly
+# between 1 and len(secret) exercises the split; 8 keeps both halves long enough
+# to be obviously a fragment of one string in the failure message.
+TERMINAL_WRAP_HEAD = 8
 
 # The regression from the first round of review: two run()s with no wait
 # between them. The shell buffers the second command and runs it after the
@@ -768,6 +803,332 @@ MAX_MERGE_OFFSET_ERROR_S = 0.1
 # segment's beats — which is what this bar, at any width, cannot say.
 MAX_CROSS_SEGMENT_DRIFT_S = MAX_CAPTURE_LOSS_S
 
+# -- per-beat evidence (issue #9) ---------------------------------------------
+#
+# Every beat writes evidence/beat-NN.json: what was on screen when the verb
+# returned, in text. The acceptance criterion is that a reviewer given only
+# those files can say what the frame showed — so the assertions below are not
+# "the file exists and parses" but *facts about the fixture app*, hand-written
+# here and looked for in the page text the recorder captured.
+EVIDENCE_DIR_NAME = "evidence"
+
+# The recorder's caps and its truncation marker, written out by hand for the
+# same reason WEB_BEATS is: a bound read off the code being graded agrees with
+# that code whatever it says. check_evidence_caps() asserts the package's own
+# constants equal these, so widening a cap has to be done on purpose.
+EVIDENCE_SCHEMA_EXPECTED = 1
+EVIDENCE_LIMITS_EXPECTED = {
+    "aria": 12_000,
+    "scope_aria": 12_000,
+    "html": 8_000,
+    "screen": 12_000,
+}
+EVIDENCE_MARKER = "[demo-video: truncated here,"
+# The most a marker can add past a field's budget, so "cut to the cap" can be
+# asserted as a range rather than as "under some ceiling".
+EVIDENCE_TRUNCATED_MAX = len(
+    "\n…[demo-video: truncated here, 999999999 more characters]"
+)
+
+# One file's ceiling. The caps are counted in *characters* and this is bytes,
+# and the two are not the same number: UTF-8 spends up to four bytes on one
+# character, and JSON escaping of a newline-dense YAML tree adds more. So the
+# ceiling is the three text fields at their caps (32 000 characters) times four,
+# plus room for the beat block — deliberately loose, because the assertion that
+# actually grades the caps counts characters per field in run_evidence(). This
+# only catches a cap that stopped being applied at all, on a file that a
+# character count never sees because it is the wrong unit.
+MAX_EVIDENCE_FILE_BYTES = 4 * 32_000 + 8_000
+# ...and the directory's, which is the "do not bloat the evidence folder" half.
+# Observed: 39 kB for the 23-beat web take, 9 kB for the 18-beat terminal one.
+MAX_EVIDENCE_DIR_BYTES = 512_000
+
+# What a reviewer must be able to read out of one beat's evidence, and what
+# must *not* be in it. The second list is what makes this more than a
+# spell-check of a static dump: `03-refreshed` holding `$134,950` and *not*
+# `$128,400` says the evidence tracks the page beat by beat, which is the whole
+# claim. Every string is a fact about tests/fixture/index.html, written here,
+# never read back off the recorder.
+#
+#   (verb, target, must appear, must not appear)
+WEB_EVIDENCE = [
+    (
+        "shot",
+        "01-dashboard",
+        [
+            "$128,400",
+            "snapshot 1 of 3",
+            "Refresh",
+            "Harbor Supply Co.",
+            "Ferrari Logistics",
+            "A small dashboard.",
+        ],
+        ["$134,950", "snapshot 2 of 3"],
+    ),
+    (
+        # The filter really filtered: one row left, and the four it dropped are
+        # gone from the account of the screen as well as from the screen.
+        "shot",
+        "02-filtered",
+        ["Harbor Supply Co.", "Seattle", "Filter by city."],
+        ["Ferrari Logistics", "Cascade Outfitters", "Pine & Poplar"],
+    ),
+    (
+        "shot",
+        "03-refreshed",
+        ["$134,950", "snapshot 2 of 3", "Refresh reloads it."],
+        ["$128,400", "snapshot 1 of 3"],
+    ),
+]
+
+# The spotlight is what issue #9 says the capture is scoped to, so it is graded
+# on its own: the beat that sets one names it and carries that element's own
+# tree and markup, and the beat that clears one carries neither.
+WEB_EVIDENCE_SCOPE = ("#kpi-rev", "$128,400", 'id="kpi-rev"')
+
+TERMINAL_EVIDENCE = [
+    (
+        "shot",
+        "01-echo",
+        # The command as typed *and* its output, which is the pair that says
+        # the PTY ran what run() sent rather than echoing it.
+        ["echo hello from demo-video", "hello from demo-video"],
+        ["ls -1", "AGENTS.md"],
+    ),
+    (
+        "shot",
+        "02-listing",
+        ["ls -1", "skills", "tests", "hello from demo-video"],
+        [],
+    ),
+]
+
+# -- the evidence take (issue #9) ---------------------------------------------
+#
+# One short take against `?evidence=1`, graded on its evidence files and
+# nothing else — no video, no stills. It carries three things the graded takes
+# structurally cannot:
+#
+#   1. **The leak shapes.** Every element in that panel reached an evidence
+#      file readable during review, and none of them is visible to any pixel
+#      assertion ever written here: a value is not less legible in JSON for
+#      having been covered on screen. They are graded by a byte sweep, the same
+#      way redaction is, with unredacted controls proving the sweep is not
+#      looking at an empty file.
+#   2. **The size cap.** Truncation cannot be provoked on the fixture as it
+#      stands — its whole ARIA tree is 2.3 kB against a 12 kB cap — and
+#      slackening the cap to meet the fixture would be grading the wrong
+#      number. So the take bloats the page on purpose.
+#   3. **The segment naming.** It records with `segment=`, which no other take
+#      here does, so `evidence/<segment>.seg.beat-NN.json` is exercised rather
+#      than merely designed (issue #22).
+EVIDENCE_SEGMENT = "shapes"
+EVIDENCE_BLOAT_ID = "smoke-bloat"
+EVIDENCE_BLOAT_ITEMS = 900
+EVIDENCE_BLOAT_JS = """(n) => {
+  const box = document.createElement('ul');
+  box.id = '__ID__';
+  for (let i = 0; i < n; i++) {
+    const li = document.createElement('li');
+    li.textContent = 'bloat row ' + i + ' — filler so the evidence cap has '
+      + 'something to cut';
+    box.appendChild(li);
+  }
+  document.body.appendChild(box);
+}""".replace("__ID__", EVIDENCE_BLOAT_ID)
+
+# Values the `?evidence=1` panel renders inside elements the take redacts, or
+# registers as secrets. None may survive in any evidence file. Each is one
+# shape, and every one of them leaked before the fix named beside it.
+#
+#   WSPC  indented on its own line in hand-written markup. textContent comes
+#         back padded with newlines, the ARIA tree does not, and str.replace
+#         between the two finds nothing — the most ordinary shape there is.
+#   BLED  inside a card whose *label* also renders outside it. It must be
+#         masked while "Revenue" must not (see EVIDENCE_KEEP).
+#   CHLD  split into text nodes that are ordinary strings on their own.
+#   LBLD  the accessible name of a redacted element, sourced from an element
+#         outside its subtree via aria-labelledby.
+#   SLOT  light DOM slotted into a redacted shadow host — assigned into the
+#         subtree, not a descendant of it.
+#   VALU  an input value, which lives on the property and not the attribute.
+#   TICK  rewritten every 5 ms, so the harvest and the ARIA snapshot see
+#         different values unless the capture refuses to straddle a repaint.
+#   ATTR  a data-* attribute nothing renders, reached only because the markup
+#         dump is a new surface this feature created.
+#   JSON  the same, inside a JSON blob in another attribute.
+#   HATT  mirrored into `title`, `data-value`, `aria-label` and an input value
+#         on siblings the take does not redact. The harvest read those when
+#         deciding what "renders in the clear", so any one of them exempted the
+#         key from masking everywhere — including timeline.json.
+#   VEIL  the same trick in CSS: an .sr-only clip, `opacity:0`,
+#         `visibility:hidden` and `left:-9999px`. `checkVisibility()` called
+#         with no arguments reports every one of them visible.
+#   AMPS  a registered secret containing `&`, which `outerHTML` writes as
+#         `&amp;`. The mask, the withhold fallback and the end-of-document
+#         backstop were all raw substring tests and all three missed it.
+#
+# HATT and VEIL are one literal per *family* rather than per channel, and that
+# is deliberate: every element in a family holds the same value, so a single
+# channel regressing puts that value back into `outside` and un-masks it
+# everywhere. One assertion covers four shapes and names the family it broke.
+EVIDENCE_SECRETS = {
+    "the whitespace-padded key": "sk-live-WSPC00000000",
+    "the key whose label also renders outside it": "sk-live-BLED00000000",
+    "the key split across child elements": "sk-live-CHLD00000000",
+    "the accessible name sourced from outside the subtree": "sk-live-LBLD00000000",
+    "the key slotted into a redacted shadow host": "sk-live-SLOT00000000",
+    "the input value that lives on the property": "sk-live-VALU00000000",
+    "the key rewritten every 5 ms": "sk-live-TICK",
+    "the data-* attribute nothing renders": "sk-live-ATTR00000000",
+    "the key inside a JSON attribute": "sk-live-JSON00000000",
+    "the key mirrored into attributes nothing paints": "sk-live-HATT00000000",
+    "the key mirrored into elements CSS hides": "sk-live-VEIL00000000",
+    "the registered secret an ampersand escapes": "sk-live-AMPS0000&sig=0000000000",
+}
+# The elements the take redacts, and the two it registers as text instead.
+# `#ev-spot-*` are deliberately **not** redacted: their values are registered
+# with register_secret(), which is the other half of the contract — a mask that
+# only elides what redact() names leaves a registered value in the markup.
+EVIDENCE_REDACT = [
+    "#ev-ws-card",
+    "#ev-bleed-card",
+    "#ev-child-card",
+    "#ev-labelled-card",
+    # Inside a shadow root, wrapping a <slot>. Its own textContent is empty and
+    # the value it paints is a light child of the *host* — inside the redaction
+    # in the flattened tree, outside it in the DOM.
+    "#ev-slot-inner",
+    "#ev-value-card",
+    "#ev-tick-card",
+    # The two whose values are mirrored *outside* them — into attributes on one
+    # hand, into CSS-hidden elements on the other. Neither mirror is redacted,
+    # which is the whole shape: `redact()` covers where a value renders, and
+    # the question is whether the recorder agrees with the browser about where
+    # that is.
+    "#ev-attr-card",
+    "#ev-veil-card",
+]
+# `harborzenith7725` is split across tags; the second contains an `&`, which
+# only exists in the markup as `&amp;`.
+EVIDENCE_REGISTER = ["harborzenith7725", "sk-live-AMPS0000&sig=0000000000"]
+
+# A caption naming a value that `redact()` covers and nobody registered. It is
+# not refused — correctly: `register_secret()` was never told about it, and the
+# words are in the frames from the moment they are drawn. What the recorder can
+# still do is keep them out of the files it *writes*, and `timeline.json` and
+# `timeline.md` are the two this skill tells people to commit. Without the
+# harvest reaching them, the same string is `[redacted]` in the evidence and in
+# the clear in the log beside it.
+#
+# It names *two* values, one from each family of leak, because the caption is
+# the only path by which a redacted value reaches the two committed files —
+# and B1's measured leak landed in both of them, not just in evidence/.
+#
+# It also quotes one of the EVIDENCE_KEEP sentences verbatim, which is not
+# decoration. A sticky caption is copied into `beat.caption` in every evidence
+# file that follows, so a `keep` assertion that searched whole files would find
+# that sentence in all of them with **zero** page text captured — the same
+# hollow shape found in the terminal's own screen assertion last round. With the
+# sentence here, "the mask did not eat the app" and "the log quoted itself" are
+# distinguishable, and the assertion searches page text only.
+EVIDENCE_BLEED_CAPTION = (
+    "The card shows sk-live-BLED00000000, mirrored at sk-live-VEIL00000000. "
+    "Revenue for the quarter was steady, and the feed is live."
+)
+# Planted in evidence/ *before* the take, as if a previous recording into the
+# same folder had left it there. It must not survive.
+EVIDENCE_STALE_SECRET = "sk-live-STAL00000000"
+
+# ...and what must **survive**. This is the half that stops the sweep above
+# from passing by masking everything, and it is not hypothetical: harvesting
+# every node of a redacted card also harvests its label, and an earlier round
+# of this feature rewrote every unrelated paragraph on the page as
+# `[redacted] for the quarter was steady.`
+#
+#   Revenue …   the label inside a redacted card, which also renders outside it
+#   live        a text node inside the split key, which is a substring of every
+#               other `sk-live-…` on the page
+#   $128,400    an ordinary value on the page, present to catch a mask that
+#               went wide enough to eat the app
+EVIDENCE_KEEP = {
+    "the sentence that shares a word with a redacted card's label": "Revenue for the quarter was steady, and the feed is live.",
+    "an ordinary KPI the mask must not reach": "$128,400",
+    "the text of the element whose attributes hold keys": "nothing rendered here",
+    "a table row from the app under the panel": "Harbor Supply Co.",
+}
+
+# The three spotlight targets, and what each proves about the markup dump.
+#
+#   #ev-spot-split  holds a registered secret written `harbor<b>zenith</b>7725`.
+#                   Its textContent is the value and its outerHTML is not, so
+#                   no substring mask can reach it — the markup must be
+#                   withheld outright rather than published half-cleaned.
+#   #ev-spot-attrs  renders the string "nothing rendered here" and carries two
+#                   attributes holding keys. Neither was ever in a frame, a
+#                   still, a caption or the TTS cache; serializing them would
+#                   make this feature the only place they exist.
+#   #ev-child-card  is *itself redacted*, and holds a value split across tags.
+#                   Both halves of that matter and they pull opposite ways: the
+#                   split makes a substring mask useless on the markup, and the
+#                   redaction makes it unnecessary, because the whole subtree
+#                   can be elided structurally. `querySelectorAll('*')` never
+#                   returns the element it was called on, so a serializer that
+#                   only elides *descendants* leaves the spotlight target — the
+#                   one element a storyboard redacts and spotlights together —
+#                   in the clear, and then withholds the markup as a
+#                   consolation. Elided markup is worth reading and withheld
+#                   markup is not, so the difference is graded.
+#   #ev-spot-amp    renders a registered secret containing an `&`. `outerHTML`
+#                   writes that as `&amp;`, so the markup holds the value in
+#                   full and matches no raw search — measured as a clean `aria`
+#                   reading `token=[redacted]` and a dirty `html` in the same
+#                   file. Nothing here asserts *which* way it comes out safe
+#                   (masked or withheld); the byte sweep asserts the value is
+#                   gone, which is the claim.
+EVIDENCE_SPLIT_TARGET = "#ev-spot-split"
+EVIDENCE_AMP_TARGET = "#ev-spot-amp"
+EVIDENCE_ATTR_TARGET = "#ev-spot-attrs"
+EVIDENCE_REDACTED_TARGET = "#ev-child-card"
+EVIDENCE_HTML_WITHHELD_MARKER = "[demo-video: markup withheld"
+# core.py's SECRET_MASK, written out by hand for the same reason every other
+# expectation in this file is: a value read off the code being graded agrees
+# with it whatever it says.
+SECRET_MASK_EXPECTED = "[redacted]"
+
+# A registered secret placed so that the html cap cuts *through* it. The
+# ordering "mask, then cap" is only load-bearing where the two meet: cap first
+# and the tail of a value survives as the last thing in the file, which no
+# later substring search finds. Arranged rather than hoped for — the take
+# re-pads until the value straddles the budget, and asserts that it did.
+EVIDENCE_STRADDLE = "sk-live-CUTT00000000000000000000"
+EVIDENCE_STRADDLE_JS = """(opts) => {
+  const [id, secret, budget] = opts;
+  const box = document.getElementById(id);
+  if (!box) return null;
+  const item = document.createElement('li');
+  item.id = 'smoke-straddle';
+  box.insertBefore(item, box.firstChild);
+  // Solve for the padding rather than scan for it: serialization is
+  // deterministic, so one measurement gives the offset the value starts at
+  // and the rest is arithmetic. A few correction passes cover the case where
+  // the padding itself changes the markup's length (it does not here, but a
+  // fixed point costs three iterations and assumes nothing).
+  let pad = Math.max(0, budget - Math.floor(secret.length / 2));
+  for (let attempt = 0; attempt < 6; attempt++) {
+    item.textContent = 'x'.repeat(pad) + secret;
+    const html = box.outerHTML;
+    const at = html.indexOf(secret);
+    if (at === -1) return null;
+    if (at < budget && at + secret.length > budget) {
+      return {at: at, length: html.length, pad: pad};
+    }
+    pad += (budget - Math.floor(secret.length / 2)) - at;
+    if (pad < 0) return null;
+  }
+  return null;
+}"""
+
 # -- redaction (issue #4) ----------------------------------------------------
 #
 # Three fixture literals, none of them a credential — each is spelled with a
@@ -877,6 +1238,12 @@ REDACT_REFUSED_SELECTORS = [
     "#api-key:has-text('sk-live')",
 ]
 
+# Spotlit mid-take so this take's evidence carries `html` at all. `#hero-card`
+# rather than `#api-key`: the storyboard redacts the *wrapper*, so the markup
+# serializer has to elide a subtree it was never handed directly — and the
+# 44px value inside it is the one a reader would recognise.
+REDACT_SPOTLIGHT = "#hero-card"
+
 REDACT_SHOTS = ["01-key-blurred", "02-mask-repaired", "03-token-typed"]
 # Taken while the paint gate is deliberately up and being attacked. Graded the
 # other way round from the rest: in this one even the *controls* — unredacted,
@@ -901,6 +1268,32 @@ REDACT_LEAK_CAPTION = f"Paste {REDACT_TYPED} to connect."
 # keep it — no recorder can un-paint a caption — but every file the take
 # writes must come back with it masked once it is registered.
 REDACT_LATE_CAPTION = f"Rotating {REDACT_LATE} now."
+
+# ...and for the redaction take, whose evidence is what the byte sweep in
+# check_redaction() is actually sweeping. Without these the sweep is a
+# statement about whatever the files happen to contain, which a constant
+# payload holding two control strings satisfies perfectly — measured: a
+# `_evidence_payload` replaced by a hardcoded dict passed the whole take.
+#
+# The facts are the *unredacted* halves of the `?secret=1` panel, so they say
+# the page was really read while the keys beside them were really masked.
+REDACT_EVIDENCE = [
+    (
+        "shot",
+        REDACT_SHOTS[0],
+        [
+            "Control key (never redacted)",
+            "sk-live-CTRL0000000000000000",
+            "Hero control (never redacted)",
+            REDACT_CAPTION,
+        ],
+        [],
+    ),
+]
+# The spotlight beat: `html` is the redacted wrapper's own markup, so it has to
+# carry the wrapper's id and none of the value inside it.
+REDACT_EVIDENCE_SCOPE = (REDACT_SPOTLIGHT, "[redacted]", 'id="hero-card"')
+
 
 # The recorder's narration defaults, written out by hand so this file computes
 # the cache path the way core.py does rather than by asking core.py. If either
@@ -2742,7 +3135,14 @@ def record_redaction(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
 
         rec.caption(REDACT_CAPTION)
         check_caption(b, rec.page, REDACT_CAPTION)
+        # A spotlight, so this take's evidence carries `html` — the markup of a
+        # redacted element, serialized. Without one the field is null in every
+        # file, the whole `outerHTML` surface sits outside the byte sweep
+        # below, and the take that has secrets in it grades none of it.
+        rec.spotlight(REDACT_SPOTLIGHT)
+        rec.hold(1.0)
         rec.shot(REDACT_SHOTS[0])
+        rec.spotlight()
 
         # DOM-level checks. Not the proof — the pixels are — but they say
         # *why* when the pixels fail, and the control ones prove the mask is
@@ -4962,9 +5362,56 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
             f"lines, and nothing for the refused one"
         )
 
+    # -- leak path 5: the evidence files -------------------------------------
+    #
+    # `evidence/beat-NN.json` is the one artifact this recorder writes that is
+    # plain text, and `redact()` is a *pixel* control — it covers where a value
+    # renders and leaves the value in the DOM, which is exactly what an
+    # evidence file is a dump of. So the sweep below has to actually reach
+    # these files, and they have to have something in them.
+    #
+    # Both halves are needed and neither alone is worth anything. An empty
+    # `evidence/`, or files holding nothing but a beat record, satisfy "no
+    # secret appears" perfectly — so the *controls*, which are never redacted
+    # and sit in the same panel as the keys, must be found in there. That pair
+    # is what makes the absence of the keys mean something.
+    evidence_dir = out_dir / EVIDENCE_DIR_NAME
+    evidence_files = sorted(evidence_dir.glob("*.json"))
+    beat_count = 0
+    if timeline.is_file():
+        beat_count = len(json.loads(timeline.read_text()).get("beats") or [])
+    if len(evidence_files) != beat_count or not evidence_files:
+        failures.append(
+            f"redaction: {EVIDENCE_DIR_NAME}/ holds {len(evidence_files)} files "
+            f"for {beat_count} beats. The byte sweep below is only a statement "
+            f"about the files that are there, so a take that wrote no evidence "
+            f"would pass it by writing nothing."
+        )
+    evidence_text = "\n".join(p.read_text() for p in evidence_files)
+    for what, control in (
+        ("the unredacted control key", REDACT_CONTROL),
+        ("the unredacted hero control", REDACT_HERO_CONTROL),
+    ):
+        if control not in evidence_text:
+            failures.append(
+                f"redaction: {what} ({control}) is not in any evidence file. It "
+                f"is rendered beside the redacted keys and is never registered, "
+                f"so its absence means the evidence captured nothing — and "
+                f"'no secret appears in it' is then a statement about an empty "
+                f"file."
+            )
+    for what, literal in REDACT_LITERALS.items():
+        holding = [p.name for p in evidence_files if leaked_in(p.read_bytes(), literal)]
+        if holding:
+            failures.append(
+                f"redaction: {what} appears verbatim in the evidence files "
+                f"{holding!r}. redact() hides where a value *renders*; the DOM "
+                f"still holds it, and evidence is a text dump of the DOM."
+            )
+
     # Everything the take wrote, byte for byte: timeline.json, timeline.md,
-    # the stills, the mp4, the narration clips, the marker. No exemptions —
-    # a leak path nobody thought of is exactly what this catches.
+    # the stills, the mp4, the narration clips, the evidence, the marker. No
+    # exemptions — a leak path nobody thought of is exactly what this catches.
     swept = 0
     for path in sorted(out_dir.rglob("*")):
         if not path.is_file():
@@ -4972,14 +5419,281 @@ def check_redaction(out_dir: Path, info: dict, started_at: float) -> list[str]:
         swept += 1
         data = path.read_bytes()
         for what, literal in REDACT_LITERALS.items():
-            if literal.encode() in data:
+            if leaked_in(data, literal):
                 failures.append(
                     f"redaction: {what} appears verbatim in {path.relative_to(out_dir)}"
                 )
     if not failures:
         print(
             f"smoke: redaction none of the {len(REDACT_LITERALS)} secrets "
-            f"appears verbatim in any of the {swept} files the take wrote"
+            f"appears verbatim in any of the {swept} files the take wrote "
+            f"({len(evidence_files)} of them per-beat evidence, which the "
+            f"controls prove is not empty)"
+        )
+    return failures
+
+
+def evidence_docs(
+    label: str, out_dir: Path, segment: str | None = None
+) -> tuple[list[dict], list[dict], list[str]]:
+    """(beats, evidence documents, failures) for one take, paired by index.
+
+    The pairing is the structural half of this axis: every beat in
+    timeline.json must name an evidence file, that file must exist, and
+    `evidence/` must hold nothing the log does not name — the same
+    both-directions check the stills already get, and for the same reason. A
+    dangling pointer sends a reviewer to a file that was never written; an
+    orphan file is a beat the log forgot.
+
+    The expected filename is *computed here*, deliberately, and that is not the
+    anti-pattern SKILL.md warns a reader about. A reader has to follow the
+    `evidence` pointer, because nothing promises them the naming; a test that
+    followed the pointer alone would agree with whatever name the recorder
+    chose. Both are graded: the pointer must say what this function computed,
+    and the file the pointer names must be the one on disk.
+    """
+    failures: list[str] = []
+    stem = f"{segment}.seg.timeline" if segment else "timeline"
+    timeline = out_dir / f"{stem}.json"
+    if not timeline.is_file():
+        return [], [], [f"{label}: {timeline.name} was never written"]
+    beats = json.loads(timeline.read_text()).get("beats") or []
+    directory = out_dir / EVIDENCE_DIR_NAME
+    if not directory.is_dir():
+        return (
+            beats,
+            [],
+            [
+                f"{label}: no {EVIDENCE_DIR_NAME}/ directory — the take recorded "
+                f"{len(beats)} beats and wrote an account of none of them"
+            ],
+        )
+    prefix = f"{segment}.seg." if segment else ""
+    docs: list[dict] = []
+    for position, beat in enumerate(beats):
+        # Computed here rather than imported, so a change to how evidence is
+        # named fails loudly instead of being agreed with.
+        wanted = f"{EVIDENCE_DIR_NAME}/{prefix}beat-{position:02d}.json"
+        if beat.get("evidence") != wanted:
+            failures.append(
+                f"{label}: beat {position} ({beat.get('verb')!r}) points at "
+                f"evidence {beat.get('evidence')!r}, expected {wanted!r}"
+            )
+        path = out_dir / (beat.get("evidence") or wanted)
+        if not path.is_file():
+            failures.append(
+                f"{label}: beat {position} ({beat.get('verb')!r}) names "
+                f"evidence {path.name!r}, which was never written"
+            )
+            continue
+        size = path.stat().st_size
+        if size > MAX_EVIDENCE_FILE_BYTES:
+            failures.append(
+                f"{label}: {path.name} is {size} bytes, over the "
+                f"{MAX_EVIDENCE_FILE_BYTES}-byte ceiling — the per-field caps "
+                f"are not being applied"
+            )
+        try:
+            docs.append(json.loads(path.read_text()))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            failures.append(f"{label}: {path.name} is not valid JSON: {exc}")
+    # Only files this take's naming owns. A multi-segment demo writes all its
+    # segments into one evidence/, so another segment's files are neither this
+    # take's orphans nor its business.
+    mine = re.compile(rf"^{re.escape(prefix)}beat-\d+\.json$")
+    on_disk = sorted(p.name for p in directory.glob("*.json") if mine.match(p.name))
+    named = sorted(Path(b["evidence"]).name for b in beats if b.get("evidence"))
+    if on_disk != named:
+        failures.append(
+            f"{label}: {EVIDENCE_DIR_NAME}/ holds {on_disk!r} but the beats "
+            f"name {named!r} — a beat captured nothing, or something was "
+            f"captured that no beat owns"
+        )
+    total = sum(
+        p.stat().st_size for p in directory.glob("*.json") if mine.match(p.name)
+    )
+    if total > MAX_EVIDENCE_DIR_BYTES:
+        failures.append(
+            f"{label}: {EVIDENCE_DIR_NAME}/ is {total // 1024} kB over "
+            f"{len(named)} beats, past the {MAX_EVIDENCE_DIR_BYTES // 1024} kB "
+            f"bar — evidence is meant to be capped, not to outgrow the mp4"
+        )
+    return beats, docs, failures
+
+
+def leaked_in(data: bytes, literal: str) -> bool:
+    """Is `literal` recoverable from these bytes by anyone who opens the file?
+
+    A byte search for the literal is not enough, and every extra form below is
+    a leak that walked past exactly such a search during review:
+
+      * **HTML entities.** `outerHTML` writes a registered
+        `sk-live-AMPS0000&sig=…` as `…&amp;sig=…`. The value is in the file
+        whole, and `literal.encode() in data` says it is not there.
+      * **Whitespace that is not in the value.** A terminal wraps a credential
+        at the last column and `__termText()` puts a newline through it;
+        `json.dumps` then writes that newline as the two characters `\\n`. Both
+        halves are legible and `tr -d '\\n'` reassembles them.
+
+    Deliberately *not* imported from `demo_recording`: a sweep that normalized
+    the same way the code under test normalizes would agree with it whatever it
+    did, which is the failure this whole file is arranged to avoid. These are
+    written out from what a reader can actually do to the file.
+    """
+    text = data.decode("utf-8", "replace")
+    recovered = html_unescape(
+        text.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+    )
+    return (
+        literal in text
+        or literal in recovered
+        # Whitespace deleted, on both sides: the wrap put whitespace inside the
+        # value, so the value has to be squeezed too or the two never meet.
+        or re.sub(r"\s+", "", literal) in re.sub(r"\s+", "", recovered)
+    )
+
+
+def evidence_screen_text(doc: dict) -> str:
+    """Only the part of an evidence document that describes the *screen*.
+
+    Deliberately excludes the embedded beat record. Every caption is in
+    `beat.caption` already, so searching the whole file for one would pass on a
+    recorder that captured no page text at all — the assertion has to be about
+    what the page said, not about the log quoting itself.
+    """
+    return "\n".join(
+        str(doc.get(field) or "") for field in ("aria", "scope_aria", "html", "screen")
+    )
+
+
+def check_evidence(
+    label: str,
+    out_dir: Path,
+    expected: list[tuple[str, str, list[str], list[str]]],
+    scope: tuple[str, str, str] | None = None,
+) -> list[str]:
+    """Issue #9's acceptance criterion, made concrete.
+
+    "A reviewer given only the evidence files can state what was on screen
+    without seeing an image" is not something a test can assert as written, so
+    it is asserted as its consequence: named facts about the fixture app —
+    values, labels, table rows, command output — have to be readable in the
+    evidence for the beat that showed them, and the values the *previous*
+    screen showed have to be gone.
+    """
+    beats, docs, failures = evidence_docs(label, out_dir)
+    if not docs:
+        return failures
+
+    for position, (beat, doc) in enumerate(zip(beats, docs, strict=False)):
+        where = f"{label}: {EVIDENCE_DIR_NAME}/beat-{position:02d}.json"
+        if doc.get("schema") != EVIDENCE_SCHEMA_EXPECTED:
+            failures.append(
+                f"{where} says schema {doc.get('schema')!r}, expected "
+                f"{EVIDENCE_SCHEMA_EXPECTED!r}"
+            )
+        if doc.get("segment") is not None:
+            failures.append(f"{where} claims segment {doc.get('segment')!r}")
+        if doc.get("media") != "demo.mp4":
+            failures.append(f"{where} describes media {doc.get('media')!r}")
+        # The embedded beat has to be *this* beat. Without it every file could
+        # hold the same screen and every fact below would still be found
+        # somewhere.
+        stamped = doc.get("beat") or {}
+        for field in ("index", "verb", "selector", "caption", "t_start", "t_end"):
+            if stamped.get(field) != beat.get(field):
+                failures.append(
+                    f"{where} stamps beat {field}={stamped.get(field)!r}, but "
+                    f"timeline.json says {beat.get(field)!r}"
+                )
+        if not isinstance(doc.get("truncated"), list):
+            failures.append(
+                f"{where} has no `truncated` list — a reader cannot tell a "
+                f"short page from a cut-off one"
+            )
+
+    def find(verb: str, target: str) -> tuple[int, dict] | None:
+        hits = [
+            (i, doc)
+            for i, (beat, doc) in enumerate(zip(beats, docs, strict=False))
+            if beat.get("verb") == verb and beat.get("selector") == target
+        ]
+        if len(hits) != 1:
+            failures.append(
+                f"{label}: {len(hits)} beats are ({verb!r}, {target!r}), so the "
+                f"evidence facts written for it cannot be checked against one"
+            )
+            return None
+        return hits[0]
+
+    for verb, target, present, absent in expected:
+        hit = find(verb, target)
+        if hit is None:
+            continue
+        position, doc = hit
+        text = evidence_screen_text(doc)
+        if not text.strip():
+            failures.append(
+                f"{label}: beat {position} ({verb} {target!r}) captured no page "
+                f"text at all — `aria`/`screen` are empty, so nothing about "
+                f"what was on screen survived"
+            )
+            continue
+        missing = [s for s in present if s not in text]
+        if missing:
+            failures.append(
+                f"{label}: the evidence for beat {position} ({verb} {target!r}) "
+                f"does not say {missing!r} was on screen. A reviewer holding "
+                f"only this file cannot state what the frame showed, which is "
+                f"issue #9's acceptance criterion. Captured "
+                f"{len(text)} characters."
+            )
+        leaked = [s for s in absent if s in text]
+        if leaked:
+            failures.append(
+                f"{label}: the evidence for beat {position} ({verb} {target!r}) "
+                f"still says {leaked!r} was on screen, which belongs to an "
+                f"earlier state of the page — the capture is not per-beat, it "
+                f"is a stale dump reused across beats"
+            )
+
+    if scope is not None:
+        selector, inside, markup = scope
+        hit = find("spotlight", selector)
+        if hit is not None:
+            position, doc = hit
+            if doc.get("scope") != selector:
+                failures.append(
+                    f"{label}: beat {position} spotlights {selector!r} and its "
+                    f"evidence scopes to {doc.get('scope')!r} — issue #9 asks "
+                    f"for the capture to be scoped to the spotlight target"
+                )
+            for field, wanted in (("scope_aria", inside), ("html", markup)):
+                got = doc.get(field)
+                if not isinstance(got, str) or wanted not in got:
+                    failures.append(
+                        f"{label}: beat {position}'s evidence `{field}` is "
+                        f"{str(got)[:120]!r}, which does not contain {wanted!r} "
+                        f"— the spotlight target's own tree and markup are "
+                        f"what the scope is for"
+                    )
+        cleared = find("spotlight", None)  # type: ignore[arg-type]
+        if cleared is not None:
+            position, doc = cleared
+            if doc.get("scope") is not None or doc.get("html") is not None:
+                failures.append(
+                    f"{label}: beat {position} clears the spotlight, but its "
+                    f"evidence still scopes to {doc.get('scope')!r} with "
+                    f"markup attached — the scope outlives the highlight"
+                )
+
+    if not failures:
+        sizes = [
+            (out_dir / b["evidence"]).stat().st_size for b in beats if b.get("evidence")
+        ]
+        print(
+            f"smoke: {label} evidence ok ({len(docs)} beats, "
+            f"{sum(sizes) // 1024} kB, largest {max(sizes)} bytes)"
         )
     return failures
 
@@ -5136,6 +5850,7 @@ def run_web(out_root: Path) -> list[str]:
         )
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
+        + check_evidence("web", out_dir, WEB_EVIDENCE, WEB_EVIDENCE_SCOPE)
         + check_healthy("web", out_dir)
     )
 
@@ -5170,6 +5885,133 @@ def run_web_problems(out_root: Path) -> list[str]:
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web-problems: Recorder raised {type(exc).__name__}: {exc}"]
     return check_issues("web-problems", out_dir, WEB_PROBLEM_ISSUES)
+
+
+def run_terminal_wrap(out_root: Path) -> list[str]:
+    """A registered secret split by a line wrap must still be refused.
+
+    Two mechanisms miss the same value for the same reason, and this take is
+    what makes them agree. `_screen()` walks the xterm.js buffer a row at a
+    time and joins with newlines without consulting `isWrapped`, so a
+    credential crossing the last column is two rows with a newline through the
+    middle: contiguous to a viewer, contiguous in the frames, and a substring
+    of nothing. `_verify_redaction_final()` — the check that decides whether
+    the mp4 may be written at all — asked `secret in screen`, and the evidence
+    mask asked the same question the same way. Both said no.
+
+    **Late registration is how the value gets onto the screen at all**, and it
+    is not a contrivance. The stream scrubber (#5) masks what it knows about
+    while the bytes go past, so a value registered up front never reaches the
+    buffer and this shape cannot exist. Registering *after* the command has
+    printed is the ordinary shape of the mistake: a token rotates into output
+    before the storyboard names it, or the author adds `register_secret()` on
+    the second run-through. What is on screen at the end of the take is what
+    is in the frames, whenever it was registered — which is exactly what the
+    final check is for.
+
+    Printed from a **script**, not a `run()` argument: a command line is
+    echoed, and typing the value into one trips `run()`'s own guard (#5) and
+    puts it in the frames by a path this take is not about. Same reasoning as
+    `term_printer_script()`.
+
+    Graded on the refusal and on what it kept: `SKILL.md` promises a
+    `SecretLeak` keeps nothing, and the geometry is asserted first so a take
+    that quietly stopped wrapping fails loudly rather than passing as a test
+    of an ordinary echo.
+    """
+    if os.name != "posix":
+        return []
+    from demo_recording import SecretLeak, TerminalRecorder
+
+    label = "terminal-wrap"
+    out_dir = fresh_take_dir(out_root, label)
+    failures: list[str] = []
+    geometry: dict = {}
+    raised: BaseException | None = None
+    # Outside the take directory, so the "nothing was kept" sweep below grades
+    # what the recorder wrote and not what this harness did. The shell starts
+    # in the process cwd, so this is a chdir, the same way
+    # `run_terminal_redaction` reaches `./print-secrets`.
+    work_dir = Path(tempfile.mkdtemp(prefix="smoke-wrap-"))
+    script = work_dir / "print-wrapped"
+    previous = Path.cwd()
+    os.chdir(work_dir)
+    try:
+        with TerminalRecorder(out_dir, speech=False) as rec:
+            cols = int(rec.page.evaluate("() => window.__term.cols"))
+            # The script prints "<pad> <secret> <marker>" from column 0, so the
+            # secret starts at len(pad) + 1. Solve for the padding that puts
+            # TERMINAL_WRAP_HEAD of its characters before the boundary.
+            pad = "x" * max(0, cols - TERMINAL_WRAP_HEAD - 1)
+            geometry = {
+                "cols": cols,
+                "starts_at": len(pad) + 1,
+                "ends_at": len(pad) + 1 + len(TERMINAL_WRAP_SECRET),
+            }
+            script.write_text(
+                f"#!/bin/sh\nprintf '%s %s %s\\n' "
+                f"'{pad}' '{TERMINAL_WRAP_SECRET}' '{TERMINAL_WRAP_MARKER}'\n"
+            )
+            script.chmod(0o755)
+            rec.caption("A long line wraps.")
+            rec.run("./print-wrapped")
+            rec.wait_for_prompt(timeout_s=15)
+            rec.pause(0.4)
+            # ...and only now is it a secret. The scrubber never saw it, so it
+            # is on the screen, wrapped, and the final check is the only thing
+            # left between it and a written mp4.
+            rec.register_secret(TERMINAL_WRAP_SECRET)
+    except SecretLeak as leak:
+        raised = leak
+    except Exception as exc:  # noqa: BLE001 - any other verdict is a failure
+        return [f"{label}: expected SecretLeak, got {type(exc).__name__}: {exc}"]
+    finally:
+        os.chdir(previous)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    # The premise, arithmetic rather than hoped for.
+    if not geometry or not (
+        geometry["starts_at"] < geometry["cols"] < geometry["ends_at"]
+    ):
+        failures.append(
+            f"{label}: the secret occupies columns {geometry.get('starts_at')}-"
+            f"{geometry.get('ends_at')} of a {geometry.get('cols')}-column "
+            f"terminal, so the line did not wrap through it and nothing below "
+            f"is being exercised"
+        )
+    if raised is None:
+        failures.append(
+            f"{label}: a registered secret was on the terminal screen at the "
+            f"end of the take, split across a line wrap, and the take finished "
+            f"cleanly. `_screen()` joins buffer rows with newlines and does not "
+            f"consult isWrapped, so `secret in screen` sees neither half — and "
+            f"the value is in the frames whole."
+        )
+    elif str(len(TERMINAL_WRAP_SECRET)) not in str(raised):
+        failures.append(
+            f"{label}: the take was refused with {str(raised)[:120]!r}, which "
+            f"does not name the {len(TERMINAL_WRAP_SECRET)}-character value "
+            f"this take planted — something else refused it and the wrap was "
+            f"never reached"
+        )
+    left = sorted(
+        str(q.relative_to(out_dir))
+        for q in out_dir.rglob("*")
+        if q.is_file() and q.name != MARKER_NAME
+    )
+    if left:
+        failures.append(
+            f"{label}: {left!r} survived a take refused for a secret on screen. "
+            f"SKILL.md says a SecretLeak keeps nothing, and a terminal still is "
+            f"the raw screen."
+        )
+    if not failures:
+        print(
+            f"smoke: {label} a registered secret split by a line wrap at column "
+            f"{geometry['cols']} (chars {geometry['starts_at']}-"
+            f"{geometry['ends_at']}) is still refused, and keeps nothing"
+        )
+    return failures
 
 
 def run_terminal_problems(out_root: Path) -> list[str]:
@@ -5788,7 +6630,14 @@ def run_redaction(out_root: Path) -> list[str]:
             return [f"redaction: Recorder raised {type(exc).__name__}: {exc}"]
         problems += check_unmatched_redaction(out_root, base_url)
         problems += check_storyboard_leak_discards(out_root, base_url)
-    return problems + check_redaction(out_dir, info, started)
+    return (
+        problems
+        # Before the byte sweep in check_redaction(), and not instead of it:
+        # the sweep says no secret is in these files, and this says the files
+        # are an account of the page. Neither is worth anything alone.
+        + check_evidence("redaction", out_dir, REDACT_EVIDENCE, REDACT_EVIDENCE_SCOPE)
+        + check_redaction(out_dir, info, started)
+    )
 
 
 def _segment_parts(out_dir: Path) -> list[str]:
@@ -6951,11 +7800,11 @@ def check_terminal_redaction(out_dir: Path, info: dict, started_at: float) -> li
         # positively: "no beat holds the secret" is equally true of a log that
         # dropped the beats.
         masked = [b for b in beats if SECRET_MASK in (b.get("selector") or "")]
-        if len(masked) != 2:
+        if len(masked) != 3:
             failures.append(
                 f"terminal-redaction: {len(masked)} beats carry a scrubbed "
-                f"selector, expected 2 — the refused run() and the refused "
-                f"send() each held a registered value. Selectors logged: "
+                f"selector, expected 3 — the refused run(), the refused send(), "
+                f"and the refused key(). Selectors logged: "
                 f"{[b.get('selector') for b in beats]!r}"
             )
         sent = [b for b in beats if b.get("verb") == "send"]
@@ -7257,6 +8106,550 @@ def run_terminal_redaction(out_root: Path) -> list[str]:
     return problems + check_terminal_redaction(out_dir, info, started)
 
 
+def check_evidence_leak_is_fatal(out_root: Path, base_url: str) -> list[str]:
+    """A `SecretLeak` raised while capturing evidence must kill the take.
+
+    This is the one assertion here about a *caller* rather than about a file,
+    and it exists because the caller was the bug. `_capture_evidence()` runs
+    inside a `finally` and wraps the medium's payload in `except Exception`,
+    because a diagnostic that cannot be collected must not lose a take that is
+    otherwise fine. But `SecretLeak` travels that same path — the payload
+    re-asserts the mask and reads the page, and both are places it comes from
+    — so the broad handler turned the one refusal that *must* be fatal into a
+    printed line and a written mp4. A guard defeated by its own caller is
+    worse than no guard: everything downstream still reads as verified.
+
+    Injected rather than provoked, deliberately. Every real source of a
+    `SecretLeak` in a payload is also a source somewhere else in the take, so
+    a fixture that provoked one would not say *which* path refused. A
+    subclass whose `_evidence_payload` raises names exactly the path under
+    test and nothing else.
+
+    Graded on the verdict *and* on what survived it: `SKILL.md` promises
+    unconditionally that a `SecretLeak` keeps nothing, and "the take raised"
+    is equally true of one that raised after writing the mp4.
+    """
+    from demo_recording import Recorder, SecretLeak
+
+    label = "evidence-leak-fatal"
+    injected = "injected: the mask could not be verified for this beat"
+
+    class LeakyEvidence(Recorder):
+        def _evidence_payload(self) -> dict:
+            raise SecretLeak(injected)
+
+    out_dir = fresh_take_dir(out_root, label)
+    failures: list[str] = []
+    raised: BaseException | None = None
+    try:
+        with LeakyEvidence(out_dir, base_url=base_url, speech=False) as rec:
+            rec.goto("/")
+            rec.wait_for("#kpi-rev")
+            rec.pause(0.2)
+    except SecretLeak as exc:
+        raised = exc
+    except Exception as exc:  # noqa: BLE001 - any other verdict is a failure
+        return [f"{label}: expected SecretLeak, got {type(exc).__name__}: {exc}"]
+    if raised is None:
+        failures.append(
+            f"{label}: a beat whose evidence capture raised SecretLeak finished "
+            f"cleanly. The refusal was swallowed by the broad `except` that is "
+            f"there for diagnostics, so a control that used to kill a take now "
+            f"prints a line and lets the mp4 be written."
+        )
+    elif injected not in str(raised):
+        failures.append(
+            f"{label}: the take raised SecretLeak {str(raised)[:120]!r}, which "
+            f"is not the one this injected — something else refused and the "
+            f"path under test was never reached"
+        )
+    left = sorted(
+        str(p.relative_to(out_dir))
+        for p in out_dir.rglob("*")
+        if p.is_file() and p.name != MARKER_NAME
+    )
+    if left:
+        failures.append(
+            f"{label}: {left!r} survived a take that died on a SecretLeak out "
+            f"of its evidence capture. SKILL.md says a SecretLeak keeps "
+            f"nothing, and an mp4 left behind by a refused take is read by "
+            f"everything downstream as a verified one."
+        )
+    if not failures:
+        print(
+            "smoke: evidence a SecretLeak raised while capturing a beat kills "
+            "the take and keeps nothing"
+        )
+    return failures
+
+
+def run_evidence(out_root: Path) -> list[str]:
+    """The evidence take: leak shapes, the size cap, and segment naming.
+
+    Graded on `evidence/` alone — no video, no stills, no timing. Everything it
+    records is either a shape that leaks into *text* and into nothing else, or
+    a page big enough to make the caps do something.
+    """
+    from demo_recording import EVIDENCE_LIMITS, EVIDENCE_SCHEMA, Recorder
+
+    label = "evidence"
+    failures: list[str] = []
+    # The package's own constants against the ones written at the top of this
+    # file. Everything below is a statement about those numbers, so a cap
+    # quietly widened by ten has to fail here rather than pass by agreeing
+    # with itself.
+    if dict(EVIDENCE_LIMITS) != EVIDENCE_LIMITS_EXPECTED:
+        failures.append(
+            f"{label}: the package caps evidence at {dict(EVIDENCE_LIMITS)!r}, "
+            f"this harness grades {EVIDENCE_LIMITS_EXPECTED!r} — one of them "
+            f"moved without the other"
+        )
+    if EVIDENCE_SCHEMA != EVIDENCE_SCHEMA_EXPECTED:
+        failures.append(
+            f"{label}: the package exports EVIDENCE_SCHEMA {EVIDENCE_SCHEMA!r}, "
+            f"this harness grades {EVIDENCE_SCHEMA_EXPECTED!r}"
+        )
+
+    # `screen` is the terminal's field, and no take here bloats a TUI far
+    # enough to reach a 12 000-character budget — so its cap is graded as the
+    # contract of the function that applies it, and this file says plainly
+    # that that is a unit check rather than a recording. The other three are
+    # graded end to end below.
+    from demo_recording.core import _cap_text
+
+    for field, limit in sorted(EVIDENCE_LIMITS_EXPECTED.items()):
+        short, cut = _cap_text("x" * (limit - 1), limit)
+        if cut or short != "x" * (limit - 1):
+            failures.append(
+                f"{label}: _cap_text() cut text already inside the {field} "
+                f"budget ({cut} characters removed)"
+            )
+        long, cut = _cap_text("y" * (limit + 500), limit)
+        if cut != 500:
+            failures.append(
+                f"{label}: _cap_text() says it removed {cut} characters from a "
+                f"{field}-sized field 500 over its budget"
+            )
+        if EVIDENCE_MARKER not in long or not long.startswith("y" * limit):
+            failures.append(
+                f"{label}: _cap_text() on a {field}-sized field returned "
+                f"{long[-60:]!r} — a cut with no marker where it stops"
+            )
+        if len(long) > limit + EVIDENCE_TRUNCATED_MAX:
+            failures.append(
+                f"{label}: _cap_text() left {len(long)} characters for a {limit} budget"
+            )
+
+    out_dir = fresh_take_dir(out_root, label)
+    # A previous take's evidence, planted. `record.py` is committed precisely so
+    # it can be re-run into the same folder, and a re-record that *adds* a
+    # redact() (or simply has fewer beats) would otherwise leave the old files
+    # sitting beside the new ones holding the value the new take exists to
+    # hide. Two files, because the clearing has to be scoped: one this take's
+    # naming owns and one belonging to another segment of the same demo, which
+    # must survive — deleting that would break a multi-segment re-record.
+    (out_dir / EVIDENCE_DIR_NAME).mkdir(parents=True, exist_ok=True)
+    stale = out_dir / EVIDENCE_DIR_NAME / f"{EVIDENCE_SEGMENT}.seg.beat-99.json"
+    stale.write_text(json.dumps({"aria": EVIDENCE_STALE_SECRET}) + "\n")
+    other = out_dir / EVIDENCE_DIR_NAME / "othersegment.seg.beat-00.json"
+    other.write_text(json.dumps({"aria": "another segment's beat"}) + "\n")
+
+    straddle: dict | None = None
+    with fixture_server() as base_url:
+        try:
+            with Recorder(
+                out_dir,
+                base_url=base_url,
+                speech=False,
+                segment=EVIDENCE_SEGMENT,
+            ) as rec:
+                rec.redact(*EVIDENCE_REDACT)
+                rec.register_secret(*EVIDENCE_REGISTER, EVIDENCE_STRADDLE)
+                rec.goto("/?evidence=1")
+                rec.wait_for("#ev-ws-key")
+                # Two beats while #ev-tick-card is still rewriting itself every
+                # 5 ms. The capture reads the page three times (harvest,
+                # snapshot, harvest) and that window is wider than the interval,
+                # so the mask cannot be built from what the snapshot saw — and
+                # the right answer is to write no page text, not to write text
+                # masked against a value that is already stale.
+                rec.pause(0.3)
+                rec.pause(0.3)
+                # ...and with the rotating value gone, everything else is
+                # gradable. The interval keeps running; it just has nothing to
+                # write into.
+                rec.page.evaluate(
+                    "() => document.getElementById('ev-tick-card').remove()"
+                )
+                rec.pause(0.4)
+                # A caption naming a redacted card's value. Nothing refuses it
+                # — it was never registered — and it is sticky, so it stamps
+                # itself onto every beat that follows in timeline.json and
+                # timeline.md, the two files this skill says to commit.
+                rec.caption(EVIDENCE_BLEED_CAPTION)
+
+                # Markup, three times. A registered value split across elements
+                # must withhold the markup outright; attributes nothing renders
+                # must not be in it at all; and a spotlight on a *redacted*
+                # element must come back elided rather than withheld.
+                rec.spotlight(EVIDENCE_SPLIT_TARGET)
+                rec.pause(0.3)
+                rec.spotlight(EVIDENCE_ATTR_TARGET)
+                rec.pause(0.3)
+                rec.spotlight(EVIDENCE_REDACTED_TARGET)
+                rec.pause(0.3)
+                # ...and a registered value the serializer escapes on its way
+                # into `html`. Nothing else on this page puts a character with
+                # an entity form inside a secret.
+                rec.spotlight(EVIDENCE_AMP_TARGET)
+                rec.pause(0.3)
+                rec.spotlight()
+
+                # The caps. Bloat the page, spotlight the bloat, and place a
+                # registered secret so the markup budget cuts through it.
+                rec.page.evaluate(EVIDENCE_BLOAT_JS, EVIDENCE_BLOAT_ITEMS)
+                rec.spotlight(f"#{EVIDENCE_BLOAT_ID}")
+                straddle = rec.page.evaluate(
+                    EVIDENCE_STRADDLE_JS,
+                    [
+                        EVIDENCE_BLOAT_ID,
+                        EVIDENCE_STRADDLE,
+                        EVIDENCE_LIMITS_EXPECTED["html"],
+                    ],
+                )
+                rec.pause(0.3)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return failures + [f"{label}: Recorder raised {type(exc).__name__}: {exc}"]
+        # Inside the same server, and after the take above rather than instead
+        # of it: this one records nothing worth grading and exists only to
+        # prove the capture's refusal is fatal.
+        failures += check_evidence_leak_is_fatal(out_root, base_url)
+
+    if stale.exists():
+        failures.append(
+            f"{label}: {stale.name} survived a re-record into the same "
+            f"directory. It is a previous take's evidence, holding a value "
+            f"this take was told to redact — and re-recording into the same "
+            f"folder is how this skill is meant to be used."
+        )
+    if not other.exists():
+        failures.append(
+            f"{label}: {other.name} was deleted. It belongs to another segment "
+            f"of the same demo, which a re-record of *this* segment must "
+            f"leave alone — otherwise re-recording one segment throws away the "
+            f"evidence for all the others."
+        )
+
+    beats, docs, problems = evidence_docs(label, out_dir, segment=EVIDENCE_SEGMENT)
+    failures += problems
+    if not docs:
+        return failures
+    pauses = [
+        (i, doc)
+        for i, (beat, doc) in enumerate(zip(beats, docs, strict=False))
+        if beat.get("verb") == "pause"
+    ]
+    if len(pauses) != 8:
+        return failures + [
+            f"{label}: {len(pauses)} pause beats, expected 8 — the take is not "
+            f"the take this grades"
+        ]
+    ticking = pauses[:2]
+    settled_i, settled = pauses[2]
+    split_i, split = pauses[3]
+    attrs_i, attrs = pauses[4]
+    elided_i, elided = pauses[5]
+    amp_i, amp = pauses[6]
+    capped_i, capped = pauses[7]
+
+    # -- the leak shapes -----------------------------------------------------
+    #
+    # A byte sweep, like redaction's, over every evidence file the take wrote.
+    # The `keep` half is what stops it from passing on a recorder that masked
+    # everything, or captured nothing.
+    written = sorted((out_dir / EVIDENCE_DIR_NAME).glob("*.json"))
+    blob = "\n".join(p.read_text() for p in written)
+    # The `keep` half is searched in the **page text only**, the same way
+    # `check_evidence` and `run_terminal_wrap` search theirs, and
+    # for the same reason: every one of these strings is also in a caption or a
+    # selector somewhere in the embedded beat record, so searching the whole
+    # file would find them whether or not a character of the page was captured.
+    # Sound over the whole file today by luck. The absence half stays broad —
+    # "this credential is in none of these bytes" is a claim about every byte.
+    screens = "\n".join(
+        evidence_screen_text(json.loads(p.read_text())) for p in written
+    )
+    # Every file the take wrote, not only the evidence — `timeline.json` and
+    # `timeline.md` are the ones this skill tells people to *commit*, and the
+    # harvest that keeps a redacted value out of the evidence has to reach them
+    # too. The storyboard captions one of these values on purpose.
+    everything = sorted(p for p in out_dir.rglob("*") if p.is_file())
+    for what, literal in EVIDENCE_SECRETS.items():
+        holding = sorted(
+            str(p.relative_to(out_dir))
+            for p in everything
+            if leaked_in(p.read_bytes(), literal)
+        )
+        if holding:
+            failures.append(
+                f"{label}: {what} ({literal}) is readable in {holding!r}. "
+                f"redact() covers where a value renders; a text dump of the "
+                f"DOM — and the beat log beside it — is not protected by "
+                f"anything about a picture."
+            )
+    for what, literal in EVIDENCE_KEEP.items():
+        if literal not in screens:
+            failures.append(
+                f"{label}: {what} ({literal!r}) is in no evidence file's page "
+                f"text. It renders outside everything redact() covers, so "
+                f"either the capture wrote no page text — which makes every "
+                f"assertion above a statement about an empty file — or the "
+                f"mask went wide enough to eat the app it was documenting."
+            )
+
+    # -- the rotating value: refuse, do not guess ----------------------------
+    refused = [i for i, doc in ticking if doc.get("omitted")]
+    if not refused:
+        failures.append(
+            f"{label}: neither beat {ticking[0][0]} nor {ticking[1][0]} refused "
+            f"to capture, and both ran while a redacted card was being "
+            f"rewritten every 5 ms — faster than the three round trips a "
+            f"capture takes. One of them has to come back `omitted`, or the "
+            f"mask is being built from a value the snapshot did not see."
+        )
+    for i, doc in ticking:
+        if not doc.get("omitted"):
+            continue
+        for field in ("aria", "scope_aria", "html"):
+            if doc.get(field):
+                failures.append(
+                    f"{label}: beat {i} says it omitted its page text and "
+                    f"still carries `{field}` — the refusal is cosmetic"
+                )
+    if settled.get("omitted"):
+        failures.append(
+            f"{label}: beat {settled_i} refused too ({settled['omitted']!r}), "
+            f"and it ran after the rotating card was removed. If every beat "
+            f"refuses, nothing below is being graded."
+        )
+
+    # -- markup: withheld when split, stripped of what never rendered --------
+    if split.get("scope") != EVIDENCE_SPLIT_TARGET:
+        failures.append(
+            f"{label}: beat {split_i} scopes to {split.get('scope')!r}, "
+            f"expected {EVIDENCE_SPLIT_TARGET!r}"
+        )
+    if EVIDENCE_HTML_WITHHELD_MARKER not in str(split.get("html")):
+        failures.append(
+            f"{label}: beat {split_i} spotlights an element holding a "
+            f"registered secret written across two tags, and its `html` is "
+            f"{str(split.get('html'))[:160]!r}. A substring mask cannot reach a "
+            f"value interleaved with elements, so the markup has to be withheld "
+            f"and say so — publishing it half-cleaned is the leak."
+        )
+    if attrs.get("scope") != EVIDENCE_ATTR_TARGET:
+        failures.append(
+            f"{label}: beat {attrs_i} scopes to {attrs.get('scope')!r}, "
+            f"expected {EVIDENCE_ATTR_TARGET!r}"
+        )
+    markup = str(attrs.get("html") or "")
+    if "nothing rendered here" not in markup:
+        failures.append(
+            f"{label}: beat {attrs_i}'s `html` is {markup[:160]!r}, which does "
+            f"not contain the text the element actually renders — the markup "
+            f"was not captured, so the attribute assertions below prove nothing"
+        )
+    for attr in ("data-token", "data-cfg"):
+        if attr in markup:
+            failures.append(
+                f"{label}: beat {attrs_i}'s `html` still carries {attr!r}. "
+                f"Nothing renders it, so it was in no frame, no still, no "
+                f"caption and no narration clip — serializing it here makes "
+                f"evidence the only place it exists."
+            )
+
+    # -- markup: elided, not withheld, when the target is itself redacted -----
+    #
+    # Redacting and spotlighting the same element is the ordinary call, and
+    # `querySelectorAll('*')` never returns the element it was called on — so a
+    # serializer that elides only *descendants* misses exactly that case. The
+    # value inside this one is split across tags, so what it falls back to is
+    # visible: the substring mask cannot reach the markup either, the withhold
+    # path catches it, and the beat comes back with no markup at all instead of
+    # markup a reader can use. Both outcomes are safe; only one is evidence.
+    if elided.get("scope") != EVIDENCE_REDACTED_TARGET:
+        failures.append(
+            f"{label}: beat {elided_i} scopes to {elided.get('scope')!r}, "
+            f"expected {EVIDENCE_REDACTED_TARGET!r}"
+        )
+    elided_html = str(elided.get("html") or "")
+    if EVIDENCE_HTML_WITHHELD_MARKER in elided_html:
+        failures.append(
+            f"{label}: beat {elided_i} spotlights an element that redact() "
+            f"covers, and its markup was withheld rather than elided. A "
+            f"redacted subtree can be replaced wholesale — the withhold path "
+            f"is the last resort for a value the mask cannot reach, and "
+            f"reaching for it here costs the beat its markup for nothing."
+        )
+    elif SECRET_MASK_EXPECTED not in elided_html:
+        failures.append(
+            f"{label}: beat {elided_i}'s `html` is {elided_html[:160]!r}, with "
+            f"no {SECRET_MASK_EXPECTED!r} in it — the spotlight target is "
+            f"redacted, so its contents have to be elided in the markup and "
+            f"visibly so"
+        )
+    elif EVIDENCE_REDACTED_TARGET.lstrip("#") not in elided_html:
+        failures.append(
+            f"{label}: beat {elided_i}'s `html` is {elided_html[:160]!r}, which "
+            f"does not name the element it is the markup of — an elision that "
+            f"took the structure with it leaves nothing to read"
+        )
+    # ...and the subtree goes with it. Eliding a redacted element means
+    # replacing its `textContent`, which takes every descendant — so the
+    # markup is the target's own tag and nothing else. Without this the
+    # descendants survive and only the *strings* in them are masked, which
+    # publishes `sk-<i>live</i>[redacted]`: a value elided in the halves the
+    # substring mask happened to reach, in markup a reader would take at face
+    # value. Measured — that is exactly what a serializer that elides only
+    # descendants writes here, and every other assertion above is satisfied
+    # by it.
+    tags = re.findall(r"<[a-zA-Z/][^>]*>", elided_html)
+    if elided_html and len(tags) != 2:
+        failures.append(
+            f"{label}: beat {elided_i}'s `html` holds {len(tags)} tags "
+            f"({tags[:6]!r}), expected the redacted target's own open and "
+            f"close and nothing between them. redact() covers a whole "
+            f"subtree; markup that kept the subtree and masked only the "
+            f"strings in it is elided wherever the mask happened to reach and "
+            f"in the clear everywhere else."
+        )
+
+    # -- markup: an entity form is still the value ---------------------------
+    #
+    # The byte sweep above is what grades the leak; this grades the *premise*,
+    # which the sweep cannot. `sk-live-AMPS0000&sig=…` is absent from a file
+    # that never captured the element at all, so without this the whole shape
+    # is satisfied by a null `html`.
+    if amp.get("scope") != EVIDENCE_AMP_TARGET:
+        failures.append(
+            f"{label}: beat {amp_i} scopes to {amp.get('scope')!r}, expected "
+            f"{EVIDENCE_AMP_TARGET!r} — the entity-escaping shape is not being "
+            f"captured, so the sweep's silence about it says nothing"
+        )
+    amp_html = str(amp.get("html") or "")
+    if not amp_html:
+        failures.append(
+            f"{label}: beat {amp_i} captured no `html` at all, so the value "
+            f"`outerHTML` escapes was never serialized and nothing about entity "
+            f"forms is being graded"
+        )
+    elif EVIDENCE_HTML_WITHHELD_MARKER not in amp_html and "&amp;" in amp_html:
+        failures.append(
+            f"{label}: beat {amp_i}'s `html` is {amp_html[:160]!r} — it still "
+            f"carries an escaped ampersand, so a registered secret spelled with "
+            f"one is being published in a form no raw search finds. The mask, "
+            f"the withhold fallback and the backstop must all resolve entities "
+            f"before deciding."
+        )
+
+    # -- the caps ------------------------------------------------------------
+    if settled.get("truncated"):
+        failures.append(
+            f"{label}: beat {settled_i} ran before anything was appended to the "
+            f"page and its evidence is already marked truncated "
+            f"{settled.get('truncated')!r} — the marker means nothing if it is "
+            f"always there"
+        )
+    if len(settled.get("aria") or "") >= EVIDENCE_LIMITS_EXPECTED["aria"]:
+        failures.append(
+            f"{label}: beat {settled_i}'s aria is "
+            f"{len(settled.get('aria') or '')} characters before the page was "
+            f"bloated, so the untruncated case is not being exercised"
+        )
+    if capped.get("scope") != f"#{EVIDENCE_BLOAT_ID}":
+        failures.append(
+            f"{label}: beat {capped_i} scopes to {capped.get('scope')!r}, "
+            f"expected the bloated element — its markup is what the html cap is "
+            f"being graded on"
+        )
+    # All three text fields, not the two that were easiest to reach: a cap
+    # applied to `aria` and not to `scope_aria` is a cap on a third of what a
+    # spotlight beat writes.
+    for field in ("aria", "scope_aria", "html"):
+        limit = EVIDENCE_LIMITS_EXPECTED[field]
+        text = capped.get(field)
+        if not isinstance(text, str):
+            failures.append(
+                f"{label}: beat {capped_i} captured no `{field}` at all, so the "
+                f"cap on it is untested"
+            )
+            continue
+        if field not in (capped.get("truncated") or []):
+            failures.append(
+                f"{label}: beat {capped_i}'s `{field}` is {len(text)} "
+                f"characters against a {limit} cap, and `truncated` is "
+                f"{capped.get('truncated')!r} — it was cut and does not say so"
+            )
+        if EVIDENCE_MARKER not in text:
+            failures.append(
+                f"{label}: beat {capped_i}'s `{field}` was cut with no marker "
+                f"where it stops. It ends {text[-80:]!r}, which reads as a page "
+                f"that simply ended there."
+            )
+        # Cut *to* the budget, not merely somewhere under a ceiling: the marker
+        # is the only thing allowed past it.
+        allowed = limit + EVIDENCE_TRUNCATED_MAX
+        if not limit < len(text) <= allowed:
+            failures.append(
+                f"{label}: beat {capped_i}'s `{field}` is {len(text)} "
+                f"characters, expected the {limit}-character budget plus a "
+                f"marker (at most {allowed})"
+            )
+
+    # -- masking runs before capping, which only matters where they meet -----
+    #
+    # The premise is arranged and asserted rather than hoped for: the take
+    # re-pads a list item until a registered secret's characters span the
+    # markup budget, and reports where it landed. Cap first and the value's
+    # head survives as the last thing in the file, which no later substring
+    # search for the whole literal finds.
+    if straddle is None:
+        failures.append(
+            f"{label}: could not place a registered secret across the "
+            f"{EVIDENCE_LIMITS_EXPECTED['html']}-character markup budget, so "
+            f"the mask-then-cap ordering is not being exercised at all"
+        )
+    else:
+        print(
+            f"smoke: {label} a registered secret spans the markup budget "
+            f"(chars {straddle['at']}-{straddle['at'] + len(EVIDENCE_STRADDLE)} "
+            f"of {straddle['length']}, budget "
+            f"{EVIDENCE_LIMITS_EXPECTED['html']})"
+        )
+        # Any run of the value long enough to identify it, not only the whole
+        # thing: a cut leaves a head, and a head is exactly what a search for
+        # the literal misses.
+        for size in (len(EVIDENCE_STRADDLE), 20, 12):
+            head = EVIDENCE_STRADDLE[:size]
+            if head in blob:
+                failures.append(
+                    f"{label}: {head!r} — {size} characters of a registered "
+                    f"secret that straddles the markup budget — survives in the "
+                    f"evidence. The value was cut before it was masked, so what "
+                    f"is left is a head no substring search finds."
+                )
+                break
+
+    if not failures:
+        print(
+            f"smoke: {label} ok ({len(docs)} beats as "
+            f"{EVIDENCE_SEGMENT}.seg.beat-NN.json, {len(EVIDENCE_SECRETS)} leak "
+            f"shapes clean, {len(EVIDENCE_KEEP)} controls intact, "
+            f"{len(refused)} beat(s) refused a moving target)"
+        )
+    return failures
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -7295,6 +8688,7 @@ def run_terminal(out_root: Path) -> list[str]:
         + check_beat_frames(
             "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
         )
+        + check_evidence("terminal", out_dir, TERMINAL_EVIDENCE)
         + check_healthy("terminal", out_dir)
     )
 
@@ -7330,6 +8724,11 @@ def main() -> int:
         help="record only the two-segment take and its stitch (issue #7)",
     )
     parser.add_argument(
+        "--evidence-only",
+        action="store_true",
+        help="record only the per-beat evidence take (issue #9)",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         help="where recordings land (default: a fresh temp dir). The web/ and "
@@ -7351,6 +8750,7 @@ def main() -> int:
             ("--determinism-only", args.determinism_only),
             ("--redaction-only", args.redaction_only),
             ("--segments-only", args.segments_only),
+            ("--evidence-only", args.evidence_only),
         )
         if on
     ]
@@ -7398,8 +8798,11 @@ def main() -> int:
         if only in (None, "--web-only"):
             failures += run_web_problems(out_root)
             failures += run_strict_web(out_root)
+        if only in (None, "--web-only", "--evidence-only"):
+            failures += run_evidence(out_root)
         if only in (None, "--terminal-only"):
             failures += run_terminal_problems(out_root)
+            failures += run_terminal_wrap(out_root)
             failures += run_terminal_race(out_root)
             failures += run_strict_terminal(out_root)
         # Both flags reach it: it is a terminal take and a redaction take, and
