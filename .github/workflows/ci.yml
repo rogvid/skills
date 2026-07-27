@@ -42,6 +42,51 @@ jobs:
           find skills -name '*.sh' -print0 |
             xargs -0 -r uv run --with shellcheck-py shellcheck --severity=style
 
+  # The demo-video workflow is the one deliverable in this repo that CI cannot
+  # exercise by running it — GitHub is the only thing that executes a workflow.
+  # actionlint is what covers the gap: it type-checks every `${{ }}` expression
+  # against the contexts actually available and runs shellcheck over each
+  # `run:` block, which is where the two classes of bug that bit this workflow
+  # during development live (a `[ -f x ] && cp` that exits under `set -e`, and
+  # a step reading an output that a skipped step never wrote).
+  workflows:
+    name: workflows (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # From PyPI for the same reason shellcheck is above: one command, the
+      # same binary a contributor gets locally.
+      - name: actionlint
+        run: |
+          uv run --no-project --with actionlint-py --with shellcheck-py \
+            actionlint .github/workflows/*.yml
+
+  ci-unit:
+    name: unit (demo-video CI helpers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: tests/ci-unit
+        run: tests/ci-unit
+
+      # An assertion nobody has watched fail is a claim, not a check. This
+      # breaks each helper in a named way and requires the tests that watch it
+      # to go red; it aborts rather than passing if an injection fails to land.
+      - name: tests/ci-unit --fault-inject
+        run: tests/ci-unit --fault-inject
+
   typecheck:
     name: typecheck (mypy)
     runs-on: ubuntu-latest

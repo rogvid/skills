@@ -43,6 +43,13 @@ evidence/
 failure/
 demo-video-FAILED.md
 
+# Scratch the demo-video CI workflow writes into the checkout: staged
+# artifacts, the changed-file lists, the rendered comment body, and the
+# second checkout it makes of this repository when another repo calls it.
+# All of it is per-run and none of it is history.
+.demo-video-ci/
+.demo-video-helpers/
+
 # Smoke-test recordings. tests/smoke records into a temp dir by default; this
 # covers pointing it back into the repo (tests/smoke --out-dir tests/out).
 tests/out/

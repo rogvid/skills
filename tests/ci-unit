@@ -1,0 +1,618 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Unit tests for the three helper scripts the demo-video CI workflow runs.
+
+    tests/ci-unit                  # run the suite
+    tests/ci-unit --fault-inject   # prove the suite can fail
+
+The workflow itself is YAML that only GitHub can execute, so what is tested
+here is everything the workflow *delegates*: which storyboards a diff makes
+stale, whether a target may be recorded against, and what the pull-request
+comment says. Those are the three places a wrong answer would be believed.
+
+**`--fault-inject` is the part that makes the rest mean anything.** It breaks
+one specific thing in a helper, runs the suite against the broken copy, and
+requires the named tests to fail. An injection whose search string does not
+match *exactly once* aborts the run rather than reporting a pass — an
+injection that silently did nothing would otherwise "prove" a hollow assertion
+was sound. What is deliberately NOT covered is stated at the bottom of this
+file; read it before treating a green run as coverage of the workflow.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+from types import ModuleType
+
+SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "scripts"
+
+
+def load(name: str, directory: Path | None = None) -> ModuleType:
+    """Import an extension-less PEP 723 executable as a module."""
+    path = (directory or SCRIPTS) / name
+    spec = importlib.util.spec_from_loader(
+        name.replace("-", "_"),
+        importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path)),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_DIR = Path(os.environ.get("CI_UNIT_SCRIPTS", SCRIPTS))
+storyboards = load("demo-storyboards", _DIR)
+guard = load("demo-target-guard", _DIR)
+comment = load("demo-comment", _DIR)
+
+
+# --------------------------------------------------------------------------
+# demo-storyboards — which storyboards a diff makes stale
+# --------------------------------------------------------------------------
+
+
+class AppRoot(unittest.TestCase):
+    def test_parent_of_the_demos_directory(self):
+        self.assertEqual(
+            storyboards.app_root("examples/ticket-queue/demos/2026-07-26-x/record.py"),
+            "examples/ticket-queue",
+        )
+
+    def test_a_storyboard_at_the_root_attributes_to_the_whole_repository(self):
+        # There is no narrower directory to blame, and saying "" (the repo
+        # root) is honest where inventing one would not be.
+        self.assertEqual(storyboards.app_root("demos/x/record.py"), "")
+
+    def test_innermost_demos_wins(self):
+        # The narrower root records fewer storyboards, never more.
+        self.assertEqual(
+            storyboards.app_root("a/demos/b/demos/c/record.py"), "a/demos/b"
+        )
+
+    def test_no_demos_component_falls_back_to_the_storyboards_own_folder(self):
+        self.assertEqual(storyboards.app_root("a/b/record.py"), "a/b")
+
+
+class Select(unittest.TestCase):
+    SB = "examples/ticket-queue/demos/2026-07-26-status-filter/record.py"
+    OTHER = "examples/other-app/demos/2026-01-01-x/record.py"
+
+    def test_a_change_to_the_storyboard_itself_selects_it(self):
+        self.assertEqual(storyboards.select([self.SB], [self.SB]), [self.SB])
+
+    def test_a_change_to_the_app_it_demonstrates_selects_it(self):
+        # The point of the rule: a demo of code that moved is stale even when
+        # nobody touched the storyboard.
+        self.assertEqual(
+            storyboards.select([self.SB], ["examples/ticket-queue/web/app.js"]),
+            [self.SB],
+        )
+
+    def test_a_change_elsewhere_selects_nothing(self):
+        self.assertEqual(
+            storyboards.select([self.SB], ["skills/demo-video/SKILL.md", "README.md"]),
+            [],
+        )
+
+    def test_a_sibling_apps_change_does_not_select_this_one(self):
+        self.assertEqual(
+            storyboards.select(
+                [self.SB, self.OTHER], ["examples/other-app/web/app.js"]
+            ),
+            [self.OTHER],
+        )
+
+    def test_an_empty_diff_selects_nothing(self):
+        self.assertEqual(storyboards.select([self.SB], []), [])
+
+    def test_a_prefix_that_is_not_a_path_boundary_does_not_match(self):
+        # "examples/ticket-queue-v2/..." must not select the ticket-queue demo.
+        self.assertEqual(
+            storyboards.select([self.SB], ["examples/ticket-queue-v2/web/app.js"]), []
+        )
+
+
+class StripPrefix(unittest.TestCase):
+    """Re-rooting a repository-relative diff onto `working-directory`."""
+
+    CHANGED = [
+        "examples/ticket-queue/web/app.js",
+        "examples/ticket-queue-v2/web/app.js",
+        "README.md",
+        "docs/examples/ticket-queue/notes.md",
+    ]
+
+    def test_only_paths_inside_the_prefix_survive_and_are_re_rooted(self):
+        self.assertEqual(
+            storyboards.strip_prefix(self.CHANGED, "examples/ticket-queue"),
+            ["web/app.js"],
+        )
+
+    def test_a_neighbour_sharing_the_prefix_as_text_is_not_inside_it(self):
+        # The bug this exists for: `grep -F examples/ticket-queue/` matches
+        # `examples/ticket-queue-v2/…` and `docs/examples/ticket-queue/…`, and
+        # every push to either would record the wrong application's demo.
+        got = storyboards.strip_prefix(self.CHANGED, "examples/ticket-queue")
+        self.assertNotIn("web/app.js", got[1:])
+        self.assertEqual(len(got), 1)
+
+    def test_no_prefix_passes_everything_through(self):
+        self.assertEqual(storyboards.strip_prefix(self.CHANGED, ""), self.CHANGED)
+        self.assertEqual(storyboards.strip_prefix(self.CHANGED, "."), self.CHANGED)
+
+    def test_a_trailing_slash_is_the_same_prefix(self):
+        self.assertEqual(
+            storyboards.strip_prefix(self.CHANGED, "examples/ticket-queue/"),
+            ["web/app.js"],
+        )
+
+    def test_a_diff_entirely_outside_the_prefix_becomes_empty(self):
+        # This is what makes the working-directory scoping a real gate: with
+        # `working-directory: examples/ticket-queue`, every storyboard's app
+        # root is "" (the directory itself), so if anything survived the strip
+        # it would select them all.
+        self.assertEqual(
+            storyboards.strip_prefix(
+                ["README.md", "skills/x/SKILL.md"], "examples/ticket-queue"
+            ),
+            [],
+        )
+
+
+# --------------------------------------------------------------------------
+# demo-target-guard — what may be recorded against
+# --------------------------------------------------------------------------
+
+
+class Classify(unittest.TestCase):
+    def test_loopback_addresses_and_names(self):
+        for url in (
+            "http://127.0.0.1:8901",
+            "http://127.5.5.5/",
+            "http://localhost:3000/x",
+            "http://[::1]:8000",
+            "https://app.localhost",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(guard.classify(url)[0], guard.LOOPBACK)
+
+    def test_private_addresses_names_and_suffixes(self):
+        for url in (
+            "http://10.0.0.4:8080",
+            "http://192.168.1.10",
+            "http://172.16.9.9",
+            "http://web:8000",  # a container service name
+            "http://queue.internal/",
+            "http://app.test",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(guard.classify(url)[0], guard.PRIVATE)
+
+    def test_public_names_and_addresses(self):
+        for url in (
+            "https://tickets.acme.com",
+            "https://staging.acme.co.uk/queue",
+            "http://93.184.216.34",
+            "https://acme.com.",  # trailing dot is still the same public name
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(guard.classify(url)[0], guard.PUBLIC)
+
+    def test_a_non_http_scheme_is_malformed(self):
+        self.assertEqual(guard.classify("file:///etc/passwd")[0], guard.MALFORMED)
+        self.assertEqual(guard.classify("not a url")[0], guard.MALFORMED)
+
+
+class Check(unittest.TestCase):
+    def test_loopback_passes_without_any_opt_in(self):
+        self.assertIsNone(guard.check("http://127.0.0.1:8901", allow_private=False))
+
+    def test_private_is_refused_by_default_and_allowed_by_the_opt_in(self):
+        self.assertIsNotNone(guard.check("http://10.0.0.4", allow_private=False))
+        self.assertIsNone(guard.check("http://10.0.0.4", allow_private=True))
+
+    def test_public_is_refused_even_with_the_opt_in(self):
+        # This is the whole point of the guard: no input makes production
+        # reachable. If this test ever passes trivially, the guard is decorative.
+        reason = guard.check("https://tickets.acme.com", allow_private=True)
+        self.assertIsNotNone(reason)
+        self.assertIn("refused", reason)
+
+    def test_the_refusal_names_the_url_so_it_can_be_fixed(self):
+        reason = guard.check("https://tickets.acme.com", allow_private=False)
+        self.assertIn("tickets.acme.com", reason)
+
+
+class Scan(unittest.TestCase):
+    SOURCE = textwrap.dedent(
+        '''
+        """A storyboard."""
+        BASE = os.environ.get("URL", "http://127.0.0.1:8901")
+        FALLBACK = "https://tickets.acme.com/queue"
+        # see http://127.0.0.1:8901 again
+        '''
+    )
+
+    def test_finds_every_distinct_literal_in_order(self):
+        self.assertEqual(
+            guard.scan(self.SOURCE),
+            ["http://127.0.0.1:8901", "https://tickets.acme.com/queue"],
+        )
+
+    def test_a_public_literal_in_a_storyboard_is_refused(self):
+        refusals = [u for u in guard.scan(self.SOURCE) if guard.check(u, False)]
+        self.assertEqual(refusals, ["https://tickets.acme.com/queue"])
+
+    def test_a_trailing_quote_or_paren_is_not_part_of_the_url(self):
+        self.assertEqual(
+            guard.scan('x = ("http://127.0.0.1:80")'), ["http://127.0.0.1:80"]
+        )
+
+
+class GuardExitCode(unittest.TestCase):
+    """The workflow only sees the exit status, so assert on that."""
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_DIR / "demo-target-guard"), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_loopback_exits_zero(self):
+        self.assertEqual(self._run("--url", "http://127.0.0.1:8901").returncode, 0)
+
+    def test_public_exits_two_and_says_why_on_stderr(self):
+        done = self._run("--url", "https://tickets.acme.com", "--allow-private")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("tickets.acme.com", done.stderr)
+
+
+# --------------------------------------------------------------------------
+# demo-comment — what the pull request says
+# --------------------------------------------------------------------------
+
+
+def beats(*pairs: tuple[float, str]) -> list[dict]:
+    return [{"index": i, "t_start": t, "caption": c} for i, (t, c) in enumerate(pairs)]
+
+
+TIMELINE = {
+    "schema": 1,
+    "recorder": "Recorder",
+    "duration": 21.4,
+    "issue_count": 0,
+    "issues": [],
+    "beats": beats(
+        (0.4, ""),
+        (1.0, "The support queue, every ticket the team holds."),
+        (4.4, "The support queue, every ticket the team holds."),
+        (6.0, "Escalated matches nothing."),
+        (9.0, "Escalated matches nothing."),
+        (11.0, ""),
+        (12.0, "Escalated matches nothing."),
+    ),
+}
+
+
+class StoryBeats(unittest.TestCase):
+    def test_a_caption_held_across_several_verbs_is_one_row(self):
+        rows = comment.story_beats(TIMELINE["beats"])
+        self.assertEqual(
+            [c for _, c in rows][:2],
+            [
+                "The support queue, every ticket the team holds.",
+                "Escalated matches nothing.",
+            ],
+        )
+
+    def test_a_row_carries_the_moment_the_caption_went_up(self):
+        rows = comment.story_beats(TIMELINE["beats"])
+        self.assertEqual(rows[0][0], 1.0)
+        self.assertEqual(rows[1][0], 6.0)
+
+    def test_a_caption_cleared_and_shown_again_is_two_rows(self):
+        # Two separate moments on screen, so two entries. Collapsing them
+        # would misreport a demo that returns to a state.
+        rows = comment.story_beats(TIMELINE["beats"])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[2], (12.0, "Escalated matches nothing."))
+
+    def test_beats_with_no_caption_produce_no_row(self):
+        self.assertEqual(comment.story_beats(beats((0.0, ""), (1.0, "  "))), [])
+
+    def test_order_is_the_order_they_appeared(self):
+        rows = comment.story_beats(beats((0.0, "a"), (1.0, "b"), (2.0, "c")))
+        self.assertEqual([c for _, c in rows], ["a", "b", "c"])
+
+
+class Cell(unittest.TestCase):
+    def test_a_pipe_in_a_caption_is_escaped_so_the_table_survives(self):
+        # A caption is author-written prose. One `|` in it silently splits the
+        # row and every later column shifts, which is a table that lies.
+        self.assertEqual(comment._cell("cat a | grep b"), "cat a \\| grep b")
+
+    def test_a_newline_is_collapsed(self):
+        self.assertEqual(comment._cell("one\ntwo"), "one two")
+
+    def test_an_empty_caption_leaves_a_visible_cell(self):
+        self.assertEqual(comment._cell(""), "&nbsp;")
+
+
+class Render(unittest.TestCase):
+    def body(self, timeline=None, **kw):
+        opts = dict(
+            artifact_url="https://github.com/o/r/actions/runs/1/artifacts/2",
+            artifact_bytes=4_200_000,
+            retention_days=30,
+            evidence_retention_days=3,
+            failure_artifact_url=None,
+            run_url="https://github.com/o/r/actions/runs/1",
+            sha="abcdef1234567890",
+        )
+        opts.update(kw)
+        return comment.render([("demos/x", timeline or TIMELINE)], **opts)
+
+    def test_the_marker_is_the_first_thing_in_the_body(self):
+        # The workflow finds the comment to rewrite with startswith(). If the
+        # marker moves, every push posts a new comment instead.
+        self.assertTrue(self.body().startswith(comment.MARKER))
+
+    def test_every_caption_reaches_the_comment(self):
+        body = self.body()
+        for _, caption in comment.story_beats(TIMELINE["beats"]):
+            self.assertIn(caption, body)
+
+    def test_the_artifact_deep_link_is_present_with_its_size(self):
+        body = self.body()
+        self.assertIn("https://github.com/o/r/actions/runs/1/artifacts/2", body)
+        self.assertIn("4.2 MB", body)
+
+    def test_the_retention_is_stated_in_the_comment(self):
+        # Issue #2: an artifact expires and a pull request revisited after that
+        # has a dead link. Nobody should be surprised by it.
+        self.assertIn("30 days", self.body())
+
+    def test_a_take_with_no_artifact_says_so_rather_than_linking_nothing(self):
+        body = self.body(artifact_url=None)
+        self.assertIn("No recording was uploaded", body)
+        self.assertNotIn("Download the recording", body)
+
+    def test_a_failed_take_is_labelled_and_names_the_failing_beat(self):
+        broken = dict(TIMELINE)
+        broken["failure"] = {
+            "type": "TimeoutError",
+            "beat": 12,
+            "verb": "wait_for",
+            "message": "waiting for .queue-empty",
+        }
+        body = self.body(broken)
+        self.assertIn("the take failed", body)
+        self.assertIn("beat 12", body)
+        self.assertIn("wait_for", body)
+        self.assertIn("waiting for .queue-empty", body)
+
+    def test_a_clean_take_is_not_labelled_as_failed(self):
+        self.assertNotIn("the take failed", self.body())
+
+    def test_issues_behind_the_pixels_are_reported(self):
+        noisy = dict(TIMELINE)
+        noisy["issue_count"] = 1
+        noisy["issues"] = [
+            {
+                "kind": "console_error",
+                "beat": 3,
+                "message": "Cannot read properties of undefined",
+            }
+        ]
+        body = self.body(noisy)
+        self.assertIn("console_error", body)
+        self.assertIn("Cannot read properties of undefined", body)
+
+    def test_a_null_duration_is_not_reported_as_a_number(self):
+        # `duration: null` means this take encoded no video. Printing "0s"
+        # would read as a successful zero-length demo.
+        no_video = dict(TIMELINE, duration=None)
+        body = self.body(no_video)
+        self.assertIn("no video", body)
+        self.assertNotIn("· 0s ·", body)
+
+    def test_a_caption_containing_a_pipe_does_not_break_the_table(self):
+        piped = dict(TIMELINE, beats=beats((1.0, "run: cat x | wc -l")))
+        rows = [ln for ln in self.body(piped).splitlines() if ln.startswith("| 1 |")]
+        self.assertEqual(len(rows), 1)
+        unescaped = re.sub(r"\\\|", "", rows[0])
+        self.assertEqual(unescaped.count("|"), 4, rows[0])  # 4 delimiters, 3 cells
+
+
+# --------------------------------------------------------------------------
+# Fault injection
+# --------------------------------------------------------------------------
+
+# (name, script, exact text to replace, replacement, tests that must then fail)
+INJECTIONS = [
+    (
+        "app_root always returns the repository root",
+        "demo-storyboards",
+        '            return "/".join(parts[:i])',
+        '            return ""',
+        ["Select.test_a_change_elsewhere_selects_nothing"],
+    ),
+    (
+        "select ignores the path boundary and matches on a bare prefix",
+        "demo-storyboards",
+        '    return path == root or path.startswith(root + "/")',
+        "    return path.startswith(root)",
+        ["Select.test_a_prefix_that_is_not_a_path_boundary_does_not_match"],
+    ),
+    (
+        "strip_prefix tests the prefix as text instead of at a path boundary",
+        "demo-storyboards",
+        "    return [p[len(prefix) :] for p in changed if p.startswith(prefix)]",
+        "    return [p.replace(prefix, '', 1) for p in changed if prefix.rstrip('/') in p]",
+        ["StripPrefix.test_a_neighbour_sharing_the_prefix_as_text_is_not_inside_it"],
+    ),
+    (
+        "the guard permits a public host",
+        "demo-target-guard",
+        '    if kind == PUBLIC:\n        return f"{url} — {why}. Recording a demo against a public host is refused; '
+        'there is no option that permits it."',
+        "    if kind == PUBLIC:\n        return None",
+        [
+            "Check.test_public_is_refused_even_with_the_opt_in",
+            "GuardExitCode.test_public_exits_two_and_says_why_on_stderr",
+        ],
+    ),
+    (
+        "the guard forgets the --allow-private opt-in and lets private through",
+        "demo-target-guard",
+        "    if kind == PRIVATE and allow_private:\n        return None",
+        "    if kind == PRIVATE:\n        return None",
+        ["Check.test_private_is_refused_by_default_and_allowed_by_the_opt_in"],
+    ),
+    (
+        "story_beats emits one row per beat instead of one per caption",
+        "demo-comment",
+        "        if caption and caption != previous:",
+        "        if caption:",
+        ["StoryBeats.test_a_caption_held_across_several_verbs_is_one_row"],
+    ),
+    (
+        "the table cell stops escaping pipes",
+        "demo-comment",
+        '    out = (text or "").replace("\\\\", "\\\\\\\\").replace("|", "\\\\|")',
+        '    out = text or ""',
+        [
+            "Cell.test_a_pipe_in_a_caption_is_escaped_so_the_table_survives",
+            "Render.test_a_caption_containing_a_pipe_does_not_break_the_table",
+        ],
+    ),
+    (
+        "the comment loses its marker, so every push posts a new comment",
+        "demo-comment",
+        '    lines = [MARKER, ""]',
+        '    lines = [""]',
+        ["Render.test_the_marker_is_the_first_thing_in_the_body"],
+    ),
+    (
+        "the comment stops stating the retention",
+        "demo-comment",
+        '            f"Kept for **{retention_days} days**, then this link dies. The beat table above "',
+        '            f"Kept for a while{retention_days!r:.0}, then this link dies. The beat table above "',
+        ["Render.test_the_retention_is_stated_in_the_comment"],
+    ),
+    (
+        "a null duration is printed as a number",
+        "demo-comment",
+        '    if d is None:\n        return "no video (this take encoded none)"',
+        '    if d is None:\n        return "0s"',
+        ["Render.test_a_null_duration_is_not_reported_as_a_number"],
+    ),
+]
+
+
+def fault_inject() -> int:
+    """Break one thing at a time and require the named tests to notice."""
+    failures = 0
+    for name, script, old, new, must_fail in INJECTIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scripts"
+            shutil.copytree(SCRIPTS, root)
+            target = root / script
+            text = target.read_text(encoding="utf-8")
+            hits = text.count(old)
+            if hits != 1:
+                print(
+                    f"ABORT: injection {name!r} matched {hits} times in {script}, "
+                    f"expected exactly 1. The injection did not land, so nothing "
+                    f"it would have proven is proven.",
+                    file=sys.stderr,
+                )
+                print(f"       looked for: {old!r}", file=sys.stderr)
+                return 3
+            target.write_text(text.replace(old, new), encoding="utf-8")
+
+            done = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--_inner"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "CI_UNIT_SCRIPTS": str(root)},
+            )
+            noticed = {t for t in must_fail if t in done.stderr}
+            missed = set(must_fail) - noticed
+            ok = done.returncode != 0 and not missed
+            print(f"{'PASS' if ok else 'FAIL'}  break: {name}")
+            print(f"      in {script}: {old.strip().splitlines()[0][:70]}…")
+            if ok:
+                first = [
+                    ln
+                    for ln in done.stderr.splitlines()
+                    if ln.startswith(("FAIL:", "ERROR:"))
+                ]
+                for line in first[:4]:
+                    print(f"      {line}")
+            else:
+                failures += 1
+                if missed:
+                    print(f"      these tests did NOT fail: {sorted(missed)}")
+                if done.returncode == 0:
+                    print("      the suite passed against broken code")
+                print(textwrap.indent(done.stderr[-1500:], "      | "))
+            print()
+    if failures:
+        print(
+            f"{failures} injection(s) went unnoticed — those assertions grade nothing."
+        )
+        return 1
+    print(f"All {len(INJECTIONS)} injections were caught.")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# What this suite does NOT cover
+# --------------------------------------------------------------------------
+#
+# Stated plainly rather than implied by silence:
+#
+# - **The workflow YAML itself.** Step ordering, `if:` conditions, artifact
+#   retention actually reaching `upload-artifact`, and the find-or-create
+#   comment logic are executed only by GitHub. They are verified by running
+#   the workflow on a real pull request and looking at the result — pushing
+#   twice and confirming there is still one comment is the only honest test of
+#   "updated in place", and it is done by hand on the reference pull request.
+# - **The recorder.** `tests/smoke` owns that.
+# - **Egress.** The target guard is a static check on configuration and source
+#   text. A storyboard that computes a URL at run time is invisible to it, and
+#   nothing here stops a runner from reaching the internet.
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--fault-inject",
+        action="store_true",
+        help="break each assertion's subject and require it to fail",
+    )
+    ap.add_argument("--_inner", action="store_true", help=argparse.SUPPRESS)
+    args, rest = ap.parse_known_args()
+    if args.fault_inject:
+        return fault_inject()
+    result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=2).result
+    return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
