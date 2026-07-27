@@ -33,10 +33,12 @@ from .core import (
     SECRET_MASK,
     Secret,
     SecretLeak,
+    OPENING_HOLD_LIMIT_S,
     _beat_verb,
     _DemoBase,
     _env,
     content_rect,
+    opening_gap,
 )
 
 # Pastel gradient behind the window — matches the terminal recorder's
@@ -1184,17 +1186,72 @@ class Recorder(_DemoBase):
         p.screenshot(path=str(self._frame_png))
         p.close()
 
+    def _opening_hold(self, mp4: Path) -> Path | None:
+        """Cover this take's blank opening with the app's first painted frame.
+
+        Returns the still to composite over the app rect, or None when there is
+        nothing to cover. See "the blank opening" in `core` for why the gap is
+        covered rather than trimmed, and what it costs.
+
+        Measured on `mp4` **before** compositing, where the whole frame is the
+        app page and the window chrome does not exist yet — so there is no rect
+        to get wrong, and none of the chrome that made a whole-frame metric run
+        backwards in issue #17 is in the picture.
+        """
+        self._opening_held = 0.0
+        gap, note = opening_gap(
+            mp4, (0, 0, self._size["width"], self._size["height"])
+        )
+        if gap is None or gap <= 0:
+            return None
+        if gap > OPENING_HOLD_LIMIT_S:
+            # Deliberately nothing. `_measure_content` then measures the same
+            # gap on the encoded file and warns, which is the honest outcome:
+            # an app that takes this long to paint is showing the viewer
+            # something true about itself.
+            print(
+                f"demo-video: this take opened on {gap:.2f}s with nothing "
+                f"painted, over the {OPENING_HOLD_LIMIT_S}s the recorder will "
+                f"cover, so the opening is left as recorded"
+                + (f" ({note})" if note else ""),
+                file=sys.stderr,
+            )
+            return None
+        still = self.out_dir / ".hold.png"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{gap:.3f}",
+             "-i", str(mp4), "-frames:v", "1", str(still)],
+            check=True,
+        )
+        self._opening_held = gap
+        return still
+
     def _postprocess(self, mp4: Path) -> None:
         # Composite the recorded video into the window body on the background.
         g = self._geom
+        hold = self._opening_hold(mp4)
         tmp = mp4.with_suffix(".comp.mp4")
+        inputs = ["-i", str(mp4), "-i", str(self._frame_png)]
         filt = (
             f"[0:v]scale={g['appw']}:{g['apph']}[app];"
-            f"[1:v][app]overlay={g['appx']}:{g['appy']}[v]"
+            f"[1:v][app]overlay={g['appx']}:{g['appy']}"
         )
+        if hold is None:
+            filt += "[v]"
+        else:
+            # A second overlay of the same size at the same place, switched off
+            # the moment the app painted. Content at every t >= held keeps the
+            # timestamp it already had: the video's duration does not change,
+            # the audio is copied untouched, and nothing that reads a beat time
+            # has to know this happened.
+            inputs += ["-i", str(hold)]
+            filt += (
+                f"[base];[2:v]scale={g['appw']}:{g['apph']}[held];"
+                f"[base][held]overlay={g['appx']}:{g['appy']}"
+                f":enable='lt(t,{self._opening_held:.3f})'[v]"
+            )
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error",
-             "-i", str(mp4), "-i", str(self._frame_png),
+            ["ffmpeg", "-y", "-loglevel", "error", *inputs,
              "-filter_complex", filt, "-map", "[v]", "-map", "0:a?",
              "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p",
              "-crf", "20", "-r", "25", "-movflags", "+faststart", str(tmp)],
@@ -1202,6 +1259,8 @@ class Recorder(_DemoBase):
         )
         tmp.replace(mp4)
         self._frame_png.unlink(missing_ok=True)
+        if hold is not None:
+            hold.unlink(missing_ok=True)
 
     # -- redaction ----------------------------------------------------------
 
