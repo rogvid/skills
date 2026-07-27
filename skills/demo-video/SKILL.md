@@ -721,6 +721,62 @@ key is fine, renaming one is not:
   across a merged demo. `segment` and `segment_index` (its position within its
   own segment) survive the merge untouched — use that pair, not `index`, to
   name a beat in anything that has to line up across a re-stitch.
+- `content` is the only key here that describes the **frames** rather than the
+  storyboard. See the next section.
+
+### `content` — did the recording show anything?
+
+Every other field above is a statement about what the storyboard *did*, and all
+of them can be exactly right while the recording shows nothing: a title card
+left up, a modal that never closed, an app that stopped painting. That happened
+here, on this skill's own reference demo — a card covered the terminal for 24.3s
+of a 60.2s take, and the beat table, the exit codes, the evidence files and the
+stills all read like a healthy demo.
+
+So the recorder also measures the picture, over the region the app occupies in
+the encoded frame, and writes down what it found:
+
+```json
+"content": { "measured": true, "note": null,
+             "rect": [74, 110, 1132, 432], "sample_fps": 2, "frames": 47,
+             "score": 14.1, "floor": 1.5,
+             "static_for": 5.0, "static_from": 13.5, "static_limit": 12.0,
+             "warnings": [] }
+```
+
+- `score` is the median luma standard deviation over `rect`. Under `floor` the
+  frames are featureless — a page that never painted, a take recorded black.
+- `static_for` is the longest stretch, in seconds, where **nothing inside
+  `rect` changed**, and `static_from` is when it started. Reported always; a
+  stretch at or over `static_limit` also produces a warning.
+- `warnings` is empty on a healthy take, and each entry is one sentence saying
+  what to go and look at. They are also printed on stderr as the take ends, so
+  an author who never opens this file is still told.
+- `measured` is `false`, with `note` saying why, when the check could not run.
+  `content` itself is `null` only when the take encoded no mp4.
+
+**It warns; it never fails a take.** A demo that legitimately holds one frame
+through a long narrated beat is ordinary, and refusing a take on a heuristic is
+worse than the heuristic missing one. Treat a warning as "watch the video at
+this timestamp before believing the beats", not as a verdict.
+
+**It does not judge whether the demo shows the _right_ thing** — only whether
+it captured anything at all. `rect` deliberately excludes the recorder's own
+window chrome and its caption bar: a whole-frame score is dominated by them, to
+the point where a recording with the app painted flat scores *higher* than a
+working one.
+
+On a stitched demo each part measures its own `.seg.mp4` — two segments can be
+two media with two geometries — so the envelope's `content` is the worst of the
+parts on each arm with `rect: null`, every warning tagged with the segment it
+came from, and each part's own report under `segments`.
+
+You can re-run it on a demo you already have, without re-recording:
+
+```python
+from demo_recording import content_report
+print(content_report("demos/2026-07-26-x/demo.mp4", (74, 110, 1132, 432)))
+```
 
 A merged timeline says so, and says what it was built from:
 
@@ -729,9 +785,11 @@ A merged timeline says so, and says what it was built from:
   "recorder": "Recorder",
   "segments": [
     { "segment": "part1", "media": "part1.seg.mp4", "duration": 6.6,
-      "offset": 0.0, "beats": 6, "recorder": "Recorder", "determinism": {…} },
+      "offset": 0.0, "beats": 6, "recorder": "Recorder",
+      "determinism": {…}, "content": {…} },
     { "segment": "part2", "media": "part2.seg.mp4", "duration": 8.6,
-      "offset": 6.6, "beats": 9, "recorder": "Recorder", "determinism": {…} }
+      "offset": 6.6, "beats": 9, "recorder": "Recorder",
+      "determinism": {…}, "content": {…} }
   ] }
 ```
 
@@ -1560,6 +1618,11 @@ invisible to it.
   frame is captured the moment it paints, and a published video leaks forever.
   Decide what must not appear *before* the first `goto()` — see **Redacting
   secrets**, and read what it does not cover.
+- **Reading the beat table as proof the demo showed something.** It is proof
+  the storyboard *ran*. A card left up, a modal that never closed or an app
+  that stopped painting produces a complete, correct, entirely successful
+  timeline over a recording nobody can watch. Check `content` in the same file
+  — that is the field that describes the frames.
 - **Embedding video in markdown.** Repo-relative mp4s don't play inline in
   rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
   with a still and point at the re-record command instead. GitHub plays only

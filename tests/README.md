@@ -38,6 +38,8 @@ tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --evidence-only       # just the per-beat evidence takes
 tests/smoke --failure-only        # just the takes that do not finish
 tests/smoke --polish-only         # just the two takes that grade how it looks
+tests/smoke --content-only        # just the pair that grades whether a
+                                  #   recording shows anything (issue #97)
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -151,8 +153,8 @@ all (see Known gaps).
 
 ## What it asserts
 
-Nine independent axes, because a recorder can fail on any one of them while
-looking perfect on the other eight.
+Ten independent axes, because a recorder can fail on any one of them while
+looking perfect on the other nine.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -1435,6 +1437,78 @@ than the fade injecting xterm.js before Chromium's screencast emits anything.
 The recorder has no fade-in path (the element is appended already opaque, so no
 transition can run), but the suite is relying on setup cost for that and would
 not notice if it changed.
+
+### Whether the recorder notices that the recording shows nothing (issue #97)
+
+Everything above is this harness measuring the picture. The recorder now
+measures it too — `content` in `timeline.json`, plus a line on stderr — because
+a user recording their own demo does not run this suite. This axis grades that
+check, and only that: the floors and rects above stay as the harness's own,
+because **a check graded by the measurement it makes is not graded**.
+
+`content-shown/` and `content-covered/` are one terminal storyboard recorded
+twice. They differ by a single line — whether `interlude("")` takes the card
+back down — and are otherwise the same three commands, the same captions, the
+same exit codes and the same `evidence/`. That pair is issue #91 reproduced:
+under the card every beat runs and none of it reaches a frame.
+
+Every assertion is a *comparison between the two takes*, because each one has a
+way to pass vacuously alone — "the covered take warns" is satisfied by a
+recorder that warns on everything, "the shown one does not" by a recorder that
+never warns, and both by a metric measuring the wrong region entirely.
+
+| | asserted on `content-shown` | asserted on `content-covered` |
+|---|---|---|
+| `content.warnings` | empty | says "did not change" |
+| stderr from the take | no warning | `WARNING`, unasked |
+| `static_for` | under `static_limit` | ≥ 75% of the take's duration |
+| the three stills, cropped to `#__term_host` | 3 distinct files | 1 file, three times |
+| the video at the first and last `run` beat | ≤ 33 dB PSNR apart | ≥ 40 dB |
+| `evidence/` | ≥ 3 distinct screens | ≥ 3 distinct screens |
+
+The last row is the control that makes the two above it mean anything: it is
+what says the three commands really printed three different things, so "the
+frames are identical" is a statement about the *recording* rather than about a
+storyboard that did nothing. It is also #97's finding stated as one line — the
+text tier says the demo worked, the pixels say nothing was shown.
+
+Stills are compared **byte for byte** and need no threshold at all: they are
+lossless PNGs of the page. The video cannot be, so it is compared with ffmpeg's
+PSNR — 46.4 dB under the card against 26.2 dB with it down, twenty decibels, a
+hundredfold in mean squared error, with both bars in the open space between.
+
+**The recorder's `static_limit` is graded as a band, from this run's own two
+takes rather than from a number in a comment**: it must sit at least 1.6x above
+the *healthy* take's longest still stretch and at most 0.7x of the covered
+take's. Halve the constant and every honest demo warns; double it and the take
+this whole issue is about goes unremarked. Both turn the suite red.
+
+**The anti-correlated metric is a standing regression test now.** The section
+at the top of this file explains why the app's rect is measured rather than the
+frame; nothing asserted it. This axis takes `content-shown/demo.mp4`, paints
+the app rect flat black with `drawbox` — keeping the recorder's chrome, which
+is the whole point — and scores the result both ways:
+
+| | healthy | app painted flat |
+|---|---|---|
+| over the content rect | 5.3 | 0.2 |
+| over the whole frame | 82.3 | **90.3** |
+
+The rect ranks the blank recording far below the healthy one; the whole frame
+ranks it **above**. Both directions are asserted, and the second is the one
+that matters: if a future change scores the frame again, or the fixture stops
+exhibiting the anti-correlation, the suite says so instead of passing on a
+number that grades chrome.
+
+Finally, `check_content_healthy()` hangs off *every* graded take — web,
+terminal and the stitched segments demo — asserting that each reports a
+measured `content` with no warnings, a score well clear of the recorder's blank
+floor, and a scored rect that lies **inside** the app rect this harness read off
+the live recorder. That last one is the assertion that catches a recorder
+grading its own window chrome, which produces a perfectly plausible `content`
+block and a number that means nothing.
+
+`tests/smoke --content-only` records just these two takes.
 
 ### Failure artifacts — what a take that did *not* finish leaves behind
 

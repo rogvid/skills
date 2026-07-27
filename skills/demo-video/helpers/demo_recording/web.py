@@ -36,6 +36,7 @@ from .core import (
     _beat_verb,
     _DemoBase,
     _env,
+    content_rect,
 )
 
 # Pastel gradient behind the window — matches the terminal recorder's
@@ -1118,6 +1119,23 @@ class Recorder(_DemoBase):
             "winx": winx, "winy": winy,
             "appx": winx + pad, "appy": winy + bar + pad,
         }
+
+    def _content_rect(self) -> tuple[int, int, int, int] | None:
+        """Where the page lands inside the composited frame (issue #97).
+
+        `_postprocess` scales the raw recording to `appw x apph` and overlays
+        it at `appx, appy` on the window-and-background still, so this is the
+        app's region of the *encoded* file — which is the only frame anybody
+        watches. Everything outside it is the recorder's own chrome, and that
+        chrome is exactly what made a whole-frame score rank a blank recording
+        above a healthy one (issue #17).
+        """
+        geom = getattr(self, "_geom", None)
+        if not geom:
+            return None
+        return content_rect(
+            (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+        )
 
     def _init_context(self, context) -> None:
         context.add_init_script(_CURSOR_JS.replace("__ACCENT__", self._accent))
