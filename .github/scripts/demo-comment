@@ -204,7 +204,16 @@ def main(argv: list[str] | None = None) -> int:
         "--demo",
         action="append",
         default=[],
-        help="a demo directory holding timeline.json",
+        help="a demo directory holding timeline.json, relative to --demo-root",
+    )
+    ap.add_argument(
+        "--demo-root",
+        default="",
+        help=(
+            "directory the --demo paths are read from. The comment still names "
+            "each demo by its --demo path, so the caller can read timelines out "
+            "of a staging area while the reader sees the repository path."
+        ),
     )
     ap.add_argument("--artifact-url")
     ap.add_argument("--artifact-bytes", type=int)
@@ -218,14 +227,16 @@ def main(argv: list[str] | None = None) -> int:
 
     demos: list[tuple[str, dict]] = []
     for raw in args.demo:
-        directory = Path(raw)
+        name = raw.rstrip("/")
+        directory = Path(args.demo_root) / name if args.demo_root else Path(name)
         timeline_path = directory / "timeline.json"
         if not timeline_path.exists():
-            # A take that refused before writing anything. Say so rather than
+            # A take that refused before writing anything, or one whose
+            # timeline was held back as not this take's. Say so rather than
             # silently dropping the demo from the comment.
             demos.append(
                 (
-                    str(directory).rstrip("/"),
+                    name,
                     {
                         "beats": [],
                         "recorder": "?",
@@ -234,18 +245,17 @@ def main(argv: list[str] | None = None) -> int:
                             "type": "NoTimeline",
                             "beat": None,
                             "verb": None,
-                            "message": "the take wrote no timeline.json",
+                            "message": (
+                                "this take published no timeline.json — it wrote none, "
+                                "or what is on disk is a previous recording's and was "
+                                "held back"
+                            ),
                         },
                     },
                 )
             )
             continue
-        demos.append(
-            (
-                str(directory).rstrip("/"),
-                json.loads(timeline_path.read_text(encoding="utf-8")),
-            )
-        )
+        demos.append((name, json.loads(timeline_path.read_text(encoding="utf-8"))))
 
     body = render(
         demos,

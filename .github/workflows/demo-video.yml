@@ -143,6 +143,7 @@ jobs:
       STAGE_WORKING: ${{ github.workspace }}/.demo-video-ci/working
       STAGE_FAILURE: ${{ github.workspace }}/.demo-video-ci/failure
       CHANGED: ${{ github.workspace }}/.demo-video-ci/changed.txt
+      STARTED_AT: ${{ github.workspace }}/.demo-video-ci/recording-started
       COMMENT_BODY: ${{ github.workspace }}/.demo-video-ci/comment.md
       APP_LOG: ${{ github.workspace }}/.demo-video-ci/app.log
 
@@ -276,8 +277,10 @@ jobs:
         id: pw
         run: |
           set -euo pipefail
+          # `playwright.__version__` does not exist — the package exposes its
+          # version only through the distribution metadata.
           v=$(uv run --no-project --with playwright python -c \
-                'import playwright; print(playwright.__version__)')
+                'from importlib.metadata import version; print(version("playwright"))')
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Playwright $v"
 
@@ -340,6 +343,12 @@ jobs:
           DEMO_VIDEO_SPEECH: "0"
         run: |
           set -uo pipefail
+          # Every artifact staged later must be newer than this. `images/`,
+          # `timeline.json` and `timeline.md` are *committed* files, so they
+          # are sitting in the checkout before anything records — and staging
+          # them unconditionally publishes the previous recording under this
+          # take's name. See the freshness check in "Stage the artifacts".
+          touch "$STARTED_AT"
           status=ok
           while IFS= read -r sb; do
             [ -n "$sb" ] || continue
@@ -353,25 +362,53 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "record status: $status"
 
+      # `steps.record.conclusion != 'skipped'` is load-bearing, not belt and
+      # braces. `images/`, `timeline.json` and `timeline.md` are *committed*
+      # files: they are in the checkout before anything records. Without this
+      # condition, a job that died during setup staged the previous
+      # recording's artifacts and posted a comment with full beat tables and a
+      # duration — a confident, entirely wrong claim that a demo had been
+      # recorded. That happened on the first real run of this workflow.
       - name: Stage the artifacts
-        if: always() && steps.discover.outputs.count != '0'
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
         id: stage
         working-directory: ${{ inputs.working-directory }}
         run: |
           set -euo pipefail
           rm -rf "$STAGE_DEMO" "$STAGE_WORKING" "$STAGE_FAILURE"
           mkdir -p "$STAGE_DEMO" "$STAGE_WORKING" "$STAGE_FAILURE"
+          stale=0
+          # Second line of defence, independent of the step condition above:
+          # nothing older than the moment recording began may be published.
+          # A take that crashed before rewriting a file leaves the committed
+          # one in place, and it is indistinguishable by content.
+          fresh() { [ -e "$1" ] && [ "$1" -nt "$STARTED_AT" ]; }
+          copy_fresh() {
+            if fresh "$1"; then
+              cp "$1" "$2"
+            elif [ -e "$1" ]; then
+              echo "::warning file=$1::not written by this take — left out of the artifacts"
+              stale=$((stale + 1))
+            fi
+          }
           while IFS= read -r dir; do
             [ -n "$dir" ] || continue
-            # What a human watches and what stays readable after the video is
+            # What a human watches, and what stays readable after the video is
             # gone. `demo-video-FAILED.md` travels with it deliberately: it is
             # the file that says whether the mp4 beside it is this take's.
             mkdir -p "$STAGE_DEMO/$dir"
             for f in demo.mp4 timeline.md timeline.json demo-video-FAILED.md; do
-              if [ -f "$dir/$f" ]; then cp "$dir/$f" "$STAGE_DEMO/$dir/$f"; fi
+              copy_fresh "$dir/$f" "$STAGE_DEMO/$dir/$f"
             done
-            if [ -d "$dir/images" ]; then cp -r "$dir/images" "$STAGE_DEMO/$dir/images"; fi
+            if [ -d "$dir/images" ]; then
+              mkdir -p "$STAGE_DEMO/$dir/images"
+              for img in "$dir"/images/*; do
+                copy_fresh "$img" "$STAGE_DEMO/$dir/images/$(basename "$img")"
+              done
+            fi
             # Short retention: enough to check a disputed finding, not an archive.
+            # Regenerated wholesale by every take, so no committed copy exists
+            # to go stale and a directory copy is safe.
             for sub in evidence frames; do
               if [ -d "$dir/$sub" ]; then
                 mkdir -p "$STAGE_WORKING/$dir"
@@ -385,11 +422,11 @@ jobs:
           done < "$DEMO_DIRS"
           bytes=$(find "$STAGE_DEMO" -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')
           echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
-          echo "staged $bytes bytes:"
+          echo "staged $bytes bytes ($stale file(s) held back as not this take's):"
           find "$STAGE_DEMO" -type f | sed "s|$STAGE_DEMO/|  |"
 
       - name: Upload the recording
-        if: always() && steps.discover.outputs.count != '0'
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
         id: upload-demo
         uses: actions/upload-artifact@v4
         with:
@@ -399,7 +436,7 @@ jobs:
           retention-days: ${{ inputs.demo-retention-days }}
 
       - name: Upload the working files a finding can be checked against
-        if: always() && steps.discover.outputs.count != '0'
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: demo-video-working-files
@@ -418,7 +455,7 @@ jobs:
           retention-days: ${{ inputs.evidence-retention-days }}
 
       - name: Render the comment
-        if: always() && steps.discover.outputs.count != '0'
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
         working-directory: ${{ inputs.working-directory }}
         env:
           SCRIPTS: ${{ steps.helpers.outputs.dir }}
@@ -432,11 +469,19 @@ jobs:
         run: |
           set -euo pipefail
           args=()
+          # Read the timelines out of the *staging* directory, not the working
+          # tree. Staging is where the freshness filter was applied, so the
+          # comment can only ever describe what was actually published. The
+          # working tree still holds the committed timeline.json of the
+          # previous recording, and on the recorder's refusal path (a take
+          # that cannot verify its mask writes nothing but the marker) that
+          # file is what a reader would have been shown as current.
           while IFS= read -r dir; do
             if [ -n "$dir" ]; then args+=(--demo "$dir"); fi
           done < "$DEMO_DIRS"
           if [ -n "$FAILURE_URL" ]; then args+=(--failure-artifact-url "$FAILURE_URL"); fi
           "$SCRIPTS/demo-comment" "${args[@]}" \
+            --demo-root "$STAGE_DEMO" \
             --artifact-url "$ARTIFACT_URL" \
             --artifact-bytes "${ARTIFACT_BYTES:-0}" \
             --retention-days "$RETENTION" \
@@ -447,7 +492,7 @@ jobs:
       # One comment, found by its marker and rewritten. A branch with ten
       # pushes must not bury its pull request under ten identical comments.
       - name: Post or update the pull-request comment
-        if: always() && steps.discover.outputs.count != '0' && github.event.pull_request.number
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped' && github.event.pull_request.number
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
