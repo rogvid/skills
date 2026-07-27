@@ -1085,6 +1085,7 @@ class Recorder(_DemoBase):
         timezone_id: str | None = None,
         locale: str | None = None,
         evidence: bool | None = None,
+        criteria: dict[str, str] | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
@@ -1093,6 +1094,7 @@ class Recorder(_DemoBase):
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
+            criteria=criteria,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")

@@ -314,6 +314,7 @@ recorded a console error, an uncaught exception, or a non-zero exit — see
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
 | `caption(text)` | Narrator line at the bottom; `""` clears; dies on full page loads, survives SPA routing — clear before navigating either way |
+| `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See **Recording against a ticket**. |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception**. |
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
 | `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search) |
@@ -939,6 +940,84 @@ afterwards — a frame-rate mismatch moves every later beat away from its frame,
 a resolution mismatch keeps the first part's dimensions, and one silent part
 makes concat drop every later part's narration. Recording every segment with
 the same `Recorder` settings is what keeps you clear of it.
+
+## Recording against a ticket (`coverage`)
+
+A demo can be perfectly clear and demonstrate the wrong thing. The fresh-agent
+review in step 6 answers *"is this story clear?"*; a review gate has to answer
+*"does this show what the ticket asked for?"*, which is a different question
+with a different answer.
+
+Declare the criteria on the recorder and tag the beats that demonstrate them:
+
+```python
+with Recorder(OUT, criteria={
+    "AC-1": "The queue can be filtered to one status.",
+    "AC-2": "A filter that matches nothing explains itself.",
+    "AC-3": "The CLI prints the same filtered list.",
+}) as rec:
+    rec.goto("/")
+    rec.caption("Filtering to one status.", ac="AC-1")
+    rec.shot("01-filtered", ac="AC-1")
+    rec.caption("Nothing matches, and the queue says why.", ac="AC-2")
+    rec.shot("02-empty", ac="AC-2")
+```
+
+`timeline.md` then carries a table above the beats, and `timeline.json` a
+`coverage` object:
+
+```
+| criterion                                   | claimed by | at   | still                 |
+| **AC-1** — The queue can be filtered…       | beat 1     | 3.20 |                       |
+|                                             | beat 2     | 5.46 | `images/01-filtered…` |
+| **AC-2** — A filter that matches nothing…   | beat 3     | 7.10 | `images/02-empty.png` |
+| **AC-3** — The CLI prints the same…         | *nothing claims this* |    |            |
+
+**1 of 3 criteria have no beat claiming them: `AC-3`.**
+```
+
+### What this does and does not tell you
+
+**The report is what the storyboard *claimed*, never what it proved**, and every
+name in it says so — `claimed` and `unclaimed`, not "demonstrated" and
+"missing". An `ac=` tag is a string you typed. A beat tagged `AC-3` whose frames
+show an error page is still tagged `AC-3`.
+
+That is not pedantry about naming. The failure this feature exists to catch is
+the **tautology**: a storyboard derived from the diff rather than from the
+ticket produces a polished, convincing demo of a misread requirement. If this
+file said "AC-3 demonstrated", the conformance reviewer below would be taking
+your word for the exact thing it was convened to check.
+
+So there is one machine-checkable finding here, and it is `unclaimed` — safe to
+automate precisely because it takes no judgement: nobody even asserted those.
+Everything else is the reviewer's call, and the artifact's job is to put them in
+front of the right frames.
+
+### Rules that follow
+
+- **Derive the storyboard from the ticket, the ADR or the RFC — not from the
+  diff.** A scenario generated from the implementation cannot fail to match it.
+  Write the criteria down first, then work out how to show each one.
+- **Criteria are declared up front**, not accumulated from the tags. The useful
+  half of the report is the criteria *nothing* claimed, and that cannot be
+  derived from the tags alone.
+- **A tag naming an undeclared criterion raises.** Left through, the criterion
+  you meant comes back unclaimed while the storyboard looks complete — wrong in
+  the one direction nobody checks. Fix the typo at the line that made it.
+- **Most beats claim nothing**, and that is ordinary: navigation, waits and
+  scene-setting captions are not demonstrating anything in particular. Tag the
+  moment a reviewer should look at, not every beat.
+- One beat may claim several criteria (`ac=["AC-1", "AC-2"]`) when one screen is
+  the evidence for both.
+- Without `criteria=`, `coverage` is `null` and `ac=` is refused. A take
+  recorded outside a ticket has no coverage to report, and an empty report would
+  read as a take that covered nothing.
+- On a **segmented** demo, `stitch()` recomputes coverage over the merged beats
+  against the union of the segments' criteria — so the joined timeline can name
+  a criterion *no* segment claimed, which neither segment's own report could.
+  Segments declaring different text for one id are reported as a conflict rather
+  than silently resolved.
 
 ## Review frames (`frames/`)
 
@@ -1602,6 +1681,35 @@ painted before that first `goto()` would be destroyed by it.
    converge in ~2 rounds; cap at 3 and surface remaining findings to the
    user instead of looping. Findings that need a different feature demoed
    are future demos, not blockers.
+
+   **6b. Conformance review (only when the take declared `criteria=`).** A
+   *second* reviewer, run alongside the one above and never instead of it —
+   they answer different questions, and a demo can pass either one while
+   failing the other. Step 6 asks whether the story is clear. This asks whether
+   it shows what the ticket asked for.
+
+   Dispatch a separate subagent and give it **the acceptance criteria as the
+   ticket words them**, `timeline.md`, and `frames/`. `evidence/beat-NN.json`
+   too if the criterion is about data rather than layout — the recorder was
+   driving the page, so the DOM or terminal buffer at that beat is recorded
+   exactly, and the reviewer does not have to squint at a picture to read a
+   number.
+
+   Ask for a verdict **per criterion**: DEMONSTRATED, NOT DEMONSTRATED, or
+   UNCLEAR, each with the beat and the frame it is based on. Tell it plainly:
+
+   > The `ac=` tags are the storyboard author's claims, not evidence. For each
+   > criterion, look at the frames the table points at and decide whether they
+   > actually show it. A criterion whose beats show something else is NOT
+   > DEMONSTRATED even though the table lists it.
+
+   That instruction is the whole point of the pass. Without it the reviewer
+   reads the coverage table back to you, which is a tautology — see **Recording
+   against a ticket**.
+
+   `unclaimed` needs no reviewer: nothing claimed those, and the timeline
+   already says so. Either the demo does not show them or the storyboard did
+   not say where, and both are fixed before review rather than during it.
 7. **Write `guide.md`** (when a written guide is wanted): what the feature
    is, how to use it step by step — each step referencing a still —
    opening with the strongest still. Don't link `demo.mp4` from it: the

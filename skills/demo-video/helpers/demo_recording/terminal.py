@@ -714,6 +714,7 @@ class TerminalRecorder(_DemoBase):
         timezone_id: str | None = None,
         locale: str | None = None,
         evidence: bool | None = None,
+        criteria: dict[str, str] | None = None,
         type_delay_ms: int = 45,
         interlude: str | None = None,
         interlude_hold: float = OPENING_CARD_HOLD_S,
@@ -728,6 +729,7 @@ class TerminalRecorder(_DemoBase):
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
+            criteria=criteria,
         )
         # Match the web recorder's effective caption height. Web composites
         # its page into a scaled, centered window, lifting its bottom:44px
@@ -1354,11 +1356,16 @@ class TerminalRecorder(_DemoBase):
 
     # -- capture ------------------------------------------------------------
 
-    def shot(self, name: str) -> Path:
+    def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
         """Still for the written guide -> images/<name>.png (pumps pending
-        output first so the latest screen state is captured)."""
+        output first so the latest screen state is captured).
+
+        `ac` is passed straight through — a terminal take records against a
+        ticket exactly like a web one, and a criterion demonstrated on the
+        command line is the ordinary reason a demo has a terminal half.
+        """
         self._pump()
-        return super().shot(name)
+        return super().shot(name, ac=ac)
 
     # -- evidence (issue #9) ------------------------------------------------
 

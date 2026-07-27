@@ -1499,6 +1499,53 @@ checks it there. And nothing here compares the held frames against what the app
 *would* have shown — the hold is the app's own first painted frame, so a wrong
 frame would have to come from somewhere else in the same recording.
 
+### Acceptance-criterion coverage (issue #12)
+
+The `coverage/` take is recorded against a three-criterion ticket and
+deliberately demonstrates only two. What is graded is that the report **cannot
+flatter the storyboard**, and the arms are chosen for the three ways it could:
+
+| arm | what it grades |
+|---|---|
+| `unclaimed` names the third criterion | the one machine-checkable finding the report exists to produce. The fixture has exactly one undemonstrated criterion so the arm has something to find. |
+| every beat the report points at really carries that tag, in the same file | correspondence, not count. "3 criteria produced 3 rows" is nearly free to satisfy; the claim is that row K points at beat K, at beat K's timestamp, naming beat K's still. |
+| a tag naming an undeclared criterion is refused at the call | left through, the criterion the author meant comes back unclaimed while the storyboard looks complete — wrong in the one direction nobody checks. |
+
+`check_coverage_refusals` runs without a browser (`Recorder(...)` launches one
+only on `__enter__`), and every refusal has a control beside it: a valid tag, a
+duplicate tag that must de-duplicate, and an untagged beat. Without those the
+refusals would pass on a function that rejected everything.
+
+`check_coverage_merge` grades the half a single take cannot reach. Each segment
+knows only its own criteria and numbers its beats from zero, so a merged report
+assembled by unioning the segments' own reports would point a reviewer at beat
+numbers absent from the file they are reading, and could never name a criterion
+*no* segment claimed. It asserts the union of criteria, `unclaimed` naming the
+one neither segment tagged, merged indices rather than per-segment ones, and a
+wording conflict reported rather than silently resolved.
+
+**One assertion here was rewritten because the injection showed it graded
+nothing.** The markdown arm originally checked `"AC-3" in timeline.md` — but
+AC-3 appears on its own table row whatever the report concludes, so it passed on
+a document that had dropped the finding entirely. It now looks for the sentence
+that *states* the finding and requires the criterion to be named in it, and
+likewise checks for "not what it proved" rather than for the word "claimed",
+which is a column header.
+
+Injections caught:
+
+| break | what fires |
+|---|---|
+| nothing is ever reported unclaimed | the finding arm, in both the recorded take and the merge |
+| the report points one beat past the beat that claimed it | the correspondence arm |
+| a tag naming an undeclared criterion is accepted | the refusals arm |
+| a merged demo is judged against only the first segment's ticket | the merge arm's union assertion |
+| timeline.md stops stating the finding | the markdown arm — the one the weaker assertion slept through |
+
+**What this deliberately does not grade**: whether a tagged beat *shows* what it
+claims. That is the reviewer's judgement, and the artifact is written to say so
+rather than to assert it.
+
 ### Whether the recorder notices that the recording shows nothing (issue #97)
 
 Everything above is this harness measuring the picture. The recorder now
