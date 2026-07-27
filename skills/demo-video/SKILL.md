@@ -801,7 +801,17 @@ window chrome and its caption bar: a whole-frame score is dominated by them, to
 the point where a recording with the app painted flat scores *higher* than a
 working one.
 
-**Three limits worth knowing before you rely on it:**
+**Five limits worth knowing before you rely on it:**
+
+- **A held stretch containing only narration is never reported.** This is the
+  verb correlation doing its job, and it is also the one blind spot that can
+  hide a real fault: a demo that raises an interlude card and then only
+  captions, holds and takes stills behind it is silent, however long the card
+  stays up. Measured: a card over 31.5s of a 34s take, no warning. There is no
+  third answer available from the frames — with the caption band excluded, an
+  honest tour of a still screen and a card left up are byte-identical. If your
+  storyboard raises a card, take it down explicitly; do not rely on this check
+  to notice.
 
 - **A caption change is invisible to the held-picture arm, by design.** The
   caption bar is the recorder's own drawing and it renders over an interlude
@@ -815,17 +825,29 @@ working one.
 - **A caption long enough to wrap reaches back into the measured region.** The
   bar grows upward, so a two- or three-line caption crosses the exclusion and a
   caption change then does count as the picture changing. Measured at 266 pixels
-  per wrap. The effect is to make a held stretch read *shorter* than it is, and
-  it cannot touch an occluded take at all, because a card covers the caption
-  too. Keep captions to one line if you want `static_for` to mean what it says.
+  per wrap. The effect is to make a held stretch read *shorter* than it is. It
+  cannot touch a take occluded by the recorder's **own** interlude card, which
+  is opaque and paints above the caption — but an app-level overlay or modal is
+  app DOM, the caption paints *over* it, so a wrapping caption can split a real
+  occlusion into stretches that each sit under the limit. Measured: 25s becomes
+  11s + 8s + 6s, and goes silent. Keep captions to one line if you want
+  `static_for` to mean what it says.
 - **A run of held frames is measured per segment.** Two parts of a stitched
   demo that each hold still for 8s across the cut are reported as 8s, not 16s.
 
-None of the three can produce a false *success*: each makes the check quieter
-than the truth, never louder.
+Three of the five can hide a real occlusion — the first, the fourth and the
+fifth. A card behind narration only, a wrapping caption splitting an app-level
+overlay into short stretches, and a hold that straddles a segment cut each
+produce a clean report on a take that shows nothing.
 
-Neither can produce a false *success*: both make the check quieter than the
-truth, never louder.
+The second and third cannot: excluding the caption bar, and not measuring the
+bottom fifth, both mean *less* of the picture counts as moving, so a stretch
+grows rather than shrinks. They push toward reporting a hold that is not there,
+not toward missing one.
+
+**A silent content report is not a guarantee that the demo shows your app.** It
+rules out the two loud failures — a recording that never rises above blank, and
+a screen that never moved while a verb was acting on it — and nothing more.
 
 On a stitched demo each part measures its own `.seg.mp4` — two segments can be
 two media with two geometries — so the envelope's `content` is the worst of the
