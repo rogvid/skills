@@ -45,6 +45,7 @@ from .core import (
     _beat_verb,
     _DemoBase,
     _env,
+    content_rect,
 )
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
@@ -766,6 +767,9 @@ class TerminalRecorder(_DemoBase):
         # _OPENING_CARD_JS.
         self._opening = interlude
         self._opening_hold = interlude_hold
+        # Where the xterm.js screen sits in the frame, read off the live
+        # element once the terminal exists (issue #97). See `_content_rect`.
+        self._host_box: tuple[int, int, int, int] | None = None
 
     # -- setup / teardown ---------------------------------------------------
 
@@ -842,6 +846,7 @@ class TerminalRecorder(_DemoBase):
              "fontSize": self._font_size},
         )
         self._set_winsize(int(dims["rows"]), int(dims["cols"]))
+        self._read_host_box()
         # Just enough to catch the shell's first prompt. It used to be kept
         # short so a segment opening on a transition would not dwell on a bare
         # terminal; with `interlude=` that dwell happens behind the card, and
@@ -849,6 +854,51 @@ class TerminalRecorder(_DemoBase):
         self._idle(0.15)
         if self._opening is not None:
             self._open_on_card()
+
+    def _read_host_box(self) -> None:
+        """Remember where `#__term_host` is, for the picture check (issue #97).
+
+        Read here, off the live element, rather than derived from the window
+        CSS: `_TERM_HOST_JS` positions the window with fixed insets and the
+        xterm.js fit addon decides the rest, so a change to either would
+        silently move the rect a hardcoded copy claimed to describe. Read
+        **once**, at `_start()`, because nothing after this resizes it and the
+        page is gone by the time the mp4 exists.
+
+        Failure is not fatal and not silent: `content_report` says the picture
+        was not measured, which is a truthful artifact. Refusing a take because
+        a bounding box could not be read would be the check costing somebody
+        the recording it exists to describe.
+        """
+        try:
+            box = self.page.locator("#__term_host").bounding_box()
+        except Exception as exc:  # noqa: BLE001 - a measurement is not a take
+            print(
+                f"demo-video: WARNING — could not read the terminal's box "
+                f"({type(exc).__name__}: {exc}), so this take's timeline will "
+                f"say the picture was not measured.",
+                file=sys.stderr,
+            )
+            return
+        if box:
+            self._host_box = (
+                int(box["x"]), int(box["y"]),
+                int(box["width"]), int(box["height"]),
+            )
+
+    def _content_rect(self) -> tuple[int, int, int, int] | None:
+        """The xterm.js screen's region of the frame (issue #97).
+
+        A terminal take frames itself *in the page* and `_postprocess` is a
+        no-op, so page coordinates are video coordinates: the context is
+        created with `record_video_size == viewport`. Everything outside this
+        box — the pastel background, the window chrome, the title bar — is the
+        recorder's own drawing and never changes, which is precisely what a
+        whole-frame score would end up measuring (issue #17).
+        """
+        if self._host_box is None:
+            return None
+        return content_rect(self._host_box)
 
     def _open_on_card(self) -> None:
         """Hold the card the init script raised, then take it down.

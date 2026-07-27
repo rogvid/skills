@@ -721,6 +721,152 @@ key is fine, renaming one is not:
   across a merged demo. `segment` and `segment_index` (its position within its
   own segment) survive the merge untouched — use that pair, not `index`, to
   name a beat in anything that has to line up across a re-stitch.
+- `content` is the only key here that describes the **frames** rather than the
+  storyboard. See the next section.
+
+### `content` — did the recording show anything?
+
+Every other field above is a statement about what the storyboard *did*, and all
+of them can be exactly right while the recording shows nothing: a title card
+left up, a modal that never closed, an app that stopped painting. That happened
+here, on this skill's own reference demo — a card covered the terminal for 24.3s
+of a 60.2s take, and the beat table, the exit codes, the evidence files and the
+stills all read like a healthy demo.
+
+So the recorder also measures the picture, over the region the app occupies in
+the encoded frame, and writes down what it found:
+
+```json
+"content": { "measured": true, "note": null,
+             "rect": [74, 110, 1132, 432], "sample_fps": 2, "frames": 47,
+             "score": 14.1, "floor": 1.0,
+             "static_for": 21.5, "static_from": 3.5, "static_limit": 15.0,
+             "static_beats": [{ "index": 6, "verb": "caption", "acting": false },
+                              { "index": 7, "verb": "hold", "acting": false }],
+             "warnings": [] }
+```
+
+- `score` is the median luma standard deviation over `rect`. Under `floor` the
+  frames are featureless — a page that never painted, a take recorded black.
+- `static_for` is the longest stretch, in seconds, where **nothing inside
+  `rect` changed**, and `static_from` is when it started. Both are reported
+  always, whatever they are.
+- `static_beats` is what the storyboard was doing during that stretch, and it
+  is what decides whether the stretch is worth a warning. See below.
+- `warnings` is empty on a healthy take, and each entry is one sentence saying
+  what to go and look at. They are also printed on stderr as the take ends, so
+  an author who never opens this file is still told.
+- `measured` is `false`, with `note` saying why, when the check could not run.
+  `content` itself is `null` only when the take encoded no mp4.
+
+### A long held stretch is not a problem, and this is the part to understand
+
+The example above holds one picture for **21.5s** — well past `static_limit` —
+and produces no warning at all. That is correct, and it is not a special case:
+
+> `static_for` on its own cannot tell a healthy demo from a broken one.
+
+Measured on real takes: a demo touring a rendered screen with three captions
+holds the measured region for **20–22s**. The title card that covered this
+skill's own reference demo held it for **23s**. There is no threshold between
+those two numbers, because the region measured excludes the recorder's caption
+bar — and swapping captions over a still screen is exactly what this guide tells
+you to do during a wait.
+
+So the warning needs a second condition: **did a verb that acts on the app run
+inside the stretch?**
+
+| beats inside the held stretch | verdict |
+|---|---|
+| `caption`, `interlude`, `bridge`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
+| `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to`, `redact` | worth looking at — warns |
+
+A `run()` that printed nothing visible, a `click()` that moved nothing: those
+are the shapes worth a human's two minutes. A caption change over a screen
+nobody touched is not.
+
+**What the warning does and does not claim.** It states what was measured — the
+stretch, the acting beats inside it, and the region — and then says plainly that
+an overlay left up, an app that stopped painting, and a demo that legitimately
+holds still through those verbs all look identical from here. It does **not**
+name a cause. It cannot know one, and an artifact that confidently attributes
+something to the wrong place is the failure this whole field exists to remove.
+
+**It warns; it never fails a take.** Treat a warning as "watch the video at this
+timestamp before believing the beats", not as a verdict.
+
+**It does not judge whether the demo shows the _right_ thing** — only whether
+it captured anything at all. `rect` deliberately excludes the recorder's own
+window chrome and its caption bar: a whole-frame score is dominated by them, to
+the point where a recording with the app painted flat scores *higher* than a
+working one.
+
+**Five limits worth knowing before you rely on it:**
+
+- **A held stretch containing only narration is never reported.** This is the
+  verb correlation doing its job, and it is also the one blind spot that can
+  hide a real fault: a demo that raises an interlude card and then only
+  captions, holds and takes stills behind it is silent, however long the card
+  stays up. Measured: a card over 31.5s of a 34s take, no warning. There is no
+  third answer available from the frames — with the caption band excluded, an
+  honest tour of a still screen and a card left up are byte-identical. If your
+  storyboard raises a card, take it down explicitly; do not rely on this check
+  to notice.
+
+- **A caption change is invisible to the held-picture arm, by design.** The
+  caption bar is the recorder's own drawing and it renders over an interlude
+  card as readily as over the app, so counting it would defeat the detector on
+  the exact occlusion it exists for. The verb correlation above is what makes
+  that survivable.
+- **The bottom fifth of the app is not measured at all** — that is where the
+  caption bar sits, and there is no room to shrink the exclusion. On a terminal
+  demo that is the last few rows *before the screen starts scrolling*. Once it
+  scrolls, every new line moves the whole picture and the blind window closes.
+- **A caption long enough to wrap reaches back into the measured region.** The
+  bar grows upward, so a two- or three-line caption crosses the exclusion and a
+  caption change then does count as the picture changing. Measured at 266 pixels
+  per wrap. The effect is to make a held stretch read *shorter* than it is. It
+  cannot touch a take occluded by the recorder's **own** interlude card, which
+  is opaque and paints above the caption — but an app-level overlay or modal is
+  app DOM, the caption paints *over* it, so a wrapping caption can split a real
+  occlusion into stretches that each sit under the limit. Measured: 25s becomes
+  11s + 8s + 6s, and goes silent. Keep captions to one line if you want
+  `static_for` to mean what it says.
+- **A run of held frames is measured per segment.** Two parts of a stitched
+  demo that each hold still for 8s across the cut are reported as 8s, not 16s.
+
+Three of the five can hide a real occlusion — the first, the fourth and the
+fifth. A card behind narration only, a wrapping caption splitting an app-level
+overlay into short stretches, and a hold that straddles a segment cut each
+produce a clean report on a take that shows nothing.
+
+The second and third cannot: excluding the caption bar, and not measuring the
+bottom fifth, both mean *less* of the picture counts as moving, so a stretch
+grows rather than shrinks. They push toward reporting a hold that is not there,
+not toward missing one.
+
+**A silent content report is not a guarantee that the demo shows your app.** It
+rules out the two loud failures — a recording that never rises above blank, and
+a screen that never moved while a verb was acting on it — and nothing more.
+
+On a stitched demo each part measures its own `.seg.mp4` — two segments can be
+two media with two geometries — so the envelope's `content` is the worst of the
+parts on each arm with `rect: null`, every warning tagged with the segment it
+came from, and each part's own report under `segments`.
+
+You can re-run it on a demo you already have, without re-recording. Pass the
+beat log too — without it the held-picture arm still measures and reports, but
+never warns, because there is nothing to correlate the stretch against:
+
+```python
+import json
+from pathlib import Path
+from demo_recording import content_report
+
+d = Path("demos/2026-07-26-x")
+doc = json.loads((d / "timeline.json").read_text())
+print(content_report(d / "demo.mp4", tuple(doc["content"]["rect"]), doc["beats"]))
+```
 
 A merged timeline says so, and says what it was built from:
 
@@ -729,9 +875,11 @@ A merged timeline says so, and says what it was built from:
   "recorder": "Recorder",
   "segments": [
     { "segment": "part1", "media": "part1.seg.mp4", "duration": 6.6,
-      "offset": 0.0, "beats": 6, "recorder": "Recorder", "determinism": {…} },
+      "offset": 0.0, "beats": 6, "recorder": "Recorder",
+      "determinism": {…}, "content": {…} },
     { "segment": "part2", "media": "part2.seg.mp4", "duration": 8.6,
-      "offset": 6.6, "beats": 9, "recorder": "Recorder", "determinism": {…} }
+      "offset": 6.6, "beats": 9, "recorder": "Recorder",
+      "determinism": {…}, "content": {…} }
   ] }
 ```
 
@@ -1560,6 +1708,15 @@ invisible to it.
   frame is captured the moment it paints, and a published video leaks forever.
   Decide what must not appear *before* the first `goto()` — see **Redacting
   secrets**, and read what it does not cover.
+- **Reading the beat table as proof the demo showed something.** It is proof
+  the storyboard *ran*. A card left up, a modal that never closed or an app
+  that stopped painting produces a complete, correct, entirely successful
+  timeline over a recording nobody can watch. Check `content` in the same file
+  — that is the field that describes the frames.
+- **Reading `content.static_for` as a score.** It is not one. A healthy demo
+  that narrates a rendered screen holds it for 20s or more, which is what a
+  covering card also measures. Read `warnings`; the number alone means nothing
+  without the beats beside it.
 - **Embedding video in markdown.** Repo-relative mp4s don't play inline in
   rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
   with a still and point at the re-record command instead. GitHub plays only

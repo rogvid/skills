@@ -38,6 +38,8 @@ tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --evidence-only       # just the per-beat evidence takes
 tests/smoke --failure-only        # just the takes that do not finish
 tests/smoke --polish-only         # just the two takes that grade how it looks
+tests/smoke --content-only        # just the pair that grades whether a
+                                  #   recording shows anything (issue #97)
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -151,8 +153,8 @@ all (see Known gaps).
 
 ## What it asserts
 
-Nine independent axes, because a recorder can fail on any one of them while
-looking perfect on the other eight.
+Ten independent axes, because a recorder can fail on any one of them while
+looking perfect on the other nine.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -1435,6 +1437,167 @@ than the fade injecting xterm.js before Chromium's screencast emits anything.
 The recorder has no fade-in path (the element is appended already opaque, so no
 transition can run), but the suite is relying on setup cost for that and would
 not notice if it changed.
+
+### Whether the recorder notices that the recording shows nothing (issue #97)
+
+Everything above is this harness measuring the picture. The recorder now
+measures it too — `content` in `timeline.json`, plus a line on stderr — because
+a user recording their own demo does not run this suite. This axis grades that
+check, and only that: the floors and rects above stay as the harness's own,
+because **a check graded by the measurement it makes is not graded**.
+
+Three takes. `content-shown/` and `content-covered/` are one terminal
+storyboard recorded twice, differing by a single line — whether `interlude("")`
+takes the card back down — and otherwise the same five commands, the same
+captions, the same exit codes and the same `evidence/`. That pair is issue #91
+reproduced: under the card every beat runs and none of it reaches a frame.
+
+`content-toured/` is a **different** healthy storyboard, and it exists because
+the pair above structurally cannot reach the failure that matters most here.
+The recorder's content rect excludes its own caption bar, so swapping captions
+over a still screen is invisible to the held-picture arm — and swapping captions
+over a still screen is precisely what `SKILL.md` tells authors to do during a
+wait. Measured on real takes:
+
+| take | `static_for` |
+|---|---|
+| healthy terminal, 2 touring captions | 16.5s |
+| healthy web, 3 touring captions | 20.0s |
+| healthy terminal, 3 touring captions | 21.5–22.0s |
+| **reference take 1, card over the terminal** | **23.0s** |
+
+There is no threshold between the healthy rows and the defect. The first
+version of this axis warned on duration alone and would have called all three
+healthy takes broken — in `timeline.json`, blaming "a title card or modal left
+up over the app", which never happened. It went unnoticed because
+`CONTENT_COMMANDS` was deliberately capped at three-line commands with no
+touring captions "to stay clear of" the limit: **a fixture shaped to avoid a
+failure mode cannot grade it.** That is the catalogue's *config-hidden path*.
+
+So the recorder correlates the stretch with the beat log — a held picture
+spanning only `caption`/`hold`/`shot`/`wait_for*` is a narrated hold; one
+spanning `run`/`click`/`goto`/`type_into`/… is worth a human's time — and
+`content-toured/` is asserted **silent** while holding *past* the limit.
+
+Five commands rather than three because the covered take cannot hold one frame
+for longer than it runs, and the band below needs it well clear of the
+recorder's limit. **Each prints at most three lines, and that is a constraint
+rather than a style**: the recorder's content rect drops the bottom fifth of
+the terminal, so output landing in the last rows of a not-yet-scrolled screen
+is outside the measured region. An earlier version of this storyboard filled 25
+of ~32 rows and pushed two commands into that band, where the *healthy* take
+reported 9.5 s of held picture while it was visibly printing. That limit is
+real and is stated in `SKILL.md`; the fixture stays clear of it so that what is
+graded here is the check rather than the limit.
+
+Every assertion is a *comparison between the two takes*, because each one has a
+way to pass vacuously alone — "the covered take warns" is satisfied by a
+recorder that warns on everything, "the shown one does not" by a recorder that
+never warns, and both by a metric measuring the wrong region entirely.
+
+| | asserted on `content-shown` | asserted on `content-covered` |
+|---|---|---|
+| `content.warnings` | empty | says "held one picture" |
+| stderr from the take | no warning | `WARNING`, unasked |
+| `static_for` | under `static_limit` | ≥ 75% of the take's duration |
+| the five stills, cropped to `#__term_host` | 5 distinct files | 1 file, five times |
+| `evidence/` | ≥ 5 distinct screens | ≥ 5 distinct screens |
+
+…plus one assertion across the pair: the video at the first and last `run` beat
+must be **at least 8 dB PSNR further apart in the covered take than in the
+shown one**.
+
+The last row is the control that makes the two above it mean anything: it is
+what says the five commands really printed five different things, so "the
+frames are identical" is a statement about the *recording* rather than about a
+storyboard that did nothing. It is also #97's finding stated as one line — the
+text tier says the demo worked, the pixels say nothing was shown.
+
+Stills are compared **byte for byte** and need no threshold at all: they are
+lossless PNGs of the page. The video cannot be, so it is compared with ffmpeg's
+PSNR — and that comparison is **relative between the two takes**, which was
+learned the expensive way. The first version asserted "the covered take reads
+at least 40 dB": 47.5 dB on the development machine, **39.8 dB on the CI
+runner**, where a different x264 build re-quantises a held frame slightly
+differently, and the suite went red on a recorder that was working. That is the
+catalogue's *threshold tuned to this box*, and the fix is the one this file
+already uses for the caption band — compare the takes against each other, same
+run, same encoder, no absolute number claimed:
+
+| | this box | CI runner |
+|---|---|---|
+| covered | 47.5 dB | 39.8 dB |
+| shown | 25.5 dB | 25.9 dB |
+| gap | 22.0 dB | 13.9 dB |
+
+**The recorder's `static_limit` is graded as a band, from this run's own two
+takes rather than from a number in a comment**: it must sit at least 1.6x above
+the *healthy* take's longest still stretch and at most 0.7x of the covered
+take's — one run measured `15.0s sits in [8.8, 21.3]s (healthy 5.5s, covered
+30.5s)`. Halve the constant and every honest demo warns; double it and the take
+this whole issue is about goes unremarked. Both turn the suite red.
+
+**The anti-correlated metric is a standing regression test now.** The section
+at the top of this file explains why the app's rect is measured rather than the
+frame; nothing asserted it. This axis takes `content-shown/demo.mp4`, paints
+the app rect flat black with `drawbox` — keeping the recorder's chrome, which
+is the whole point — and scores the result both ways:
+
+| | healthy | app painted flat |
+|---|---|---|
+| over the content rect | 6.6 | 0.2 |
+| over the whole frame | 82.3 | **90.3** |
+
+The rect ranks the blank recording far below the healthy one; the whole frame
+ranks it **above**. Both directions are asserted, and the second is the one
+that matters: if a future change scores the frame again, or the fixture stops
+exhibiting the anti-correlation, the suite says so instead of passing on a
+number that grades chrome.
+
+Three more assertions round it out.
+
+**`content-toured/` must hold past the limit and be met with silence**, and the
+first half is the premise the second needs: if the take stopped holding long
+enough it would keep passing after the thing it grades regressed, so
+`static_for >= static_limit` is asserted explicitly. **That premise has already
+earned its keep**: the first version of this take used sentence-length captions,
+which wrapped to three lines on the CI runner — and a wrapping caption bar grows
+*upward*, past the bottom fifth the content rect trims off and into the measured
+region, 266 changed pixels a time. The stretch fell from 25.0s to 11.0s and the
+take stopped reaching the path it exists for. CI said so instead of passing. The mechanism is asserted
+too, not just the symptom — `content.static_beats` must be non-empty and must
+contain no acting verb — because "no warning" alone would also pass on a
+recorder whose static arm was simply switched off.
+
+**The covered take's message must not name a cause.** It is asserted to contain
+neither "title card or modal left up" nor "is not visible", and to say which
+region was measured. A warning that blames an overlay is wrong on three of this
+suite's own healthy takes, and a confidently wrong artifact is the thing #97
+exists to remove — the detector must not become an instance of it.
+
+**Every storyboard verb must be classified.** `check_verb_classification()`
+scrapes `@_beat_verb("…")` and `self._beat("…")` out of the package source —
+scraped rather than imported, so an omission cannot hide on both sides — and
+requires each of the 22 verbs to be in exactly one of the recorder's two sets.
+An unclassified verb silently counts as passive, which would quietly switch the
+arm off for a whole class of demo. It aborts if the scrape finds fewer than 15
+verbs, so a broken regex reports itself instead of passing on an empty set.
+
+Finally, `check_content_healthy()` hangs off *every* graded take — web,
+terminal and the stitched segments demo — asserting that each reports a
+measured `content` with no warnings, a score well clear of the recorder's blank
+floor, and a scored rect that lies **inside** the app rect this harness read off
+the live recorder. That last one is the assertion that catches a recorder
+grading its own window chrome, which produces a perfectly plausible `content`
+block and a number that means nothing.
+
+What it deliberately does **not** assert is that `static_for` stays under
+`static_limit`. That rule was there in the first version and it was wrong: a
+healthy demo narrating a rendered screen holds the measured region for longer
+than the limit and is supposed to. What a healthy take owes is silence, not a
+small number.
+
+`tests/smoke --content-only` records just these three takes.
 
 ### Failure artifacts — what a take that did *not* finish leaves behind
 
