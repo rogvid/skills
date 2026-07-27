@@ -4277,23 +4277,41 @@ OPENING_FIRST_FRAME_S = 0.03
 
 
 def check_opening(label: str, out_dir: Path, app_rect: Rect) -> list[str]:
-    """The first frame of a web take shows the app (issue #119)."""
+    """The first frame of a web take shows the app (issue #119).
+
+    **The acceptance criterion is about the picture, not about the mechanism**,
+    and the first version of this confused the two. It refused to grade a take
+    whose `held` was zero and reported that refusal as a failure — so a run
+    where Chromium's screencast happened to emit its first frame *after* the
+    page painted, which is a perfectly healthy recording and the outcome the
+    fix is trying to produce, went red. It did on CI, on a branch that had
+    nothing to do with the opening.
+
+    A take whose app painted before frame zero satisfies the criterion by
+    itself; one whose app did not satisfies it because the hold covered the
+    gap. Either way frame zero has to show the app, so that arm runs
+    unconditionally now.
+
+    What is lost is graded coverage of the hold *code* on a run that never
+    needed it, and the honest handling is to say so out loud rather than to
+    fail: the line below reports whether the hold was exercised, so a run whose
+    evidence is thinner announces it instead of looking identical to one that
+    proved something. Making that reliable needs a fixture that defers its
+    first paint on purpose — #126.
+    """
     failures: list[str] = []
     mp4 = out_dir / "demo.mp4"
     content = content_of(out_dir) or {}
     opening = content.get("opening")
     held = opening.get("held") if isinstance(opening, dict) else None
+    exercised = isinstance(held, (int, float)) and held > 0
 
-    if not isinstance(held, (int, float)) or held <= 0:
-        return [
-            f"{label}: this take reports no opening hold "
-            f"(content.opening.held is {held!r}), so the app had already "
-            f"painted when the recording started and nothing here graded the "
-            f"fix for #119. The check is the failure, not the recording — "
-            f"re-run, and if it persists the gap this covers has stopped "
-            f"happening on this machine and this assertion is worthless as "
-            f"written."
-        ]
+    if held is None:
+        failures.append(
+            f"{label}: this take reports content.opening.held = null, which "
+            f"means the web recorder did not run its opening hold at all. "
+            f"Whatever frame zero shows, the mechanism is not wired in."
+        )
 
     rect = keep_top(app_rect)
     try:
@@ -4322,14 +4340,29 @@ def check_opening(label: str, out_dir: Path, app_rect: Rect) -> list[str]:
             f"{label}: {mp4.name} opens on a picture that is not there — its "
             f"first frame scores {first:.2f} luma stddev over {rect}, under "
             f"{floor:.2f} ({OPENING_FRAME0_SHARE:g} of this take's own "
-            f"{median:.2f} median). The recorder says it held the opening for "
-            f"{held:.2f}s; whatever it composited, the app is not visible at "
-            f"t=0."
+            f"{median:.2f} median). The recorder reports "
+            f"content.opening.held = {held!r}"
+            + (
+                "; whatever it composited, the app is not visible at t=0."
+                if exercised
+                else " — it saw nothing to cover, and the app is not there "
+                "either, so the opening was blank and went unnoticed."
+            )
         )
     if not failures:
+        # Which of the two ways this passed, every time, unasked. A reader who
+        # only ever sees "opens on the app" cannot tell a run that exercised
+        # the hold from one that never needed it.
+        how = (
+            f"over a {held:.2f}s hold"
+            if exercised
+            else "with no hold needed — the app had already painted when the "
+            "screencast started, so the hold code was not exercised this run "
+            "(#126)"
+        )
         print(
             f"smoke: {label} opens on the app (frame 0 scores {first:.2f} "
-            f"against a {median:.2f} median, over a {held:.2f}s hold)"
+            f"against a {median:.2f} median, {how})"
         )
     return failures
 
