@@ -4267,6 +4267,12 @@ def check_content_healthy(label: str, out_dir: Path, app_rect: Rect) -> list[str
 # above what a blank one can.
 OPENING_FRAME0_SHARE = 0.5
 
+# How much of the file to read to get its first frame. Shorter than one frame
+# at any rate the recorder encodes, so what comes back is frame zero and at
+# most one neighbour — and it is read with `-t` rather than an `fps` filter for
+# the reason spelled out in check_opening().
+OPENING_FIRST_FRAME_S = 0.03
+
 
 def check_opening(label: str, out_dir: Path, app_rect: Rect) -> list[str]:
     """The first frame of a web take shows the app (issue #119)."""
@@ -4289,17 +4295,25 @@ def check_opening(label: str, out_dir: Path, app_rect: Rect) -> list[str]:
 
     rect = keep_top(app_rect)
     try:
-        frames = gray_frames(mp4, rect, sample_fps=CONTENT_SAMPLE_FPS)
+        # **Not `sample_fps=`.** The fps filter quantises to its own output
+        # slots, and at 1 fps slot zero is a whole second wide — measured, it
+        # returns a frame from around 0.5 s, which on a broken take is *after*
+        # the blank opening has ended. The first version of this check read
+        # that frame, scored 17.06 on a take whose first frame was flat white,
+        # and passed. A window cut with `-t` instead decodes from the file's
+        # own first frame, which is the only frame this assertion is about.
+        opening = gray_frames(mp4, rect, duration=OPENING_FIRST_FRAME_S)
+        body = gray_frames(mp4, rect, sample_fps=CONTENT_SAMPLE_FPS)
     except RuntimeError as exc:
         return [f"{label}: {exc}"]
-    if len(frames) < 2:
+    if not opening or len(body) < 2:
         return [
-            f"{label}: only {len(frames)} frame(s) sampled from {mp4.name}, "
-            f"too few to compare the opening against the rest of the take"
+            f"{label}: {len(opening)} opening frame(s) and {len(body)} sampled "
+            f"from {mp4.name}, too few to compare the opening against the take"
         ]
 
-    scores = [contrast(f) for f in frames]
-    first, median = scores[0], statistics.median(scores)
+    first = contrast(opening[0])
+    median = statistics.median(contrast(f) for f in body)
     floor = median * OPENING_FRAME0_SHARE
     if first < floor:
         failures.append(
