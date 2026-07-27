@@ -4352,11 +4352,22 @@ def _synthetic_take(path: Path, painted_at: float | None, seconds: float) -> Non
         subprocess.run([*common, "-f", "lavfi", "-i", bars, *encode], check=True)
         return
     subprocess.run(
-        [*common,
-         "-f", "lavfi", "-i", f"color=c=white:s=320x180:r=25:d={seconds:.2f}",
-         "-f", "lavfi", "-i", bars,
-         "-filter_complex", f"[0:v][1:v]overlay=enable='gte(t,{painted_at:.2f})'[v]",
-         "-map", "[v]", *encode],
+        [
+            *common,
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=white:s=320x180:r=25:d={seconds:.2f}",
+            "-f",
+            "lavfi",
+            "-i",
+            bars,
+            "-filter_complex",
+            f"[0:v][1:v]overlay=enable='gte(t,{painted_at:.2f})'[v]",
+            "-map",
+            "[v]",
+            *encode,
+        ],
         check=True,
     )
 
