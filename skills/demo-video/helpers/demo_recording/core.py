@@ -34,7 +34,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from html import unescape as html_unescape
 from pathlib import Path
@@ -452,6 +452,175 @@ class Secret:
         return SECRET_MASK
 
 
+# -- acceptance criteria and coverage (issue #12) -----------------------------
+#
+# A demo can be perfectly clear and demonstrate the wrong thing. The reviewer
+# this skill already asks for answers *"is this story clear?"*; a review gate
+# has to answer *"does this show what the ticket asked for?"*, which is a
+# different question with a different answer.
+#
+# So a take can be recorded **against a ticket**: the criteria are declared on
+# the recorder, individual beats tag themselves with the criterion they are
+# there to show, and the timeline carries a coverage report naming any
+# criterion no beat claimed.
+#
+# **The report records what the storyboard CLAIMED, never what it proved, and
+# every name in it says so.** `claimed` and `unclaimed`, not `demonstrated` and
+# `missing`. This is the whole honesty of the feature and it is worth being
+# explicit about why:
+#
+#   * An `ac=` tag is a string the storyboard author typed. It is evidence of
+#     intent and nothing else. A beat tagged `AC-3` whose frames show an error
+#     page is still tagged `AC-3`.
+#   * The failure this exists to catch is the *tautology* — a storyboard
+#     derived from the diff rather than from the ticket, which produces a
+#     polished, convincing demo of a misread requirement. If this file said
+#     "AC-3 demonstrated", a conformance reviewer reading it would be taking
+#     the author's word for exactly the thing it was convened to check. It
+#     would share the blind spot of the bug it exists to find.
+#   * So the artifact's job is to put the reviewer in front of the right
+#     frames — which beats claim which criterion, at what timestamp, with
+#     which still — and the verdict stays with the reviewer.
+#
+# `unclaimed` is the one machine-checkable finding here, and it is safe to
+# automate precisely because it needs no judgement: nobody even asserted it.
+
+# How a criterion id may be written. Deliberately narrow — these become table
+# rows, filenames in a reviewer's prompt and keys in a JSON object, and an id
+# holding a pipe or a newline breaks the first two silently.
+_AC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
+
+
+def _checked_criteria(criteria: dict[str, str] | None) -> dict[str, str]:
+    """Validate a declared criteria map, or `{}` when none was declared.
+
+    Raises rather than dropping a bad entry: a criterion silently missing from
+    this map is a criterion that can never be reported `unclaimed`, which is
+    the one finding the coverage report exists to produce.
+    """
+    if criteria is None:
+        return {}
+    if not isinstance(criteria, dict):
+        raise TypeError(
+            f"criteria must be a dict of {{id: text}}, got {type(criteria).__name__}"
+        )
+    checked: dict[str, str] = {}
+    for key, text in criteria.items():
+        if not isinstance(key, str) or not _AC_ID.match(key):
+            raise ValueError(
+                f"criterion id {key!r} is not usable: ids are 1-40 characters "
+                f"of letters, digits, dot, dash or underscore, starting with a "
+                f"letter or digit (e.g. 'AC-3')"
+            )
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(
+                f"criterion {key!r} has no text. The text is what a reviewer "
+                f"judges the frames against — an id on its own says nothing."
+            )
+        checked[key] = text.strip()
+    return checked
+
+
+def _ac_field(claims: list[str]) -> dict:
+    """`{"ac": [...]}` when a beat claims something, `{}` when it does not.
+
+    Absent-rather-than-empty for the reason `error` is absent on a beat that
+    returned (issue #24): a take recorded before this key existed then reads
+    exactly like an untagged beat, and `"ac": []` on all 28 beats of an
+    untagged demo is noise in a file this skill tells people to commit.
+    """
+    return {"ac": claims} if claims else {}
+
+
+def coverage_report(criteria: dict[str, str], beats: list[dict]) -> dict | None:
+    """Which criteria the storyboard **claimed**, and which nothing claimed.
+
+    None when no criteria were declared: a take recorded outside a ticket has
+    no coverage to report, and an empty report would read as a take that
+    covered nothing.
+
+    A pure function of the two inputs, so a stitched demo merges the same way a
+    single take builds it, and so a consumer can re-run it over a committed
+    `timeline.json` without re-recording.
+    """
+    if not criteria:
+        return None
+    claimed: dict[str, list[dict]] = {key: [] for key in criteria}
+    tagged = 0
+    for beat in beats:
+        ids = beat.get("ac") or []
+        if not isinstance(ids, list) or not ids:
+            continue
+        tagged += 1
+        for key in ids:
+            if key in claimed:
+                claimed[key].append(
+                    {
+                        "index": beat.get("index"),
+                        "segment": beat.get("segment"),
+                        "segment_index": beat.get("segment_index"),
+                        "t_start": beat.get("t_start"),
+                        "still": beat.get("still"),
+                    }
+                )
+    return {
+        "criteria": dict(criteria),
+        # Every declared id is a key here, including the ones with an empty
+        # list. A consumer iterating `claimed` sees the whole ticket rather
+        # than only its demonstrated half.
+        "claimed": claimed,
+        "unclaimed": [key for key, beats_ in claimed.items() if not beats_],
+        "tagged_beats": tagged,
+        "untagged_beats": len(beats) - tagged,
+    }
+
+
+def _merged_coverage(docs: list[dict], beats: list[dict]) -> dict | None:
+    """The coverage report for a demo stitched out of several segments.
+
+    `docs` supplies the declared criteria — the union of what each segment was
+    recorded against — and `beats` is the *merged*, renumbered beat list the
+    report has to point at.
+
+    A demo whose segments were recorded against different halves of one ticket
+    is the ordinary case: the web part shows AC-1 and AC-2, the terminal part
+    shows AC-3. Taking the union is what lets the joined timeline report AC-4
+    unclaimed when no segment claimed it — which neither segment's own report
+    could say, since neither knew the other's criteria.
+    """
+    criteria, conflicts = _declared_criteria(docs)
+    report = coverage_report(criteria, beats)
+    if report is not None and conflicts:
+        # Named rather than resolved: two segments recorded against different
+        # wordings of the same id is a storyboard mistake somebody has to see,
+        # and silently keeping the first text would hide it behind a report
+        # that looks complete.
+        report["conflicts"] = conflicts
+    return report
+
+
+def _declared_criteria(docs: list[dict]) -> tuple[dict[str, str], list[str]]:
+    """Every criterion the segments declared, and any id they disagree on.
+
+    A conflict is kept rather than resolved — first text wins in the map, and
+    the id is named in `conflicts` so the merged document says the segments
+    were recorded against different wordings instead of quietly picking one.
+    """
+    merged: dict[str, str] = {}
+    conflicts: list[str] = []
+    for doc in docs:
+        coverage = doc.get("coverage")
+        if not isinstance(coverage, dict):
+            continue
+        for key, text in (coverage.get("criteria") or {}).items():
+            if key in merged and merged[key] != text:
+                if key not in conflicts:
+                    conflicts.append(key)
+                continue
+            merged.setdefault(key, text)
+    return merged, conflicts
+
+
 def _env(name: str, default: str | None = None) -> str | None:
     """A DEMO_VIDEO_-prefixed environment variable, or the default."""
     value = os.environ.get(f"DEMO_VIDEO_{name}", "").strip()
@@ -582,6 +751,19 @@ def tts_clip(
 #                          `held` means the frames at the start of the video
 #                          are not frames the recording captured; see "the
 #                          blank opening".
+#   coverage      dict?  — **null** unless the take was recorded against a
+#                          ticket (`Recorder(criteria={...})`). What the
+#                          storyboard *claimed*, never what it proved:
+#                          `criteria` (the declared {id: text}), `claimed`
+#                          ({id: [beats that tagged it]} — every declared id is
+#                          a key, with an empty list where nothing did),
+#                          `unclaimed` (the ids no beat tagged, the one
+#                          machine-checkable finding here), `tagged_beats`,
+#                          `untagged_beats`, and `conflicts` on a merged demo
+#                          whose segments used different text for one id.
+#                          On a stitched demo it is recomputed over the merged
+#                          beats, so its indices match this file. See
+#                          "acceptance criteria and coverage".
 #   beats         list   — the beats, in the order they ran
 #   strict        bool   — whether strict mode was on for this take (on a
 #                          merged demo: only if it was on for every segment)
@@ -617,6 +799,11 @@ def tts_clip(
 #                      merge — so `(segment, segment_index)` names a beat the
 #                      same way before and after `stitch`, which `index` alone
 #                      cannot (see issue #22).
+#   ac        list?  — **absent** on a beat that claims no acceptance
+#                      criterion, which is most of them. Present, as a list of
+#                      declared criterion ids, on a `caption` or `shot` given
+#                      `ac=`. A claim by the storyboard's author and nothing
+#                      more — see `coverage` above.
 #   evidence  str?   — path, relative to the timeline file, of this beat's
 #                      evidence file ("evidence/beat-04.json"); null when
 #                      evidence capture is off. See "per-beat evidence" below
@@ -884,6 +1071,91 @@ def _fmt_t(value: object) -> str:
     return "" if value is None else f"{float(value):.2f}"
 
 
+def _coverage_md(coverage: object) -> list[str]:
+    """The acceptance-criteria section of timeline.md, or nothing (issue #12).
+
+    Every word here is chosen so a reader cannot come away thinking this file
+    graded anything. The column is "claimed by", the note says a tag is the
+    author's claim, and the only assertive sentence in the section is about
+    the criteria nothing claimed — which needs no judgement, because nobody
+    asserted them.
+    """
+    if not isinstance(coverage, dict):
+        return []
+    criteria = coverage.get("criteria") or {}
+    if not criteria:
+        return []
+    claimed = coverage.get("claimed") or {}
+    unclaimed = coverage.get("unclaimed") or []
+    out = [
+        "## Acceptance criteria",
+        "",
+        "This take was recorded against a ticket. **The table below is what "
+        "the storyboard *claimed*, not what it proved** — an `ac=` tag is a "
+        "string its author typed, and whether the frames actually show the "
+        "criterion is the reviewer's judgement, not this file's.",
+        "",
+        "| criterion | claimed by | at | still |",
+        "|---|---|---:|---|",
+    ]
+    for key, text in criteria.items():
+        rows = claimed.get(key) or []
+        if not rows:
+            out.append(
+                f"| **{_md_cell(key)}** — {_md_cell(text)} | "
+                f"*nothing claims this* | | |"
+            )
+            continue
+        for n, row in enumerate(rows):
+            label = (
+                f"**{_md_cell(key)}** — {_md_cell(text)}" if n == 0 else ""
+            )
+            beat = f"beat {row.get('index')}"
+            if row.get("segment"):
+                beat += f" (`{_md_cell(row['segment'])}`)"
+            still = row.get("still")
+            out.append(
+                f"| {label} | {beat} | {_fmt_t(row.get('t_start'))} | "
+                + (f"`{_md_cell(still)}`" if still else "")
+                + " |"
+            )
+    out.append("")
+    if unclaimed:
+        out += [
+            f"**{len(unclaimed)} of {len(criteria)} criteria have no beat "
+            f"claiming them: {', '.join(f'`{_md_cell(k)}`' for k in unclaimed)}.** "
+            f"Either the demo does not show them, or the storyboard did not say "
+            f"where. Both are worth fixing before review.",
+            "",
+        ]
+    else:
+        out += [
+            f"Every one of the {len(criteria)} criteria has at least one beat "
+            f"claiming it. Whether those beats show what they claim is the "
+            f"reviewer's call.",
+            "",
+        ]
+    conflicts = coverage.get("conflicts") or []
+    if conflicts:
+        out += [
+            f"**Segments disagree about the wording of "
+            f"{', '.join(f'`{_md_cell(k)}`' for k in conflicts)}** — they were "
+            f"recorded against different text for the same id, and the first "
+            f"segment's wording is the one shown above. Check the segment "
+            f"timelines.",
+            "",
+        ]
+    untagged = coverage.get("untagged_beats")
+    if isinstance(untagged, int) and untagged:
+        out += [
+            f"{untagged} beat(s) claim no criterion. That is ordinary — "
+            f"navigation, waits and captions that set the scene are not "
+            f"demonstrating anything in particular.",
+            "",
+        ]
+    return out
+
+
 def render_timeline_md(doc: dict) -> str:
     """Render a timeline document as markdown, stills embedded.
 
@@ -966,6 +1238,11 @@ def render_timeline_md(doc: dict) -> str:
             f"times below are on the stitched video's clock.",
             "",
         ]
+    # Above the beat table, because it is the reason somebody opened this file
+    # when the take was recorded against a ticket — and because a reviewer who
+    # scrolls past 28 beats first has already formed the impression the
+    # coverage report exists to test (issue #12).
+    out += _coverage_md(doc.get("coverage"))
     # The exit column only exists when something in this take has one — a web
     # timeline would otherwise carry an empty column on every row. A `run` beat
     # whose status could not be read shows "?" rather than blank, so the
@@ -2351,6 +2628,7 @@ class _DemoBase:
         timezone_id: str | None = None,
         locale: str | None = None,
         evidence: bool | None = None,
+        criteria: dict[str, str] | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
         # > built-in default (see SKILL.md for the variable names).
@@ -2361,6 +2639,12 @@ class _DemoBase:
             )
         self.out_dir = Path(out_dir)
         self.segment = segment
+        # The ticket's acceptance criteria, if this take is being recorded
+        # against one (issue #12). Declared up front rather than accumulated
+        # from the `ac=` tags, because the useful half of a coverage report is
+        # the criteria **nothing** claimed — and that is underivable from the
+        # tags alone. Absent here, `coverage` is null and `ac=` is refused.
+        self._criteria = _checked_criteria(criteria)
         self.images_dir = self.out_dir / "images"
         self._video_dir = self.out_dir / ".video"
         if accent_rgb is None:
@@ -4377,6 +4661,11 @@ class _DemoBase:
             "content": self._evidence_scrub_deep(
                 self._scrub_deep(self._content), forbidden
             ),
+            # Built from the *scrubbed* beats, not from `self._beats`, so a
+            # still path or a caption that the mask reached is masked here too
+            # rather than reappearing in the coverage table (issue #12).
+            # Null on a take recorded outside a ticket.
+            "coverage": coverage_report(self._criteria, beats),
             "beats": beats,
             "strict": self._strict,
             "issues": issues,
@@ -4419,21 +4708,76 @@ class _DemoBase:
         """Hold the frame so viewers can read what is on screen."""
         self._idle(seconds)
 
-    def caption(self, text: str) -> None:
+    def _checked_ac(self, ac: object, where: str) -> list[str]:
+        """The criterion ids this beat claims, validated against the declared
+        set (issue #12).
+
+        **Refused at the call, not recorded and sorted out later.** A tag
+        naming a criterion that does not exist is an authoring typo, and the
+        cost of letting it through is paid by the reader: the criterion the
+        author *meant* comes back `unclaimed` while the storyboard looks like
+        it covered everything. Same posture as `caption()` refusing a secret —
+        an authoring error is cheapest to fix at the line that made it.
+        """
+        if ac is None:
+            return []
+        if isinstance(ac, str):
+            ids = [ac]
+        elif isinstance(ac, Sequence):
+            ids = list(ac)
+        else:
+            # Checked before iterating: `list(7)` raises "'int' object is not
+            # iterable", which names neither the verb nor the argument.
+            raise TypeError(
+                f"{where} was given ac={ac!r}: a criterion id is a string, or "
+                f"a list of them"
+            )
+        for key in ids:
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"{where} was given ac={ac!r}: a criterion id is a string, "
+                    f"or a list of them"
+                )
+        if not self._criteria:
+            raise ValueError(
+                f"{where} tags {', '.join(map(repr, ids))}, but this take "
+                f"declared no acceptance criteria. Pass them to the recorder — "
+                f"criteria={{'AC-1': 'the text from the ticket', ...}} — so the "
+                f"timeline can report which of them nothing claimed."
+            )
+        unknown = [key for key in ids if key not in self._criteria]
+        if unknown:
+            raise ValueError(
+                f"{where} tags {', '.join(map(repr, unknown))}, which "
+                f"{'is' if len(unknown) == 1 else 'are'} not among this take's "
+                f"declared criteria ({', '.join(map(repr, self._criteria))}). "
+                f"A tag that names nothing would leave the criterion you meant "
+                f"reported as unclaimed while the storyboard looks complete."
+            )
+        # De-duplicated, order kept: `ac=["AC-1", "AC-1"]` claims it once, and
+        # `claimed` is a list of beats rather than a count of tags.
+        return list(dict.fromkeys(ids))
+
+    def caption(self, text: str, ac: str | Sequence[str] | None = None) -> None:
         """Show a narrator line at the bottom of the frame ("" hides it).
 
         With speech enabled the line is also spoken; the previous line
         always finishes before this one starts.
+
+        `ac` names the acceptance criterion this line is here to demonstrate —
+        `caption("The overdraft is rejected at submit.", ac="AC-3")`. It is a
+        **claim**, recorded as one: see "acceptance criteria and coverage".
         """
         # Before anything else, and specifically before _prepare_line() —
         # which would synthesize the line and cache the audio on disk.
         self._no_secrets(text, "caption()")
+        claims = self._checked_ac(ac, "caption()")
         # Synthesizing and waiting out the previous spoken line happens
         # *before* the beat opens: the beat's t_start is when this caption
         # reaches the screen, which is what a reviewer extracting a frame at
         # that timestamp expects to see.
         clip = self._prepare_line(text)
-        with self._beat("caption", caption=text):
+        with self._beat("caption", caption=text, **_ac_field(claims)):
             self.page.evaluate("t => window.__demoCaption(t)", text)
             self._caption = text
             self._start_line(clip)
@@ -4551,8 +4895,14 @@ class _DemoBase:
         cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", scrubbed.replace(SECRET_MASK, "redacted"))
         return f"{cleaned.strip('-')}-{digest}"
 
-    def shot(self, name: str) -> Path:
-        """Still for the written guide -> images/<name>.png."""
+    def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
+        """Still for the written guide -> images/<name>.png.
+
+        `ac` names the acceptance criterion this still is here to demonstrate.
+        A tagged `shot` is the strongest thing a coverage report can hand a
+        reviewer — a committed picture of the moment, at a known timestamp.
+        """
+        claims = self._checked_ac(ac, "shot()")
         # Scrubbed here rather than only in the beat record, so the file on
         # disk carries the same name the log does. Scrubbing the log alone
         # would leave images/04-sk-live-….png sitting next to a beat that
@@ -4561,7 +4911,7 @@ class _DemoBase:
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()
         self._shots.append(path)
-        with self._beat("shot", selector=name, still=rel):
+        with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):
             # Stills are the exposed path: the web recorder captures them
             # full-bleed — the whole page, no window frame — so a mask that
             # only covers the video would leave every still readable. Nothing
@@ -4891,6 +5241,11 @@ def _merged_timeline(
         "duration": total,
         "determinism": _merge_determinism([r["determinism"] for r in records]),
         "content": merge_content(records),
+        # Recomputed over the *merged* beat list, not unioned from the
+        # segments' own reports: `index` is renumbered by the merge, and a
+        # report assembled from per-segment ones would point a reviewer at beat
+        # numbers that do not exist in the file they are reading.
+        "coverage": _merged_coverage(docs, beats),
         "segments": records,
         "beats": beats,
         "strict": strict,

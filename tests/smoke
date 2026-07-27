@@ -4380,6 +4380,375 @@ SYNTHETIC_PAINT_AT = 0.6
 SYNTHETIC_SLACK_S = 0.12
 
 
+# -- acceptance-criterion coverage (issue #12) --------------------------------
+#
+# The existing fresh-agent review asks "is this story clear?". A review gate has
+# to answer "does this show what the ticket asked for?" — a different question,
+# and a demo can be perfectly clear while demonstrating the wrong thing. So a
+# take can now be recorded against a ticket's criteria, beats tag themselves
+# with the criterion they are there to show, and the timeline reports which
+# criteria nothing claimed.
+#
+# **What is graded here is that the report cannot flatter the storyboard**, and
+# the three arms are chosen for the three ways it could:
+#
+#   1. `unclaimed` names the criterion nothing tagged. This is the whole
+#      machine-checkable finding, and the fixture is built with exactly one
+#      undemonstrated criterion so the arm has something to find.
+#   2. Every beat the report points at **really carries that tag, in the same
+#      file**. "3 criteria produced 3 rows" is nearly free to satisfy and says
+#      nothing; the claim is that row K points at beat K.
+#   3. A tag naming a criterion that was never declared is **refused at the
+#      call**. Left through, the criterion the author meant comes back
+#      unclaimed while the storyboard looks complete — the report would be
+#      wrong in the one direction nobody checks.
+#
+# Deliberately NOT graded, because it is not a thing this suite can know:
+# whether a tagged beat *shows* what it claims. That is the reviewer's
+# judgement, and the artifact is written to say so rather than to assert it.
+# See "acceptance criteria and coverage" in core.py.
+
+# The ticket the coverage take is recorded against. Three criteria, and the
+# storyboard deliberately demonstrates only two — COVERAGE_UNCLAIMED is the
+# finding the whole axis exists to produce, and a fixture that covered
+# everything could not produce it.
+COVERAGE_CRITERIA = {
+    "AC-1": "The dashboard lists the current figures.",
+    "AC-2": "The list can be filtered.",
+    "AC-3": "A filter that matches nothing says so.",
+}
+COVERAGE_UNCLAIMED = "AC-3"
+
+
+def record_coverage(out_dir: Path, base_url: str) -> list[str]:
+    """A take recorded against COVERAGE_CRITERIA, with one left undemonstrated."""
+    from demo_recording import Recorder
+
+    b = Beats("coverage")
+    with Recorder(
+        out_dir,
+        base_url=base_url,
+        speech=False,
+        strict=True,
+        deterministic=True,
+        criteria=COVERAGE_CRITERIA,
+    ) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        rec.caption("The current figures.", ac="AC-1")
+        rec.shot("01-figures", ac="AC-1")
+        # Two ids on one beat: a single screen can be the evidence for more
+        # than one criterion, and `claimed` has to list it under both.
+        rec.caption("Filtered, and still showing figures.", ac=["AC-2", "AC-1"])
+        rec.shot("02-filtered", ac="AC-2")
+        # Untagged on purpose: most beats claim nothing, and `untagged_beats`
+        # has to count them without any of them reaching `claimed`.
+        rec.caption("")
+    return b.problems
+
+
+def check_coverage(out_dir: Path) -> list[str]:
+    """The coverage report says what the storyboard claimed, and no more."""
+    failures: list[str] = []
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    coverage = doc.get("coverage")
+    if not isinstance(coverage, dict):
+        return [
+            f"coverage: this take declared {len(COVERAGE_CRITERIA)} criteria "
+            f"and its timeline reports coverage={coverage!r} — nothing below "
+            f"can be graded"
+        ]
+
+    if coverage.get("criteria") != COVERAGE_CRITERIA:
+        failures.append(
+            f"coverage: the report's criteria are "
+            f"{coverage.get('criteria')!r}, not the ones the take declared. "
+            f"A reviewer judges the frames against this text."
+        )
+
+    # Arm 1 — the finding.
+    if coverage.get("unclaimed") != [COVERAGE_UNCLAIMED]:
+        failures.append(
+            f"coverage: `unclaimed` is {coverage.get('unclaimed')!r}, expected "
+            f"[{COVERAGE_UNCLAIMED!r}]. The storyboard demonstrates two of "
+            f"three criteria and never tags the third, so that is the one "
+            f"finding this report exists to produce."
+        )
+
+    # Arm 2 — correspondence, not count. Every beat the report points at has
+    # to be a beat in *this* file carrying *that* tag.
+    beats = {b.get("index"): b for b in doc.get("beats") or []}
+    claimed = coverage.get("claimed") or {}
+    if set(claimed) != set(COVERAGE_CRITERIA):
+        failures.append(
+            f"coverage: `claimed` has keys {sorted(claimed)}, expected every "
+            f"declared criterion ({sorted(COVERAGE_CRITERIA)}) — a consumer "
+            f"iterating it must see the whole ticket, not its covered half"
+        )
+    for key, rows in claimed.items():
+        for row in rows:
+            beat = beats.get(row.get("index"))
+            if beat is None:
+                failures.append(
+                    f"coverage: {key} points at beat {row.get('index')!r}, "
+                    f"which is not a beat in this timeline"
+                )
+                continue
+            if key not in (beat.get("ac") or []):
+                failures.append(
+                    f"coverage: {key} points at beat {row.get('index')} "
+                    f"(`{beat.get('verb')}`), whose own `ac` is "
+                    f"{beat.get('ac')!r} — the report and the beat disagree "
+                    f"about what that beat claims"
+                )
+            if row.get("t_start") != beat.get("t_start"):
+                failures.append(
+                    f"coverage: {key} says beat {row.get('index')} is at "
+                    f"{row.get('t_start')!r}, the beat says "
+                    f"{beat.get('t_start')!r} — a reviewer scrubbing to that "
+                    f"timestamp would land somewhere else"
+                )
+            if row.get("still") != beat.get("still"):
+                failures.append(
+                    f"coverage: {key} names still {row.get('still')!r} for "
+                    f"beat {row.get('index')}, the beat names "
+                    f"{beat.get('still')!r}"
+                )
+
+    # No beat may claim a criterion that was never declared — the report is
+    # built from the beats, so an undeclared tag reaching one would be a row
+    # nothing on the ticket accounts for.
+    for beat in doc.get("beats") or []:
+        for key in beat.get("ac") or []:
+            if key not in COVERAGE_CRITERIA:
+                failures.append(
+                    f"coverage: beat {beat.get('index')} claims {key!r}, "
+                    f"which this take never declared"
+                )
+
+    tagged = sum(1 for b in doc.get("beats") or [] if b.get("ac"))
+    if coverage.get("tagged_beats") != tagged:
+        failures.append(
+            f"coverage: the report counts {coverage.get('tagged_beats')!r} "
+            f"tagged beats; {tagged} beats carry an `ac`"
+        )
+    untagged = len(doc.get("beats") or []) - tagged
+    if coverage.get("untagged_beats") != untagged:
+        failures.append(
+            f"coverage: the report counts {coverage.get('untagged_beats')!r} "
+            f"untagged beats; {untagged} beats carry no `ac`"
+        )
+
+    # The markdown is what a reviewer is actually handed, so the finding has to
+    # survive into it — a JSON field nobody renders is not a review gate.
+    # **Not "does AC-3 appear in the file".** It appears in the table on its
+    # own row whatever the report concludes, so that assertion would pass on a
+    # document that had dropped the finding entirely. What has to survive into
+    # the markdown is the *sentence that states it*, naming the criterion.
+    md = (out_dir / "timeline.md").read_text()
+    stated = [ln for ln in md.splitlines() if "no beat claiming them" in ln]
+    if not stated:
+        failures.append(
+            "coverage: timeline.md never states the finding — the criteria "
+            "nothing claimed exist in the JSON and in a table row, and "
+            "nowhere in the file does a sentence say so"
+        )
+    elif not any(COVERAGE_UNCLAIMED in ln for ln in stated):
+        failures.append(
+            f"coverage: timeline.md states a finding about unclaimed criteria "
+            f"without naming {COVERAGE_UNCLAIMED}: {stated!r}"
+        )
+    # Likewise not "does the word claimed appear" — it is a column header.
+    if "not what it proved" not in md:
+        failures.append(
+            "coverage: timeline.md's acceptance section never says the table "
+            "is what the storyboard claimed and *not what it proved*. Without "
+            "that sentence a reviewer reads an author's tag as a demonstrated "
+            "criterion, which is the tautology this feature exists to avoid"
+        )
+
+    if not failures:
+        print(
+            f"smoke: coverage ok ({len(COVERAGE_CRITERIA)} criteria, "
+            f"{tagged} tagged beats, unclaimed {coverage.get('unclaimed')})"
+        )
+    return failures
+
+
+def check_coverage_refusals(out_root: Path) -> list[str]:
+    """Tagging and declaring are refused where they would produce a wrong
+    report. No browser: `Recorder(...)` does not launch one until `__enter__`.
+    """
+    from demo_recording import Recorder, coverage_report
+
+    failures: list[str] = []
+    out = out_root / "coverage-refusals"
+    out.mkdir(parents=True, exist_ok=True)
+
+    def refuses(what: str, call, *want: type) -> None:
+        try:
+            call()
+        except want:
+            return
+        except Exception as exc:  # noqa: BLE001 - the wrong error is a failure
+            failures.append(
+                f"coverage-refusals: {what} raised {type(exc).__name__}, "
+                f"expected one of {[w.__name__ for w in want]}"
+            )
+            return
+        failures.append(f"coverage-refusals: {what} was accepted")
+
+    tagged = Recorder(out, criteria={"AC-1": "one"})
+    refuses(
+        "a tag naming an undeclared criterion",
+        lambda: tagged._checked_ac("AC-9", "caption()"),
+        ValueError,
+    )
+    refuses(
+        "a list holding one undeclared criterion",
+        lambda: tagged._checked_ac(["AC-1", "AC-9"], "shot()"),
+        ValueError,
+    )
+    refuses(
+        "a tag that is not a string",
+        lambda: tagged._checked_ac(7, "caption()"),
+        TypeError,
+    )
+    refuses(
+        "a tag on a take that declared no criteria",
+        lambda: Recorder(out)._checked_ac("AC-1", "caption()"),
+        ValueError,
+    )
+    refuses(
+        "a criterion id with a space in it",
+        lambda: Recorder(out, criteria={"AC 1": "one"}),
+        ValueError,
+    )
+    refuses(
+        "a criterion declared with no text",
+        lambda: Recorder(out, criteria={"AC-1": "   "}),
+        ValueError,
+    )
+
+    # Accepted, and the control for every refusal above: if these raised, the
+    # refusals would be passing because nothing works.
+    try:
+        if tagged._checked_ac(["AC-1", "AC-1"], "shot()") != ["AC-1"]:
+            failures.append(
+                "coverage-refusals: a criterion tagged twice on one beat is "
+                "not de-duplicated, so `claimed` would list that beat twice"
+            )
+        if tagged._checked_ac(None, "caption()") != []:
+            failures.append("coverage-refusals: an untagged beat is not accepted")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(
+            f"coverage-refusals: a valid tag raised {type(exc).__name__}: {exc}"
+        )
+
+    # A take recorded outside a ticket reports null, not an empty report: an
+    # empty one reads as a take that covered nothing.
+    if coverage_report({}, [{"index": 0, "verb": "goto"}]) is not None:
+        failures.append(
+            "coverage-refusals: a take that declared no criteria produced a "
+            "coverage report instead of null — which reads as a take measured "
+            "against a ticket and found to cover none of it"
+        )
+
+    if not failures:
+        print("smoke: coverage refusals ok (6 refused, 3 controls accepted)")
+    return failures
+
+
+def check_coverage_merge() -> list[str]:
+    """A stitched demo's coverage is recomputed over the *merged* beats.
+
+    The subtle half of the feature, and unreachable from a single take: each
+    segment knows only its own criteria and numbers its beats from zero. A
+    merged report assembled by unioning the segments' own reports would point a
+    reviewer at beat numbers that do not exist in the file they are reading,
+    and could never report a criterion that *no* segment claimed — because no
+    segment knows the other's ticket.
+    """
+    from demo_recording.core import _merged_coverage
+
+    failures: list[str] = []
+    docs = [
+        {"coverage": {"criteria": {"AC-1": "web half", "AC-3": "neither shows this"}}},
+        {"coverage": {"criteria": {"AC-2": "cli half", "AC-3": "neither shows this"}}},
+    ]
+    # Indices as `stitch()` renumbers them: segment two's beat 0 becomes beat 5.
+    merged = [
+        {
+            "index": 0,
+            "ac": ["AC-1"],
+            "segment": "part1",
+            "segment_index": 0,
+            "t_start": 1.0,
+            "still": None,
+        },
+        {
+            "index": 5,
+            "ac": ["AC-2"],
+            "segment": "part2",
+            "segment_index": 0,
+            "t_start": 9.0,
+            "still": None,
+        },
+    ]
+    report = _merged_coverage(docs, merged)
+    if report is None:
+        return ["coverage-merge: two segments with criteria produced no report"]
+    if sorted(report["criteria"]) != ["AC-1", "AC-2", "AC-3"]:
+        failures.append(
+            f"coverage-merge: the merged criteria are "
+            f"{sorted(report['criteria'])}, not the union of the segments' — "
+            f"so a criterion only one segment knew about is missing from the "
+            f"ticket the joined demo is judged against"
+        )
+    if report["unclaimed"] != ["AC-3"]:
+        failures.append(
+            f"coverage-merge: `unclaimed` is {report['unclaimed']!r}, expected "
+            f"['AC-3'] — the criterion neither segment claimed, which neither "
+            f"segment's own report could name"
+        )
+    got = report["claimed"].get("AC-2") or []
+    if [row.get("index") for row in got] != [5]:
+        failures.append(
+            f"coverage-merge: AC-2 points at beats "
+            f"{[r.get('index') for r in got]}, expected [5] — the merged "
+            f"index. Segment two numbers that beat 0 in its own log, and a "
+            f"reviewer handed 'beat 0' would open the wrong one."
+        )
+
+    # Two segments recorded against different wording for one id is a
+    # storyboard mistake, and the merged report has to say so rather than
+    # silently keeping whichever it saw first.
+    clashing = [
+        {"coverage": {"criteria": {"AC-1": "one wording"}}},
+        {"coverage": {"criteria": {"AC-1": "a different wording"}}},
+    ]
+    clash = _merged_coverage(clashing, [])
+    if not clash or clash.get("conflicts") != ["AC-1"]:
+        failures.append(
+            f"coverage-merge: segments declaring different text for AC-1 "
+            f"produced conflicts={None if not clash else clash.get('conflicts')!r}, "
+            f"expected ['AC-1'] — otherwise the merged file shows one wording "
+            f"and nothing says the other existed"
+        )
+    if _merged_coverage([{}, {}], merged) is not None:
+        failures.append(
+            "coverage-merge: segments with no criteria produced a report "
+            "instead of null"
+        )
+
+    if not failures:
+        print(
+            "smoke: coverage merge ok (union of 3 criteria, unclaimed AC-3, "
+            "merged indices, 1 wording conflict named)"
+        )
+    return failures
+
+
 def check_opening_gap(out_root: Path) -> list[str]:
     """`opening_gap` on two videos built here, not recorded (issue #119).
 
@@ -7778,6 +8147,24 @@ def run_content(out_root: Path) -> list[str]:
         check_verb_classification()
         + check_content_pair(takes)
         + check_content_toured(toured["out_dir"], toured["stderr"])
+    )
+
+
+def run_coverage(out_root: Path) -> list[str]:
+    """Acceptance-criterion coverage (issue #12): one take, two unit arms."""
+    out_dir = fresh_take_dir(out_root, "coverage")
+    with fixture_server() as base_url:
+        try:
+            problems = record_coverage(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"coverage: Recorder raised {type(exc).__name__}: {exc}"]
+    if not (out_dir / "timeline.json").is_file():
+        return problems + ["coverage: the take wrote no timeline.json"]
+    return (
+        problems
+        + check_coverage(out_dir)
+        + check_coverage_refusals(out_root)
+        + check_coverage_merge()
     )
 
 
@@ -11797,6 +12184,12 @@ def main() -> int:
         "recording showing nothing (issue #97)",
     )
     parser.add_argument(
+        "--coverage-only",
+        action="store_true",
+        help="record only the take that grades acceptance-criterion coverage "
+        "(issue #12)",
+    )
+    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -11829,6 +12222,7 @@ def main() -> int:
             ("--failure-only", args.failure_only),
             ("--polish-only", args.polish_only),
             ("--content-only", args.content_only),
+            ("--coverage-only", args.coverage_only),
         )
         if on
     ]
@@ -11908,6 +12302,11 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # take, and the card it leaves up is the terminal recorder's card.
     if only in (None, "--terminal-only", "--content-only"):
         failures += run_content(out_root)
+    # Acceptance-criterion coverage (issue #12). Reachable from --web-only as
+    # well as its own flag: it is a web take, and whoever is changing the
+    # recorder's beat record is running --web-only.
+    if only in (None, "--web-only", "--coverage-only"):
+        failures += run_coverage(out_root)
     if only in (None, "--web-only"):
         failures += run_web_problems(out_root)
         failures += run_strict_web(out_root)
