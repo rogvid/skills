@@ -43,6 +43,33 @@ or installed. (You can still pull one directly by path if you want to try it.)
 
 *Nothing in development right now.*
 
+## Recording a demo on a pull request
+
+[`.github/workflows/demo-video.yml`](.github/workflows/demo-video.yml) is a
+reusable GitHub Actions workflow that records the demos a branch made stale and
+posts **one comment** on the pull request — rewritten on every push — carrying
+the beat table as text and a deep link to the mp4. A consuming repo calls it in
+a few lines:
+
+```yaml
+jobs:
+  demo:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: rogvid/skills/.github/workflows/demo-video.yml@main
+    with:
+      working-directory: app
+      app-command: npm run dev -- --port 3000
+      base-url: http://127.0.0.1:3000
+```
+
+It records only storyboards whose application changed, sets an explicit
+artifact retention and says it in the comment, and **refuses to record against
+a public host** — see *Recording on a pull request (CI)* in
+[`skills/demo-video/SKILL.md`](skills/demo-video/SKILL.md) for the trigger
+policy, what is published, and what the target guard does not cover.
+
 ## Examples
 
 [`examples/`](examples/) holds applications the skills are exercised against.

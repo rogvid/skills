@@ -350,17 +350,33 @@ jobs:
           # take's name. See the freshness check in "Stage the artifacts".
           touch "$STARTED_AT"
           status=ok
-          while IFS= read -r sb; do
+          ran=0
+          # The loop reads its list on fd 3, not stdin. `uv run` inherits stdin
+          # and drains it, so with the ordinary `done < file` the *first*
+          # storyboard swallowed the rest of the list: two were selected, one
+          # was recorded, and nothing said so. The second demo's committed
+          # artifacts were then the only thing left on disk to publish.
+          while IFS= read -r sb <&3; do
             [ -n "$sb" ] || continue
+            ran=$((ran + 1))
             echo "::group::uv run $sb"
-            if ! uv run "$sb"; then
+            if ! uv run "$sb" < /dev/null; then
               echo "::error file=$sb::the take did not finish — see failure/ in the artifacts"
               status=failed
             fi
             echo "::endgroup::"
-          done < "$CHANGED.selected"
+          done 3< "$CHANGED.selected"
+
+          # A loop that silently runs fewer storyboards than were selected is
+          # exactly the bug above, and it is invisible in the artifacts: what
+          # is missing looks like what was never asked for.
+          expected=$(grep -c . "$CHANGED.selected")
+          if [ "$ran" -ne "$expected" ]; then
+            echo "::error::selected $expected storyboard(s) but ran $ran"
+            status=failed
+          fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          echo "record status: $status"
+          echo "record status: $status ($ran of $expected storyboards run)"
 
       # `steps.record.conclusion != 'skipped'` is load-bearing, not belt and
       # braces. `images/`, `timeline.json` and `timeline.md` are *committed*
@@ -378,6 +394,7 @@ jobs:
           rm -rf "$STAGE_DEMO" "$STAGE_WORKING" "$STAGE_FAILURE"
           mkdir -p "$STAGE_DEMO" "$STAGE_WORKING" "$STAGE_FAILURE"
           stale=0
+          silent=0
           # Second line of defence, independent of the step condition above:
           # nothing older than the moment recording began may be published.
           # A take that crashed before rewriting a file leaves the committed
@@ -400,6 +417,16 @@ jobs:
             for f in demo.mp4 timeline.md timeline.json demo-video-FAILED.md; do
               copy_fresh "$dir/$f" "$STAGE_DEMO/$dir/$f"
             done
+            # `timeline.json` is the file that decides whether this demo said
+            # anything at all this run: the comment is rendered from it, and
+            # without one the demo is reported as having published nothing.
+            # Counted separately from `stale` because a held-back *still* is
+            # ordinary — a storyboard that dropped a `shot()` leaves its
+            # committed png behind — and must not turn the check red on its own.
+            if [ ! -f "$STAGE_DEMO/$dir/timeline.json" ]; then
+              echo "::error file=$dir::published no timeline.json this run wrote"
+              silent=$((silent + 1))
+            fi
             if [ -d "$dir/images" ]; then
               mkdir -p "$STAGE_DEMO/$dir/images"
               for img in "$dir"/images/*; do
@@ -421,8 +448,12 @@ jobs:
             fi
           done < "$DEMO_DIRS"
           bytes=$(find "$STAGE_DEMO" -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')
-          echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
-          echo "staged $bytes bytes ($stale file(s) held back as not this take's):"
+          {
+            echo "bytes=$bytes"
+            echo "stale=$stale"
+            echo "silent=$silent"
+          } >> "$GITHUB_OUTPUT"
+          echo "staged $bytes bytes ($stale file(s) held back as not this take's, $silent demo(s) published no timeline):"
           find "$STAGE_DEMO" -type f | sed "s|$STAGE_DEMO/|  |"
 
       - name: Upload the recording
@@ -513,8 +544,17 @@ jobs:
           fi
 
       # Last, so a take that failed still publishes everything above.
+      #
+      # `silent != 0` is part of the condition because the check and the
+      # comment must never disagree. A demo that published no timeline is
+      # reported in the comment as a take that failed, and a green check beside
+      # that sentence teaches a reviewer to ignore the comment — worse than
+      # either signal alone.
       - name: Fail the check if the take failed
-        if: always() && steps.discover.outputs.count != '0' && steps.record.outputs.status != 'ok'
+        if: >-
+          always() && steps.discover.outputs.count != '0' &&
+          (steps.record.outputs.status != 'ok' || steps.stage.outputs.silent != '0')
         run: |
-          echo "::error::A take did not finish. The recording, the beat log and failure/ are attached to this run."
+          echo "::error::A take did not finish, or a selected demo published nothing this run wrote."
+          echo "::error::The recording, the beat log and failure/ are attached to this run."
           exit 1
