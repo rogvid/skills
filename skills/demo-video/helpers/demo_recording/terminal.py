@@ -1356,11 +1356,16 @@ class TerminalRecorder(_DemoBase):
 
     # -- capture ------------------------------------------------------------
 
-    def shot(self, name: str) -> Path:
+    def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
         """Still for the written guide -> images/<name>.png (pumps pending
-        output first so the latest screen state is captured)."""
+        output first so the latest screen state is captured).
+
+        `ac` is passed straight through — a terminal take records against a
+        ticket exactly like a web one, and a criterion demonstrated on the
+        command line is the ordinary reason a demo has a terminal half.
+        """
         self._pump()
-        return super().shot(name)
+        return super().shot(name, ac=ac)
 
     # -- evidence (issue #9) ------------------------------------------------
 
