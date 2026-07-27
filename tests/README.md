@@ -1448,9 +1448,20 @@ because **a check graded by the measurement it makes is not graded**.
 
 `content-shown/` and `content-covered/` are one terminal storyboard recorded
 twice. They differ by a single line — whether `interlude("")` takes the card
-back down — and are otherwise the same three commands, the same captions, the
+back down — and are otherwise the same five commands, the same captions, the
 same exit codes and the same `evidence/`. That pair is issue #91 reproduced:
 under the card every beat runs and none of it reaches a frame.
+
+Five commands rather than three because the covered take cannot hold one frame
+for longer than it runs, and the band below needs it well clear of the
+recorder's limit. **Each prints at most three lines, and that is a constraint
+rather than a style**: the recorder's content rect drops the bottom fifth of
+the terminal, so output landing in the last rows of a not-yet-scrolled screen
+is outside the measured region. An earlier version of this storyboard filled 25
+of ~32 rows and pushed two commands into that band, where the *healthy* take
+reported 9.5 s of held picture while it was visibly printing. That limit is
+real and is stated in `SKILL.md`; the fixture stays clear of it so that what is
+graded here is the check rather than the limit.
 
 Every assertion is a *comparison between the two takes*, because each one has a
 way to pass vacuously alone — "the covered take warns" is satisfied by a
@@ -1462,25 +1473,41 @@ never warns, and both by a metric measuring the wrong region entirely.
 | `content.warnings` | empty | says "did not change" |
 | stderr from the take | no warning | `WARNING`, unasked |
 | `static_for` | under `static_limit` | ≥ 75% of the take's duration |
-| the three stills, cropped to `#__term_host` | 3 distinct files | 1 file, three times |
-| the video at the first and last `run` beat | ≤ 33 dB PSNR apart | ≥ 40 dB |
-| `evidence/` | ≥ 3 distinct screens | ≥ 3 distinct screens |
+| the five stills, cropped to `#__term_host` | 5 distinct files | 1 file, five times |
+| `evidence/` | ≥ 5 distinct screens | ≥ 5 distinct screens |
+
+…plus one assertion across the pair: the video at the first and last `run` beat
+must be **at least 8 dB PSNR further apart in the covered take than in the
+shown one**.
 
 The last row is the control that makes the two above it mean anything: it is
-what says the three commands really printed three different things, so "the
+what says the five commands really printed five different things, so "the
 frames are identical" is a statement about the *recording* rather than about a
 storyboard that did nothing. It is also #97's finding stated as one line — the
 text tier says the demo worked, the pixels say nothing was shown.
 
 Stills are compared **byte for byte** and need no threshold at all: they are
 lossless PNGs of the page. The video cannot be, so it is compared with ffmpeg's
-PSNR — 46.4 dB under the card against 26.2 dB with it down, twenty decibels, a
-hundredfold in mean squared error, with both bars in the open space between.
+PSNR — and that comparison is **relative between the two takes**, which was
+learned the expensive way. The first version asserted "the covered take reads
+at least 40 dB": 47.5 dB on the development machine, **39.8 dB on the CI
+runner**, where a different x264 build re-quantises a held frame slightly
+differently, and the suite went red on a recorder that was working. That is the
+catalogue's *threshold tuned to this box*, and the fix is the one this file
+already uses for the caption band — compare the takes against each other, same
+run, same encoder, no absolute number claimed:
+
+| | this box | CI runner |
+|---|---|---|
+| covered | 47.5 dB | 39.8 dB |
+| shown | 25.5 dB | 25.9 dB |
+| gap | 22.0 dB | 13.9 dB |
 
 **The recorder's `static_limit` is graded as a band, from this run's own two
 takes rather than from a number in a comment**: it must sit at least 1.6x above
 the *healthy* take's longest still stretch and at most 0.7x of the covered
-take's. Halve the constant and every honest demo warns; double it and the take
+take's — one run measured `15.0s sits in [8.8, 21.3]s (healthy 5.5s, covered
+30.5s)`. Halve the constant and every honest demo warns; double it and the take
 this whole issue is about goes unremarked. Both turn the suite red.
 
 **The anti-correlated metric is a standing regression test now.** The section
@@ -1491,7 +1518,7 @@ is the whole point — and scores the result both ways:
 
 | | healthy | app painted flat |
 |---|---|---|
-| over the content rect | 5.3 | 0.2 |
+| over the content rect | 6.6 | 0.2 |
 | over the whole frame | 82.3 | **90.3** |
 
 The rect ranks the blank recording far below the healthy one; the whole frame

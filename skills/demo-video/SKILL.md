@@ -739,8 +739,8 @@ the encoded frame, and writes down what it found:
 ```json
 "content": { "measured": true, "note": null,
              "rect": [74, 110, 1132, 432], "sample_fps": 2, "frames": 47,
-             "score": 14.1, "floor": 1.5,
-             "static_for": 5.0, "static_from": 13.5, "static_limit": 12.0,
+             "score": 14.1, "floor": 1.0,
+             "static_for": 5.0, "static_from": 13.5, "static_limit": 15.0,
              "warnings": [] }
 ```
 
@@ -765,6 +765,20 @@ it captured anything at all. `rect` deliberately excludes the recorder's own
 window chrome and its caption bar: a whole-frame score is dominated by them, to
 the point where a recording with the app painted flat scores *higher* than a
 working one.
+
+**Two limits worth knowing before you rely on it:**
+
+- **The bottom fifth of the app is not measured** — that is where the caption
+  bar is burned in, and there is no room to shrink the exclusion. On a terminal
+  demo that is the last few rows *before the screen starts scrolling*: output
+  landing there does not count as the picture changing, so a stretch that is
+  visibly printing can read as held. Once the screen scrolls, every new line
+  moves the whole picture and the blind window closes.
+- **A run of held frames is measured per segment.** Two parts of a stitched
+  demo that each hold still for 8s across the cut are reported as 8s, not 16s.
+
+Neither can produce a false *success*: both make the check quieter than the
+truth, never louder.
 
 On a stitched demo each part measures its own `.seg.mp4` — two segments can be
 two media with two geometries — so the envelope's `content` is the worst of the

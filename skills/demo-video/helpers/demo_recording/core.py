@@ -1531,28 +1531,44 @@ _CONTENT_W, _CONTENT_H = 160, 90
 
 # How much of the content rect's height is dropped off the bottom before
 # scoring. Sized for the caption bar plus its shadow at either recorder's
-# geometry — the web caption sits at bottom:44px inside an app rect that is
-# then scaled ~0.8, the terminal's at bottom:88px in an un-composited frame —
-# and the same 0.8 keep that tests/smoke has used for its own content floor
-# since #17.
+# geometry — the web caption's top edge sits at 84.2% of the app rect's height
+# and the terminal's at 85.7%, with a 24 px shadow above each — and it is the
+# same 0.8 keep that tests/smoke has used for its own content floor since #17.
+#
+# **The stated limit this creates**: whatever happens in the bottom fifth of
+# the app is not measured. For a terminal that is the last few rows *before the
+# screen scrolls* — after it starts scrolling every new line moves the whole
+# picture, so the blind window is bounded and transient, but inside it a demo
+# that is visibly printing reads as held. Measured on a fixture that filled 25
+# of ~32 rows: 9.5 s of "held" picture across two commands that were plainly
+# running. There is no room to shrink the trim (the caption's shadow starts at
+# ~82%), so it is documented in SKILL.md rather than tuned away.
 CONTENT_CAPTION_TRIM = 0.2
 
 # Median luma standard deviation under which the content rect is "blank".
 #
-# Measured over the trimmed rect, per medium, on this repo's own takes:
+# Measured over the trimmed rect, on every take tests/smoke records plus this
+# repo's reference demo:
 #
-#              healthy                       blank
-#   web        15.5 - 17.0                   0.1 - 1.1
-#   terminal    5.1 -  7.9                   0.2 - 0.4
+#   blank                            0.2 - 1.1   (a real recording with the app
+#                                                 rect painted flat scores 0.21)
+#   healthy, sparsest terminal       2.0         (one failing command, nothing
+#                                                 else on screen)
+#   healthy, ordinary terminal       4.6 - 14.3
+#   healthy, web                    16.0 - 36.1
 #
-# One floor for both media rather than two, and it sits in the gap: ~3.4x under
-# the weakest healthy terminal take (the tighter side by far) and ~1.4x over
-# the strongest blank one. The asymmetry is deliberate — this warns rather than
-# refusing, so a missed blank take costs a warning nobody got, while a false
-# alarm on a legitimately sparse terminal demo costs the warning its credibility
-# everywhere. tests/smoke keeps its own, higher, per-medium floors as a gate;
-# this is the floor shipped to somebody else's app.
-CONTENT_BLANK_FLOOR = 1.5
+# One floor for both media rather than two, and it sits at 1.0 — 2x under the
+# sparsest healthy take in the suite and roughly 5x over a blank one. The
+# asymmetry is deliberate and it is not a compromise: this arm has a partner.
+# A page that never painted does not change either, so the static arm below
+# catches the blank case a second time, and a floor set high enough to catch
+# every blank take on its own would warn about honest, nearly-empty terminal
+# demos — which costs the warning its credibility everywhere.
+#
+# tests/smoke keeps its own, higher, per-medium floors as a *gate*. This is the
+# floor shipped to somebody else's app, where a false alarm is the expensive
+# failure.
+CONTENT_BLANK_FLOOR = 1.0
 
 # When two consecutive samples count as "the same picture": fewer than
 # CONTENT_MOVED_PIXELS of the 14 400 reduced pixels moved by more than
@@ -1587,21 +1603,25 @@ CONTENT_MOVED_PIXELS = 4
 # stderr and `warnings` mention it.
 #
 # Measured, on the longest stretch a *healthy* take holds one frame — which is
-# larger than it sounds, because a demo ends on its last screen and the
-# recording runs on for a second or two after the storyboard does:
+# larger than it sounds, for two reasons that are easy to forget: a demo ends
+# on its last screen and the recording runs on for a second or two after the
+# storyboard does, and a caption change is invisible here on purpose (see
+# CONTENT_CAPTION_TRIM), so a stretch narrated over a still screen counts as
+# held.
 #
 #   reference demo, web part          4.5 s
 #   reference demo, terminal part     5.0 s
 #   tests/smoke's content take        6.0 s
-#   ...the same storyboard, covered  19.5 s
-#   reference demo take 1, covered   23.0 s
+#   tests/smoke's terminal take       9.5 s   <- the worst healthy value seen
+#   ...the content storyboard, covered  ~28 s
+#   reference demo take 1, covered      23 s
 #
-# 12 s sits 2x over the worst healthy value and 1.6x under the smallest covered
-# one, and tests/smoke's content axis re-derives that band from its own two
+# 15 s sits 1.6x over the worst healthy value and 1.5x under the smallest
+# covered one. tests/smoke's content axis re-derives that band from its own two
 # takes on every run rather than trusting this comment — halve this constant
 # and every honest demo warns, double it and the take issue #97 exists for goes
 # unremarked. Both directions turn the suite red.
-CONTENT_STATIC_WARN_S = 12.0
+CONTENT_STATIC_WARN_S = 15.0
 
 
 def content_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:

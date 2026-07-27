@@ -203,6 +203,30 @@ CONTENT_KEEP = 0.8
 CONTENT_TAKES = ("content-shown", "content-covered")
 CONTENT_CARD = "Everything after this is covered."
 
+# Five commands rather than three, and the length is load-bearing rather than
+# thorough: the covered take can hold one frame for no longer than it runs, and
+# the band below needs the covered value to sit well clear of the recorder's
+# limit. Each prints something different, so `evidence/` can say the take
+# really did five things while the frames say none of them showed.
+#
+# **Every one of them prints at most three lines, and that is a constraint, not
+# a style.** The recorder's content rect drops the bottom fifth of the terminal
+# (its caption bar is burned in there), so output landing in the last few rows
+# of a not-yet-scrolled screen is outside the measured region. An earlier
+# version of this storyboard ran `seq 1 8` and two `ls -1`s, filled 25 of ~32
+# rows, and pushed the last two commands into that band — where the *healthy*
+# take reported 9.5 s of held picture for a stretch in which it was visibly
+# printing. The limit is real and is written down in SKILL.md; this keeps the
+# fixture clear of it, so what is graded here is the check rather than the
+# limit.
+CONTENT_COMMANDS = (
+    ("The first command.", "seq 1 3"),
+    ("The second, printing something else.", "printf 'alpha\\nbravo\\n'"),
+    ("A listing, cut short.", "ls -1 | head -2"),
+    ("Two more words.", "printf 'charlie\\ndelta\\n'"),
+    ("And one that says where it is.", "basename $PWD"),
+)
+
 # The band `CONTENT_STATIC_WARN_S` has to sit inside, measured on this run's own
 # two takes rather than hardcoded: a healthy take of this storyboard holds its
 # longest frame for `shown.static_for`, and the covered one holds the card for
@@ -228,15 +252,26 @@ CONTENT_SCORE_HEADROOM = 3.0
 # fades over 0.45 s, so it is never the whole file.
 CONTENT_COVERED_FRACTION = 0.75
 
-# How far apart, in dB PSNR, two moments of one take may be before this harness
-# calls them the same picture — measured on the video rather than on the
-# lossless stills, because a codec makes byte equality impossible there.
-# Measured over the app rect, between the first and last `run` beat: 46.4 dB
-# under the card, 26.2 dB with the card down. Twenty decibels is a hundredfold
-# in mean squared error, so the two bars below sit in open space rather than
-# next to either number.
-CONTENT_HELD_PSNR_DB = 40.0
-CONTENT_MOVED_PSNR_DB = 33.0
+# How much *further apart* in dB PSNR the covered take's two sampled moments
+# must be than the shown take's. Measured on the video rather than the lossless
+# stills, because a codec makes byte equality impossible there.
+#
+# **Relative, not absolute, and that was learned the expensive way.** The first
+# version asserted "the covered take reads at least 40 dB". It measured 46.4 dB
+# on the development machine and **39.8 dB** on the CI runner — a different
+# x264 build re-quantising a held frame slightly differently — so the suite
+# went red on a recorder that was working perfectly. The catalogue entry for
+# that is "the threshold tuned to this box", and the fix is the one this file
+# already uses for the caption band: compare the two takes against each other,
+# in the same run, on the same encoder, so no absolute number is claimed.
+#
+#            this box    CI runner
+#   covered   47.5 dB     39.8 dB
+#   shown     25.5 dB     25.9 dB
+#   gap       22.0 dB     13.9 dB
+#
+# 8 dB is a sixfold difference in mean squared error and sits under both.
+CONTENT_PSNR_GAP_DB = 8.0
 
 # Duration windows, in seconds. Wide on purpose: the lower bound catches a
 # take that died early, the upper one catches a hang, and everything in
@@ -3146,14 +3181,7 @@ def record_content(out_dir: Path, cleared: bool) -> tuple[list[str], dict]:
         # Three commands whose output is different every time, each followed by
         # a hold. Under the card every one of them runs, exits zero, lands in
         # `evidence/` and changes nothing on screen — which is the finding.
-        for n, (caption, command) in enumerate(
-            (
-                ("The first command.", "seq 1 8"),
-                ("The second, printing something else.", "printf 'alpha\\nbravo\\n'"),
-                ("And a listing.", "ls -1"),
-            ),
-            start=1,
-        ):
+        for n, (caption, command) in enumerate(CONTENT_COMMANDS, start=1):
             rec.caption(caption)
             rec.run(command)
             expect_prompt(rec, f"run({command!r})")
@@ -4291,12 +4319,31 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
     #    #97, and it is measured here without asking the recorder anything:
     #    ffmpeg cuts two frames from the middles of two different `run` beats
     #    and they are byte-identical.
+    apart: dict[str, float | None] = {}
     for take, name, is_covered in (
         (covered, CONTENT_TAKES[1], True),
         (shown, CONTENT_TAKES[0], False),
     ):
-        failures += _check_occlusion(
+        found, apart[name] = _check_occlusion(
             take["out_dir"], name, keep_top(take["info"]["app"]), covered=is_covered
+        )
+        failures += found
+    held_db, moved_db = apart[CONTENT_TAKES[1]], apart[CONTENT_TAKES[0]]
+    if held_db is None or moved_db is None:
+        failures.append("content: one of the two takes yielded no PSNR reading")
+    elif held_db - moved_db < CONTENT_PSNR_GAP_DB:
+        failures.append(
+            f"content: the covered take's two sampled moments are {held_db:.1f} "
+            f"dB PSNR apart and the shown take's {moved_db:.1f} dB — a gap of "
+            f"{held_db - moved_db:.1f} dB, under the {CONTENT_PSNR_GAP_DB} dB "
+            f"one. Whatever the absolute numbers are on this encoder, the card "
+            f"is not holding the video visibly stiller than the storyboard does"
+        )
+    else:
+        print(
+            f"smoke: content video held {held_db:.1f} dB against moved "
+            f"{moved_db:.1f} dB — {held_db - moved_db:.1f} dB apart, over the "
+            f"{CONTENT_PSNR_GAP_DB} dB gap"
         )
 
     # 6. The anti-correlated metric (issue #17), as a standing regression test.
@@ -4356,62 +4403,80 @@ def psnr_db(a: Path, b: Path) -> float | None:
     return math.inf if found.group(1) == "inf" else float(found.group(1))
 
 
-def _check_occlusion(out_dir: Path, label: str, rect: Rect, covered: bool) -> list[str]:
+def _check_occlusion(
+    out_dir: Path, label: str, rect: Rect, covered: bool
+) -> tuple[list[str], float | None]:
     """Was the app covered for this whole take? Answered without the recorder.
 
-    Two independent readings of the same three moments, neither of which asks
-    the recorder anything, and one control that stops both from being vacuous:
+    Returns (failures, the PSNR between the two sampled moments). Two
+    independent readings, neither of which asks the recorder anything, and one
+    control that stops both from being vacuous:
 
     * **the stills**, cropped to `rect` and compared byte for byte. Lossless
       PNGs of the page, so this needs no threshold at all: under a card the
-      three are one file three times, and with the card down they are three
-      files.
-    * **the recording**, at the midpoints of the first and last `run` beat,
-      compared by ffmpeg's PSNR. The stills are the page and the video is what
-      a reviewer watches; a codec makes byte equality impossible there, and the
-      two takes sit 46.4 dB and 26.2 dB apart — twenty decibels, a hundredfold
-      in error — so the bars below are nowhere near either measurement.
-    * **`evidence/`**, which must hold several *different* screens either way.
-      That is the control: it is what says the three commands really printed
-      three different things, so that "the frames are identical" is a statement
-      about the recording rather than about a storyboard that did nothing.
+      five are one file five times, and with the card down they are five files.
+      This is the assertion made *here*, per take.
+    * **the recording**, at the midpoints of the first and last `run` beat. The
+      stills are the page and the video is what a reviewer watches; a codec
+      makes byte equality impossible there, so the reading is handed back and
+      compared *against the other take's* by the caller — an absolute dB bar is
+      a bar tuned to one x264 build, which this suite found out by going red on
+      CI at 39.8 dB after measuring 47.5 dB here.
+    * **`evidence/`**, which must hold as many *different* screens as there are
+      commands, either way. That is the control: it is what says the commands
+      really printed different things, so that "the frames are identical" is a
+      statement about the recording rather than about a storyboard that did
+      nothing.
 
     `covered=True` is asserted for the covered take and `covered=False` for the
     shown one. Running both is what makes each mean something: a comparison
     that answered "identical" for every take would pass the first and fail the
     second.
     """
+    wanted = len(CONTENT_COMMANDS)
     runs = beat_midpoints(out_dir, "run")
-    if len(runs) != 3:
-        return [f"{label}: the take recorded {len(runs)} run beats, expected 3"]
+    if len(runs) != wanted:
+        return (
+            [f"{label}: the take recorded {len(runs)} run beats, expected {wanted}"],
+            None,
+        )
     distinct, last = screens_differ(out_dir)
-    if distinct < 3:
-        return [
-            f"{label}: evidence/ holds {distinct} distinct screens, so the "
-            f"commands did not print three different things and comparing "
-            f"their frames proves nothing"
-        ]
+    if distinct < wanted:
+        return (
+            [
+                f"{label}: evidence/ holds {distinct} distinct screens, so the "
+                f"{wanted} commands did not print {wanted} different things and "
+                f"comparing their frames proves nothing"
+            ],
+            None,
+        )
 
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         shots = sorted((out_dir / "images").glob("*-content.png"))
-        if len(shots) != 3:
-            return [f"{label}: {len(shots)} stills named *-content.png, expected 3"]
+        if len(shots) != wanted:
+            return (
+                [
+                    f"{label}: {len(shots)} stills named *-content.png, expected "
+                    f"{wanted}"
+                ],
+                None,
+            )
         cropped = [crop_png(s, rect, work / f"s{n}.png") for n, s in enumerate(shots)]
         if any(c is None for c in cropped):
-            return [f"{label}: a still could not be cropped to {rect}"]
+            return [f"{label}: a still could not be cropped to {rect}"], None
         unique = len({hashlib.sha256(c).hexdigest() for c in cropped})  # type: ignore[arg-type]
         if covered and unique != 1:
             failures.append(
-                f"{label}: the three stills show {unique} different pictures "
+                f"{label}: the {wanted} stills show {unique} different pictures "
                 f"where the terminal is, so the card did not cover this take "
                 f"and every assertion about occlusion here measures something "
                 f"else"
             )
-        if not covered and unique != 3:
+        if not covered and unique != wanted:
             failures.append(
-                f"{label}: the three stills show only {unique} distinct "
+                f"{label}: the {wanted} stills show only {unique} distinct "
                 f"picture(s) where the terminal is, over {distinct} distinct "
                 f"evidence screens ({last.splitlines()[-1][:60]!r}) — the "
                 f"recording is not showing what the terminal did"
@@ -4421,33 +4486,20 @@ def _check_occlusion(out_dir: Path, label: str, rect: Rect, covered: bool) -> li
         first = frame_at(mp4, runs[0][1], rect, work / "a.png")
         final = frame_at(mp4, runs[-1][1], rect, work / "b.png")
         if first is None or final is None:
-            return failures + [
-                f"{label}: could not cut frames at the run beats' midpoints"
-            ]
+            return (
+                failures
+                + [f"{label}: could not cut frames at the run beats' midpoints"],
+                None,
+            )
         quality = psnr_db(work / "a.png", work / "b.png")
     if quality is None:
-        return failures + [f"{label}: ffmpeg reported no PSNR for the two frames"]
-    bar = CONTENT_HELD_PSNR_DB if covered else CONTENT_MOVED_PSNR_DB
-    if covered and quality < bar:
-        failures.append(
-            f"{label}: the video at beats {runs[0][0]} and {runs[-1][0]} "
-            f"differs by {quality:.1f} dB PSNR, under the {bar} dB bar — the "
-            f"card is not holding the picture still and `static_for` above is "
-            f"describing something this harness cannot see"
-        )
-    if not covered and quality > bar:
-        failures.append(
-            f"{label}: the video at beats {runs[0][0]} and {runs[-1][0]} is "
-            f"{quality:.1f} dB PSNR apart, over the {bar} dB bar — two beats "
-            f"of a take whose card came down look the same, so the comparison "
-            f"used for the covered take cannot distinguish them"
-        )
+        failures.append(f"{label}: ffmpeg reported no PSNR for the two frames")
     if not failures:
         print(
-            f"smoke: {label} stills {unique}/3 distinct where the terminal is, "
-            f"video {quality:.1f} dB apart, over {distinct} evidence screens"
+            f"smoke: {label} stills {unique}/{wanted} distinct where the terminal "
+            f"is, video {quality:.1f} dB apart, over {distinct} evidence screens"
         )
-    return failures
+    return failures, quality
 
 
 def _check_scored_region(take: dict, content: dict) -> list[str]:
