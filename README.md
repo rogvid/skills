@@ -41,7 +41,9 @@ Skills under [`wip/`](wip/) are intentionally invisible to `npx skills add` — 
 installer only walks the repo root one level deep, so nothing there is discovered
 or installed. (You can still pull one directly by path if you want to try it.)
 
-*Nothing in development right now.*
+| Skill | What it does |
+|---|---|
+| [`verified-review`](wip/verified-review/) | The two halves of a review loop that terminates — a bounded reviewer contract, and the fault-injection rule that stops a green suite meaning nothing. Includes a catalogue of measurements that look rigorous and grade nothing. |
 
 ## Recording a demo on a pull request
 

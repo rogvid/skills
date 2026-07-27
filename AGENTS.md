@@ -80,6 +80,51 @@ buried in `docs/`. If work is worth remembering, it is an issue.
   the design record. A single issue holding a quarter of work is a backlog, and
   nobody picks up a backlog. #1 split into #2–#12 is the worked example.
 
+## When a change gets a demo video
+
+**The test: can the acceptance criterion be verified by watching?** If yes, the
+change gets a demo and a human reviews the video. If it can only be verified by
+reading a file, an assertion, or a log, it does not — a video of it would be
+ceremony, and ceremony is what makes people stop watching.
+
+| Demoable | Not demoable |
+|---|---|
+| How the recording looks — spotlight, interludes, framing, captions | Whether a mask holds — absence is not watchable |
+| A new verb a storyboard author would call | Beat schema, timeline fields, exit paths |
+| Anything a viewer sees happen | Anything only a sweep or an assertion can see |
+| A visible bug someone reported by eye | Test-only, CI, lint, docs |
+
+The judgment is the author's, not the reviewer's, and it is made **before** the
+work starts — it decides whether a human is in the loop at all.
+
+Note what this implies for this repo: most work here is correctness in
+secret-handling and artifact integrity, which is not demoable. That is expected.
+`examples/ticket-queue` is where demoable features live, and it is the realistic
+proving ground for anything about delivery.
+
+## Reviewing changes, and writing the assertions that gate them
+
+**Read `wip/verified-review/SKILL.md` before reviewing a change, and before
+writing or fixing any assertion that gates one.** It is the house discipline
+and it is not optional here. Two rules:
+
+- **Authoring: an assertion you have not seen fail is not evidence.** Break the
+  thing it watches, run it, show the failure output in the pull request, then
+  undo the break. Confirm the injection landed — make the harness refuse to
+  proceed unless its pattern matched exactly once.
+- **Reviewing: answer only "does this meet its stated acceptance criterion, and
+  does it regress anything."** Everything else genuine that you notice goes in
+  the PR body as a stated limit, or into an issue with its measurement. It does
+  not block the merge, and it does not earn another round.
+
+A finding blocks only if the change misses its acceptance criterion, regresses
+something, makes an artifact lie, or adds an assertion that cannot fail for the
+reason it claims. Merge when the blocking list clears; file the rest.
+
+The skill's catalogue of *measurements that grade nothing* is the reviewer's
+checklist. Every entry in it came from a change in this repo that had green CI
+and an honest author.
+
 ## Housekeeping
 
 - Never commit `node_modules/`, `dist/`, `build/`, `__pycache__/`, `.tts/`, or
