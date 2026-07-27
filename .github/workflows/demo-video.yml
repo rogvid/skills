@@ -179,6 +179,14 @@ jobs:
           chmod +x "$dir"/demo-storyboards "$dir"/demo-target-guard "$dir"/demo-comment
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
+      # Before discovery, not after: the helper scripts are PEP 723 executables
+      # with a `uv run --script` shebang, so `uv` has to exist before the first
+      # one is invoked. On a run with nothing to record this is the only setup
+      # paid for, and with the cache warm it is a few seconds.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
       - name: Work out which storyboards this branch made stale
         id: discover
         working-directory: ${{ inputs.working-directory }}
@@ -258,11 +266,6 @@ jobs:
               echo "exported ${line%%=*}"
             fi
           done <<< "$EXTRA_ENV"
-
-      - uses: astral-sh/setup-uv@v6
-        if: steps.discover.outputs.count != '0'
-        with:
-          enable-cache: true
 
       # Chromium is ~170 MB and re-downloading it on every pull request is the
       # single biggest avoidable cost in this job. The key carries the resolved
