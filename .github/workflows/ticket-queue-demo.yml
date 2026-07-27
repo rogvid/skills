@@ -1,0 +1,49 @@
+name: ticket-queue demo
+
+# The only place in this repository that records a demo on a pull request, and
+# deliberately so. Most work here is secret-handling and artifact-integrity
+# correctness, which cannot be verified by watching — a demo of it would be
+# ceremony, and ceremony is what makes people stop watching. `examples/
+# ticket-queue` is the one application in the tree with demoable features, so
+# it is the one thing this fires on.
+#
+# The `paths:` filter is the coarse gate. The reusable workflow's own discovery
+# is the fine one: on a pull request that changes only the workflow or the
+# helper scripts, no storyboard under examples/ticket-queue is stale, so the
+# job finishes in well under a minute without starting a browser.
+
+on:
+  pull_request:
+    paths:
+      - "examples/ticket-queue/**"
+      - ".github/workflows/ticket-queue-demo.yml"
+      - ".github/workflows/demo-video.yml"
+      - ".github/scripts/demo-*"
+
+permissions:
+  contents: read
+
+# Ten pushes should cost one recording.
+concurrency:
+  group: ticket-queue-demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/demo-video.yml
+    with:
+      working-directory: examples/ticket-queue
+      app-command: ./serve --port 8901
+      base-url: http://127.0.0.1:8901
+      # The storyboards read TICKET_QUEUE_URL, so it is set here rather than
+      # left to their default — and the target guard checks it like any other.
+      extra-env: TICKET_QUEUE_URL=http://127.0.0.1:8901
+      # Long enough that a demo stays watchable through a normal review cycle
+      # and a week of holiday; short enough that a year of recordings is not
+      # sitting in the account. Stated in the comment so nobody is surprised
+      # when a revisited pull request has a dead link.
+      demo-retention-days: 30
+      evidence-retention-days: 3

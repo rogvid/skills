@@ -1,0 +1,149 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Pick the storyboards a change makes stale, so CI records those and no others.
+
+    demo-storyboards --root . --changed-file changed.txt
+
+Reads the paths a branch changed (one per line) and prints the storyboards that
+need re-recording, one path per line. With --github-output it also writes
+`storyboards` (a JSON array) and `count` for a workflow to branch on.
+
+**The rule.** A storyboard is stale when the thing it demonstrates moved. Every
+storyboard sits under a `demos/` directory, and the directory holding that
+`demos/` is the *app root* — the code the demo is about. So
+`examples/ticket-queue/demos/2026-07-26-status-filter/record.py` has the app
+root `examples/ticket-queue`, and any change under it selects that storyboard.
+
+**The limit this leaves.** A change *outside* the app root that the demo still
+depends on — a shared library, a design system, the recorder itself — selects
+nothing, and the last recording stays the current one. Pass `--all` (or the
+workflow's `storyboards:` input) when that is what happened. The gate is a cost
+control, not a correctness proof: the storyboard is the durable artifact and
+re-running it is always available.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path, PurePosixPath
+
+DEFAULT_GLOB = "**/demos/**/record.py"
+
+
+def app_root(storyboard: str) -> str:
+    """The directory whose contents this storyboard demonstrates.
+
+    The parent of the innermost `demos/` component, as a POSIX-style relative
+    path; `""` means the repository root, which is the honest answer for a
+    storyboard at `demos/x/record.py` — there is no narrower directory to
+    attribute it to.
+    """
+    parts = PurePosixPath(storyboard).parts
+    # Innermost, not outermost: a nested `demos/` narrows the blast radius,
+    # and a narrower root records fewer storyboards, never more.
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == "demos":
+            return "/".join(parts[:i])
+    return "/".join(parts[:-1])
+
+
+def _within(path: str, root: str) -> bool:
+    if root == "":
+        return True
+    return path == root or path.startswith(root + "/")
+
+
+def select(storyboards: list[str], changed: list[str]) -> list[str]:
+    """Storyboards whose app root contains at least one changed path."""
+    out = []
+    for sb in sorted(set(storyboards)):
+        root = app_root(sb)
+        if any(_within(c, root) for c in changed):
+            out.append(sb)
+    return out
+
+
+def strip_prefix(changed: list[str], prefix: str) -> list[str]:
+    """Re-root a repository-relative diff onto `working-directory`.
+
+    Paths outside the prefix are dropped, not kept: they name files this
+    working directory has no storyboards for. The boundary is a `/`, so
+    `examples/ticket-queue-v2/app.js` is not inside `examples/ticket-queue` —
+    an unanchored prefix test would say it was, and would record a demo of a
+    different application on every push to its neighbour.
+    """
+    if not prefix or prefix == ".":
+        return list(changed)
+    prefix = prefix.rstrip("/") + "/"
+    return [p[len(prefix) :] for p in changed if p.startswith(prefix)]
+
+
+def _read_changed(path: str | None) -> list[str]:
+    text = (
+        sys.stdin.read() if path in (None, "-") else open(path, encoding="utf-8").read()
+    )
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--root", default=".", help="repository root to glob from")
+    ap.add_argument(
+        "--glob", default=DEFAULT_GLOB, help=f"storyboard glob (default {DEFAULT_GLOB})"
+    )
+    ap.add_argument(
+        "--changed-file", help="file of changed paths, one per line; '-' for stdin"
+    )
+    ap.add_argument(
+        "--all", action="store_true", help="select every storyboard, ignoring the diff"
+    )
+    ap.add_argument(
+        "--explicit",
+        default="",
+        help="whitespace-separated storyboard paths to use verbatim, skipping discovery",
+    )
+    ap.add_argument(
+        "--strip-prefix",
+        default="",
+        help="repository-relative path of --root; changed paths outside it are dropped",
+    )
+    ap.add_argument("--github-output", help="path to write GITHUB_OUTPUT-style keys to")
+    args = ap.parse_args(argv)
+
+    root = os.path.abspath(args.root)
+    if args.explicit.strip():
+        chosen = args.explicit.split()
+        missing = [p for p in chosen if not os.path.exists(os.path.join(root, p))]
+        if missing:
+            print(f"no such storyboard: {', '.join(missing)}", file=sys.stderr)
+            return 2
+    else:
+        found = [
+            os.path.relpath(p, root).replace(os.sep, "/")
+            for p in Path(root).glob(args.glob)
+            if p.is_file()
+        ]
+        if args.all:
+            chosen = sorted(found)
+        else:
+            changed = strip_prefix(_read_changed(args.changed_file), args.strip_prefix)
+            chosen = select(found, changed)
+
+    for path in chosen:
+        print(path)
+
+    if args.github_output:
+        with open(args.github_output, "a", encoding="utf-8") as fh:
+            fh.write(f"storyboards={json.dumps(chosen)}\n")
+            fh.write(f"count={len(chosen)}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

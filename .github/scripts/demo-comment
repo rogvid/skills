@@ -1,0 +1,281 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Render the pull-request comment for a recorded demo.
+
+    demo-comment --demo demos/2026-07-27-empty-state \
+                 --artifact-url https://github.com/o/r/actions/runs/1/artifacts/2 \
+                 --artifact-bytes 1234567 --retention-days 30 \
+                 --run-url https://github.com/o/r/actions/runs/1 --sha abc1234 \
+                 --out body.md
+
+The comment carries two tiers, decided in issue #2:
+
+1. **The beat table, as text.** Every caption in order, read straight out of
+   `timeline.json`. It needs no hosting, never expires, needs no access to the
+   Actions tab, and renders on GitLab and Bitbucket as readily as here. A
+   reviewer who reads twenty lines knows whether they need to watch anything.
+2. **A deep link to the artifact**, so watching is one click and an unzip.
+
+Tier 1 is what survives artifact retention. Tier 2 is what a reviewer clicks
+today. Neither substitutes for the other.
+
+The body opens with an HTML marker so the workflow can find and rewrite this
+comment rather than appending a new one on every push.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+MARKER = "<!-- demo-video-ci: one comment per pull request, rewritten on every push -->"
+
+
+def _cell(text: str) -> str:
+    """Make authored caption text safe to drop into a markdown table cell."""
+    out = (text or "").replace("\\", "\\\\").replace("|", "\\|")
+    out = " ".join(out.split())  # a newline in a cell ends the row
+    return out or "&nbsp;"
+
+
+def story_beats(beats: list[dict]) -> list[tuple[float, str]]:
+    """Collapse the beat log to the lines a viewer actually reads.
+
+    A storyboard logs one beat per verb, so a six-line demo is forty beats and
+    most of them repeat the caption above them. What a reviewer wants is the
+    narration: each caption once, at the moment it went up, in order. A caption
+    that is cleared and later shown again is two entries, because that is two
+    separate moments on screen.
+    """
+    out: list[tuple[float, str]] = []
+    previous: str | None = None
+    for beat in beats:
+        caption = (beat.get("caption") or "").strip()
+        if caption and caption != previous:
+            out.append((float(beat.get("t_start") or 0.0), caption))
+        previous = caption
+    return out
+
+
+def _human_size(n: int | None) -> str:
+    if not n:
+        return "size unknown"
+    mb = n / 1_000_000
+    return f"{mb:.1f} MB" if mb >= 1 else f"{n / 1000:.0f} kB"
+
+
+def _duration(timeline: dict) -> str:
+    d = timeline.get("duration")
+    if d is None:
+        return "no video (this take encoded none)"
+    return f"{float(d):.0f}s"
+
+
+def render_demo(name: str, timeline: dict) -> str:
+    """One demo's section: the heading, the beat table, and what went wrong."""
+    beats = timeline.get("beats") or []
+    rows = story_beats(beats)
+    failure = timeline.get("failure")
+
+    lines: list[str] = []
+    status = " — **the take did not finish**" if failure else ""
+    lines.append(f"### `{name}`{status}")
+    lines.append("")
+    lines.append(
+        f"{len(rows)} beats · {_duration(timeline)} · recorded by `{timeline.get('recorder', '?')}`"
+    )
+    lines.append("")
+
+    if rows:
+        lines.append("| # | at | Caption |")
+        lines.append("|---:|---:|---|")
+        for i, (t, caption) in enumerate(rows, start=1):
+            lines.append(f"| {i} | {t:.0f}s | {_cell(caption)} |")
+    else:
+        lines.append(
+            "_No captioned beats — this storyboard narrates nothing, "
+            "which makes the recording unreviewable on its own._"
+        )
+    lines.append("")
+
+    if failure:
+        beat = failure.get("beat")
+        where = (
+            f"beat {beat} (`{failure.get('verb')}`)"
+            if beat is not None
+            else "between beats"
+        )
+        lines.append(
+            f"> **Failed at {where}:** `{failure.get('type')}` — {_cell(failure.get('message') or '')}"
+        )
+        lines.append(">")
+        lines.append(
+            "> The beats above are the ones it got through. `failure/` in the artifacts "
+            "below has the last frame, the page text and the failing beat in full."
+        )
+        lines.append("")
+
+    issues = timeline.get("issues") or []
+    count = timeline.get("issue_count", len(issues))
+    if count:
+        lines.append(
+            f"<details><summary>{count} issue(s) the recorder saw behind the pixels</summary>"
+        )
+        lines.append("")
+        for issue in issues:
+            at = f"beat {issue['beat']}" if issue.get("beat") is not None else "no beat"
+            lines.append(
+                f"- `{issue.get('kind')}` at {at}: {_cell(issue.get('message') or '')}"
+            )
+        lines.append("")
+        lines.append("</details>")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def render(
+    demos: list[tuple[str, dict]],
+    *,
+    artifact_url: str | None,
+    artifact_bytes: int | None,
+    retention_days: int,
+    evidence_retention_days: int | None,
+    failure_artifact_url: str | None,
+    run_url: str | None,
+    sha: str | None,
+) -> str:
+    failed = any(t.get("failure") for _, t in demos)
+    lines = [MARKER, ""]
+    lines.append("## Demo video" + (" — the take failed" if failed else ""))
+    lines.append("")
+    if not demos:
+        lines.append("No storyboard on this branch needed re-recording.")
+        return "\n".join(lines) + "\n"
+
+    for name, timeline in demos:
+        lines.append(render_demo(name, timeline))
+
+    if artifact_url:
+        size = _human_size(artifact_bytes)
+        lines.append(
+            f"**[⬇ Download the recording ({size})]({artifact_url})** — GitHub zips every "
+            f"artifact, so unzip it and play `demo.mp4`."
+        )
+        lines.append("")
+        lines.append(
+            f"Kept for **{retention_days} days**, then this link dies. The beat table above "
+            "and the storyboard on this branch are the durable record; re-run the workflow "
+            "to get the video back."
+        )
+    else:
+        lines.append("_No recording was uploaded._")
+    lines.append("")
+
+    if failure_artifact_url:
+        lines.append(f"Diagnostics: **[failure dump]({failure_artifact_url})**.")
+        lines.append("")
+
+    footnote = []
+    if sha:
+        footnote.append(f"Recorded from `{sha[:7]}`.")
+    if run_url:
+        footnote.append(f"[Workflow run]({run_url}).")
+    if evidence_retention_days:
+        footnote.append(
+            f"`evidence/` and `frames/` are uploaded separately and kept "
+            f"{evidence_retention_days} days, long enough to check a disputed finding."
+        )
+    footnote.append(
+        "Which acceptance criterion each beat demonstrates is not reported yet "
+        "([#12](https://github.com/rogvid/skills/issues/12))."
+    )
+    lines.append("<sub>" + " ".join(footnote) + "</sub>")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--demo",
+        action="append",
+        default=[],
+        help="a demo directory holding timeline.json, relative to --demo-root",
+    )
+    ap.add_argument(
+        "--demo-root",
+        default="",
+        help=(
+            "directory the --demo paths are read from. The comment still names "
+            "each demo by its --demo path, so the caller can read timelines out "
+            "of a staging area while the reader sees the repository path."
+        ),
+    )
+    ap.add_argument("--artifact-url")
+    ap.add_argument("--artifact-bytes", type=int)
+    ap.add_argument("--retention-days", type=int, required=True)
+    ap.add_argument("--evidence-retention-days", type=int)
+    ap.add_argument("--failure-artifact-url")
+    ap.add_argument("--run-url")
+    ap.add_argument("--sha")
+    ap.add_argument("--out", required=True, help="where to write the comment body")
+    args = ap.parse_args(argv)
+
+    demos: list[tuple[str, dict]] = []
+    for raw in args.demo:
+        name = raw.rstrip("/")
+        directory = Path(args.demo_root) / name if args.demo_root else Path(name)
+        timeline_path = directory / "timeline.json"
+        if not timeline_path.exists():
+            # A take that refused before writing anything, or one whose
+            # timeline was held back as not this take's. Say so rather than
+            # silently dropping the demo from the comment.
+            demos.append(
+                (
+                    name,
+                    {
+                        "beats": [],
+                        "recorder": "?",
+                        "duration": None,
+                        "failure": {
+                            "type": "NoTimeline",
+                            "beat": None,
+                            "verb": None,
+                            "message": (
+                                "this take published no timeline.json — it wrote none, "
+                                "or what is on disk is a previous recording's and was "
+                                "held back"
+                            ),
+                        },
+                    },
+                )
+            )
+            continue
+        demos.append((name, json.loads(timeline_path.read_text(encoding="utf-8"))))
+
+    body = render(
+        demos,
+        artifact_url=args.artifact_url,
+        artifact_bytes=args.artifact_bytes,
+        retention_days=args.retention_days,
+        evidence_retention_days=args.evidence_retention_days,
+        failure_artifact_url=args.failure_artifact_url,
+        run_url=args.run_url,
+        sha=args.sha,
+    )
+    Path(args.out).write_text(body, encoding="utf-8")
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        # The job summary is the second surface: it works when the token cannot
+        # write comments, which is every pull request from a fork.
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write(body)
+    print(body)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

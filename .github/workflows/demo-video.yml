@@ -1,0 +1,560 @@
+name: Demo video
+
+# Record the demos a branch made stale and publish them to its pull request.
+#
+# This is a *reusable* workflow. A consuming repository calls it in a few lines:
+#
+#   jobs:
+#     demo:
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#       uses: rogvid/skills/.github/workflows/demo-video.yml@main
+#       with:
+#         working-directory: examples/ticket-queue
+#         app-command: ./serve --port 8901
+#         base-url: http://127.0.0.1:8901
+#
+# and gets one comment on the pull request, rewritten on every push, carrying
+# the beat table as text and a deep link to the mp4.
+#
+# ---------------------------------------------------------------------------
+# Trigger policy: the caller decides *when*, this workflow decides *whether*.
+#
+# Recording is not a test job. It runs a browser, encodes video with a software
+# encoder, and takes minutes rather than seconds — this repository's `smoke`
+# job is already ~8 minutes. Firing it on every push to every pull request is a
+# bill nobody signed up for, so there are two gates and they are different:
+#
+#   1. The caller's `paths:` filter — the coarse one. Point it at the part of
+#      the repository that has demos. Everything else never starts a runner.
+#   2. This workflow's own discovery — the fine one. It records a storyboard
+#      only when the branch changed something under the app that storyboard
+#      demonstrates. A pull request that touches the app but no storyboard
+#      still records; a pull request that touches neither exits in seconds.
+#
+# A label was the alternative and was rejected: it needs a human action on a
+# branch that already exists, and when somebody forgets, the failure mode is
+# *no video* — precisely the thing this workflow exists to eliminate. A path
+# filter is automatic, and it matches the house rule that whether a change is
+# demoable is decided by the author before the work starts.
+#
+# Add `concurrency` with `cancel-in-progress` in the caller. Ten pushes should
+# cost one recording.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      storyboards:
+        description: >-
+          Whitespace-separated storyboard paths to record, skipping discovery.
+          Leave empty to record the storyboards this branch made stale.
+        type: string
+        default: ""
+      storyboard-glob:
+        description: Glob that finds storyboards, relative to working-directory.
+        type: string
+        default: "**/demos/**/record.py"
+      working-directory:
+        description: Directory the app and its storyboards are rooted at.
+        type: string
+        default: "."
+      app-command:
+        description: >-
+          Command that starts the application, run in the background before
+          recording. Leave empty for a storyboard that needs no server.
+        type: string
+        default: ""
+      base-url:
+        description: >-
+          Where the app is. Exported as DEMO_VIDEO_BASE_URL and checked by the
+          target guard — loopback only, unless allow-private-network-target.
+        type: string
+        default: "http://127.0.0.1:8000"
+      ready-path:
+        description: Path polled on base-url until it answers, before recording starts.
+        type: string
+        default: "/"
+      ready-timeout-seconds:
+        type: number
+        default: 60
+      allow-private-network-target:
+        description: >-
+          Permit a private or internal host (10.x, a container service name,
+          *.internal). Public hosts are refused regardless — there is no input
+          that permits one. See .github/scripts/demo-target-guard.
+        type: boolean
+        default: false
+      extra-env:
+        description: >-
+          KEY=VALUE lines exported for the app and the storyboards. Not a place
+          for secrets: everything here is visible to the storyboard, which
+          renders what it is given onto a video that leaves this repository.
+        type: string
+        default: ""
+      demo-retention-days:
+        description: How long demo.mp4 stays downloadable. Set it, do not inherit it.
+        type: number
+        default: 30
+      evidence-retention-days:
+        description: >-
+          How long evidence/ and frames/ stay downloadable. Long enough to
+          settle a disputed finding, short enough not to be an archive.
+        type: number
+        default: 3
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        type: number
+        default: 25
+      helper-ref:
+        description: >-
+          Ref of rogvid/skills the CI helper scripts come from. Ignored when
+          the calling repository is rogvid/skills itself, which already has
+          them in the checkout under test.
+        type: string
+        default: main
+    outputs:
+      recorded:
+        description: How many storyboards were recorded.
+        value: ${{ jobs.record.outputs.recorded }}
+      artifact-url:
+        description: Deep link to the uploaded demo artifact; empty if there was none.
+        value: ${{ jobs.record.outputs.artifact-url }}
+
+jobs:
+  record:
+    name: record the branch's demos
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      recorded: ${{ steps.discover.outputs.count }}
+      artifact-url: ${{ steps.upload-demo.outputs.artifact-url }}
+    env:
+      # Where staged artifacts and scratch files go. Set once so no step has to
+      # agree with another about a path by copying a literal.
+      DEMO_DIRS: ${{ github.workspace }}/.demo-video-ci/demo-dirs.txt
+      STAGE_DEMO: ${{ github.workspace }}/.demo-video-ci/demo
+      STAGE_WORKING: ${{ github.workspace }}/.demo-video-ci/working
+      STAGE_FAILURE: ${{ github.workspace }}/.demo-video-ci/failure
+      CHANGED: ${{ github.workspace }}/.demo-video-ci/changed.txt
+      STARTED_AT: ${{ github.workspace }}/.demo-video-ci/recording-started
+      COMMENT_BODY: ${{ github.workspace }}/.demo-video-ci/comment.md
+      APP_LOG: ${{ github.workspace }}/.demo-video-ci/app.log
+
+    steps:
+      # fetch-depth: 0 because discovery diffs against the base commit, and a
+      # shallow clone does not have it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The helper scripts live in this repository. When the caller *is* this
+      # repository the checkout above already has them, and reaching for main
+      # instead would test main's helpers against the branch's workflow.
+      - uses: actions/checkout@v4
+        if: github.repository != 'rogvid/skills'
+        with:
+          repository: rogvid/skills
+          ref: ${{ inputs.helper-ref }}
+          path: .demo-video-helpers
+          persist-credentials: false
+
+      - name: Locate the CI helper scripts
+        id: helpers
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$DEMO_DIRS")"
+          if [ "$GITHUB_REPOSITORY" = "rogvid/skills" ]; then
+            dir="$GITHUB_WORKSPACE/.github/scripts"
+            echo "Using the helper scripts from the checkout under test."
+          else
+            dir="$GITHUB_WORKSPACE/.demo-video-helpers/.github/scripts"
+          fi
+          # Packaging and some checkout paths drop the executable bit.
+          chmod +x "$dir"/demo-storyboards "$dir"/demo-target-guard "$dir"/demo-comment
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      # Before discovery, not after: the helper scripts are PEP 723 executables
+      # with a `uv run --script` shebang, so `uv` has to exist before the first
+      # one is invoked. On a run with nothing to record this is the only setup
+      # paid for, and with the cache warm it is a few seconds.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Work out which storyboards this branch made stale
+        id: discover
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          EXPLICIT: ${{ inputs.storyboards }}
+          GLOB: ${{ inputs.storyboard-glob }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_SHA" ]; then
+            # Two dots, not three: the checkout is the pull request's merge
+            # commit, so its diff against the base is exactly the net change.
+            git diff --name-only "$BASE_SHA" HEAD > "$CHANGED"
+          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
+            git diff --name-only HEAD^ HEAD > "$CHANGED"
+          else
+            : > "$CHANGED"
+          fi
+          echo "Changed on this branch:"; sed 's/^/  /' "$CHANGED"
+
+          # Diff paths are repository-relative and the script globs from
+          # working-directory. Re-rooting them is --strip-prefix's job, not a
+          # shell `grep`'s: the prefix test has to be anchored at a path
+          # boundary or a push to `examples/ticket-queue-v2` records
+          # `examples/ticket-queue`'s demos.
+          "$SCRIPTS/demo-storyboards" \
+            --root . --glob "$GLOB" \
+            --explicit "$EXPLICIT" \
+            --changed-file "$CHANGED" \
+            --strip-prefix "$WORKDIR" \
+            --github-output "$GITHUB_OUTPUT" > "$CHANGED.selected"
+
+          # Every later step reads the demo directories from here, so it exists
+          # even when the take never runs.
+          sed 's|/[^/]*$||' "$CHANGED.selected" | sort -u > "$DEMO_DIRS"
+          echo "Recording:"; sed 's/^/  /' "$DEMO_DIRS"
+
+      - name: Nothing to record
+        if: steps.discover.outputs.count == '0'
+        run: |
+          echo "No storyboard on this branch needs re-recording." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # ---- everything below runs only when there is something to record ----
+
+      - name: Refuse a target that could be production
+        if: steps.discover.outputs.count != '0'
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          BASE_URL: ${{ inputs.base-url }}
+          ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}
+          EXTRA_ENV: ${{ inputs.extra-env }}
+        run: |
+          set -euo pipefail
+          args=(--url "$BASE_URL")
+          if [ "$ALLOW_PRIVATE" = "true" ]; then args+=(--allow-private); fi
+          while IFS= read -r sb; do
+            if [ -n "$sb" ]; then args+=(--scan "$sb"); fi
+          done < "$CHANGED.selected"
+          # extra-env is where a second URL hides — a storyboard that reads
+          # its own variable would otherwise route around base-url entirely.
+          printf '%s\n' "$EXTRA_ENV" > "$CHANGED.env"
+          args+=(--scan "$CHANGED.env")
+          "$SCRIPTS/demo-target-guard" "${args[@]}"
+
+      - name: Export the caller's extra environment
+        if: steps.discover.outputs.count != '0' && inputs.extra-env != ''
+        env:
+          EXTRA_ENV: ${{ inputs.extra-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then
+              echo "$line" >> "$GITHUB_ENV"
+              echo "exported ${line%%=*}"
+            fi
+          done <<< "$EXTRA_ENV"
+
+      # Chromium is ~170 MB and re-downloading it on every pull request is the
+      # single biggest avoidable cost in this job. The key carries the resolved
+      # Playwright version so a version bump gets a fresh browser rather than a
+      # stale one that will not launch.
+      - name: Resolve the Playwright version the storyboards will get
+        if: steps.discover.outputs.count != '0'
+        id: pw
+        run: |
+          set -euo pipefail
+          # `playwright.__version__` does not exist — the package exposes its
+          # version only through the distribution metadata.
+          v=$(uv run --no-project --with playwright python -c \
+                'from importlib.metadata import version; print(version("playwright"))')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Playwright $v"
+
+      - name: Cache the Chromium build
+        if: steps.discover.outputs.count != '0'
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-chromium
+
+      - name: Install ffmpeg and Chromium
+        if: steps.discover.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+            echo "ffmpeg already present: $(ffmpeg -version | head -1)"
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+          # On a cache hit this skips the browser download; the system
+          # libraries are not cacheable and are installed either way.
+          echo "browser cache hit: ${{ steps.browser-cache.outputs.cache-hit || 'false' }}"
+          uv run --no-project --with playwright playwright install --with-deps chromium
+
+      - name: Start the application
+        if: steps.discover.outputs.count != '0' && inputs.app-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          APP_COMMAND: ${{ inputs.app-command }}
+        run: |
+          set -euo pipefail
+          nohup bash -c "$APP_COMMAND" > "$APP_LOG" 2>&1 &
+          echo "started: $APP_COMMAND (pid $!)"
+
+      - name: Wait for the application
+        if: steps.discover.outputs.count != '0' && inputs.app-command != ''
+        env:
+          URL: ${{ inputs.base-url }}${{ inputs.ready-path }}
+          DEADLINE: ${{ inputs.ready-timeout-seconds }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 "$DEADLINE"); do
+            if curl -fsS -o /dev/null "$URL"; then echo "$URL is up"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::$URL never answered in ${DEADLINE}s"
+          echo "--- app log ---"; cat "$APP_LOG" || true
+          exit 1
+
+      # The take is allowed to fail here. What it left behind is the point of
+      # every step after this one, so the job is failed at the very end instead.
+      - name: Record
+        if: steps.discover.outputs.count != '0'
+        id: record
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}
+          DEMO_VIDEO_SPEECH: "0"
+        run: |
+          set -uo pipefail
+          # Every artifact staged later must be newer than this. `images/`,
+          # `timeline.json` and `timeline.md` are *committed* files, so they
+          # are sitting in the checkout before anything records — and staging
+          # them unconditionally publishes the previous recording under this
+          # take's name. See the freshness check in "Stage the artifacts".
+          touch "$STARTED_AT"
+          status=ok
+          ran=0
+          # The loop reads its list on fd 3, not stdin. `uv run` inherits stdin
+          # and drains it, so with the ordinary `done < file` the *first*
+          # storyboard swallowed the rest of the list: two were selected, one
+          # was recorded, and nothing said so. The second demo's committed
+          # artifacts were then the only thing left on disk to publish.
+          while IFS= read -r sb <&3; do
+            [ -n "$sb" ] || continue
+            ran=$((ran + 1))
+            echo "::group::uv run $sb"
+            if ! uv run "$sb" < /dev/null; then
+              echo "::error file=$sb::the take did not finish — see failure/ in the artifacts"
+              status=failed
+            fi
+            echo "::endgroup::"
+          done 3< "$CHANGED.selected"
+
+          # A loop that silently runs fewer storyboards than were selected is
+          # exactly the bug above, and it is invisible in the artifacts: what
+          # is missing looks like what was never asked for.
+          expected=$(grep -c . "$CHANGED.selected")
+          if [ "$ran" -ne "$expected" ]; then
+            echo "::error::selected $expected storyboard(s) but ran $ran"
+            status=failed
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "record status: $status ($ran of $expected storyboards run)"
+
+      # `steps.record.conclusion != 'skipped'` is load-bearing, not belt and
+      # braces. `images/`, `timeline.json` and `timeline.md` are *committed*
+      # files: they are in the checkout before anything records. Without this
+      # condition, a job that died during setup staged the previous
+      # recording's artifacts and posted a comment with full beat tables and a
+      # duration — a confident, entirely wrong claim that a demo had been
+      # recorded. That happened on the first real run of this workflow.
+      - name: Stage the artifacts
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
+        id: stage
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          rm -rf "$STAGE_DEMO" "$STAGE_WORKING" "$STAGE_FAILURE"
+          mkdir -p "$STAGE_DEMO" "$STAGE_WORKING" "$STAGE_FAILURE"
+          stale=0
+          silent=0
+          # Second line of defence, independent of the step condition above:
+          # nothing older than the moment recording began may be published.
+          # A take that crashed before rewriting a file leaves the committed
+          # one in place, and it is indistinguishable by content.
+          fresh() { [ -e "$1" ] && [ "$1" -nt "$STARTED_AT" ]; }
+          copy_fresh() {
+            if fresh "$1"; then
+              cp "$1" "$2"
+            elif [ -e "$1" ]; then
+              echo "::warning file=$1::not written by this take — left out of the artifacts"
+              stale=$((stale + 1))
+            fi
+          }
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            # What a human watches, and what stays readable after the video is
+            # gone. `demo-video-FAILED.md` travels with it deliberately: it is
+            # the file that says whether the mp4 beside it is this take's.
+            mkdir -p "$STAGE_DEMO/$dir"
+            for f in demo.mp4 timeline.md timeline.json demo-video-FAILED.md; do
+              copy_fresh "$dir/$f" "$STAGE_DEMO/$dir/$f"
+            done
+            # `timeline.json` is the file that decides whether this demo said
+            # anything at all this run: the comment is rendered from it, and
+            # without one the demo is reported as having published nothing.
+            # Counted separately from `stale` because a held-back *still* is
+            # ordinary — a storyboard that dropped a `shot()` leaves its
+            # committed png behind — and must not turn the check red on its own.
+            if [ ! -f "$STAGE_DEMO/$dir/timeline.json" ]; then
+              echo "::error file=$dir::published no timeline.json this run wrote"
+              silent=$((silent + 1))
+            fi
+            if [ -d "$dir/images" ]; then
+              mkdir -p "$STAGE_DEMO/$dir/images"
+              for img in "$dir"/images/*; do
+                copy_fresh "$img" "$STAGE_DEMO/$dir/images/$(basename "$img")"
+              done
+            fi
+            # Short retention: enough to check a disputed finding, not an archive.
+            # Regenerated wholesale by every take, so no committed copy exists
+            # to go stale and a directory copy is safe.
+            for sub in evidence frames; do
+              if [ -d "$dir/$sub" ]; then
+                mkdir -p "$STAGE_WORKING/$dir"
+                cp -r "$dir/$sub" "$STAGE_WORKING/$dir/$sub"
+              fi
+            done
+            if [ -d "$dir/failure" ]; then
+              mkdir -p "$STAGE_FAILURE/$dir"
+              cp -r "$dir/failure" "$STAGE_FAILURE/$dir/failure"
+            fi
+          done < "$DEMO_DIRS"
+          bytes=$(find "$STAGE_DEMO" -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+          {
+            echo "bytes=$bytes"
+            echo "stale=$stale"
+            echo "silent=$silent"
+          } >> "$GITHUB_OUTPUT"
+          echo "staged $bytes bytes ($stale file(s) held back as not this take's, $silent demo(s) published no timeline):"
+          find "$STAGE_DEMO" -type f | sed "s|$STAGE_DEMO/|  |"
+
+      - name: Upload the recording
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
+        id: upload-demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-video
+          path: ${{ github.workspace }}/.demo-video-ci/demo
+          if-no-files-found: warn
+          retention-days: ${{ inputs.demo-retention-days }}
+
+      - name: Upload the working files a finding can be checked against
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-video-working-files
+          path: ${{ github.workspace }}/.demo-video-ci/working
+          if-no-files-found: ignore
+          retention-days: ${{ inputs.evidence-retention-days }}
+
+      - name: Upload the failure dump
+        if: always() && steps.discover.outputs.count != '0' && steps.record.outputs.status != 'ok'
+        id: upload-failure
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-video-failure
+          path: ${{ github.workspace }}/.demo-video-ci/failure
+          if-no-files-found: warn
+          retention-days: ${{ inputs.evidence-retention-days }}
+
+      - name: Render the comment
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          ARTIFACT_URL: ${{ steps.upload-demo.outputs.artifact-url }}
+          FAILURE_URL: ${{ steps.upload-failure.outputs.artifact-url }}
+          ARTIFACT_BYTES: ${{ steps.stage.outputs.bytes }}
+          RETENTION: ${{ inputs.demo-retention-days }}
+          EVIDENCE_RETENTION: ${{ inputs.evidence-retention-days }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          args=()
+          # Read the timelines out of the *staging* directory, not the working
+          # tree. Staging is where the freshness filter was applied, so the
+          # comment can only ever describe what was actually published. The
+          # working tree still holds the committed timeline.json of the
+          # previous recording, and on the recorder's refusal path (a take
+          # that cannot verify its mask writes nothing but the marker) that
+          # file is what a reader would have been shown as current.
+          while IFS= read -r dir; do
+            if [ -n "$dir" ]; then args+=(--demo "$dir"); fi
+          done < "$DEMO_DIRS"
+          if [ -n "$FAILURE_URL" ]; then args+=(--failure-artifact-url "$FAILURE_URL"); fi
+          "$SCRIPTS/demo-comment" "${args[@]}" \
+            --demo-root "$STAGE_DEMO" \
+            --artifact-url "$ARTIFACT_URL" \
+            --artifact-bytes "${ARTIFACT_BYTES:-0}" \
+            --retention-days "$RETENTION" \
+            --evidence-retention-days "$EVIDENCE_RETENTION" \
+            --run-url "$RUN_URL" --sha "$HEAD_SHA" \
+            --out "$COMMENT_BODY"
+
+      # One comment, found by its marker and rewritten. A branch with ten
+      # pushes must not bury its pull request under ten identical comments.
+      - name: Post or update the pull-request comment
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped' && github.event.pull_request.number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          MARKER: "<!-- demo-video-ci:"
+        run: |
+          set -euo pipefail
+          existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | startswith(\"$MARKER\")) | .id] | first // empty")
+          if [ -n "$existing" ]; then
+            url=$(gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@"$COMMENT_BODY" --jq .html_url)
+            echo "updated comment $existing in place: $url"
+          else
+            url=$(gh api -X POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@"$COMMENT_BODY" --jq .html_url)
+            echo "posted a new comment: $url"
+          fi
+
+      # Last, so a take that failed still publishes everything above.
+      #
+      # `silent != 0` is part of the condition because the check and the
+      # comment must never disagree. A demo that published no timeline is
+      # reported in the comment as a take that failed, and a green check beside
+      # that sentence teaches a reviewer to ignore the comment — worse than
+      # either signal alone.
+      - name: Fail the check if the take failed
+        if: >-
+          always() && steps.discover.outputs.count != '0' &&
+          (steps.record.outputs.status != 'ok' || steps.stage.outputs.silent != '0')
+        run: |
+          echo "::error::A take did not finish, or a selected demo published nothing this run wrote."
+          echo "::error::The recording, the beat log and failure/ are attached to this run."
+          exit 1

@@ -1,0 +1,179 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Refuse to record a demo against anything that could be production.
+
+    demo-target-guard --url "$DEMO_VIDEO_BASE_URL" --scan demos/x/record.py
+
+A take recorded in CI drives a real application, and the mp4 it produces is an
+outbound artifact: it leaves the repository boundary the moment somebody
+downloads it, and it renders whatever was on the screen. Pointed at a
+production host it is a screen recording of real customer data, published to
+everyone with repository read access, for as long as the artifact lives.
+
+So the target is classified, not trusted:
+
+| class | example | verdict |
+|---|---|---|
+| loopback | `127.0.0.1`, `localhost`, `[::1]` | always allowed |
+| private | `10.x`, `192.168.x`, `svc.internal`, a bare hostname | allowed only with `--allow-private` |
+| public | `demo.example.com`, `93.184.216.34` | **refused, with no flag that permits it** |
+
+There is deliberately no `--allow-public`. Recording against a public host is
+not a thing this workflow should make easy to configure; a team that truly
+needs it has to write their own job and own that decision explicitly.
+
+`--scan` applies the same rule to `http(s)://` literals inside a storyboard, so
+a hardcoded production URL is refused before the browser opens.
+
+**The limit.** A storyboard that *computes* its URL at run time — from an
+environment variable this guard was not given, from a config file, by string
+concatenation — is invisible to `--scan`. This is a static check on the
+configuration and the source text, not a network egress control. A runner with
+network access can still reach the internet; what the guard stops is the
+ordinary path of pointing the workflow at the wrong host.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import re
+import sys
+from urllib.parse import urlsplit
+
+LOOPBACK, PRIVATE, PUBLIC, MALFORMED = "loopback", "private", "public", "malformed"
+
+# Suffixes reserved by RFC 2606/6761/8375 or conventional for internal naming.
+_PRIVATE_SUFFIXES = (
+    ".test",
+    ".invalid",
+    ".example",
+    ".local",
+    ".internal",
+    ".localdomain",
+    ".home.arpa",
+)
+
+URL_LITERAL = re.compile(r"https?://[^\s'\"`<>)\]}\\]+")
+
+
+def classify(url: str) -> tuple[str, str]:
+    """Return (class, why) for a URL string."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError as exc:
+        return MALFORMED, f"unparseable ({exc})"
+    if parts.scheme not in ("http", "https"):
+        return MALFORMED, f"scheme {parts.scheme or '(none)'!r} is not http or https"
+    try:
+        host = parts.hostname
+    except ValueError as exc:
+        return MALFORMED, f"unparseable host ({exc})"
+    if not host:
+        return MALFORMED, "no host"
+    host = host.rstrip(".").lower()
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_loopback:
+            return LOOPBACK, f"loopback address {ip}"
+        if ip.is_private or ip.is_link_local or ip.is_unspecified:
+            return PRIVATE, f"private address {ip}"
+        return PUBLIC, f"publicly routable address {ip}"
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return LOOPBACK, f"{host} resolves to loopback by RFC 6761"
+    if host.endswith(_PRIVATE_SUFFIXES):
+        return PRIVATE, f"{host} is under a reserved internal suffix"
+    if "." not in host:
+        # A single label cannot be reached from the public internet without a
+        # search domain; in CI it is a service name on a container network.
+        return PRIVATE, f"{host} is a single-label host name"
+    return PUBLIC, f"{host} is a public DNS name"
+
+
+def check(url: str, allow_private: bool) -> str | None:
+    """None when the URL may be recorded against, else the reason it may not."""
+    kind, why = classify(url)
+    if kind == LOOPBACK:
+        return None
+    if kind == PRIVATE and allow_private:
+        return None
+    if kind == PRIVATE:
+        return f"{url} — {why}. Pass allow-private-network-target: true if this really is a test host."
+    if kind == PUBLIC:
+        return f"{url} — {why}. Recording a demo against a public host is refused; there is no option that permits it."
+    return f"{url} — {why}."
+
+
+def scan(text: str) -> list[str]:
+    """The http(s) literals in a blob of source, in order, deduplicated."""
+    seen, out = set(), []
+    for match in URL_LITERAL.findall(text):
+        url = match.rstrip(".,;")
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--url", action="append", default=[], help="a URL the take will be pointed at"
+    )
+    ap.add_argument(
+        "--scan",
+        action="append",
+        default=[],
+        help="a source file to scan for URL literals",
+    )
+    ap.add_argument(
+        "--allow-private", action="store_true", help="permit private/internal hosts"
+    )
+    args = ap.parse_args(argv)
+
+    problems: list[str] = []
+    checked = 0
+    for url in args.url:
+        if not url.strip():
+            continue
+        checked += 1
+        if (reason := check(url, args.allow_private)) is not None:
+            problems.append(f"target: {reason}")
+
+    for path in args.scan:
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError as exc:
+            problems.append(f"scan: cannot read {path}: {exc}")
+            continue
+        for url in scan(text):
+            checked += 1
+            if (reason := check(url, args.allow_private)) is not None:
+                problems.append(f"{path}: {reason}")
+
+    if problems:
+        print(
+            "Refusing to record. A demo recorded in CI is an outbound artifact.",
+            file=sys.stderr,
+        )
+        for line in problems:
+            print(f"  - {line}", file=sys.stderr)
+        return 2
+
+    print(
+        f"target guard: {checked} URL(s) checked, all loopback"
+        + (" or private" if args.allow_private else "")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
