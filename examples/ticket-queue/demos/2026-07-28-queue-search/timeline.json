@@ -1,0 +1,742 @@
+{
+  "schema": 1,
+  "generated_by": "demo-video",
+  "recorder": "Recorder",
+  "segment": null,
+  "media": "demo.mp4",
+  "duration": 49.96,
+  "determinism": {
+    "deterministic": false,
+    "clock": null,
+    "timezone_id": "UTC",
+    "locale": "en-US"
+  },
+  "content": {
+    "measured": true,
+    "note": null,
+    "rect": [
+      128,
+      90,
+      1024,
+      460
+    ],
+    "sample_fps": 2,
+    "frames": 100,
+    "score": 21.92,
+    "floor": 1.0,
+    "static_for": 6.0,
+    "static_from": 41.0,
+    "static_beats": [
+      {
+        "index": 34,
+        "verb": "wait_for",
+        "acting": false
+      },
+      {
+        "index": 35,
+        "verb": "hold",
+        "acting": false
+      },
+      {
+        "index": 36,
+        "verb": "shot",
+        "acting": false
+      },
+      {
+        "index": 37,
+        "verb": "caption",
+        "acting": false
+      }
+    ],
+    "static_limit": 15.0,
+    "opening": {
+      "gap": 0.0,
+      "held": 0.4,
+      "limit": 1.5,
+      "note": null
+    },
+    "warnings": []
+  },
+  "coverage": {
+    "criteria": {
+      "AC-1": "A search box above the queue narrows the list as you type, case-insensitively, with no button to press.",
+      "AC-2": "Search and the status filter combine, and the heading count agrees with what is listed.",
+      "AC-3": "Search matches the requester as well as the title — typing part of a name or address finds that person's tickets.",
+      "AC-4": "A search matching nothing shows the same 'No tickets match this filter.' line, and clearing the box restores the status filter's list."
+    },
+    "claimed": {
+      "AC-1": [
+        {
+          "index": 2,
+          "segment": null,
+          "segment_index": 2,
+          "t_start": 1.084,
+          "still": null
+        },
+        {
+          "index": 5,
+          "segment": null,
+          "segment_index": 5,
+          "t_start": 5.966,
+          "still": "images/01-search-box.png"
+        },
+        {
+          "index": 7,
+          "segment": null,
+          "segment_index": 7,
+          "t_start": 6.607,
+          "still": null
+        },
+        {
+          "index": 11,
+          "segment": null,
+          "segment_index": 11,
+          "t_start": 12.718,
+          "still": "images/02-invoice.png"
+        }
+      ],
+      "AC-2": [
+        {
+          "index": 21,
+          "segment": null,
+          "segment_index": 21,
+          "t_start": 24.226,
+          "still": null
+        },
+        {
+          "index": 25,
+          "segment": null,
+          "segment_index": 25,
+          "t_start": 30.419,
+          "still": "images/04-open-and-search.png"
+        },
+        {
+          "index": 26,
+          "segment": null,
+          "segment_index": 26,
+          "t_start": 30.467,
+          "still": null
+        },
+        {
+          "index": 29,
+          "segment": null,
+          "segment_index": 29,
+          "t_start": 34.98,
+          "still": "images/05-heading.png"
+        }
+      ],
+      "AC-3": [
+        {
+          "index": 12,
+          "segment": null,
+          "segment_index": 12,
+          "t_start": 12.763,
+          "still": null
+        },
+        {
+          "index": 16,
+          "segment": null,
+          "segment_index": 16,
+          "t_start": 20.0,
+          "still": "images/03-requester.png"
+        }
+      ],
+      "AC-4": [
+        {
+          "index": 31,
+          "segment": null,
+          "segment_index": 31,
+          "t_start": 36.023,
+          "still": null
+        },
+        {
+          "index": 36,
+          "segment": null,
+          "segment_index": 36,
+          "t_start": 43.188,
+          "still": "images/06-no-match.png"
+        },
+        {
+          "index": 37,
+          "segment": null,
+          "segment_index": 37,
+          "t_start": 43.38,
+          "still": null
+        },
+        {
+          "index": 41,
+          "segment": null,
+          "segment_index": 41,
+          "t_start": 49.49,
+          "still": "images/07-restored.png"
+        }
+      ]
+    },
+    "unclaimed": [],
+    "tagged_beats": 14,
+    "untagged_beats": 29
+  },
+  "beats": [
+    {
+      "index": 0,
+      "t_start": 0.493,
+      "t_end": 1.055,
+      "caption": "",
+      "verb": "goto",
+      "selector": "/",
+      "still": null,
+      "segment": null,
+      "segment_index": 0,
+      "evidence": "evidence/beat-00.json"
+    },
+    {
+      "index": 1,
+      "t_start": 1.055,
+      "t_end": 1.084,
+      "caption": "",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 1,
+      "evidence": "evidence/beat-01.json"
+    },
+    {
+      "index": 2,
+      "t_start": 1.084,
+      "t_end": 4.087,
+      "caption": "A search box sits above the queue.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 2,
+      "evidence": "evidence/beat-02.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 3,
+      "t_start": 4.087,
+      "t_end": 4.423,
+      "caption": "A search box sits above the queue.",
+      "verb": "spotlight",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 3,
+      "evidence": "evidence/beat-03.json"
+    },
+    {
+      "index": 4,
+      "t_start": 4.423,
+      "t_end": 5.966,
+      "caption": "A search box sits above the queue.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 4,
+      "evidence": "evidence/beat-04.json"
+    },
+    {
+      "index": 5,
+      "t_start": 5.966,
+      "t_end": 6.048,
+      "caption": "A search box sits above the queue.",
+      "verb": "shot",
+      "selector": "01-search-box",
+      "still": "images/01-search-box.png",
+      "segment": null,
+      "segment_index": 5,
+      "evidence": "evidence/beat-05.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 6,
+      "t_start": 6.048,
+      "t_end": 6.607,
+      "caption": "A search box sits above the queue.",
+      "verb": "spotlight",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 6,
+      "evidence": "evidence/beat-06.json"
+    },
+    {
+      "index": 7,
+      "t_start": 6.607,
+      "t_end": 9.947,
+      "caption": "Typing invoice in lower case narrows the list.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 7,
+      "evidence": "evidence/beat-07.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 8,
+      "t_start": 9.947,
+      "t_end": 11.197,
+      "caption": "Typing invoice in lower case narrows the list.",
+      "verb": "type_into",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 8,
+      "evidence": "evidence/beat-08.json"
+    },
+    {
+      "index": 9,
+      "t_start": 11.197,
+      "t_end": 11.209,
+      "caption": "Typing invoice in lower case narrows the list.",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 9,
+      "evidence": "evidence/beat-09.json"
+    },
+    {
+      "index": 10,
+      "t_start": 11.209,
+      "t_end": 12.718,
+      "caption": "Typing invoice in lower case narrows the list.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 10,
+      "evidence": "evidence/beat-10.json"
+    },
+    {
+      "index": 11,
+      "t_start": 12.718,
+      "t_end": 12.763,
+      "caption": "Typing invoice in lower case narrows the list.",
+      "verb": "shot",
+      "selector": "02-invoice",
+      "still": "images/02-invoice.png",
+      "segment": null,
+      "segment_index": 11,
+      "evidence": "evidence/beat-11.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 12,
+      "t_start": 12.763,
+      "t_end": 16.434,
+      "caption": "Search matches the requester as well as the title.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 12,
+      "evidence": "evidence/beat-12.json",
+      "ac": [
+        "AC-3"
+      ]
+    },
+    {
+      "index": 13,
+      "t_start": 16.434,
+      "t_end": 17.374,
+      "caption": "Search matches the requester as well as the title.",
+      "verb": "click",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 13,
+      "evidence": "evidence/beat-13.json"
+    },
+    {
+      "index": 14,
+      "t_start": 17.385,
+      "t_end": 18.491,
+      "caption": "Search matches the requester as well as the title.",
+      "verb": "type_into",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 14,
+      "evidence": "evidence/beat-14.json"
+    },
+    {
+      "index": 15,
+      "t_start": 18.491,
+      "t_end": 20.0,
+      "caption": "Search matches the requester as well as the title.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 15,
+      "evidence": "evidence/beat-15.json"
+    },
+    {
+      "index": 16,
+      "t_start": 20.0,
+      "t_end": 20.046,
+      "caption": "Search matches the requester as well as the title.",
+      "verb": "shot",
+      "selector": "03-requester",
+      "still": "images/03-requester.png",
+      "segment": null,
+      "segment_index": 16,
+      "evidence": "evidence/beat-16.json",
+      "ac": [
+        "AC-3"
+      ]
+    },
+    {
+      "index": 17,
+      "t_start": 20.046,
+      "t_end": 22.362,
+      "caption": "Clearing the box, choosing Open.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 17,
+      "evidence": "evidence/beat-17.json"
+    },
+    {
+      "index": 18,
+      "t_start": 22.362,
+      "t_end": 23.278,
+      "caption": "Clearing the box, choosing Open.",
+      "verb": "click",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 18,
+      "evidence": "evidence/beat-18.json"
+    },
+    {
+      "index": 19,
+      "t_start": 23.286,
+      "t_end": 24.212,
+      "caption": "Clearing the box, choosing Open.",
+      "verb": "click",
+      "selector": "button[data-status='open']",
+      "still": null,
+      "segment": null,
+      "segment_index": 19,
+      "evidence": "evidence/beat-19.json"
+    },
+    {
+      "index": 20,
+      "t_start": 24.212,
+      "t_end": 24.226,
+      "caption": "Clearing the box, choosing Open.",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 20,
+      "evidence": "evidence/beat-20.json"
+    },
+    {
+      "index": 21,
+      "t_start": 24.226,
+      "t_end": 27.895,
+      "caption": "With Open chosen, search narrows within the open tickets.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 21,
+      "evidence": "evidence/beat-21.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 22,
+      "t_start": 27.895,
+      "t_end": 28.899,
+      "caption": "With Open chosen, search narrows within the open tickets.",
+      "verb": "type_into",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 22,
+      "evidence": "evidence/beat-22.json"
+    },
+    {
+      "index": 23,
+      "t_start": 28.899,
+      "t_end": 28.909,
+      "caption": "With Open chosen, search narrows within the open tickets.",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 23,
+      "evidence": "evidence/beat-23.json"
+    },
+    {
+      "index": 24,
+      "t_start": 28.909,
+      "t_end": 30.419,
+      "caption": "With Open chosen, search narrows within the open tickets.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 24,
+      "evidence": "evidence/beat-24.json"
+    },
+    {
+      "index": 25,
+      "t_start": 30.419,
+      "t_end": 30.467,
+      "caption": "With Open chosen, search narrows within the open tickets.",
+      "verb": "shot",
+      "selector": "04-open-and-search",
+      "still": "images/04-open-and-search.png",
+      "segment": null,
+      "segment_index": 25,
+      "evidence": "evidence/beat-25.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 26,
+      "t_start": 30.467,
+      "t_end": 33.123,
+      "caption": "The heading counts what is listed.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 26,
+      "evidence": "evidence/beat-26.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 27,
+      "t_start": 33.123,
+      "t_end": 33.462,
+      "caption": "The heading counts what is listed.",
+      "verb": "spotlight",
+      "selector": "#queue-heading",
+      "still": null,
+      "segment": null,
+      "segment_index": 27,
+      "evidence": "evidence/beat-27.json"
+    },
+    {
+      "index": 28,
+      "t_start": 33.462,
+      "t_end": 34.98,
+      "caption": "The heading counts what is listed.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 28,
+      "evidence": "evidence/beat-28.json"
+    },
+    {
+      "index": 29,
+      "t_start": 34.98,
+      "t_end": 35.451,
+      "caption": "The heading counts what is listed.",
+      "verb": "shot",
+      "selector": "05-heading",
+      "still": "images/05-heading.png",
+      "segment": null,
+      "segment_index": 29,
+      "evidence": "evidence/beat-29.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 30,
+      "t_start": 35.451,
+      "t_end": 36.023,
+      "caption": "The heading counts what is listed.",
+      "verb": "spotlight",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 30,
+      "evidence": "evidence/beat-30.json"
+    },
+    {
+      "index": 31,
+      "t_start": 36.023,
+      "t_end": 39.545,
+      "caption": "A search that matches nothing says so.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 31,
+      "evidence": "evidence/beat-31.json",
+      "ac": [
+        "AC-4"
+      ]
+    },
+    {
+      "index": 32,
+      "t_start": 39.545,
+      "t_end": 40.475,
+      "caption": "A search that matches nothing says so.",
+      "verb": "click",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 32,
+      "evidence": "evidence/beat-32.json"
+    },
+    {
+      "index": 33,
+      "t_start": 40.484,
+      "t_end": 41.667,
+      "caption": "A search that matches nothing says so.",
+      "verb": "type_into",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 33,
+      "evidence": "evidence/beat-33.json"
+    },
+    {
+      "index": 34,
+      "t_start": 41.667,
+      "t_end": 41.677,
+      "caption": "A search that matches nothing says so.",
+      "verb": "wait_for",
+      "selector": ".queue-empty",
+      "still": null,
+      "segment": null,
+      "segment_index": 34,
+      "evidence": "evidence/beat-34.json"
+    },
+    {
+      "index": 35,
+      "t_start": 41.677,
+      "t_end": 43.188,
+      "caption": "A search that matches nothing says so.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 35,
+      "evidence": "evidence/beat-35.json"
+    },
+    {
+      "index": 36,
+      "t_start": 43.188,
+      "t_end": 43.38,
+      "caption": "A search that matches nothing says so.",
+      "verb": "shot",
+      "selector": "06-no-match",
+      "still": "images/06-no-match.png",
+      "segment": null,
+      "segment_index": 36,
+      "evidence": "evidence/beat-36.json",
+      "ac": [
+        "AC-4"
+      ]
+    },
+    {
+      "index": 37,
+      "t_start": 43.38,
+      "t_end": 47.049,
+      "caption": "Clearing the box restores what the status filter shows.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 37,
+      "evidence": "evidence/beat-37.json",
+      "ac": [
+        "AC-4"
+      ]
+    },
+    {
+      "index": 38,
+      "t_start": 47.049,
+      "t_end": 47.959,
+      "caption": "Clearing the box restores what the status filter shows.",
+      "verb": "click",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 38,
+      "evidence": "evidence/beat-38.json"
+    },
+    {
+      "index": 39,
+      "t_start": 47.966,
+      "t_end": 47.981,
+      "caption": "Clearing the box restores what the status filter shows.",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 39,
+      "evidence": "evidence/beat-39.json"
+    },
+    {
+      "index": 40,
+      "t_start": 47.981,
+      "t_end": 49.49,
+      "caption": "Clearing the box restores what the status filter shows.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 40,
+      "evidence": "evidence/beat-40.json"
+    },
+    {
+      "index": 41,
+      "t_start": 49.49,
+      "t_end": 49.539,
+      "caption": "Clearing the box restores what the status filter shows.",
+      "verb": "shot",
+      "selector": "07-restored",
+      "still": "images/07-restored.png",
+      "segment": null,
+      "segment_index": 41,
+      "evidence": "evidence/beat-41.json",
+      "ac": [
+        "AC-4"
+      ]
+    },
+    {
+      "index": 42,
+      "t_start": 49.539,
+      "t_end": 49.852,
+      "caption": "",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 42,
+      "evidence": "evidence/beat-42.json"
+    }
+  ],
+  "strict": false,
+  "issues": [],
+  "issue_count": 0
+}
