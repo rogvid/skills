@@ -8,8 +8,10 @@ Storyboards import from here:
 """
 
 from .core import (
+    CONTENT_ACTING_VERBS,
     CONTENT_BLANK_FLOOR,
     CONTENT_MOVED_PIXELS,
+    CONTENT_PASSIVE_VERBS,
     CONTENT_PIXEL_DELTA,
     CONTENT_SAMPLE_FPS,
     CONTENT_STATIC_WARN_S,
@@ -52,8 +54,10 @@ from .terminal import TerminalRecorder
 from .web import Recorder
 
 __all__ = [
+    "CONTENT_ACTING_VERBS",
     "CONTENT_BLANK_FLOOR",
     "CONTENT_MOVED_PIXELS",
+    "CONTENT_PASSIVE_VERBS",
     "CONTENT_PIXEL_DELTA",
     "CONTENT_SAMPLE_FPS",
     "CONTENT_STATIC_WARN_S",

@@ -1535,14 +1535,26 @@ _CONTENT_W, _CONTENT_H = 160, 90
 # and the terminal's at 85.7%, with a 24 px shadow above each — and it is the
 # same 0.8 keep that tests/smoke has used for its own content floor since #17.
 #
-# **The stated limit this creates**: whatever happens in the bottom fifth of
-# the app is not measured. For a terminal that is the last few rows *before the
-# screen scrolls* — after it starts scrolling every new line moves the whole
-# picture, so the blind window is bounded and transient, but inside it a demo
-# that is visibly printing reads as held. Measured on a fixture that filled 25
-# of ~32 rows: 9.5 s of "held" picture across two commands that were plainly
-# running. There is no room to shrink the trim (the caption's shadow starts at
-# ~82%), so it is documented in SKILL.md rather than tuned away.
+# **This is why the static arm needs the beat log, and the reasoning is worth
+# keeping.** Excluding the caption bar is not optional: the bar is the
+# recorder's own drawing, it renders *over* an interlude card as readily as
+# over the app, and leaving it in would let a caption change count as the
+# picture changing — which defeats the detector on exactly the occlusion it
+# exists for. But the exclusion has a cost, and it is not a small one: the two
+# things this skill hands an author for keeping a still screen alive — swapping
+# captions, and narration pacing — are both invisible here **by construction**.
+# A perfectly healthy demo that tours a rendered screen with three captions
+# holds the measured region still for 20-22 s, which is indistinguishable from
+# a card covering the terminal for 23 s.
+#
+# So a held stretch on its own says nothing about whether anything is wrong,
+# and `CONTENT_ACTING_VERBS` below is what turns it into a signal. Two stated
+# limits survive that, both narrower:
+#
+#   * whatever happens in the bottom fifth of the app is not measured at all;
+#     on a terminal that is the last rows before the screen starts scrolling.
+#   * a demo that genuinely holds still *through* an acting verb warns, and is
+#     right to be looked at even though nothing is broken.
 CONTENT_CAPTION_TRIM = 0.2
 
 # Median luma standard deviation under which the content rect is "blank".
@@ -1598,30 +1610,96 @@ CONTENT_BLANK_FLOOR = 1.0
 CONTENT_PIXEL_DELTA = 12
 CONTENT_MOVED_PIXELS = 4
 
-# How long the content rect may hold still before it is worth saying so.
-# `static_for` is reported *always*, whatever it is; this only decides whether
-# stderr and `warnings` mention it.
+# How long the content rect may hold still before it is worth looking at, *and*
+# an acting verb ran inside that stretch. `static_for` is reported always,
+# whatever it is; this and CONTENT_ACTING_VERBS together decide whether stderr
+# and `warnings` mention it.
 #
-# Measured, on the longest stretch a *healthy* take holds one frame — which is
-# larger than it sounds, for two reasons that are easy to forget: a demo ends
-# on its last screen and the recording runs on for a second or two after the
-# storyboard does, and a caption change is invisible here on purpose (see
-# CONTENT_CAPTION_TRIM), so a stretch narrated over a still screen counts as
-# held.
+# Measured, on the longest stretch a take holds one frame:
 #
-#   reference demo, web part          4.5 s
-#   reference demo, terminal part     5.0 s
-#   tests/smoke's content take        6.0 s
-#   tests/smoke's terminal take       9.5 s   <- the worst healthy value seen
-#   ...the content storyboard, covered  ~28 s
-#   reference demo take 1, covered      23 s
+#   reference demo, web part                       4.5 s   healthy
+#   reference demo, terminal part                  5.0 s   healthy
+#   tests/smoke's content-shown take               6.0 s   healthy
+#   tests/smoke's terminal take                   10.0 s   healthy
+#   a terminal demo touring a screen, 2 captions  16.5 s   healthy
+#   a web demo touring a screen, 3 captions       20.0 s   healthy
+#   a terminal demo touring a screen, 3 captions  22.0 s   healthy
+#   reference demo take 1, card over the terminal 23.0 s   the defect
+#   tests/smoke's content-covered take            30.5 s   the defect
 #
-# 15 s sits 1.6x over the worst healthy value and 1.5x under the smallest
-# covered one. tests/smoke's content axis re-derives that band from its own two
-# takes on every run rather than trusting this comment — halve this constant
-# and every honest demo warns, double it and the take issue #97 exists for goes
-# unremarked. Both directions turn the suite red.
+# **Read that table before touching this constant.** There is no value of it
+# that separates the last two rows from the three above them: a healthy demo
+# narrated over a rendered screen and a demo nobody can see produce the same
+# number. That is not a tuning problem, it is what excluding the caption band
+# costs (see CONTENT_CAPTION_TRIM), and it is why duration alone never warns.
+#
+# What this constant does is set how long a stretch has to be before it is worth
+# reporting at all. 15 s is comfortably over every healthy take's ordinary holds
+# and under the shortest occlusion measured.
 CONTENT_STATIC_WARN_S = 15.0
+
+# The storyboard verbs that **act on the app**. A held picture spanning one of
+# these is worth a human's attention; a held picture spanning only the others is
+# a narrated hold — which is exactly what this skill tells authors to write:
+#
+#     "during unavoidable waits, tour what's on screen or swap the caption"
+#
+# This is the whole difference between a detector and a timer. Without it the
+# static arm fires on ordinary demos on both media — measured at 16.5-22.0 s on
+# three healthy takes, against 23.0 s for the defect it exists to catch — and
+# the sentence it prints blames an occlusion that did not happen. An artifact
+# confidently attributing something to the wrong cause is the precise failure
+# issue #97 exists to remove, so the detector must not commit it.
+#
+# The split is by *what the verb does to the picture*, not by how long it takes:
+#
+#   acting    it changed the app, the page or the terminal screen, so something
+#             should have moved in the measured region and nothing did.
+#   passive   it narrated, waited, held, or photographed. A still picture is the
+#             expected outcome there, not a symptom.
+#
+# `wait_for*` are passive on purpose: a wait that returns immediately because
+# its condition already held changes nothing, and cannot be told apart here from
+# one that really waited. Guessing would put the false positive straight back.
+#
+# tests/smoke asserts this covers **every** verb the recorders define, so a verb
+# added later cannot quietly default into either bucket.
+CONTENT_ACTING_VERBS = frozenset(
+    {
+        "click",
+        "click_fast",
+        "goto",
+        "key",
+        "move_to",
+        "redact",
+        "run",
+        "scroll_to",
+        "send",
+        "spotlight",
+        "terminal",
+        "terminal_close",
+        "terminal_output",
+        "type_into",
+    }
+)
+CONTENT_PASSIVE_VERBS = frozenset(
+    {
+        "bridge",
+        "caption",
+        "hold",
+        "interlude",
+        "pause",
+        "shot",
+        "wait_for",
+        "wait_for_prompt",
+        "wait_for_text",
+    }
+)
+
+# How many of the beats a held stretch spans are named in the report. Enough to
+# see what was going on, few enough that `timeline.json` stays a file somebody
+# opens.
+CONTENT_STATIC_BEATS_MAX = 8
 
 
 def content_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -1682,9 +1760,40 @@ def _moved_pixels(a: bytes, b: bytes) -> int:
     )
 
 
+def _beats_within(beats: list[dict], start: float, end: float) -> list[dict]:
+    """The beats whose midpoint falls inside [start, end], classified.
+
+    Midpoint rather than overlap, because the beat log and the video run on
+    different clocks (issue #18) and a take that lost wall time to the capture
+    slides every beat by the same amount. A beat that merely *touches* the edge
+    of the stretch is exactly the one that skew moves in or out; its midpoint is
+    the same answer `beat_frames` already trusts when it aims a frame.
+    """
+    found = []
+    for beat in beats or []:
+        t_start, t_end = beat.get("t_start"), beat.get("t_end")
+        if not isinstance(t_start, (int, float)):
+            continue
+        if not isinstance(t_end, (int, float)) or t_end < t_start:
+            t_end = t_start
+        middle = (float(t_start) + float(t_end)) / 2
+        if not start <= middle <= end:
+            continue
+        verb = str(beat.get("verb") or "")
+        found.append(
+            {
+                "index": beat.get("index"),
+                "verb": verb,
+                "acting": verb in CONTENT_ACTING_VERBS,
+            }
+        )
+    return found
+
+
 def content_report(
     mp4: Path | str,
     rect: tuple[int, int, int, int] | None,
+    beats: list[dict] | None = None,
     *,
     floor: float = CONTENT_BLANK_FLOOR,
     sample_fps: int = CONTENT_SAMPLE_FPS,
@@ -1692,15 +1801,62 @@ def content_report(
 ) -> dict:
     """Does this recording show anything? See the section header.
 
-    Pure function of the mp4 and the rect, so it can be re-run on a demo
-    somebody already has — `content_report(dir / "demo.mp4", rect)` — without
-    re-recording. `rect` is the app's region in *video* pixels, already trimmed
-    by `content_rect`; pass None and the report says, in the document itself,
-    that nothing was measured and why.
+    A function of the mp4, the rect and the beat log, so it can be re-run on a
+    demo somebody already has without re-recording:
 
-    Never raises. A check that costs a take the recording it is describing is
-    worse than no check.
+        doc = json.loads((d / "timeline.json").read_text())
+        content_report(d / "demo.mp4", tuple(doc["content"]["rect"]), doc["beats"])
+
+    `rect` is the app's region in *video* pixels, already trimmed by
+    `content_rect`; pass None and the report says, in the document itself, that
+    nothing was measured and why.
+
+    **`beats` is what makes the held-picture arm a detector rather than a
+    timer**, and leaving it out is a supported, conservative choice rather than
+    an optimisation: without it `static_for` is still measured and reported, and
+    it never warns, because there is no way to tell a demo narrating over a
+    rendered screen from a demo nobody can see. See CONTENT_ACTING_VERBS.
+
+    Never raises — the whole body is guarded, not just the ffmpeg call. This
+    runs inside `__exit__` before the timeline, the evidence and the review
+    frames are written, so an exception escaping here would cost a take every
+    artifact that section promises can never be lost.
     """
+    try:
+        return _content_report(
+            mp4, rect, beats, floor=floor, sample_fps=sample_fps,
+            static_limit=static_limit,
+        )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        return {
+            "measured": False,
+            "note": (
+                f"the picture check itself failed ({type(exc).__name__}: "
+                f"{exc}), so nothing is claimed about these frames"
+            ),
+            "rect": list(rect) if rect else None,
+            "sample_fps": sample_fps,
+            "frames": 0,
+            "score": None,
+            "floor": floor,
+            "static_for": None,
+            "static_from": None,
+            "static_beats": None,
+            "static_limit": static_limit,
+            "warnings": [],
+        }
+
+
+def _content_report(
+    mp4: Path | str,
+    rect: tuple[int, int, int, int] | None,
+    beats: list[dict] | None,
+    *,
+    floor: float,
+    sample_fps: int,
+    static_limit: float,
+) -> dict:
+    """`content_report` without the guard. Call that, not this."""
     mp4 = Path(mp4)
     report: dict = {
         "measured": False,
@@ -1712,6 +1868,10 @@ def content_report(
         "floor": floor,
         "static_for": None,
         "static_from": None,
+        # The beats the held stretch spans, and whether each acted on the app.
+        # Null when no beat log was supplied — which is *not* the same as an
+        # empty list, and the difference decides whether the arm may warn.
+        "static_beats": None,
         "static_limit": static_limit,
         "warnings": [],
     }
@@ -1757,8 +1917,19 @@ def content_report(
             run_gaps, run_start = 0, i
         if run_gaps > best_gaps:
             best_gaps, best_start = run_gaps, run_start
-    report["static_for"] = round(best_gaps * step, 2)
-    report["static_from"] = round(best_start * step, 2)
+    held = best_gaps * step
+    began, ended = best_start * step, (best_start + best_gaps) * step
+    report["static_for"] = round(held, 2)
+    report["static_from"] = round(began, 2)
+
+    # What the storyboard was doing while the picture stood still. Verb and
+    # index only — never the selector: a selector can hold a value somebody
+    # registered as a secret, and this string goes to stderr before the take's
+    # scrubbing has run. The index is enough; the beat is in the same file.
+    spanned = None if beats is None else _beats_within(beats, began, ended)
+    acting = [b for b in (spanned or []) if b["acting"]]
+    if spanned is not None:
+        report["static_beats"] = spanned[:CONTENT_STATIC_BEATS_MAX]
 
     warnings: list[str] = []
     if score < floor:
@@ -1769,16 +1940,25 @@ def content_report(
             f"frames are featureless — a page that never painted, a take "
             f"recorded black, or a rect that is not where the app ended up."
         )
-    if best_gaps * step >= static_limit:
-        held = best_gaps * step
+    # Both conditions, and the second is the one that stops this being a timer.
+    # A long held stretch on its own is *ordinary*: a demo touring a rendered
+    # screen with three captions holds it for 20-22 s, which is what the defect
+    # this exists for also measures. Only a stretch that swallowed a verb which
+    # acted on the app is worth a human's time.
+    if held >= static_limit and acting:
+        named = ", ".join(f"beat {b['index']} `{b['verb']}`" for b in acting[:4])
+        more = f" (+{len(acting) - 4} more)" if len(acting) > 4 else ""
         warnings.append(
-            f"the content rect did not change for {held:.1f}s, from "
-            f"{best_start * step:.1f}s. The beats in this timeline ran during "
-            f"that stretch and nothing in the picture moved, so whatever they "
-            f"did is not visible: a title card or modal left up over the app "
-            f"(issue #91), an overlay that never faded, or an app that stopped "
-            f"painting. Watch {mp4.name} at {best_start * step:.1f}s before "
-            f"believing the beats above it."
+            f"the content rect held one picture for {held:.1f}s "
+            f"({began:.1f}s-{ended:.1f}s) while {len(acting)} verb(s) that act "
+            f"on the app ran inside it: {named}{more}. Nothing changed in the "
+            f"measured region while they ran. **What was measured**: the app "
+            f"rect {tuple(rect)}, which excludes the recorder's own caption bar "
+            f"— so a caption change is invisible here by design and is not what "
+            f"this reports. An overlay left up, a modal that never closed and an "
+            f"app that stopped painting all look like this; so does a demo that "
+            f"genuinely holds still through these verbs. The frames cannot tell "
+            f"those apart — open {mp4.name} at {began:.1f}s and look."
         )
     report["warnings"] = warnings
     return report
@@ -1825,10 +2005,12 @@ def merge_content(records: list[dict]) -> dict:
             (c["static_for"] for c in measured if c.get("static_for") is not None),
             default=None,
         ),
-        # Deliberately null: the worst run belongs to one segment's own clock,
-        # and stating it against the merged video's would be a confidently
-        # wrong timestamp. The segment's own record has it.
+        # Both deliberately null: the worst run belongs to one segment's own
+        # clock and to that segment's own beat numbering, and restating either
+        # against the merged video would be a confidently wrong timestamp and a
+        # confidently wrong beat index. The segment's own record has both.
         "static_from": None,
+        "static_beats": None,
         "static_limit": _common([c.get("static_limit") for c in measured]),
         "warnings": [
             f"segment {name!r}: {warning}"
@@ -1857,11 +2039,26 @@ def print_content_summary(content: dict | None, media: str) -> None:
         return
     for warning in content.get("warnings") or []:
         print(f"demo-video: WARNING — {media}: {warning}", file=sys.stderr)
-    if not content.get("warnings"):
-        print(
-            f"{media} shows a picture (content {content.get('score')} over the "
-            f"app rect, longest still stretch {content.get('static_for')}s)"
-        )
+    if content.get("warnings"):
+        return
+    held = content.get("static_for")
+    limit = content.get("static_limit")
+    # A long held stretch that did *not* warn is worth one clause rather than
+    # silence: it is the ordinary shape of a narrated demo, and a reader who
+    # only ever sees the number when something is wrong will read it as wrong.
+    why = ""
+    if isinstance(held, (int, float)) and isinstance(limit, (int, float)):
+        if held >= limit:
+            why = (
+                " — over the "
+                f"{limit}s limit, but every beat inside it was narration, a "
+                "hold or a wait, which is what a still screen is supposed to "
+                "look like"
+            )
+    print(
+        f"{media} shows a picture (content {content.get('score')} over the "
+        f"app rect, longest still stretch {held}s{why})"
+    )
 
 
 def _verb_target(args: tuple, kwargs: dict) -> str | None:
@@ -3840,7 +4037,10 @@ class _DemoBase:
                 f"picture was measured"
             )
             return
-        self._content = content_report(self._media_path(), rect)
+        # The beat log goes in, and it is what makes the held-picture arm mean
+        # anything: without it a demo narrating over a rendered screen and a
+        # demo nobody can see are the same number. See CONTENT_ACTING_VERBS.
+        self._content = content_report(self._media_path(), rect, self._beats)
 
     def _timeline_doc(self, failure: dict | None = None) -> dict:
         """This take's beat log as a timeline document (see TIMELINE_SCHEMA).
@@ -3942,7 +4142,14 @@ class _DemoBase:
             # there is nothing to measure and a previous run's file is not this
             # take's — and a dict with `measured: false` and a `note` whenever
             # it could not be measured. Never silently absent.
-            "content": self._content,
+            #
+            # Scrubbed like everything else in this document. It carries no
+            # selector today and deliberately so (see `_content_report`), but
+            # this file is committed and a field that grows a quoted string
+            # later must not be the one place the mask does not reach.
+            "content": self._evidence_scrub_deep(
+                self._scrub_deep(self._content), forbidden
+            ),
             "beats": beats,
             "strict": self._strict,
             "issues": issues,

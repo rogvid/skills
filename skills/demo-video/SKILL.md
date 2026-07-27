@@ -740,25 +740,60 @@ the encoded frame, and writes down what it found:
 "content": { "measured": true, "note": null,
              "rect": [74, 110, 1132, 432], "sample_fps": 2, "frames": 47,
              "score": 14.1, "floor": 1.0,
-             "static_for": 5.0, "static_from": 13.5, "static_limit": 15.0,
+             "static_for": 21.5, "static_from": 3.5, "static_limit": 15.0,
+             "static_beats": [{ "index": 6, "verb": "caption", "acting": false },
+                              { "index": 7, "verb": "hold", "acting": false }],
              "warnings": [] }
 ```
 
 - `score` is the median luma standard deviation over `rect`. Under `floor` the
   frames are featureless — a page that never painted, a take recorded black.
 - `static_for` is the longest stretch, in seconds, where **nothing inside
-  `rect` changed**, and `static_from` is when it started. Reported always; a
-  stretch at or over `static_limit` also produces a warning.
+  `rect` changed**, and `static_from` is when it started. Both are reported
+  always, whatever they are.
+- `static_beats` is what the storyboard was doing during that stretch, and it
+  is what decides whether the stretch is worth a warning. See below.
 - `warnings` is empty on a healthy take, and each entry is one sentence saying
   what to go and look at. They are also printed on stderr as the take ends, so
   an author who never opens this file is still told.
 - `measured` is `false`, with `note` saying why, when the check could not run.
   `content` itself is `null` only when the take encoded no mp4.
 
-**It warns; it never fails a take.** A demo that legitimately holds one frame
-through a long narrated beat is ordinary, and refusing a take on a heuristic is
-worse than the heuristic missing one. Treat a warning as "watch the video at
-this timestamp before believing the beats", not as a verdict.
+### A long held stretch is not a problem, and this is the part to understand
+
+The example above holds one picture for **21.5s** — well past `static_limit` —
+and produces no warning at all. That is correct, and it is not a special case:
+
+> `static_for` on its own cannot tell a healthy demo from a broken one.
+
+Measured on real takes: a demo touring a rendered screen with three captions
+holds the measured region for **20–22s**. The title card that covered this
+skill's own reference demo held it for **23s**. There is no threshold between
+those two numbers, because the region measured excludes the recorder's caption
+bar — and swapping captions over a still screen is exactly what this guide tells
+you to do during a wait.
+
+So the warning needs a second condition: **did a verb that acts on the app run
+inside the stretch?**
+
+| beats inside the held stretch | verdict |
+|---|---|
+| `caption`, `interlude`, `bridge`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
+| `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to`, `redact` | worth looking at — warns |
+
+A `run()` that printed nothing visible, a `click()` that moved nothing: those
+are the shapes worth a human's two minutes. A caption change over a screen
+nobody touched is not.
+
+**What the warning does and does not claim.** It states what was measured — the
+stretch, the acting beats inside it, and the region — and then says plainly that
+an overlay left up, an app that stopped painting, and a demo that legitimately
+holds still through those verbs all look identical from here. It does **not**
+name a cause. It cannot know one, and an artifact that confidently attributes
+something to the wrong place is the failure this whole field exists to remove.
+
+**It warns; it never fails a take.** Treat a warning as "watch the video at this
+timestamp before believing the beats", not as a verdict.
 
 **It does not judge whether the demo shows the _right_ thing** — only whether
 it captured anything at all. `rect` deliberately excludes the recorder's own
@@ -766,16 +801,22 @@ window chrome and its caption bar: a whole-frame score is dominated by them, to
 the point where a recording with the app painted flat scores *higher* than a
 working one.
 
-**Two limits worth knowing before you rely on it:**
+**Three limits worth knowing before you rely on it:**
 
-- **The bottom fifth of the app is not measured** — that is where the caption
-  bar is burned in, and there is no room to shrink the exclusion. On a terminal
-  demo that is the last few rows *before the screen starts scrolling*: output
-  landing there does not count as the picture changing, so a stretch that is
-  visibly printing can read as held. Once the screen scrolls, every new line
-  moves the whole picture and the blind window closes.
+- **A caption change is invisible to the held-picture arm, by design.** The
+  caption bar is the recorder's own drawing and it renders over an interlude
+  card as readily as over the app, so counting it would defeat the detector on
+  the exact occlusion it exists for. The verb correlation above is what makes
+  that survivable.
+- **The bottom fifth of the app is not measured at all** — that is where the
+  caption bar sits, and there is no room to shrink the exclusion. On a terminal
+  demo that is the last few rows *before the screen starts scrolling*. Once it
+  scrolls, every new line moves the whole picture and the blind window closes.
 - **A run of held frames is measured per segment.** Two parts of a stitched
   demo that each hold still for 8s across the cut are reported as 8s, not 16s.
+
+None of the three can produce a false *success*: each makes the check quieter
+than the truth, never louder.
 
 Neither can produce a false *success*: both make the check quieter than the
 truth, never louder.
@@ -785,11 +826,18 @@ two media with two geometries — so the envelope's `content` is the worst of th
 parts on each arm with `rect: null`, every warning tagged with the segment it
 came from, and each part's own report under `segments`.
 
-You can re-run it on a demo you already have, without re-recording:
+You can re-run it on a demo you already have, without re-recording. Pass the
+beat log too — without it the held-picture arm still measures and reports, but
+never warns, because there is nothing to correlate the stretch against:
 
 ```python
+import json
+from pathlib import Path
 from demo_recording import content_report
-print(content_report("demos/2026-07-26-x/demo.mp4", (74, 110, 1132, 432)))
+
+d = Path("demos/2026-07-26-x")
+doc = json.loads((d / "timeline.json").read_text())
+print(content_report(d / "demo.mp4", tuple(doc["content"]["rect"]), doc["beats"]))
 ```
 
 A merged timeline says so, and says what it was built from:
@@ -1637,6 +1685,10 @@ invisible to it.
   that stopped painting produces a complete, correct, entirely successful
   timeline over a recording nobody can watch. Check `content` in the same file
   — that is the field that describes the frames.
+- **Reading `content.static_for` as a score.** It is not one. A healthy demo
+  that narrates a rendered screen holds it for 20s or more, which is what a
+  covering card also measures. Read `warnings`; the number alone means nothing
+  without the beats beside it.
 - **Embedding video in markdown.** Repo-relative mp4s don't play inline in
   rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
   with a still and point at the re-record command instead. GitHub plays only

@@ -196,12 +196,47 @@ CONTENT_KEEP = 0.8
 # that, and only that — the numbers above stay as this harness's own gate, on
 # purpose: a check graded by the measurement it makes is not graded.
 #
-# Two takes of one storyboard, differing in a single line — whether the opening
-# title card is taken down. That is issue #91 exactly, and recording both is
-# what stops each assertion here from being satisfiable by a take that shows
-# nothing (the covered one) or by a take that never holds still (the shown one).
+# **Three** takes, and the third is the one this axis got wrong the first time.
+#
+#   content-shown     the storyboard below, card taken down. Healthy.
+#   content-covered   the same storyboard, card left up. Issue #91 exactly.
+#   content-toured    a *different* healthy storyboard: one command, then a
+#                     rendered screen narrated with touring captions.
+#
+# The first two differ by a single line, which is what stops each assertion from
+# being satisfiable by a take that shows nothing or by one that never holds
+# still. The third exists because the first two, on their own, **structurally
+# cannot reach the failure that matters most here**.
+#
+# The recorder's content rect excludes its own caption bar, so swapping captions
+# over a still screen is invisible to the held-picture arm — and swapping
+# captions over a still screen is precisely what SKILL.md tells authors to do
+# during a wait. A healthy demo written that way holds the measured region for
+# 16.5-22.0 s, against 23.0 s for the card that covered the reference demo's
+# first take. The two are indistinguishable by duration, and the first version
+# of this axis never noticed, because `CONTENT_COMMANDS` below was deliberately
+# shaped to keep the fixture clear of long holds. A fixture that cannot reach
+# the failure path grades the constant against a sample chosen to exclude it.
+#
+# `content-toured` is that path, asserted **silent**: it must hold longer than
+# the recorder's own limit and warn about nothing, because every beat inside the
+# stretch is a caption or a hold. Remove the verb correlation from the recorder
+# and this take goes red.
 CONTENT_TAKES = ("content-shown", "content-covered")
+CONTENT_TOURED = "content-toured"
 CONTENT_CARD = "Everything after this is covered."
+
+# The touring storyboard: one command that renders something worth looking at,
+# then captions that talk about what is already on screen without touching it.
+# Long captions on purpose — the recorder holds a caption for roughly reading
+# speed, so these are what produce a stretch past CONTENT_STATIC_WARN_S with no
+# acting verb anywhere inside it.
+CONTENT_TOUR_COMMAND = ("The queue, as the command line prints it.", "seq 1 4")
+CONTENT_TOUR_CAPTIONS = (
+    "Each line above is one ticket, in the order the queue holds them.",
+    "The number on the left is the identifier the CLI and the web app share.",
+    "Nothing here is filtered yet — this is the whole queue, exactly as stored.",
+)
 
 # Five commands rather than three, and the length is load-bearing rather than
 # thorough: the covered take can hold one frame for no longer than it runs, and
@@ -219,6 +254,9 @@ CONTENT_CARD = "Everything after this is covered."
 # printing. The limit is real and is written down in SKILL.md; this keeps the
 # fixture clear of it, so what is graded here is the check rather than the
 # limit.
+#
+# Keeping this pair clear of long holds is also what made `content-toured`
+# necessary: a fixture shaped to avoid a failure mode cannot grade it.
 CONTENT_COMMANDS = (
     ("The first command.", "seq 1 3"),
     ("The second, printing something else.", "printf 'alpha\\nbravo\\n'"),
@@ -3205,6 +3243,61 @@ def record_content(out_dir: Path, cleared: bool) -> tuple[list[str], dict]:
     return b.problems, {"app": app, "size": size}
 
 
+def record_content_toured(out_dir: Path) -> tuple[list[str], dict]:
+    """A healthy demo that narrates a rendered screen without touching it.
+
+    Written the way `SKILL.md` tells storyboard authors to write one — *"during
+    unavoidable waits, tour what's on screen or swap the caption"* — and it is
+    the shape that made the first version of this check wrong. One command puts
+    something on screen; after that every beat is a caption or a hold, so the
+    measured region legitimately holds one picture for longer than the
+    recorder's own limit, with nothing occluded and nothing broken.
+
+    The recorder must say nothing about it. If it warns, its message blames an
+    overlay that never existed, in `timeline.json`, which is the failure issue
+    #97 was filed to remove.
+    """
+    from demo_recording import TerminalRecorder
+
+    b = Beats(CONTENT_TOURED)
+    caption, command = CONTENT_TOUR_COMMAND
+
+    with TerminalRecorder(
+        out_dir, speech=False, strict=True, deterministic=True
+    ) as rec:
+        start_ticker(b, rec.page)
+        rec.caption(caption)
+        rec.run(command)
+        try:
+            rec.wait_for_prompt(timeout_s=15)
+        except RuntimeError as exc:
+            b.fail_if(True, f"the shell prompt never came back — {exc}")
+        rec.shot("01-toured")
+        # Everything from here is narration over a screen nobody touches again.
+        # `hold()` after each caption so the stretch is made of holds as well as
+        # captions — both passive, and a stretch of only one verb would be a
+        # thinner claim than the mix a real storyboard produces.
+        for line in CONTENT_TOUR_CAPTIONS:
+            rec.caption(line)
+            rec.hold()
+        rec.caption("")
+
+        box = rec.page.locator("#__term_host").bounding_box()
+        if box is None:
+            raise SmokeFailure(
+                f"{CONTENT_TOURED}: #__term_host has no box — nothing rendered"
+            )
+        app: Rect = (
+            int(box["x"]),
+            int(box["y"]),
+            int(box["width"]),
+            int(box["height"]),
+        )
+        size = (rec._size["width"], rec._size["height"])
+
+    return b.problems, {"app": app, "size": size}
+
+
 class EntropyTake(NamedTuple):
     """One recording of the entropy storyboard, and what it rendered."""
 
@@ -4092,12 +4185,11 @@ def check_content_healthy(label: str, out_dir: Path, app_rect: Rect) -> list[str
             f"{label}: content.static_for is {still!r} and content.static_limit "
             f"is {limit!r}; a measured take must have both"
         )
-    elif still >= limit:
-        failures.append(
-            f"{label}: this healthy take held one frame for {still}s, at or "
-            f"over the recorder's own {limit}s limit — the storyboard idles "
-            f"longer than the limit allows, so every take of it warns"
-        )
+    # Deliberately *no* assertion that `still` stays under `limit`. It used to
+    # be here and it was wrong: a healthy demo narrating over a rendered screen
+    # holds the measured region for longer than the limit and is supposed to,
+    # which is what `content-toured` exists to prove. What a healthy take owes
+    # is silence, not a small number.
 
     if content.get("warnings"):
         failures.append(
@@ -4107,8 +4199,64 @@ def check_content_healthy(label: str, out_dir: Path, app_rect: Rect) -> list[str
     if not failures:
         print(
             f"smoke: {label} content ok (score {score}, longest still "
-            f"{still}s under {limit}s, over {len(rects)} rect(s) "
+            f"{still}s against a {limit}s limit, over {len(rects)} rect(s) "
             f"{[tuple(r) for r in rects]})"
+        )
+    return failures
+
+
+def declared_verbs() -> set[str]:
+    """Every verb name the recorders record a beat under.
+
+    Scraped from the package source rather than imported, on purpose: the point
+    is to catch a verb that exists and is in *neither* of the recorder's two
+    classification sets, and asking the recorder which verbs it has would let
+    the same omission hide on both sides.
+    """
+    found: set[str] = set()
+    for path in (HELPERS_DIR / "demo_recording").glob("*.py"):
+        source = path.read_text()
+        found |= set(re.findall(r'@_beat_verb\(\s*"([a-z_]+)"', source))
+        found |= set(re.findall(r'self\._beat\(\s*"([a-z_]+)"', source))
+    return found
+
+
+def check_verb_classification() -> list[str]:
+    """Every storyboard verb must be classified acting or passive (issue #97).
+
+    The held-picture arm only warns when an *acting* verb ran inside the
+    stretch — that is the whole difference between a detector and a timer. A
+    verb added later and left out of both sets silently becomes passive, and
+    the arm quietly stops noticing a whole class of demo. Free to check, and it
+    needs no recording.
+    """
+    from demo_recording import CONTENT_ACTING_VERBS, CONTENT_PASSIVE_VERBS
+
+    declared = declared_verbs()
+    if len(declared) < 15:
+        return [
+            f"content: only {len(declared)} storyboard verbs were found in the "
+            f"package source ({sorted(declared)}) — the scrape is broken, so "
+            f"the classification below is being checked against almost nothing"
+        ]
+    classified = CONTENT_ACTING_VERBS | CONTENT_PASSIVE_VERBS
+    failures = []
+    missing = sorted(declared - classified)
+    if missing:
+        failures.append(
+            f"content: {missing} record beats but are in neither "
+            f"CONTENT_ACTING_VERBS nor CONTENT_PASSIVE_VERBS. An unclassified "
+            f"verb counts as passive, so a held picture spanning it never "
+            f"warns — decide which it is rather than letting it default"
+        )
+    both = sorted(CONTENT_ACTING_VERBS & CONTENT_PASSIVE_VERBS)
+    if both:
+        failures.append(f"content: {both} are classified as both acting and passive")
+    if not failures:
+        print(
+            f"smoke: all {len(declared)} storyboard verbs are classified "
+            f"({len(CONTENT_ACTING_VERBS & declared)} acting, "
+            f"{len(CONTENT_PASSIVE_VERBS & declared)} passive)"
         )
     return failures
 
@@ -4252,23 +4400,40 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
             f"card *is* taken down: {shown_c['warnings']}"
         )
     still = " ".join(str(w) for w in covered_c.get("warnings") or [])
-    if "did not change" not in still:
+    if "held one picture" not in still:
         failures.append(
             f"{CONTENT_TAKES[1]}: the recorder did not report a held picture "
             f"for a take whose title card covered every beat. This is issue "
             f"#91 reproduced, and `content.warnings` says {covered_c.get('warnings')!r}"
         )
+    # The message must describe what was measured and must not name a cause it
+    # cannot know. A warning that blames an overlay is wrong on three of this
+    # suite's own healthy takes, and a confidently wrong artifact is the thing
+    # #97 exists to remove — the detector must not become an instance of it.
+    for banned in ("title card or modal left up", "is not visible"):
+        if banned in still:
+            failures.append(
+                f"{CONTENT_TAKES[1]}: the warning asserts {banned!r}, a cause "
+                f"the frames cannot establish — a held stretch has honest "
+                f"explanations too (see {CONTENT_TOURED})"
+            )
+    if "caption bar" not in still:
+        failures.append(
+            f"{CONTENT_TAKES[1]}: the warning does not say what region was "
+            f"measured. It excludes the recorder's own caption bar, so a "
+            f"reader who does not know that cannot tell what the silence means"
+        )
 
     # 2. ...and on stderr, unasked, which is the half of the acceptance
     #    criterion no artifact can carry.
     err = covered["stderr"]
-    if "WARNING" not in err or "did not change" not in err:
+    if "WARNING" not in err or "held one picture" not in err:
         failures.append(
             f"{CONTENT_TAKES[1]}: nothing on stderr said the recording holds "
             f"still. A reviewer who does not open timeline.json gets no signal "
             f"at all. Captured stderr: {err[-400:]!r}"
         )
-    if "did not change" in shown["stderr"]:
+    if "held one picture" in shown["stderr"]:
         failures.append(
             f"{CONTENT_TAKES[0]}: stderr warned about a healthy take, so the "
             f"warning above says nothing"
@@ -4348,6 +4513,81 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
 
     # 6. The anti-correlated metric (issue #17), as a standing regression test.
     failures += _check_scored_region(shown, shown_c)
+    return failures
+
+
+def check_content_toured(out_dir: Path, stderr: str) -> list[str]:
+    """A healthy demo that holds still past the limit must be met with silence.
+
+    The false positive this axis was blind to. `content-toured` narrates a
+    rendered screen the way SKILL.md tells authors to, so the measured region
+    holds one picture for longer than `static_limit` with nothing occluded.
+    Three assertions, and the first is the premise the other two need:
+
+    1. it really does hold past the limit — otherwise this take proves nothing
+       and would keep passing after the check regressed;
+    2. `content.warnings` is empty and nothing reached stderr;
+    3. the stretch is populated with beats and **none of them acted on the
+       app**, which is the mechanism rather than the symptom. Without it, "no
+       warning" would also pass on a recorder whose static arm was simply
+       switched off.
+    """
+    content = content_of(out_dir)
+    if content is None or not content.get("measured"):
+        return [
+            f"{CONTENT_TOURED}: no measured `content` in timeline.json "
+            f"({None if content is None else content.get('note')})"
+        ]
+    held, limit = content.get("static_for"), content.get("static_limit")
+    if not isinstance(held, (int, float)) or not isinstance(limit, (int, float)):
+        return [f"{CONTENT_TOURED}: static_for is {held!r}, limit {limit!r}"]
+
+    failures: list[str] = []
+    if held < limit:
+        failures.append(
+            f"{CONTENT_TOURED}: this take was written to hold one picture past "
+            f"the recorder's {limit}s limit and only held it for {held}s, so "
+            f"it does not reach the false-positive path at all. Lengthen the "
+            f"touring captions — as written, this take would keep passing "
+            f"after the thing it grades regressed"
+        )
+    if content.get("warnings"):
+        failures.append(
+            f"{CONTENT_TOURED}: the recorder warned about a healthy demo that "
+            f"narrates a rendered screen — nothing is occluded, the terminal is "
+            f"fully drawn, and every beat in the held stretch is a caption or a "
+            f"hold. The warning says {content['warnings']!r}"
+        )
+    if "WARNING" in stderr and "held one picture" in stderr:
+        failures.append(
+            f"{CONTENT_TOURED}: stderr carried a held-picture warning for a "
+            f"healthy take: {stderr[-400:]!r}"
+        )
+
+    spanned = content.get("static_beats")
+    if not spanned:
+        failures.append(
+            f"{CONTENT_TOURED}: content.static_beats is {spanned!r}. The take "
+            f"held a picture for {held}s and the recorder recorded no beats "
+            f"inside it, so 'no acting verb ran' is vacuous rather than true"
+        )
+    else:
+        acting = [b for b in spanned if b.get("acting")]
+        if acting:
+            failures.append(
+                f"{CONTENT_TOURED}: the held stretch is reported as spanning "
+                f"acting verbs {[b.get('verb') for b in acting]}, but this "
+                f"storyboard touches nothing after its one command — either "
+                f"the classification is wrong or the stretch is misaligned "
+                f"with the beat log"
+            )
+        elif not failures:
+            print(
+                f"smoke: {CONTENT_TOURED} held one picture for {held}s, over "
+                f"the {limit}s limit, across "
+                f"{[b.get('verb') for b in spanned]} — and the recorder said "
+                f"nothing, which is correct"
+            )
     return failures
 
 
@@ -7234,53 +7474,76 @@ def run_terminal_opening(out_root: Path) -> list[str]:
     )
 
 
-def run_content(out_root: Path) -> list[str]:
-    """One storyboard recorded twice: card taken down, and card left up.
+def _record_content_take(out_root: Path, name: str, record) -> tuple[list[str], dict]:
+    """Record one content take, capturing its stderr.
 
-    Issue #97's acceptance criterion, and the closest thing this suite has to
-    the defect that motivated it — take 1 of the reference demo, where a title
-    card covered 24.3 s of a 60.2 s recording and every artifact reported a
-    healthy take.
-
-    stderr is captured per take, not just inspected afterwards, because half
-    the criterion is that the warning arrives *unasked*: an author who never
-    opens timeline.json still has to be told. `print` writes through
-    `sys.stderr` at call time, so redirecting it here catches the recorder's
-    own output and nothing else's.
+    stderr is captured rather than merely inspected afterwards, because half
+    the acceptance criterion is that the verdict arrives *unasked*: an author
+    who never opens timeline.json still has to be told, and — for the healthy
+    takes — must not be told something untrue. `print` resolves `sys.stderr` at
+    call time, so redirecting here catches the recorder's own output and
+    nothing else's.
     """
-    takes: dict[str, dict] = {}
+    out_dir = fresh_take_dir(out_root, name)
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured):
+            found, info = record(out_dir)
+    except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+        sys.stderr.write(captured.getvalue())
+        return [f"{name}: TerminalRecorder raised {type(exc).__name__}: {exc}"], {}
+    # Put it back on the real stderr: a run that fails later should not also
+    # have swallowed the recorder's own account of itself.
+    sys.stderr.write(captured.getvalue())
+    if not (out_dir / "demo.mp4").is_file():
+        found = [*found, f"{name}: demo.mp4 was never written"]
+    return found, {"out_dir": out_dir, "info": info, "stderr": captured.getvalue()}
+
+
+def run_content(out_root: Path) -> list[str]:
+    """Three takes: card taken down, card left up, and a narrated hold.
+
+    The first two are issue #97's acceptance criterion — take 1 of the
+    reference demo, where a title card covered 24.3 s of a 60.2 s recording and
+    every artifact reported a healthy take.
+
+    The third is the false positive that criterion does not cover, and it is
+    the reason this phase is not just a pair. A healthy demo touring a rendered
+    screen holds the measured region for longer than the covered take does; a
+    check that warned on duration alone would call it broken, in
+    `timeline.json`, naming a cause that never happened.
+    """
     problems: list[str] = []
+    takes: dict[str, dict] = {}
     previous = Path.cwd()
     # `ls -1` is one of the beats; pin the shell's directory so the take does
     # not depend on where the suite was started.
     os.chdir(REPO_ROOT)
     try:
         for name, cleared in zip(CONTENT_TAKES, (True, False), strict=True):
-            out_dir = fresh_take_dir(out_root, name)
-            captured = io.StringIO()
-            try:
-                with contextlib.redirect_stderr(captured):
-                    found, info = record_content(out_dir, cleared=cleared)
-            except Exception as exc:  # noqa: BLE001 - a raising take is a failure
-                sys.stderr.write(captured.getvalue())
-                return [f"{name}: TerminalRecorder raised {type(exc).__name__}: {exc}"]
-            # Put it back on the real stderr: a run that fails later should not
-            # also have swallowed the recorder's own account of itself.
-            sys.stderr.write(captured.getvalue())
+            found, take = _record_content_take(
+                out_root,
+                name,
+                lambda out_dir, cleared=cleared: record_content(
+                    out_dir, cleared=cleared
+                ),
+            )
             problems += found
-            takes[name] = {
-                "out_dir": out_dir,
-                "info": info,
-                "stderr": captured.getvalue(),
-            }
+            if take:
+                takes[name] = take
+        toured_problems, toured = _record_content_take(
+            out_root, CONTENT_TOURED, record_content_toured
+        )
+        problems += toured_problems
     finally:
         os.chdir(previous)
-    for name, take in takes.items():
-        if not (take["out_dir"] / "demo.mp4").is_file():
-            problems.append(f"{name}: demo.mp4 was never written")
     if problems:
         return problems
-    return check_content_pair(takes)
+    return (
+        check_verb_classification()
+        + check_content_pair(takes)
+        + check_content_toured(toured["out_dir"], toured["stderr"])
+    )
 
 
 def run_web_problems(out_root: Path) -> list[str]:
