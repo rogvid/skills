@@ -23,6 +23,13 @@ function visibleTickets() {
 function renderList() {
   const shown = visibleTickets();
   headingEl.textContent = `Support queue (${shown.length})`;
+  // An empty array maps to an empty string, which renders as blank space —
+  // indistinguishable from a queue that failed to load. Say what happened.
+  if (shown.length === 0) {
+    listEl.innerHTML =
+      '<li class="queue-empty">No tickets match this filter.</li>';
+    return;
+  }
   listEl.innerHTML = shown
     .map(
       (t) => `

@@ -97,6 +97,14 @@ h1 {
   gap: 8px;
 }
 
+.queue-empty {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--muted);
+}
+
 .ticket {
   width: 100%;
   text-align: left;

@@ -54,11 +54,12 @@ with Recorder(HERE, base_url=BASE_URL, segment="part1") as rec:
     rec.hold()
     rec.shot("03-waiting")
 
-    # The caption says what the frame shows, not what the ticket asked for:
-    # criterion 3 of #90 wanted "No tickets match this filter." here, and the
-    # queue renders nothing at all. Claiming otherwise would put the demo's
-    # word above the app's.
-    rec.caption("Escalated matches nothing. The list is empty.")
+    # This caption used to read "the list is empty", because it did: criterion
+    # 3 of #90 was unimplemented and the queue rendered nothing at all. #112
+    # implemented it, so the old line now describes a frame that no longer
+    # exists — which is exactly the kind of stale caption that makes a demo
+    # lie. Re-recorded with the caption the app now earns.
+    rec.caption("Escalated matches nothing, and the queue says so.")
     rec.click("button[data-status='escalated']")
     rec.hold()
     rec.shot("04-escalated")
