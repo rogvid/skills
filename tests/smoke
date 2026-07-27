@@ -4072,8 +4072,10 @@ def _check_video(
         return failures
 
     # Median, not max: one good frame must not excuse a blank video. Not min
-    # either — a take legitimately opens on a frame or two of not-yet-painted
-    # page.
+    # either — a *terminal* take legitimately opens on a frame or two of
+    # not-yet-painted page, and this runs on both media. A web take no longer
+    # does (issue #119), and `check_opening` grades that separately, on the one
+    # frame this median is deliberately insensitive to.
     floor = MIN_CONTENT_STDDEV[label]
     score = statistics.median(contrast(f) for f in frames)
     if score < floor:

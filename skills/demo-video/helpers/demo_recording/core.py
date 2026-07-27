@@ -4500,7 +4500,16 @@ class _DemoBase:
         # text dump of the page, this take wrote none (the documents never left
         # memory), and the folder may hold the last one's.
         gone += self._clear_failure_dir()
-        for path in self._shots + [self.out_dir / ".frame.png"]:
+        # `.hold.png` is the opening frame the web recorder composites over a
+        # blank open (issue #119) — a full-size picture of the app, so it
+        # belongs here beside the stills rather than only in `_postprocess`'s
+        # own cleanup. It cannot normally exist at this point (a take that
+        # cannot vouch for its mask never reaches the encode), which is the
+        # argument for listing it rather than against.
+        for path in self._shots + [
+            self.out_dir / ".frame.png",
+            self.out_dir / ".hold.png",
+        ]:
             try:
                 if path.is_file():
                     path.unlink()

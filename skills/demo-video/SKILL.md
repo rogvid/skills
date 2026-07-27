@@ -743,6 +743,7 @@ the encoded frame, and writes down what it found:
              "static_for": 21.5, "static_from": 3.5, "static_limit": 15.0,
              "static_beats": [{ "index": 6, "verb": "caption", "acting": false },
                               { "index": 7, "verb": "hold", "acting": false }],
+             "opening": { "gap": 0.0, "held": 0.4, "limit": 1.5, "note": null },
              "warnings": [] }
 ```
 
@@ -758,6 +759,46 @@ the encoded frame, and writes down what it found:
   an author who never opens this file is still told.
 - `measured` is `false`, with `note` saying why, when the check could not run.
   `content` itself is `null` only when the take encoded no mp4.
+- `opening` says what the take opened on — and, on a web take, what the
+  recorder did about it. Read the next section: `held` above zero means the
+  first frames of your video are not frames the recording captured.
+
+### `opening` — the first frames of a web take are a hold
+
+Chromium starts recording when the page is created, and the page is
+`about:blank` until your first `goto()` returns. `about:blank` paints white, so
+a web take's recording genuinely begins with a few hundred milliseconds of flat
+white inside a correct-looking window frame — which reads as *the app loaded
+blank*, and is the most plausible-looking way a demo can misrepresent an app.
+
+The recorder covers that gap: it finds the first frame that differs from the one
+the take opened on, and composites **that** frame over the app area for the
+seconds before it. So a web demo opens on the application, as you would want it
+to.
+
+**Two things follow, and neither is hidden from you:**
+
+- Those opening frames show the app slightly before it painted. `held` is how
+  many seconds were covered, it is in `timeline.json`, and the take says it on
+  stderr as it finishes. Nothing else in the video is touched — the duration,
+  the audio and every beat timestamp are exactly what they were, because the
+  hold is an overlay switched off rather than a trim.
+- The video is therefore not a measurement of your app's load time, and was
+  never a good one: the gap it covers is the recorder's own startup as much as
+  the app's.
+
+`gap` is measured **afterwards**, off the encoded mp4 — so on a healthy web take
+it reads `0.0` *because* the hold landed, and a hold that silently did nothing
+shows up here as a non-zero number and a warning.
+
+Past `limit` (1.5s) nothing is held and the take warns instead. An app that
+takes that long to paint is telling the viewer something true about itself, and
+covering seconds of it would be inventing a demo rather than repairing one.
+
+`held` is `null` on a terminal take. The terminal recorder draws its own window
+inside the page, so it has no equivalent gap; open a terminal segment on a title
+card if you want its first frame to be deliberate (see *Opening a terminal
+segment on a title card*).
 
 ### A long held stretch is not a problem, and this is the part to understand
 

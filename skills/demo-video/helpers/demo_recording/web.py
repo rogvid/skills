@@ -1250,17 +1250,23 @@ class Recorder(_DemoBase):
                 f"[base][held]overlay={g['appx']}:{g['appy']}"
                 f":enable='lt(t,{self._opening_held:.3f})'[v]"
             )
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", *inputs,
-             "-filter_complex", filt, "-map", "[v]", "-map", "0:a?",
-             "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-             "-crf", "20", "-r", "25", "-movflags", "+faststart", str(tmp)],
-            check=True,
-        )
-        tmp.replace(mp4)
-        self._frame_png.unlink(missing_ok=True)
-        if hold is not None:
-            hold.unlink(missing_ok=True)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", *inputs,
+                 "-filter_complex", filt, "-map", "[v]", "-map", "0:a?",
+                 "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-crf", "20", "-r", "25", "-movflags", "+faststart", str(tmp)],
+                check=True,
+            )
+            tmp.replace(mp4)
+        finally:
+            # In a finally because `.hold.png` is a frame of the *app*, not of
+            # the recorder's chrome: if ffmpeg raises, leaving it on disk leaves
+            # a full-size picture of whatever the app was showing sitting beside
+            # the demo. `_discard_artifacts` names it too, for the same reason.
+            self._frame_png.unlink(missing_ok=True)
+            if hold is not None:
+                hold.unlink(missing_ok=True)
 
     # -- redaction ----------------------------------------------------------
 
