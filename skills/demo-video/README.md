@@ -51,6 +51,14 @@ and a real terminal session (voice on):
   direction, HTML entities and JSON escaping — a stated list, not an open
   promise. It is **not committed**; `SKILL.md` explains every one of those
   decisions and where they stop.
+- **A statement about the frames, not only the storyboard** — `content` in
+  `timeline.json`, plus a line on stderr, saying whether the recording shows
+  anything at all: how much picture there is where the app sits, and the
+  longest stretch in which nothing there changed. Every other artifact here
+  describes what the storyboard *did*, and all of them can be exactly right
+  over a recording that is blank or covered — a title card over a terminal
+  once cost this project 24.3 s of a 60.2 s demo with every beat, exit code
+  and evidence file reporting success. It warns; it never fails a take.
 - **A recording that reproduces, when you ask for it** — the browser's
   timezone and locale are always pinned, and `Recorder(deterministic=True)`
   additionally freezes the page's clock and flattens animations, so the same
