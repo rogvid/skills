@@ -228,15 +228,32 @@ CONTENT_CARD = "Everything after this is covered."
 
 # The touring storyboard: one command that renders something worth looking at,
 # then captions that talk about what is already on screen without touching it.
-# Long captions on purpose — the recorder holds a caption for roughly reading
-# speed, so these are what produce a stretch past CONTENT_STATIC_WARN_S with no
-# acting verb anywhere inside it.
-CONTENT_TOUR_COMMAND = ("The queue, as the command line prints it.", "seq 1 4")
+#
+# **Every caption is short enough that it cannot wrap, and the hold is explicit
+# rather than left to reading speed.** Both were learned from CI. The first
+# version used sentence-length captions and the recorder'"'"'s automatic hold; on the
+# runner two of them wrapped to three lines, and a caption bar that wraps grows
+# *upward* — past the 20% the content rect trims off the bottom and into the
+# measured region. Each wrap then registered as 266 changed pixels, chopping the
+# take'"'"'s held stretch from 25.0s to 11.0s and taking it below the limit it exists
+# to sit above. The premise assertion in check_content_toured() caught it, which
+# is the whole reason that assertion is there.
+#
+# The underlying behaviour is a real (and safe) property of the check, recorded
+# in SKILL.md: a wrapping caption makes a held stretch look *shorter* than it is,
+# never longer, and it cannot reach an occluded take at all because a card
+# covers the caption too.
+CONTENT_TOUR_COMMAND = ("Four tickets, oldest first.", "seq 1 4")
 CONTENT_TOUR_CAPTIONS = (
-    "Each line above is one ticket, in the order the queue holds them.",
-    "The number on the left is the identifier the CLI and the web app share.",
-    "Nothing here is filtered yet — this is the whole queue, exactly as stored.",
+    "Each line is one ticket.",
+    "The left column is the id.",
+    "Nothing is filtered here.",
 )
+
+# How long each touring caption stays up. Explicit because the automatic hold is
+# derived from word count, and captions short enough not to wrap are short
+# enough to be held for under two seconds — which would not reach the limit.
+CONTENT_TOUR_HOLD_S = 6.0
 
 # Five commands rather than three, and the length is load-bearing rather than
 # thorough: the covered take can hold one frame for no longer than it runs, and
@@ -3279,7 +3296,7 @@ def record_content_toured(out_dir: Path) -> tuple[list[str], dict]:
         # thinner claim than the mix a real storyboard produces.
         for line in CONTENT_TOUR_CAPTIONS:
             rec.caption(line)
-            rec.hold()
+            rec.hold(CONTENT_TOUR_HOLD_S)
         rec.caption("")
 
         box = rec.page.locator("#__term_host").bounding_box()

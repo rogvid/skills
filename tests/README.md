@@ -1559,7 +1559,12 @@ Three more assertions round it out.
 **`content-toured/` must hold past the limit and be met with silence**, and the
 first half is the premise the second needs: if the take stopped holding long
 enough it would keep passing after the thing it grades regressed, so
-`static_for >= static_limit` is asserted explicitly. The mechanism is asserted
+`static_for >= static_limit` is asserted explicitly. **That premise has already
+earned its keep**: the first version of this take used sentence-length captions,
+which wrapped to three lines on the CI runner — and a wrapping caption bar grows
+*upward*, past the bottom fifth the content rect trims off and into the measured
+region, 266 changed pixels a time. The stretch fell from 25.0s to 11.0s and the
+take stopped reaching the path it exists for. CI said so instead of passing. The mechanism is asserted
 too, not just the symptom — `content.static_beats` must be non-empty and must
 contain no acting verb — because "no warning" alone would also pass on a
 recorder whose static arm was simply switched off.

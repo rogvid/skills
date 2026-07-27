@@ -812,6 +812,12 @@ working one.
   caption bar sits, and there is no room to shrink the exclusion. On a terminal
   demo that is the last few rows *before the screen starts scrolling*. Once it
   scrolls, every new line moves the whole picture and the blind window closes.
+- **A caption long enough to wrap reaches back into the measured region.** The
+  bar grows upward, so a two- or three-line caption crosses the exclusion and a
+  caption change then does count as the picture changing. Measured at 266 pixels
+  per wrap. The effect is to make a held stretch read *shorter* than it is, and
+  it cannot touch an occluded take at all, because a card covers the caption
+  too. Keep captions to one line if you want `static_for` to mean what it says.
 - **A run of held frames is measured per segment.** Two parts of a stitched
   demo that each hold still for 8s across the cut are reported as 8s, not 16s.
 

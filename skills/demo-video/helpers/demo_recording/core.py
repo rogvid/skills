@@ -1761,23 +1761,30 @@ def _moved_pixels(a: bytes, b: bytes) -> int:
 
 
 def _beats_within(beats: list[dict], start: float, end: float) -> list[dict]:
-    """The beats whose midpoint falls inside [start, end], classified.
+    """The beats that **began** inside [start, end], classified.
 
-    Midpoint rather than overlap, because the beat log and the video run on
-    different clocks (issue #18) and a take that lost wall time to the capture
-    slides every beat by the same amount. A beat that merely *touches* the edge
-    of the stretch is exactly the one that skew moves in or out; its midpoint is
-    the same answer `beat_frames` already trusts when it aims a frame.
+    Began, not overlapped and not midpoint-inside, and the difference is the
+    whole correctness of this. A held stretch begins at the first sample after
+    something changed — and the thing that changed is very often the verb
+    immediately before it. Measured on a healthy fixture: `run("seq 1 4")`
+    spanning 2.32-2.85 s, its output landing at 2.50 s, and the stretch
+    therefore starting at 2.50 s. By midpoint (2.585 s) that `run` is "inside a
+    stretch where nothing changed" — while in fact it is the thing that *ended*
+    the previous stretch and started this one. The warning that produced was
+    exactly the false positive this correlation exists to remove.
+
+    So a beat qualifies only if it started at or after the stretch did. The
+    error this trades for is a miss: a long acting verb that begins before the
+    stretch and runs silently through it is not counted. That is the direction
+    to be wrong in — quieter than the truth, never louder — and it is also the
+    direction the beat/video clock skew (issue #18) pushes an edge case.
     """
     found = []
     for beat in beats or []:
-        t_start, t_end = beat.get("t_start"), beat.get("t_end")
+        t_start = beat.get("t_start")
         if not isinstance(t_start, (int, float)):
             continue
-        if not isinstance(t_end, (int, float)) or t_end < t_start:
-            t_end = t_start
-        middle = (float(t_start) + float(t_end)) / 2
-        if not start <= middle <= end:
+        if not start <= float(t_start) <= end:
             continue
         verb = str(beat.get("verb") or "")
         found.append(
