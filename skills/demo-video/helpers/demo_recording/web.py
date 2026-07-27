@@ -30,10 +30,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .core import (
+    OPENING_HOLD_LIMIT_S,
     SECRET_MASK,
     Secret,
     SecretLeak,
-    OPENING_HOLD_LIMIT_S,
     _beat_verb,
     _DemoBase,
     _env,
