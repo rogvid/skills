@@ -1438,6 +1438,67 @@ The recorder has no fade-in path (the element is appended already opaque, so no
 transition can run), but the suite is relying on setup cost for that and would
 not notice if it changed.
 
+### What a web take opens on (issue #119)
+
+The third defect in this file found by a human watching, and the most plausible-
+looking of the three: Chromium's screencast starts with the page, the page is
+`about:blank` until the first `goto()` returns, and `about:blank` paints white —
+so a web take opened on ~400 ms of flat white inside a *correct-looking* window
+frame. It does not read as a broken recorder. It reads as an app that loaded
+blank.
+
+Nothing in this file moved when that shipped, and neither did the recorder's own
+picture check: its `score` is a median, so it cannot see a leading blank shorter
+than half the take, and `static_for` saw one 0.5 s gap against a 15 s limit.
+Both are the right design for what they grade, and both are the reason this
+needed its own assertion.
+
+`check_opening` rides on the `web/` take rather than recording a fourth one, and
+the placement is load-bearing: the fix is an overlay switched off part way
+through, so no timestamp may move, and `check_beat_frames` in that same take
+already matches each beat's frame against the caption that beat put up. A hold
+that shifted the clock lands those frames on the wrong captions.
+
+Two arms, and they fail for different reasons:
+
+| arm | what it grades |
+|---|---|
+| `content.opening.held` is above zero | that this take **had** a gap to cover. Without it, frame zero shows the app whatever the recorder does, and the arm below grades nothing. |
+| frame zero scores at least half the take's own median contrast | that the app is visible at t = 0, out of pixels — never through `opening_gap`, which is the code under test asking itself whether it worked. |
+
+**The first version of the second arm graded nothing, and the fault injection is
+what said so.** It sampled with `sample_fps=1` and read `frames[0]`. The `fps`
+filter quantises to its own output slots, and at 1 fps slot zero is a whole
+second wide — measured, it returns a frame from around 0.5 s, which on a broken
+take is *after* the blank has ended. It scored 17.06 on a video whose first
+frame was flat white. The window is now cut with `-t` instead, which decodes
+from the file's own first frame: 17.25 healthy against 0.00 blanked. Reading the
+assertion would not have found this; breaking the recorder did.
+
+`check_opening_gap` is the other half, and it exists because **the recorded
+takes can only ever show one of the two shapes**. A web take always opens blank,
+so nothing in this suite reaches the blank floor — the constant that stops
+`opening_gap` firing on an app that painted immediately and then held still. Two
+videos are synthesised with ffmpeg, no browser: white until 0.6 s then colour
+bars (must measure 0.6 s), and colour bars throughout (must measure 0.0). The
+second is the control. Colour bars rather than `testsrc2` on purpose —
+`testsrc2` animates, so a video of it changes every frame and could not express
+"painted and holding still", which is the whole distinction being graded.
+
+Injections caught:
+
+| break | what fires |
+|---|---|
+| the hold is composited but switched off (`enable='lt(t,0)'`) | frame zero scores 0.00 against the take's median |
+| the opening is never detected, so nothing is ever held | the premise arm — `held` comes back 0.0 |
+| the blank floor is removed | the synthetic control: a static painted picture reads as a 1.95 s opening |
+
+**What this does not cover.** Only the `web/` take is graded; the web segment
+inside `segments/` and the entropy takes hold their openings too, and nothing
+checks it there. And nothing here compares the held frames against what the app
+*would* have shown — the hold is the app's own first painted frame, so a wrong
+frame would have to come from somewhere else in the same recording.
+
 ### Whether the recorder notices that the recording shows nothing (issue #97)
 
 Everything above is this harness measuring the picture. The recorder now

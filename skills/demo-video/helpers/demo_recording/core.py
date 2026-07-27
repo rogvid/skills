@@ -563,12 +563,25 @@ def tts_clip(
 #                          false), `rect`, `sample_fps`, `frames`, `score`
 #                          (median luma stddev), `floor`, `static_for` (the
 #                          longest stretch in seconds where nothing in the rect
-#                          changed), `static_from`, `static_limit`, and
-#                          `warnings` (empty on a healthy take). **Null** on a
-#                          take that encoded no mp4. This is the only field in
-#                          this document that describes the frames rather than
-#                          the storyboard — see "did the recording show
-#                          anything?" for why it had to exist.
+#                          changed), `static_from`, `static_limit`, `opening`
+#                          (see below) and `warnings` (empty on a healthy take).
+#                          **Null** on a take that encoded no mp4. This is the
+#                          only field in this document that describes the frames
+#                          rather than the storyboard — see "did the recording
+#                          show anything?" for why it had to exist.
+#   content.opening
+#                 dict?  — what the take opened on, and what the encode did
+#                          about it: `gap` (seconds of featureless, unchanging
+#                          picture at the start, measured off this mp4; 0.0
+#                          when it opens on a picture, null when it could not
+#                          be measured), `held` (seconds the recorder covered
+#                          with the app's first painted frame, **null** for a
+#                          recorder that does not do this), `limit` and `note`.
+#                          On a merged demo this is the *first* segment's — the
+#                          only one whose frame zero is the demo's. A non-zero
+#                          `held` means the frames at the start of the video
+#                          are not frames the recording captured; see "the
+#                          blank opening".
 #   beats         list   — the beats, in the order they ran
 #   strict        bool   — whether strict mode was on for this take (on a
 #                          merged demo: only if it was on for every segment)
@@ -1702,6 +1715,63 @@ CONTENT_PASSIVE_VERBS = frozenset(
 CONTENT_STATIC_BEATS_MAX = 8
 
 
+# -- the blank opening (issue #119) ------------------------------------------
+#
+# Chromium's screencast starts with the page, and the page is `about:blank`
+# until the storyboard's first `goto()` returns. `about:blank` paints white, so
+# every web take opened on a flat white app rect — measured at ~400 ms on the
+# reference demo, and reported by a human watching it, not by anything here.
+#
+# `_t0` cannot simply be moved later to skip it: the comment on it in
+# `__enter__` is load-bearing, and says why. Frame zero of the recording is the
+# page's creation, so pinning `_t0` anywhere else shifts every beat timestamp
+# and every narration offset earlier than the frame it describes.
+#
+# **So the gap is covered, not cut.** The web recorder finds the first frame
+# that differs from the one the take opened on, and composites *that* frame
+# over the app rect for the seconds before it. Content at every later time
+# stays exactly where it was: the video's duration is unchanged, the audio is
+# untouched, and not one timestamp moves — which is the whole reason this shape
+# was chosen over trimming, whose uniform `t -= trim` would have to be threaded
+# through `frames/` extraction, `stitch()`'s merged offsets and the capture-loss
+# offset in issue #18.
+#
+# **What it costs, and why the artifact has to say so.** Those first frames show
+# the app before it painted. That is a picture the recording did not capture,
+# and a recorder that fabricates one silently is doing the thing this whole
+# package refuses to do everywhere else. So `content.opening` carries `held` —
+# how many seconds were covered — and the summary line says it out loud.
+#
+# **The number that grades it is measured from the other side.** `held` is what
+# the recorder believes it did; `gap` is measured afterwards, off the encoded
+# mp4, by the same sampling the picture check uses. On a web take that worked,
+# `gap` is 0.0 *because* the hold landed — so a hold that silently did nothing
+# shows up as a non-zero `gap` on the file somebody watches, and warns. The two
+# numbers come from different passes over different files on purpose.
+#
+# Neither number is invented for recorders that do not do this: `held` is null
+# for them (the terminal recorder frames itself in the page and `_postprocess`
+# is a no-op there), and only a recorder that holds can warn about a gap it
+# failed to cover.
+
+# How long an opening gap may be before the recorder refuses to cover it. Past
+# this the opening is not a screencast artefact, it is an app that takes a long
+# time to paint — which is information about the app, and covering seconds of it
+# would be inventing a demo rather than repairing one. Over the limit nothing is
+# held, `note` says why, and the measured `gap` then warns on its own.
+OPENING_HOLD_LIMIT_S = 1.5
+
+# How far in to look for the first change, and how finely. 20 fps because the
+# thing being measured is ~400 ms long: at the picture check's own 2 fps the
+# answer would be 0.0 or 0.5 with nothing in between.
+OPENING_SEARCH_S = 3.0
+OPENING_SAMPLE_FPS = 20
+
+# A measured gap under this is one or two frames of encoder settling, not an
+# opening somebody would notice. Three samples at OPENING_SAMPLE_FPS.
+OPENING_WARN_S = 0.15
+
+
 def content_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     """An app rect with the recorder's own caption band cut off the bottom.
 
@@ -1718,16 +1788,25 @@ def content_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
 
 
 def _content_frames(
-    mp4: Path, rect: tuple[int, int, int, int], sample_fps: int
+    mp4: Path,
+    rect: tuple[int, int, int, int],
+    sample_fps: int,
+    limit_s: float | None = None,
 ) -> list[bytes]:
-    """`mp4`'s content rect, sampled and reduced to grayscale frames."""
+    """`mp4`'s content rect, sampled and reduced to grayscale frames.
+
+    `limit_s` stops after that many seconds of video — the opening check looks
+    at the first few seconds and decoding a whole 60 s take to answer a question
+    about its first 400 ms is waste. None reads the file to the end.
+    """
     x, y, w, h = rect
     chain = (
         f"fps={sample_fps},crop={w}:{h}:{x}:{y},"
         f"scale={_CONTENT_W}:{_CONTENT_H},format=gray"
     )
+    window = [] if limit_s is None else ["-t", f"{limit_s:.3f}"]
     proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(mp4), "-vf", chain,
+        ["ffmpeg", "-v", "error", "-i", str(mp4), *window, "-vf", chain,
          "-an", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
         capture_output=True,
     )
@@ -1757,6 +1836,107 @@ def _moved_pixels(a: bytes, b: bytes) -> int:
     """
     return sum(
         1 for x, y in zip(a, b, strict=True) if abs(x - y) > CONTENT_PIXEL_DELTA
+    )
+
+
+def opening_gap(
+    mp4: Path | str,
+    rect: tuple[int, int, int, int] | None,
+    *,
+    fps: int = OPENING_SAMPLE_FPS,
+    search_s: float = OPENING_SEARCH_S,
+    floor: float = CONTENT_BLANK_FLOOR,
+) -> tuple[float | None, str | None]:
+    """How long this recording opens on a featureless picture nothing changes.
+
+    Returns `(seconds, note)`. `seconds` is 0.0 when the take opens on a
+    picture, which is the healthy answer and the common one; `None` when
+    nothing could be measured, and then `note` says why. See the section header
+    for what the web recorder does with it.
+
+    **Two conditions, and the second is what stops this firing on a static
+    app.** The opening frame has to be *featureless* — under the same blank
+    floor the picture check uses — and only then is the wait for it to change
+    meaningful. A demo that opens on a rendered page holding still for two
+    seconds is an ordinary demo; without the floor it would read identically to
+    a page that never painted, and every such take would report a two-second
+    opening gap that is not there.
+
+    Calibrated off the take's **own** first frame rather than against an
+    absolute white, so it does not assume anything about what a blank page
+    looks like: an app on a dark background whose recorder opens black is the
+    same phenomenon and measures the same way.
+
+    Never raises, for the reason `content_report` does not: this runs inside
+    the encode path, and a measurement must never be able to cost somebody a
+    recording.
+    """
+    try:
+        if rect is None:
+            return None, (
+                "this recorder does not know where the app sits in the frame"
+            )
+        mp4 = Path(mp4)
+        if not mp4.is_file():
+            return None, f"there is no {mp4.name} to measure"
+        frames = _content_frames(mp4, rect, fps, limit_s=search_s)
+        if len(frames) < 2:
+            return None, (
+                f"only {len(frames)} frame(s) could be sampled from {mp4.name} "
+                f"at {fps} fps, which is too few to say anything"
+            )
+        if _luma_stddev(frames[0]) >= floor:
+            return 0.0, None
+        for i in range(1, len(frames)):
+            if _moved_pixels(frames[0], frames[i]) >= CONTENT_MOVED_PIXELS:
+                return round(i / fps, 3), None
+        return round((len(frames) - 1) / fps, 3), (
+            f"the picture had still not changed {search_s:.1f}s in, which is as "
+            f"far as this looks — so the opening is at least that long, and may "
+            f"be the whole take"
+        )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def opening_report(
+    gap: float | None,
+    note: str | None,
+    held: float | None,
+    *,
+    limit: float = OPENING_HOLD_LIMIT_S,
+) -> dict:
+    """`content.opening`: what the take opened on, and what was done about it.
+
+    `held` is null for a recorder that does not cover its opening — see the
+    section header for why the two numbers come from different passes over
+    different files.
+    """
+    return {"gap": gap, "held": held, "limit": limit, "note": note}
+
+
+def opening_warning(opening: dict | None) -> str | None:
+    """The one thing worth saying out loud about an opening, or None.
+
+    Only a recorder that *holds* can warn, and that is the point rather than a
+    convenience: a non-zero gap on a recorder that covers its opening means the
+    cover did not land, which is a defect. The same number on a recorder that
+    never claimed to cover anything is just a description, and warning about it
+    would fire on every take of that medium — the exact way a warning stops
+    being read.
+    """
+    if not isinstance(opening, dict):
+        return None
+    gap, held = opening.get("gap"), opening.get("held")
+    if held is None or not isinstance(gap, (int, float)):
+        return None
+    if gap < OPENING_WARN_S:
+        return None
+    note = opening.get("note")
+    return (
+        f"this take opens on {gap:.2f}s of featureless picture that does not "
+        f"change — the app had not painted when the recording started, and the "
+        f"opening hold did not cover it" + (f" ({note})" if note else "")
     )
 
 
@@ -1850,6 +2030,12 @@ def content_report(
             "static_from": None,
             "static_beats": None,
             "static_limit": static_limit,
+            # Supplied by the recorder in `_measure_content` (issue #119), not
+            # measured here: half of it is what the encode *did*, which no
+            # amount of looking at the finished file can recover. Present and
+            # null rather than absent, so the shape of `content` is the same
+            # whoever built it.
+            "opening": None,
             "warnings": [],
         }
 
@@ -1880,6 +2066,7 @@ def _content_report(
         # empty list, and the difference decides whether the arm may warn.
         "static_beats": None,
         "static_limit": static_limit,
+        "opening": None,  # the recorder fills this in — see the guard above
         "warnings": [],
     }
     if rect is None:
@@ -2019,6 +2206,12 @@ def merge_content(records: list[dict]) -> dict:
         "static_from": None,
         "static_beats": None,
         "static_limit": _common([c.get("static_limit") for c in measured]),
+        # The **first** segment's, not the worst and not a merge, because only
+        # segment one's opening is the joined video's opening; every other
+        # segment's frame zero lands in the middle of the demo, where a blank
+        # frame is a cut and not this phenomenon at all. Null when there are no
+        # segments to ask (issue #119).
+        "opening": (parts[0][1].get("opening") if parts else None),
         "warnings": [
             f"segment {name!r}: {warning}"
             for name, content in parts
@@ -2062,9 +2255,22 @@ def print_content_summary(content: dict | None, media: str) -> None:
                 "hold or a wait, which is what a still screen is supposed to "
                 "look like"
             )
+    # Said on every healthy take that held one, unasked, for the same reason
+    # the rest of this line is: the frames somebody watches at the start of
+    # this demo are not frames the recording captured, and a recorder that
+    # repairs its own output quietly is one nobody can audit (issue #119).
+    opening = content.get("opening")
+    opened = ""
+    if isinstance(opening, dict):
+        held_open = opening.get("held")
+        if isinstance(held_open, (int, float)) and held_open > 0:
+            opened = (
+                f"; the first {held_open:.2f}s is a hold — the app had not "
+                f"painted yet, so its first painted frame covers the gap"
+            )
     print(
         f"{media} shows a picture (content {content.get('score')} over the "
-        f"app rect, longest still stretch {held}s{why})"
+        f"app rect, longest still stretch {held}s{why}{opened})"
     )
 
 
@@ -2280,6 +2486,11 @@ class _DemoBase:
         # rather than the storyboard. See the "did the recording show
         # anything?" section.
         self._content: dict | None = None
+        # Seconds of blank opening this take's encode covered over, or None for
+        # a recorder that does not do that at all (issue #119). Null and 0.0 are
+        # different answers here — "never claimed to" against "had nothing to
+        # cover" — and `opening_warning` reads the difference.
+        self._opening_held: float | None = None
         # The medium's screen, read once on the failure path *before* the final
         # redaction check vouches for it, and turned into a file only if that
         # check passes. See the "failure artifacts" section.
@@ -4048,6 +4259,15 @@ class _DemoBase:
         # anything: without it a demo narrating over a rendered screen and a
         # demo nobody can see are the same number. See CONTENT_ACTING_VERBS.
         self._content = content_report(self._media_path(), rect, self._beats)
+        # What the take opened on, measured off the **encoded** mp4 — the file
+        # a reviewer watches, and the one the opening hold has already been
+        # applied to. That ordering is the whole check: a hold that silently
+        # did nothing leaves a non-zero gap right here (issue #119).
+        gap, note = opening_gap(self._media_path(), rect)
+        self._content["opening"] = opening_report(gap, note, self._opening_held)
+        warning = opening_warning(self._content["opening"])
+        if warning:
+            self._content["warnings"].append(warning)
 
     def _timeline_doc(self, failure: dict | None = None) -> dict:
         """This take's beat log as a timeline document (see TIMELINE_SCHEMA).
@@ -4280,7 +4500,16 @@ class _DemoBase:
         # text dump of the page, this take wrote none (the documents never left
         # memory), and the folder may hold the last one's.
         gone += self._clear_failure_dir()
-        for path in self._shots + [self.out_dir / ".frame.png"]:
+        # `.hold.png` is the opening frame the web recorder composites over a
+        # blank open (issue #119) — a full-size picture of the app, so it
+        # belongs here beside the stills rather than only in `_postprocess`'s
+        # own cleanup. It cannot normally exist at this point (a take that
+        # cannot vouch for its mask never reaches the encode), which is the
+        # argument for listing it rather than against.
+        for path in self._shots + [
+            self.out_dir / ".frame.png",
+            self.out_dir / ".hold.png",
+        ]:
             try:
                 if path.is_file():
                     path.unlink()

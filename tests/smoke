@@ -4072,8 +4072,10 @@ def _check_video(
         return failures
 
     # Median, not max: one good frame must not excuse a blank video. Not min
-    # either — a take legitimately opens on a frame or two of not-yet-painted
-    # page.
+    # either — a *terminal* take legitimately opens on a frame or two of
+    # not-yet-painted page, and this runs on both media. A web take no longer
+    # does (issue #119), and `check_opening` grades that separately, on the one
+    # frame this median is deliberately insensitive to.
     floor = MIN_CONTENT_STDDEV[label]
     score = statistics.median(contrast(f) for f in frames)
     if score < floor:
@@ -4218,6 +4220,215 @@ def check_content_healthy(label: str, out_dir: Path, app_rect: Rect) -> list[str
             f"smoke: {label} content ok (score {score}, longest still "
             f"{still}s against a {limit}s limit, over {len(rects)} rect(s) "
             f"{[tuple(r) for r in rects]})"
+        )
+    return failures
+
+
+# -- what a web take opens on (issue #119) -----------------------------------
+#
+# Chromium's screencast starts with the page, and the page is `about:blank`
+# until the first `goto()` returns — so every web take used to open on a flat
+# white app rect inside a correct-looking window frame, which reads as "the app
+# loaded blank". Measured at ~400 ms on the demo CI recorded for #117, and
+# found by a human watching it: none of this suite's numbers moved, and neither
+# did the recorder's own picture check, whose `score` is a *median* and whose
+# `static_for` saw one 0.5 s gap against a 15 s limit.
+#
+# The recorder now covers that gap with the app's first painted frame. What is
+# graded here is the only thing a viewer can see: **is there a picture at
+# t = 0**.
+#
+# Three things about how it is measured, each one deliberate:
+#
+#   * off `demo.mp4` with this file's own `gray_frames`/`contrast`, never
+#     through `opening_gap`. The recorder's `content.opening.gap` answers the
+#     same question, and a check that read it would be asking the code under
+#     test whether it worked.
+#   * against the take's **own** median rather than an absolute floor, so it
+#     carries no number tuned to this fixture, this app or this machine. The
+#     separation is not marginal: a covered opening scores the same as the rest
+#     of the take (measured 17.03 against a 17.01 median), and a blank one
+#     scores ~0.
+#   * with `held` asserted non-zero **first**. If this take had no gap to
+#     cover, frame zero shows the app whatever the recorder does, and the
+#     assertion below grades nothing — the exact shape of an environment-
+#     agreeing assertion. That case is reported as a failure of this check
+#     rather than passed over in silence.
+#
+# What is *not* asserted here, because something else in this take already
+# grades it: that no timestamp moved. The hold is an overlay switched off part
+# way through, so the video keeps its length and every frame keeps its time —
+# and `check_beat_frames` in the same phase reads each beat's `t` out of
+# timeline.json and matches the frame there against the caption that beat put
+# up. A hold that shifted the clock would land those frames on the wrong
+# captions.
+
+# How much of the take's own median contrast frame zero must reach. Nothing
+# subtle is being separated: the two populations are "the app" and "flat
+# white", so a half is far below anything a real opening frame scores and far
+# above what a blank one can.
+OPENING_FRAME0_SHARE = 0.5
+
+# How much of the file to read to get its first frame. Shorter than one frame
+# at any rate the recorder encodes, so what comes back is frame zero and at
+# most one neighbour — and it is read with `-t` rather than an `fps` filter for
+# the reason spelled out in check_opening().
+OPENING_FIRST_FRAME_S = 0.03
+
+
+def check_opening(label: str, out_dir: Path, app_rect: Rect) -> list[str]:
+    """The first frame of a web take shows the app (issue #119)."""
+    failures: list[str] = []
+    mp4 = out_dir / "demo.mp4"
+    content = content_of(out_dir) or {}
+    opening = content.get("opening")
+    held = opening.get("held") if isinstance(opening, dict) else None
+
+    if not isinstance(held, (int, float)) or held <= 0:
+        return [
+            f"{label}: this take reports no opening hold "
+            f"(content.opening.held is {held!r}), so the app had already "
+            f"painted when the recording started and nothing here graded the "
+            f"fix for #119. The check is the failure, not the recording — "
+            f"re-run, and if it persists the gap this covers has stopped "
+            f"happening on this machine and this assertion is worthless as "
+            f"written."
+        ]
+
+    rect = keep_top(app_rect)
+    try:
+        # **Not `sample_fps=`.** The fps filter quantises to its own output
+        # slots, and at 1 fps slot zero is a whole second wide — measured, it
+        # returns a frame from around 0.5 s, which on a broken take is *after*
+        # the blank opening has ended. The first version of this check read
+        # that frame, scored 17.06 on a take whose first frame was flat white,
+        # and passed. A window cut with `-t` instead decodes from the file's
+        # own first frame, which is the only frame this assertion is about.
+        opening = gray_frames(mp4, rect, duration=OPENING_FIRST_FRAME_S)
+        body = gray_frames(mp4, rect, sample_fps=CONTENT_SAMPLE_FPS)
+    except RuntimeError as exc:
+        return [f"{label}: {exc}"]
+    if not opening or len(body) < 2:
+        return [
+            f"{label}: {len(opening)} opening frame(s) and {len(body)} sampled "
+            f"from {mp4.name}, too few to compare the opening against the take"
+        ]
+
+    first = contrast(opening[0])
+    median = statistics.median(contrast(f) for f in body)
+    floor = median * OPENING_FRAME0_SHARE
+    if first < floor:
+        failures.append(
+            f"{label}: {mp4.name} opens on a picture that is not there — its "
+            f"first frame scores {first:.2f} luma stddev over {rect}, under "
+            f"{floor:.2f} ({OPENING_FRAME0_SHARE:g} of this take's own "
+            f"{median:.2f} median). The recorder says it held the opening for "
+            f"{held:.2f}s; whatever it composited, the app is not visible at "
+            f"t=0."
+        )
+    if not failures:
+        print(
+            f"smoke: {label} opens on the app (frame 0 scores {first:.2f} "
+            f"against a {median:.2f} median, over a {held:.2f}s hold)"
+        )
+    return failures
+
+
+def _synthetic_take(path: Path, painted_at: float | None, seconds: float) -> None:
+    """A tiny mp4 that opens blank and paints at `painted_at` — or never blank.
+
+    `painted_at=None` writes a video that is one *painted* picture from its
+    first frame to its last: the control, and the only thing that separates
+    "opened on nothing" from "opened on something and held still".
+    """
+    common = ["ffmpeg", "-y", "-v", "error"]
+    # Colour bars rather than `testsrc2`: they are a *static* picture, which is
+    # exactly the control this needs. `testsrc2` animates, so a video made of
+    # it changes every frame and could not tell a blank opening from a painted
+    # one that holds still — the very distinction being graded.
+    bars = f"smptebars=s=320x180:r=25:d={seconds:.2f}"
+    encode = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "25", str(path)]
+    if painted_at is None:
+        subprocess.run([*common, "-f", "lavfi", "-i", bars, *encode], check=True)
+        return
+    subprocess.run(
+        [
+            *common,
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=white:s=320x180:r=25:d={seconds:.2f}",
+            "-f",
+            "lavfi",
+            "-i",
+            bars,
+            "-filter_complex",
+            f"[0:v][1:v]overlay=enable='gte(t,{painted_at:.2f})'[v]",
+            "-map",
+            "[v]",
+            *encode,
+        ],
+        check=True,
+    )
+
+
+# Where the synthetic take below starts painting, and how much slack the
+# measurement is allowed. The slack covers one sample at OPENING_SAMPLE_FPS
+# plus the encoder placing the switch on the nearest frame; it is not a
+# tolerance for the answer being roughly right.
+SYNTHETIC_PAINT_AT = 0.6
+SYNTHETIC_SLACK_S = 0.12
+
+
+def check_opening_gap(out_root: Path) -> list[str]:
+    """`opening_gap` on two videos built here, not recorded (issue #119).
+
+    The recorded takes above can only ever show one of these shapes: a web take
+    always opens blank, so nothing in this suite exercises the other half of
+    the function — **the blank floor**, which is the whole reason it does not
+    fire on an app that painted immediately and then held still. A fixture that
+    cannot reach a path does not grade the constant guarding it.
+
+    So both shapes are synthesised, four lines of ffmpeg each, and the control
+    is the one that matters: a video that is one painted picture from first
+    frame to last must measure a 0.0 gap. Delete the floor and this is the
+    assertion that goes red.
+    """
+    from demo_recording import opening_gap
+
+    failures: list[str] = []
+    root = out_root / "opening-gap"
+    root.mkdir(parents=True, exist_ok=True)
+    rect = (0, 0, 320, 180)
+
+    blank = root / "blank-then-painted.mp4"
+    _synthetic_take(blank, SYNTHETIC_PAINT_AT, 2.0)
+    gap, note = opening_gap(blank, rect)
+    if gap is None or abs(gap - SYNTHETIC_PAINT_AT) > SYNTHETIC_SLACK_S:
+        failures.append(
+            f"opening-gap: a video that is flat white until "
+            f"{SYNTHETIC_PAINT_AT}s and painted after it measured a gap of "
+            f"{gap!r} (note {note!r}), not {SYNTHETIC_PAINT_AT}s "
+            f"+/- {SYNTHETIC_SLACK_S}s"
+        )
+
+    static = root / "painted-throughout.mp4"
+    _synthetic_take(static, None, 2.0)
+    gap, note = opening_gap(static, rect)
+    if gap != 0.0:
+        failures.append(
+            f"opening-gap: a video that shows one *painted* picture for its "
+            f"whole length measured a gap of {gap!r} (note {note!r}), not 0.0. "
+            f"Nothing changes in it from first frame to last, so a detector "
+            f"without the blank floor reads it as an opening that never "
+            f"painted — and the recorder would composite a later frame over "
+            f"the start of a take that never needed it."
+        )
+
+    if not failures:
+        print(
+            "smoke: opening-gap reads a blank opening and a static picture "
+            "differently (blank-then-painted, painted-throughout)"
         )
     return failures
 
@@ -7446,6 +7657,13 @@ def run_web(out_root: Path) -> list[str]:
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_evidence("web", out_dir, WEB_EVIDENCE, WEB_EVIDENCE_SCOPE)
+        # Here rather than in its own phase: the opening hold has to leave every
+        # beat where it was, and this is the take whose beat/frame alignment is
+        # already graded above (issue #119).
+        + check_opening("web", out_dir, video_rect)
+        # No browser and no recording — two synthesised videos, run here
+        # because this is the phase whose acceptance criterion it belongs to.
+        + check_opening_gap(out_root)
         + check_healthy("web", out_dir)
     )
 
