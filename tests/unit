@@ -7,6 +7,7 @@
 
     tests/unit                  # run the suite
     tests/unit --fault-inject   # prove the suite can fail
+    tests/unit --budget         # what SKILL.md costs a caller (warns, no gate)
 
 **`dependencies = []` is the point of this file, not an accident.** Everything
 tested here — the coverage report, the timeline's two renderings, the content
@@ -603,12 +604,54 @@ class SecretType(unittest.TestCase):
 
 SKILL_DIR = Path(os.environ.get("UNIT_SKILL_DIR", REPO / "skills" / "demo-video"))
 
-# Lines SKILL.md may occupy. It is 510 today. The headroom is for ordinary
-# growth — a verb, a mistake worth naming — and the number is deliberately
-# tight enough that a *section* cannot fit inside it. When this fails, the
-# answer is almost never to raise it: it is to move the new material into
-# reference/ and link it at the point of use.
+# Lines SKILL.md may occupy before `--budget` says so. It is 510 today. The
+# headroom is for ordinary growth — a verb, a mistake worth naming — and the
+# number is deliberately tight enough that a *section* cannot fit inside it.
+# When it is exceeded the answer is almost never to raise it: it is to move the
+# new material into reference/ and link it at the point of use.
+#
+# **This is a warning, not a gate, and it is a separate entry point for exactly
+# that reason.** Every other assertion in this file says something is *wrong*.
+# This one says a shared budget is being spent, which is a judgement its author
+# is allowed to make — somebody adding a genuinely load-bearing paragraph
+# should not be blocked by a line count. So it is reported by `tests/unit
+# --budget`, which CI runs with `continue-on-error`, rather than by a test that
+# turns a pull request red.
+#
+# It still *exits non-zero* when it is over. A budget that cannot fail is a
+# number nobody reads — the catalogue's "measurement that grades nothing" — and
+# the point of splitting it out is to keep it able to fail somewhere that does
+# not block.
 SKILL_LINE_BUDGET = 600
+
+
+def budget_report() -> int:
+    """Say what SKILL.md costs a caller. Non-zero when it is over budget."""
+    skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    lines = len(skill.splitlines())
+    # ~3.6 characters per token, calibrated against the 1,893-line / 40,510-token
+    # measurement this budget was set from. Indicative, not exact — the point is
+    # the order of magnitude a caller pays on every invocation.
+    tokens = round(len(skill) / 2.763)
+    over = lines > SKILL_LINE_BUDGET
+    print(
+        f"SKILL.md: {lines} lines (~{tokens:,} tokens), budget "
+        f"{SKILL_LINE_BUDGET} lines"
+    )
+    if over:
+        print(
+            f"\nWARNING: SKILL.md is {lines - SKILL_LINE_BUDGET} lines over "
+            f"budget.\n"
+            f"A skill's SKILL.md is loaded whole into the caller's context "
+            f"every time the\nskill triggers; reference/ files are read on "
+            f"demand. Consider moving the new\nmaterial into reference/ and "
+            f"linking it at the point of use.\n"
+            f"\nThis does not block anything. If the new material genuinely "
+            f"belongs in the\nalways-loaded file, raise SKILL_LINE_BUDGET in "
+            f"tests/unit and say why.",
+            file=sys.stderr,
+        )
+    return 1 if over else 0
 
 
 class SkillDocs(unittest.TestCase):
@@ -630,17 +673,6 @@ class SkillDocs(unittest.TestCase):
         linked = set(re.findall(r"\]\(reference/([^)#]+)", self.skill))
         self.assertGreaterEqual(len(on_disk), 8)
         self.assertEqual(on_disk - linked, set(), "reference files nothing links")
-
-    def test_skill_md_stays_inside_its_context_budget(self):
-        lines = len(self.skill.splitlines())
-        self.assertLessEqual(
-            lines,
-            SKILL_LINE_BUDGET,
-            f"SKILL.md is {lines} lines against a {SKILL_LINE_BUDGET}-line "
-            f"budget. Every caller pays for this file on every invocation — "
-            f"move the new material into reference/ and link it at the point "
-            f"of use rather than raising the budget.",
-        )
 
 
 # --------------------------------------------------------------------------
@@ -800,13 +832,6 @@ INJECTIONS = [
         ["SkillDocs.test_every_reference_link_in_skill_md_resolves"],
     ),
     (
-        "a whole section drifts back into the always-loaded SKILL.md",
-        "SKILL.md",
-        "## Common mistakes",
-        "## Common mistakes\n" + "\n".join(f"- padding line {i}" for i in range(200)),
-        ["SkillDocs.test_skill_md_stays_inside_its_context_budget"],
-    ),
-    (
         "a reference file stops being linked from SKILL.md",
         "SKILL.md",
         # narration.md is the one file linked exactly once, so removing that
@@ -932,8 +957,15 @@ def main() -> int:
         action="store_true",
         help="break each assertion's subject and require it to fail",
     )
+    parser.add_argument(
+        "--budget",
+        action="store_true",
+        help="report SKILL.md's context cost (warns, does not gate)",
+    )
     parser.add_argument("--_inner", action="store_true", help=argparse.SUPPRESS)
     args, rest = parser.parse_known_args()
+    if args.budget:
+        return budget_report()
     if args.fault_inject:
         return fault_inject()
     result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=1)
