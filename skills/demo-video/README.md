@@ -132,16 +132,37 @@ win over env vars.
 
 ```
 demo-video/
-├── SKILL.md                       # the process — agents read this
+├── SKILL.md                       # the process — agents read this, in full, every time
+├── reference/                     # the argued detail — read at the point of use
+│   ├── secrets.md                 #   redact(), register_secret(), and what they miss
+│   ├── determinism.md             #   the frozen clock, and why it is opt-in
+│   ├── timeline.md                #   the beat log, and whether the picture showed anything
+│   ├── review.md                  #   frames, per-beat evidence, acceptance criteria
+│   ├── failures.md                #   strict takes, and takes that do not finish
+│   ├── terminal.md                #   TerminalRecorder verbs, patterns, gotchas
+│   ├── narration.md               #   ElevenLabs speech
+│   └── ci.md                      #   recording on a pull request
 ├── README.md                      # this file — humans read this
 └── helpers/
-    ├── demo_recording/            # package: core + web + terminal recorders
+    ├── demo_recording/            # package: the recorders, and what reads their output
     │   ├── __init__.py            #   exports Recorder, TerminalRecorder, stitch
-    │   ├── core.py                #   shared recording + narration + ffmpeg
+    │   ├── core.py                #   _DemoBase: the browser, narration, ffmpeg
     │   ├── web.py                 #   Recorder (Playwright web apps)
-    │   └── terminal.py            #   TerminalRecorder (PTY + xterm.js)
+    │   ├── terminal.py            #   TerminalRecorder (PTY + xterm.js)
+    │   ├── timeline.py            #   ── everything below this line is
+    │   ├── coverage.py            #      browser-free: no Playwright, no ffmpeg
+    │   ├── content.py             #      import, importable and unit-testable
+    │   ├── frames.py              #      on its own. tests/unit grades it in
+    │   ├── failure.py             #      0.07 s; tests/smoke owns the rest.
+    │   ├── secrets.py             #
+    │   └── stitching.py           #
     └── assets/xterm/              # vendored xterm.js (terminal rendering)
 ```
+
+**SKILL.md is loaded whole into an agent's context whenever the skill triggers;
+`reference/` is read on demand.** That is why the split exists and why it is
+worth keeping: the entry point costs ~11k tokens instead of ~40k, and nothing
+was deleted to get there.
 
 The package and every generated storyboard carry PEP 723 metadata, so the
 dependency declaration travels with the files. Each storyboard embeds

@@ -4702,7 +4702,7 @@ def check_coverage_merge() -> list[str]:
     and could never report a criterion that *no* segment claimed — because no
     segment knows the other's ticket.
     """
-    from demo_recording.core import _merged_coverage
+    from demo_recording.coverage import _merged_coverage
 
     failures: list[str] = []
     docs = [
@@ -10598,7 +10598,7 @@ def run_evidence(out_root: Path) -> list[str]:
     # contract of the function that applies it, and this file says plainly
     # that that is a unit check rather than a recording. The other three are
     # graded end to end below.
-    from demo_recording.core import _cap_text
+    from demo_recording.timeline import _cap_text
 
     for field, limit in sorted(EVIDENCE_LIMITS_EXPECTED.items()):
         short, cut = _cap_text("x" * (limit - 1), limit)

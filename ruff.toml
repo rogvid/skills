@@ -17,6 +17,7 @@ exclude = [
 extend-include = [
     "tests/smoke",
     "tests/ci-unit",
+    "tests/unit",
     ".github/scripts/*",   # the CI workflow's PEP 723 executables
     "skills/*/scripts/*",  # every skill's PEP 723 executables
     "examples/*/serve",    # the example app's PEP 723 executables
