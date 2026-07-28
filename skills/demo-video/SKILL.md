@@ -5,6 +5,34 @@ description: Use when a web app, CLI, or TUI needs a screen-recorded demo video 
 
 # demo-video — self-explanatory recorded demos of a web app or terminal program
 
+## What this records, and what it does not defend against
+
+**demo-video records fixtures and example data.** Read this before pointing it
+at anything.
+
+- The tool has **no masking, no scrubbing and no redaction**. It does not hide
+  anything that reaches the screen, and it does not try to.
+- A value written into a storyboard, a caption or a timeline is an **example**.
+  A string that would be a credential in production is not one in a fixture,
+  and nothing needs to hide it.
+- **If a real credential can appear in the app you are recording, do not record
+  it.** That is the whole of the guidance. There is no setting, no verb and no
+  flag that makes it safe.
+- The corollary, stated plainly because it is a design decision and not an
+  omission: **a demo that needs a real secret to be meaningful is a demo that
+  cannot be made.** That is a constraint on what gets demoed. It is not a gap
+  waiting to be filled, and a future version will not fill it.
+
+This is a scope limit, not a security property. Nothing here is a control, so
+nothing here can be relied on as one — which is exactly why the machinery that
+used to look like one was removed rather than improved. A masking system that
+works almost always is worse than none, because it is what persuades somebody
+it is safe to point the recorder at production. The absence is the stronger
+guarantee ([#138](https://github.com/rogvid/skills/issues/138)).
+
+Recording in CI is the ordinary case and is secret-free by construction: the
+workflow refuses to record against a public host at all.
+
 ## Overview
 
 A demo is a short mp4 that explains itself to someone with zero context —
@@ -185,8 +213,6 @@ exception, or a non-zero exit. Both are
 | `wait_for(selector)` | Wait for something the app does on its own |
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition) |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
-| `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. **Read [reference/secrets.md](reference/secrets.md) before using this** — including what it does not cover. |
-| `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. **Refuses values under 8 characters** — see [reference/secrets.md](reference/secrets.md). |
 | `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
