@@ -87,6 +87,45 @@ jobs:
       - name: tests/ci-unit --fault-inject
         run: tests/ci-unit --fault-inject
 
+  # The recorder's own fast job. Everything it grades is a function of
+  # documents and values — the coverage report, the timeline's two renderings,
+  # the content and opening warnings, the merge a stitch performs — so it needs
+  # neither a browser nor ffmpeg and finishes in about a second.
+  #
+  # It exists because `smoke` is the recorder's only other check and costs ten
+  # minutes under an exclusive lock, which is why #136 found the injection
+  # manifest executed for the 720-line suite and written down as prose for the
+  # 12,369-line one. At 0.07s a run, the discipline is affordable here.
+  unit:
+    name: unit (demo-video recorder)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # No `--with playwright`, deliberately: if this job ever needs it, the
+      # import boundary issue #139 restored has been broken again, and this
+      # step is what says so.
+      - name: tests/unit
+        run: tests/unit
+
+      - name: tests/unit --fault-inject
+        run: tests/unit --fault-inject
+
+      # A warning, not a gate — hence `continue-on-error`. SKILL.md's length is
+      # a cost every caller pays on every invocation, so it is worth saying out
+      # loud; but whether a paragraph earns its place in the always-loaded file
+      # is a judgement its author is allowed to make, and a line count should
+      # not turn a pull request red. It still exits non-zero when it is over,
+      # so the annotation appears and the number stays honest.
+      - name: SKILL.md context budget (advisory)
+        continue-on-error: true
+        run: tests/unit --budget
+
   typecheck:
     name: typecheck (mypy)
     runs-on: ubuntu-latest

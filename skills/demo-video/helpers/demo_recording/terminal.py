@@ -36,17 +36,9 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .core import (
-    INTERLUDE_CSS,
-    INTERLUDE_ID,
-    SECRET_MASK,
-    Secret,
-    SecretLeak,
-    _beat_verb,
-    _DemoBase,
-    _env,
-    content_rect,
-)
+from .content import content_rect
+from .core import INTERLUDE_CSS, INTERLUDE_ID, _beat_verb, _DemoBase, _env
+from .secrets import SECRET_MASK, Secret, SecretLeak
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
 

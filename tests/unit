@@ -1,0 +1,976 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Unit tests for the browser-free half of the demo-video recorder.
+
+    tests/unit                  # run the suite
+    tests/unit --fault-inject   # prove the suite can fail
+    tests/unit --budget         # what SKILL.md costs a caller (warns, no gate)
+
+**`dependencies = []` is the point of this file, not an accident.** Everything
+tested here — the coverage report, the timeline's two renderings, the content
+and opening measurements, the merge a stitch performs, the two secret types —
+is a function of documents and values. None of it drives a browser. Until
+issue #139 it was nonetheless unreachable without one, because `core` imported
+Playwright at module scope and `__init__` imported both recorders eagerly, so
+the recorder's only check was `tests/smoke`: 12,369 lines, Chromium and ffmpeg
+required, ten minutes, one suite at a time behind an exclusive `flock`.
+
+That cost is what issue #136 measures, and it is why the fault-injection rule
+is *executed* for `tests/ci-unit` and *prose* for the recorder. At 12-620 s per
+injection under a lock nobody maintains a manifest. At 0.2 s they do.
+
+So this suite exists to make the discipline affordable where it was not, and
+it carries its own `INJECTIONS` table with the same contract `tests/ci-unit`
+uses: each entry breaks one named thing, the suite must go red, and the
+**named** tests must be the ones that fired. An injection whose search string
+does not match exactly once aborts the run rather than reporting a pass.
+
+What this suite does NOT cover is stated at the bottom of this file. Read it
+before treating a green run as coverage of the recorder.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+HELPERS = REPO / "skills" / "demo-video" / "helpers"
+
+# The package under test, overridable so --fault-inject can point the suite at
+# a broken copy without touching the working tree.
+_PKG_PARENT = Path(os.environ.get("UNIT_HELPERS", HELPERS))
+sys.path.insert(0, str(_PKG_PARENT))
+
+from demo_recording.content import (  # noqa: E402
+    CONTENT_CAPTION_TRIM,
+    OPENING_WARN_S,
+    _beats_within,
+    content_rect,
+    merge_content,
+    opening_report,
+    opening_warning,
+)
+from demo_recording.coverage import (  # noqa: E402
+    _checked_criteria,
+    _declared_criteria,
+    _merged_coverage,
+    coverage_report,
+)
+from demo_recording.secrets import SECRET_MASK, Secret  # noqa: E402
+from demo_recording.timeline import (  # noqa: E402
+    _coverage_md,
+    _fmt_t,
+    _md_cell,
+    render_timeline_md,
+    timeline_paths,
+)
+
+# --------------------------------------------------------------------------
+# Helpers — deliberately hand-written
+# --------------------------------------------------------------------------
+#
+# `split_row` does NOT reuse `_md_cell`'s escaping, and that is the catalogue
+# entry "the check that shares the bug's blind spot": a check that unescapes
+# with the same helper the code escaped with agrees with that helper's bugs by
+# construction. This one is written from the reader's side — what a markdown
+# renderer does with a row — so a change to the escaping rule shows up here as
+# a failure rather than as silence.
+
+
+def split_row(line: str) -> list[str]:
+    """A markdown table row split into cells, honouring backslash escapes."""
+    cells: list[str] = []
+    current: list[str] = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line):
+            current.append(line[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    cells.append("".join(current))
+    return [c.strip() for c in cells[1:-1]] if len(cells) > 2 else []
+
+
+def beat(index: int, verb: str, t_start: float, **extra: object) -> dict:
+    doc = {
+        "index": index,
+        "verb": verb,
+        "t_start": t_start,
+        "t_end": t_start + 0.1,
+        "caption": "",
+        "selector": None,
+        "segment": None,
+        "segment_index": index,
+    }
+    doc.update(extra)
+    return doc
+
+
+def seg(name: str, **content: object) -> dict:
+    base = {
+        "measured": True,
+        "score": 10.0,
+        "static_for": 1.0,
+        "frames": 10,
+        "sample_fps": 2,
+        "floor": 6.0,
+        "static_limit": 15.0,
+        "opening": None,
+        "warnings": [],
+    }
+    base.update(content)
+    return {"segment": name, "content": base}
+
+
+def envelope(**over: object) -> dict:
+    doc = {
+        "schema": 1,
+        "generated_by": "demo-video",
+        "recorder": "Recorder",
+        "segment": None,
+        "media": "demo.mp4",
+        "duration": 18.04,
+        "strict": False,
+        "issue_count": 0,
+        "beats": [],
+        "issues": [],
+        "determinism": {
+            "deterministic": False,
+            "clock": None,
+            "timezone_id": "UTC",
+            "locale": "en-US",
+        },
+        "content": None,
+        "coverage": None,
+    }
+    doc.update(over)
+    return doc
+
+
+# --------------------------------------------------------------------------
+# coverage.py — what the storyboard claimed, and what nothing claimed
+# --------------------------------------------------------------------------
+
+
+class Coverage(unittest.TestCase):
+    CRITERIA = {
+        "AC-1": "The queue can be filtered to one status.",
+        "AC-2": "A filter that matches nothing explains itself.",
+        "AC-3": "The CLI prints the same filtered list.",
+    }
+
+    def test_a_criterion_no_beat_claims_is_reported_unclaimed(self):
+        report = coverage_report(
+            self.CRITERIA,
+            [
+                beat(1, "caption", 3.2, ac=["AC-1"]),
+                beat(2, "shot", 5.4, ac=["AC-2"], still="images/02.png"),
+            ],
+        )
+        self.assertEqual(report["unclaimed"], ["AC-3"])
+
+    def test_every_declared_id_is_a_key_even_with_no_claims(self):
+        # Stated invariant: a consumer iterating `claimed` sees the whole
+        # ticket, not only its demonstrated half.
+        report = coverage_report(self.CRITERIA, [beat(1, "caption", 3.2, ac=["AC-1"])])
+        self.assertEqual(sorted(report["claimed"]), ["AC-1", "AC-2", "AC-3"])
+        self.assertEqual(report["claimed"]["AC-3"], [])
+
+    def test_a_claim_carries_the_beat_that_made_it(self):
+        # Not "one claim was recorded" — which beat, at what time, with which
+        # still. A count here would pass on a report that pointed a reviewer
+        # at the wrong frame.
+        report = coverage_report(
+            self.CRITERIA,
+            [
+                beat(0, "goto", 0.1),
+                beat(7, "shot", 5.46, ac=["AC-2"], still="images/02-empty.png"),
+            ],
+        )
+        self.assertEqual(
+            report["claimed"]["AC-2"],
+            [
+                {
+                    "index": 7,
+                    "segment": None,
+                    "segment_index": 7,
+                    "t_start": 5.46,
+                    "still": "images/02-empty.png",
+                }
+            ],
+        )
+
+    def test_a_take_recorded_outside_a_ticket_has_no_report(self):
+        # None, not {}. An empty report would read as a take that covered
+        # nothing, which is a different and false statement.
+        self.assertIsNone(coverage_report({}, [beat(1, "caption", 1.0)]))
+
+    def test_one_beat_may_claim_several_criteria(self):
+        report = coverage_report(
+            self.CRITERIA, [beat(3, "shot", 4.0, ac=["AC-1", "AC-2"])]
+        )
+        self.assertEqual([c["index"] for c in report["claimed"]["AC-1"]], [3])
+        self.assertEqual([c["index"] for c in report["claimed"]["AC-2"]], [3])
+        self.assertEqual(report["tagged_beats"], 1)
+
+    def test_tagged_and_untagged_beats_partition_the_log(self):
+        beats = [
+            beat(0, "goto", 0.1),
+            beat(1, "caption", 1.0, ac=["AC-1"]),
+            beat(2, "pause", 2.0),
+            beat(3, "shot", 3.0, ac=["AC-2"]),
+        ]
+        report = coverage_report(self.CRITERIA, beats)
+        self.assertEqual(report["tagged_beats"], 2)
+        self.assertEqual(report["untagged_beats"], 2)
+        self.assertEqual(report["tagged_beats"] + report["untagged_beats"], len(beats))
+
+
+class CheckedCriteria(unittest.TestCase):
+    def test_no_criteria_is_an_empty_map_not_an_error(self):
+        self.assertEqual(_checked_criteria(None), {})
+
+    def test_an_id_at_the_length_limit_is_accepted_and_one_over_is_not(self):
+        # The boundary, not comfortably inside it: the catalogue's "ungraded
+        # constant". The rule is 1-40 characters.
+        ok = "A" + "b" * 39
+        self.assertEqual(len(ok), 40)
+        self.assertEqual(_checked_criteria({ok: "text"}), {ok: "text"})
+        with self.assertRaises(ValueError):
+            _checked_criteria({ok + "c": "text"})
+
+    def test_an_id_holding_a_pipe_is_refused_before_it_reaches_a_table(self):
+        with self.assertRaises(ValueError):
+            _checked_criteria({"AC|1": "text"})
+
+    def test_a_criterion_with_no_text_is_refused(self):
+        # The text is what a reviewer judges the frames against; an id alone
+        # says nothing, and a dropped entry could never be reported unclaimed.
+        with self.assertRaises(ValueError):
+            _checked_criteria({"AC-1": "   "})
+
+
+class MergedCoverage(unittest.TestCase):
+    def test_the_union_names_a_criterion_no_single_segment_could(self):
+        # Neither segment's own report can say AC-3 is unclaimed, because
+        # neither knows the other's criteria. The merged one can.
+        docs = [
+            {"coverage": {"criteria": {"AC-1": "web half", "AC-3": "cli half"}}},
+            {"coverage": {"criteria": {"AC-2": "second half"}}},
+        ]
+        merged = _merged_coverage(docs, [beat(1, "caption", 1.0, ac=["AC-1"])])
+        self.assertEqual(sorted(merged["criteria"]), ["AC-1", "AC-2", "AC-3"])
+        self.assertEqual(sorted(merged["unclaimed"]), ["AC-2", "AC-3"])
+
+    def test_segments_disagreeing_about_one_id_is_reported_not_resolved(self):
+        docs = [
+            {"coverage": {"criteria": {"AC-1": "the wording one segment used"}}},
+            {"coverage": {"criteria": {"AC-1": "a different wording entirely"}}},
+        ]
+        merged = _merged_coverage(docs, [])
+        self.assertEqual(merged["conflicts"], ["AC-1"])
+
+    def test_agreeing_segments_produce_no_conflict_key(self):
+        # The control for the test above: without it, a `conflicts` key that
+        # was always present would satisfy that assertion on every input.
+        docs = [
+            {"coverage": {"criteria": {"AC-1": "same"}}},
+            {"coverage": {"criteria": {"AC-1": "same"}}},
+        ]
+        self.assertNotIn("conflicts", _merged_coverage(docs, []))
+
+    def test_first_wording_wins_in_the_map_when_segments_disagree(self):
+        criteria, conflicts = _declared_criteria(
+            [
+                {"coverage": {"criteria": {"AC-1": "first"}}},
+                {"coverage": {"criteria": {"AC-1": "second"}}},
+            ]
+        )
+        self.assertEqual(criteria["AC-1"], "first")
+        self.assertEqual(conflicts, ["AC-1"])
+
+
+# --------------------------------------------------------------------------
+# timeline.py — the beat log's two renderings
+# --------------------------------------------------------------------------
+
+
+class Cell(unittest.TestCase):
+    def test_a_pipe_in_a_caption_does_not_add_a_column(self):
+        # Read from the renderer's side: the row must still have exactly the
+        # four cells the header declares.
+        row = f"| 1 | {_md_cell('Filter | then sort')} | 1.00 | |"
+        self.assertEqual(len(split_row(row)), 4)
+        self.assertIn("Filter | then sort", split_row(row)[1])
+
+    def test_a_newline_in_a_caption_does_not_split_the_row(self):
+        self.assertNotIn("\n", _md_cell("two\nlines"))
+
+    def test_a_backslash_survives_as_one_backslash_to_the_reader(self):
+        self.assertEqual(split_row(f"| {_md_cell(chr(92))} |"), [chr(92)])
+
+
+class FmtT(unittest.TestCase):
+    def test_a_beat_with_no_timestamp_renders_empty_not_zero(self):
+        # "0.00" would read as "this happened at the start of the demo",
+        # which is a confident wrong answer where "" is an honest absence.
+        self.assertEqual(_fmt_t(None), "")
+
+    def test_a_timestamp_renders_at_two_decimals(self):
+        self.assertEqual(_fmt_t(5.4567), "5.46")
+
+
+class CoverageMd(unittest.TestCase):
+    REPORT = {
+        "criteria": {
+            "AC-1": "Filterable.",
+            "AC-2": "Explains itself.",
+            "AC-3": "CLI agrees.",
+        },
+        "claimed": {
+            "AC-1": [{"index": 1, "t_start": 3.2, "still": None, "segment": None}],
+            "AC-2": [
+                {"index": 2, "t_start": 5.4, "still": "images/02.png", "segment": None}
+            ],
+            "AC-3": [],
+        },
+        "unclaimed": ["AC-3"],
+        "tagged_beats": 2,
+        "untagged_beats": 4,
+    }
+
+    def test_the_unclaimed_sentence_names_every_unclaimed_id(self):
+        text = "\n".join(_coverage_md(self.REPORT))
+        self.assertIn("`AC-3`", text)
+        self.assertIn("1 of 3 criteria have no beat claiming them", text)
+
+    def test_the_section_says_claimed_and_never_says_demonstrated(self):
+        # The whole honesty of issue #12. If this file said "demonstrated",
+        # the conformance reviewer would be taking the storyboard author's
+        # word for the exact thing it was convened to check.
+        text = "\n".join(_coverage_md(self.REPORT)).lower()
+        self.assertIn("claimed", text)
+        self.assertNotIn("demonstrated", text)
+        self.assertNotIn("proved", text.replace("not what it proved", ""))
+
+    def test_a_take_with_no_criteria_renders_no_section_at_all(self):
+        self.assertEqual(_coverage_md(None), [])
+        self.assertEqual(_coverage_md({"criteria": {}}), [])
+
+    def test_the_table_header_and_every_row_agree_on_column_count(self):
+        rows = [
+            ln
+            for ln in _coverage_md(self.REPORT)
+            if ln.startswith("|") and not ln.startswith("|---")
+        ]
+        self.assertGreater(len(rows), 3)  # header + one row per claim
+        widths = {len(split_row(r)) for r in rows}
+        self.assertEqual(widths, {4})
+
+
+class TimelineMd(unittest.TestCase):
+    def test_a_null_duration_is_not_rendered_as_a_number(self):
+        # issue #20: a take that encoded no mp4 reports duration null, even
+        # when a previous run's demo.mp4 is sitting right there. Rendering
+        # that as 0.00s would restate the lie the null exists to avoid.
+        text = render_timeline_md(envelope(duration=None, beats=[beat(0, "goto", 0.1)]))
+        self.assertNotRegex(text, r"\b0\.00\s*s\b")
+
+    def test_the_beat_table_survives_a_caption_holding_a_pipe(self):
+        text = render_timeline_md(
+            envelope(
+                duration=3.0,
+                beats=[beat(0, "caption", 0.1, caption="Filter | then sort")],
+            )
+        )
+        rows = [
+            ln
+            for ln in text.splitlines()
+            if ln.startswith("|") and not ln.startswith("|---")
+        ]
+        self.assertGreater(len(rows), 1)
+        widths = {len(split_row(r)) for r in rows}
+        self.assertEqual(len(widths), 1, f"ragged table: {widths}")
+
+
+class TimelinePaths(unittest.TestCase):
+    def test_a_segment_never_collides_with_the_whole_demo(self):
+        whole = timeline_paths("/out")
+        part = timeline_paths("/out", "part1")
+        self.assertEqual(whole[0].name, "timeline.json")
+        self.assertEqual(part[0].name, "part1.seg.timeline.json")
+        self.assertNotEqual(whole, part)
+
+    def test_two_segments_never_collide_with_each_other(self):
+        self.assertNotEqual(timeline_paths("/o", "a"), timeline_paths("/o", "b"))
+
+
+# --------------------------------------------------------------------------
+# content.py — did the recording show anything
+# --------------------------------------------------------------------------
+
+
+class OpeningWarning(unittest.TestCase):
+    def test_a_recorder_that_never_held_does_not_warn(self):
+        # `held: null` and `held: 0.0` are different answers — "never claimed
+        # to" against "had nothing to cover" — and only the second can be a
+        # defect. A terminal take reports null on every take; warning there
+        # is exactly how a warning stops being read.
+        self.assertIsNone(opening_warning(opening_report(2.0, None, None)))
+
+    def test_a_recorder_that_held_and_still_opens_blank_warns(self):
+        warning = opening_warning(opening_report(2.0, None, 0.0))
+        self.assertIsNotNone(warning)
+        self.assertIn("2.00s", warning)
+
+    def test_the_warning_bar_is_graded_at_its_boundary(self):
+        # The catalogue's "ungraded constant": test either side of
+        # OPENING_WARN_S, not comfortably inside one of them.
+        just_under = OPENING_WARN_S - 0.01
+        self.assertIsNone(opening_warning(opening_report(just_under, None, 0.0)))
+        self.assertIsNotNone(opening_warning(opening_report(OPENING_WARN_S, None, 0.0)))
+
+    def test_a_healthy_take_whose_hold_landed_is_silent(self):
+        self.assertIsNone(opening_warning(opening_report(0.0, None, 0.42)))
+
+
+class BeatsWithin(unittest.TestCase):
+    def test_a_beat_that_began_before_the_stretch_is_not_counted(self):
+        # "Began, not overlapped", and the difference is the whole
+        # correctness of the correlation: the verb immediately before a held
+        # stretch is very often the thing that *ended* the previous one.
+        found = _beats_within([beat(1, "run", 2.32)], 2.50, 9.0)
+        self.assertEqual(found, [])
+
+    def test_a_beat_that_began_inside_the_stretch_is_counted(self):
+        found = _beats_within([beat(1, "run", 2.60)], 2.50, 9.0)
+        self.assertEqual([b["index"] for b in found], [1])
+
+    def test_an_acting_verb_and_a_narrating_one_are_told_apart(self):
+        found = _beats_within(
+            [
+                beat(1, "caption", 3.0),
+                beat(2, "click", 4.0),
+                beat(3, "hold", 5.0),
+                beat(4, "run", 6.0),
+            ],
+            2.0,
+            9.0,
+        )
+        self.assertEqual(
+            {b["verb"]: b["acting"] for b in found},
+            {"caption": False, "click": True, "hold": False, "run": True},
+        )
+
+    def test_a_beat_with_no_usable_timestamp_is_skipped_not_crashed(self):
+        self.assertEqual(_beats_within([{"index": 1, "verb": "run"}], 0.0, 9.0), [])
+
+
+class ContentRect(unittest.TestCase):
+    def test_the_caption_band_is_cut_off_the_bottom(self):
+        _, _, _, h = content_rect((0, 0, 1280, 720))
+        self.assertLess(h, 720)
+        self.assertEqual(h, int(720 * (1.0 - CONTENT_CAPTION_TRIM)))
+
+    def test_a_degenerate_rect_never_comes_back_zero_sized(self):
+        # ffmpeg's crop filter fails on a zero dimension, and a measurement
+        # must never be able to cost somebody a recording.
+        _, _, w, h = content_rect((-5, -5, 0, 0))
+        self.assertGreaterEqual(w, 2)
+        self.assertGreaterEqual(h, 2)
+
+
+class MergeContent(unittest.TestCase):
+    """issue #121 — the 'worst of the segments' direction, which is opposite
+    on the two arms: lowest score, longest held stretch."""
+
+    def test_the_merged_score_is_the_lowest_of_the_segments(self):
+        merged = merge_content([seg("a", score=14.0), seg("b", score=3.0)])
+        self.assertEqual(merged["score"], 3.0)
+
+    def test_the_merged_static_stretch_is_the_longest_of_the_segments(self):
+        merged = merge_content([seg("a", static_for=4.0), seg("b", static_for=21.5)])
+        self.assertEqual(merged["static_for"], 21.5)
+
+    def test_a_segment_that_could_not_be_measured_lowers_nothing(self):
+        merged = merge_content(
+            [
+                seg("a", score=14.0, static_for=4.0),
+                seg("b", measured=False, score=None, static_for=None),
+            ]
+        )
+        self.assertTrue(merged["measured"])
+        self.assertEqual(merged["score"], 14.0)
+        self.assertEqual(merged["static_for"], 4.0)
+
+    def test_every_segments_warning_survives_tagged_with_its_segment(self):
+        merged = merge_content(
+            [
+                seg("a", warnings=["the rect held one picture for 20.0s"]),
+                seg("b", warnings=["there is no picture where the app should be"]),
+            ]
+        )
+        self.assertEqual(len(merged["warnings"]), 2)
+        self.assertTrue(merged["warnings"][0].startswith("segment 'a':"))
+        self.assertTrue(merged["warnings"][1].startswith("segment 'b':"))
+
+    def test_the_opening_is_the_first_segments_not_the_worst(self):
+        # Only segment one's frame zero is the joined video's frame zero;
+        # every other segment's opening lands mid-demo, where a blank frame
+        # is a cut and not this phenomenon at all.
+        first = opening_report(0.0, None, 0.4)
+        second = opening_report(2.0, None, 0.0)
+        merged = merge_content([seg("a", opening=first), seg("b", opening=second)])
+        self.assertEqual(merged["opening"], first)
+
+    def test_a_merged_demo_reports_no_single_rect_or_beat_index(self):
+        # Two segments can be two media with two geometries, and the worst
+        # run belongs to one segment's own clock and beat numbering.
+        merged = merge_content([seg("a"), seg("b")])
+        self.assertIsNone(merged["rect"])
+        self.assertIsNone(merged["static_from"])
+        self.assertIsNone(merged["static_beats"])
+
+    def test_segments_disagreeing_on_a_floor_report_neither(self):
+        merged = merge_content([seg("a", floor=6.0), seg("b", floor=2.0)])
+        self.assertIsNone(merged["floor"])
+
+
+# --------------------------------------------------------------------------
+# secrets.py
+# --------------------------------------------------------------------------
+
+
+class SecretType(unittest.TestCase):
+    def test_a_secret_is_not_a_str(self):
+        # Deliberately not a str subclass: `_verb_target` picks the first
+        # string argument of a verb as that beat's `selector`, so a
+        # str-subclassed Secret handed to any verb would be written into
+        # timeline.json verbatim — a file this skill tells people to commit.
+        self.assertNotIsInstance(Secret("sk-live-abcdef123456"), str)
+
+    def test_printing_a_secret_yields_the_mask_not_the_value(self):
+        self.assertEqual(str(Secret("sk-live-abcdef123456")), SECRET_MASK)
+        self.assertEqual(f"{Secret('sk-live-abcdef123456')}", SECRET_MASK)
+
+    def test_repr_names_the_length_and_not_the_value(self):
+        # A repr lands in tracebacks, CI logs and bug reports — the set of
+        # places this type exists to keep the value out of.
+        text = repr(Secret("sk-live-abcdef123456"))
+        self.assertNotIn("sk-live", text)
+        self.assertIn("20", text)
+
+    def test_reveal_is_the_only_way_to_the_plaintext(self):
+        self.assertEqual(
+            Secret("sk-live-abcdef123456").reveal(), "sk-live-abcdef123456"
+        )
+
+    def test_an_empty_secret_is_refused(self):
+        with self.assertRaises(ValueError):
+            Secret("")
+
+
+# --------------------------------------------------------------------------
+# SKILL.md and its reference/ files (issue #140)
+# --------------------------------------------------------------------------
+#
+# A skill's SKILL.md is loaded *whole* into the caller's context the moment the
+# skill triggers; files it links are read on demand. That makes its length a
+# cost every invocation pays, and it is why the reference material was moved
+# out. These three assertions are what stop the move from silently undoing
+# itself — a pointer that rots, a reference file nothing links, or a section
+# that drifts back into the always-loaded file.
+
+
+SKILL_DIR = Path(os.environ.get("UNIT_SKILL_DIR", REPO / "skills" / "demo-video"))
+
+# Lines SKILL.md may occupy before `--budget` says so. It is 510 today. The
+# headroom is for ordinary growth — a verb, a mistake worth naming — and the
+# number is deliberately tight enough that a *section* cannot fit inside it.
+# When it is exceeded the answer is almost never to raise it: it is to move the
+# new material into reference/ and link it at the point of use.
+#
+# **This is a warning, not a gate, and it is a separate entry point for exactly
+# that reason.** Every other assertion in this file says something is *wrong*.
+# This one says a shared budget is being spent, which is a judgement its author
+# is allowed to make — somebody adding a genuinely load-bearing paragraph
+# should not be blocked by a line count. So it is reported by `tests/unit
+# --budget`, which CI runs with `continue-on-error`, rather than by a test that
+# turns a pull request red.
+#
+# It still *exits non-zero* when it is over. A budget that cannot fail is a
+# number nobody reads — the catalogue's "measurement that grades nothing" — and
+# the point of splitting it out is to keep it able to fail somewhere that does
+# not block.
+SKILL_LINE_BUDGET = 600
+
+
+def budget_report() -> int:
+    """Say what SKILL.md costs a caller. Non-zero when it is over budget."""
+    skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    lines = len(skill.splitlines())
+    # ~3.6 characters per token, calibrated against the 1,893-line / 40,510-token
+    # measurement this budget was set from. Indicative, not exact — the point is
+    # the order of magnitude a caller pays on every invocation.
+    tokens = round(len(skill) / 2.763)
+    over = lines > SKILL_LINE_BUDGET
+    print(
+        f"SKILL.md: {lines} lines (~{tokens:,} tokens), budget "
+        f"{SKILL_LINE_BUDGET} lines"
+    )
+    if over:
+        print(
+            f"\nWARNING: SKILL.md is {lines - SKILL_LINE_BUDGET} lines over "
+            f"budget.\n"
+            f"A skill's SKILL.md is loaded whole into the caller's context "
+            f"every time the\nskill triggers; reference/ files are read on "
+            f"demand. Consider moving the new\nmaterial into reference/ and "
+            f"linking it at the point of use.\n"
+            f"\nThis does not block anything. If the new material genuinely "
+            f"belongs in the\nalways-loaded file, raise SKILL_LINE_BUDGET in "
+            f"tests/unit and say why.",
+            file=sys.stderr,
+        )
+    return 1 if over else 0
+
+
+class SkillDocs(unittest.TestCase):
+    def setUp(self):
+        self.skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_every_reference_link_in_skill_md_resolves(self):
+        links = sorted(set(re.findall(r"\]\((reference/[^)#]+)", self.skill)))
+        # The catalogue's "vacuous sweep": a link check over a file with no
+        # links passes trivially. Assert the haystack first.
+        self.assertGreaterEqual(len(links), 8, "SKILL.md links almost nothing")
+        missing = [ln for ln in links if not (SKILL_DIR / ln).is_file()]
+        self.assertEqual(missing, [], f"dead reference links: {missing}")
+
+    def test_every_reference_file_is_linked_from_skill_md(self):
+        # An unread reference is a deleted one. A file nothing points at is
+        # not progressive disclosure, it is material that was removed.
+        on_disk = {p.name for p in (SKILL_DIR / "reference").glob("*.md")}
+        linked = set(re.findall(r"\]\(reference/([^)#]+)", self.skill))
+        self.assertGreaterEqual(len(on_disk), 8)
+        self.assertEqual(on_disk - linked, set(), "reference files nothing links")
+
+
+# --------------------------------------------------------------------------
+# Fault injection
+# --------------------------------------------------------------------------
+
+# (name, module, exact text to replace, replacement, tests that must then fail)
+INJECTIONS = [
+    (
+        "coverage accumulates criteria from the tags instead of the declaration",
+        "coverage.py",
+        "    claimed: dict[str, list[dict]] = {key: [] for key in criteria}",
+        "    claimed: dict[str, list[dict]] = {}",
+        [
+            "Coverage.test_a_criterion_no_beat_claims_is_reported_unclaimed",
+            "Coverage.test_every_declared_id_is_a_key_even_with_no_claims",
+        ],
+    ),
+    (
+        "a take with no criteria reports an empty coverage object instead of null",
+        "coverage.py",
+        "    if not criteria:\n        return None",
+        "    if not criteria:\n        criteria = {}",
+        ["Coverage.test_a_take_recorded_outside_a_ticket_has_no_report"],
+    ),
+    (
+        "a claim records only the beat index, losing the frame it points at",
+        "coverage.py",
+        '                        "still": beat.get("still"),',
+        '                        "still": None,',
+        ["Coverage.test_a_claim_carries_the_beat_that_made_it"],
+    ),
+    (
+        "segments disagreeing about a criterion's wording are silently resolved",
+        "coverage.py",
+        "            if key in merged and merged[key] != text:",
+        "            if False:",
+        [
+            "MergedCoverage.test_segments_disagreeing_about_one_id_is_reported_not_resolved"
+        ],
+    ),
+    (
+        "the criterion id pattern stops excluding a pipe",
+        "coverage.py",
+        r'_AC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")',
+        r'_AC_ID = re.compile(r"^[A-Za-z0-9].{0,200}$")',
+        [
+            "CheckedCriteria.test_an_id_holding_a_pipe_is_refused_before_it_reaches_a_table",
+            "CheckedCriteria.test_an_id_at_the_length_limit_is_accepted_and_one_over_is_not",
+        ],
+    ),
+    (
+        "the table cell stops escaping pipes",
+        "timeline.py",
+        '        .replace("|", "\\\\|")',
+        '        .replace("|", "|")',
+        [
+            "Cell.test_a_pipe_in_a_caption_does_not_add_a_column",
+            "TimelineMd.test_the_beat_table_survives_a_caption_holding_a_pipe",
+        ],
+    ),
+    (
+        "a beat with no timestamp renders as time zero",
+        "timeline.py",
+        '    return "" if value is None else f"{float(cast(\'float\', value)):.2f}"',
+        "    return f\"{float(cast('float', value or 0)):.2f}\"",
+        ["FmtT.test_a_beat_with_no_timestamp_renders_empty_not_zero"],
+    ),
+    (
+        "the coverage section calls a claim a demonstration",
+        "timeline.py",
+        '        "| criterion | claimed by | at | still |",',
+        '        "| criterion | demonstrated by | at | still |",',
+        ["CoverageMd.test_the_section_says_claimed_and_never_says_demonstrated"],
+    ),
+    (
+        "the unclaimed sentence stops naming which criteria are unclaimed",
+        "timeline.py",
+        "            f\"claiming them: {', '.join(f'`{_md_cell(k)}`' for k in unclaimed)}.** \"",
+        '            f"claiming them.** "',
+        ["CoverageMd.test_the_unclaimed_sentence_names_every_unclaimed_id"],
+    ),
+    (
+        "a segment's timeline is written to the whole demo's path",
+        "timeline.py",
+        '    stem = f"{segment}.seg.timeline" if segment else "timeline"',
+        '    stem = "timeline"',
+        [
+            "TimelinePaths.test_a_segment_never_collides_with_the_whole_demo",
+            "TimelinePaths.test_two_segments_never_collide_with_each_other",
+        ],
+    ),
+    (
+        "a recorder that never held its opening warns like one that did",
+        "content.py",
+        "    if held is None or not isinstance(gap, (int, float)):\n        return None",
+        "    if not isinstance(gap, (int, float)):\n        return None",
+        ["OpeningWarning.test_a_recorder_that_never_held_does_not_warn"],
+    ),
+    (
+        "the opening warning fires below its own bar",
+        "content.py",
+        "    if gap < OPENING_WARN_S:\n        return None",
+        "    if gap < 0:\n        return None",
+        [
+            "OpeningWarning.test_the_warning_bar_is_graded_at_its_boundary",
+            "OpeningWarning.test_a_healthy_take_whose_hold_landed_is_silent",
+        ],
+    ),
+    (
+        "the held-stretch correlation counts a beat that began before the stretch",
+        "content.py",
+        "        if not start <= float(t_start) <= end:",
+        "        if not float(t_start) <= end:",
+        ["BeatsWithin.test_a_beat_that_began_before_the_stretch_is_not_counted"],
+    ),
+    (
+        "an acting verb is classified as narration",
+        "content.py",
+        '                "acting": verb in CONTENT_ACTING_VERBS,',
+        '                "acting": False,',
+        ["BeatsWithin.test_an_acting_verb_and_a_narrating_one_are_told_apart"],
+    ),
+    (
+        "the content rect keeps the caption band it exists to exclude",
+        "content.py",
+        "        max(2, int(h * (1.0 - CONTENT_CAPTION_TRIM))),",
+        "        max(2, int(h)),",
+        ["ContentRect.test_the_caption_band_is_cut_off_the_bottom"],
+    ),
+    (
+        "a merged demo reports the best segment's score instead of the worst",
+        "content.py",
+        '        "score": min(',
+        '        "score": max(',
+        ["MergeContent.test_the_merged_score_is_the_lowest_of_the_segments"],
+    ),
+    (
+        "a merged demo reports the shortest held stretch instead of the longest",
+        "content.py",
+        '        "static_for": max(',
+        '        "static_for": min(',
+        ["MergeContent.test_the_merged_static_stretch_is_the_longest_of_the_segments"],
+    ),
+    (
+        "a merged warning loses the segment it came from",
+        "content.py",
+        '            f"segment {name!r}: {warning}"',
+        '            f"{warning}"',
+        ["MergeContent.test_every_segments_warning_survives_tagged_with_its_segment"],
+    ),
+    (
+        "a reference link in SKILL.md points at a file that is not there",
+        "SKILL.md",
+        "| [reference/secrets.md](reference/secrets.md) | Before the first",
+        "| [reference/secrets.md](reference/redaction.md) | Before the first",
+        ["SkillDocs.test_every_reference_link_in_skill_md_resolves"],
+    ),
+    (
+        "a reference file stops being linked from SKILL.md",
+        "SKILL.md",
+        # narration.md is the one file linked exactly once, so removing that
+        # link removes the only pointer to it. Targeting a file linked twice
+        # left the other link standing and the assertion stayed silent — which
+        # is what this manifest is for.
+        "| [reference/narration.md](reference/narration.md) | When",
+        "| reference/narration.md | When",
+        ["SkillDocs.test_every_reference_file_is_linked_from_skill_md"],
+    ),
+    (
+        "Secret becomes a str subclass, so a verb can log one as its target",
+        "secrets.py",
+        "class Secret:",
+        "class Secret(str):",
+        ["SecretType.test_a_secret_is_not_a_str"],
+    ),
+    (
+        "a Secret's repr discloses the value",
+        "secrets.py",
+        '        return f"Secret(<{len(self._value)} chars>)"',
+        '        return f"Secret({self._value!r})"',
+        ["SecretType.test_repr_names_the_length_and_not_the_value"],
+    ),
+]
+
+
+def fault_inject() -> int:
+    """Break one thing at a time and require the named tests to notice."""
+    failures = 0
+    for name, module, old, new, must_fail in INJECTIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            # The whole skill, not just the package: two injections break
+            # SKILL.md, and the documentation assertions are as much a check
+            # as the behavioural ones.
+            skill = Path(tmp) / "demo-video"
+            shutil.copytree(REPO / "skills" / "demo-video", skill)
+            root = skill / "helpers"
+            target = (
+                skill / module
+                if module.endswith(".md")
+                else root / "demo_recording" / module
+            )
+            text = target.read_text(encoding="utf-8")
+            hits = text.count(old)
+            if hits != 1:
+                print(
+                    f"ABORT: injection {name!r} matched {hits} times in "
+                    f"{module}, expected exactly 1. The injection did not "
+                    f"land, so nothing it would have proven is proven.",
+                    file=sys.stderr,
+                )
+                print(f"       looked for: {old!r}", file=sys.stderr)
+                return 3
+            target.write_text(text.replace(old, new), encoding="utf-8")
+
+            done = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--_inner"],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "UNIT_HELPERS": str(root),
+                    "UNIT_SKILL_DIR": str(skill),
+                },
+            )
+            noticed = {t for t in must_fail if t in done.stderr}
+            missed = set(must_fail) - noticed
+            ok = done.returncode != 0 and not missed
+            print(f"{'PASS' if ok else 'FAIL'}  break: {name}")
+            print(f"      in {module}: {old.strip().splitlines()[0][:68]}…")
+            if ok:
+                for line in [
+                    ln
+                    for ln in done.stderr.splitlines()
+                    if ln.startswith(("FAIL:", "ERROR:"))
+                ][:4]:
+                    print(f"      {line}")
+            else:
+                failures += 1
+                if missed:
+                    print(f"      these tests did NOT fail: {sorted(missed)}")
+                if done.returncode == 0:
+                    print("      the suite passed against broken code")
+                print(textwrap.indent(done.stderr[-1500:], "      | "))
+            print()
+    if failures:
+        print(
+            f"{failures} injection(s) went unnoticed — those assertions grade nothing."
+        )
+        return 1
+    print(f"All {len(INJECTIONS)} injections were caught.")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# What this suite does NOT cover
+# --------------------------------------------------------------------------
+#
+# Stated plainly rather than implied by silence:
+#
+# - **Anything that drives a browser or a PTY.** `_DemoBase`, `Recorder` and
+#   `TerminalRecorder` — every storyboard verb, the redaction masking and its
+#   verification, per-beat evidence harvesting, the failure dump, narration
+#   pacing and the ffmpeg composite — are `tests/smoke`'s, and this suite does
+#   not reduce what smoke has to run. It runs the half that never needed one.
+# - **Anything measured off real frames.** `content_report`'s ffmpeg sampling,
+#   `opening_gap`, `_luma_stddev` and `_moved_pixels` need a video to be true
+#   about. What is graded here is the logic *around* them: the warning
+#   conditions, the beat correlation and the merge. A number this suite is
+#   happy with can still be measured off the wrong rect.
+# - **`stitch()` end to end.** Its refusals are exercised by smoke's segments
+#   take; `_check_stream_shapes` needs real media to probe.
+# - **That the split preserved behaviour.** That is what the full `tests/smoke`
+#   run in the pull request is for. A green run here says the pieces are
+#   right, not that they are still wired together.
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fault-inject",
+        action="store_true",
+        help="break each assertion's subject and require it to fail",
+    )
+    parser.add_argument(
+        "--budget",
+        action="store_true",
+        help="report SKILL.md's context cost (warns, does not gate)",
+    )
+    parser.add_argument("--_inner", action="store_true", help=argparse.SUPPRESS)
+    args, rest = parser.parse_known_args()
+    if args.budget:
+        return budget_report()
+    if args.fault_inject:
+        return fault_inject()
+    result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=1)
+    return 0 if result.result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

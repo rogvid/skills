@@ -29,17 +29,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .core import (
-    OPENING_HOLD_LIMIT_S,
-    SECRET_MASK,
-    Secret,
-    SecretLeak,
-    _beat_verb,
-    _DemoBase,
-    _env,
-    content_rect,
-    opening_gap,
-)
+from .content import OPENING_HOLD_LIMIT_S, content_rect, opening_gap
+from .core import _beat_verb, _DemoBase, _env
+from .secrets import SECRET_MASK, Secret, SecretLeak
 
 # Pastel gradient behind the window — matches the terminal recorder's
 # background so web and terminal demos share one look.

@@ -1,22 +1,39 @@
 # tests
 
-One smoke test and one fixture app. Together they answer four questions:
-**does the demo-video recorder still produce a real video, does it still notice
-when the thing it recorded was broken, does a registered secret stay out of
-everything it produces, and can a reader say what each frame showed without
-decoding one?**
+Three suites. Two of them are fast and one is not, and which is which is the
+whole of how this directory is organised.
 
-They are not unit tests. The recorders' interesting behaviour is "shell out to
-ffmpeg, drive a headless browser, come back with an mp4", which nothing short
-of running it can check. So the smoke test runs it, end to end, and asserts on
-what lands on disk.
+`smoke` answers four questions: **does the demo-video recorder still produce a
+real video, does it still notice when the thing it recorded was broken, does a
+registered secret stay out of everything it produces, and can a reader say what
+each frame showed without decoding one?** Nothing short of running the recorder
+can check any of that — its interesting behaviour is "shell out to ffmpeg,
+drive a headless browser, come back with an mp4" — so the smoke test runs it,
+end to end, and asserts on what lands on disk. It costs about ten minutes and
+takes an exclusive lock.
+
+`unit` answers everything that never needed a browser: the coverage report, the
+timeline's two renderings, the content and opening warnings, the merge a stitch
+performs, the two secret types, and whether `SKILL.md`'s reference links still
+resolve. It costs 0.07 s and has no dependencies at all.
+
+**That split is the point, not tidiness.** [#136] measured the asymmetry it
+exists to remove: the fault-injection rule was *executed* for `ci-unit` and
+written down as prose for the 12,369-line suite, because at 12–620 s per
+injection under a lock nobody maintains a manifest. `unit` carries a real
+`INJECTIONS` table for the half of the recorder that can afford one. It does
+not reduce what `smoke` has to run.
 
 ```
 tests/
-├── smoke              # the runner (a PEP 723 uv script — no venv, no install)
+├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
+├── unit               # the browser-free half (~0.07 s, no dependencies)
+├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 └── fixture/
-    └── index.html     # the app it records: static, dependency-free, deterministic
+    └── index.html     # the app smoke records: static, dependency-free, deterministic
 ```
+
+[#136]: https://github.com/rogvid/skills/issues/136
 
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
 problem takes, `redaction/` — the web recorder against a page that renders
@@ -27,6 +44,18 @@ and `evidence/`, a few seconds against the shapes that leak into text and into
 nothing else.
 
 ## Running it
+
+Start with the fast pair — they need nothing installed and finish before you
+have read this sentence:
+
+```sh
+tests/unit                        # the browser-free half of the recorder
+tests/unit --fault-inject         # break each thing an assertion watches
+tests/ci-unit                     # the CI workflow's three helper scripts
+tests/ci-unit --fault-inject
+```
+
+Then the recorder itself:
 
 ```sh
 tests/smoke                       # every take, output to a temp dir
