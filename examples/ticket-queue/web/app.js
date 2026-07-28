@@ -3,10 +3,12 @@
 let tickets = [];
 let selectedId = null;
 let activeStatus = "all";
+let searchTerm = "";
 
 const listEl = document.getElementById("ticket-list");
 const headingEl = document.getElementById("queue-heading");
 const filterEl = document.getElementById("status-filter");
+const searchEl = document.getElementById("queue-search");
 const detailEl = document.getElementById("detail");
 const liveEl = document.getElementById("live-status");
 const modalEl = document.getElementById("assign-modal");
@@ -16,8 +18,14 @@ function statusPill(status) {
 }
 
 function visibleTickets() {
-  if (activeStatus === "all") return tickets;
-  return tickets.filter((t) => t.status === activeStatus);
+  const term = searchTerm.trim().toLowerCase();
+  return tickets.filter(
+    (t) =>
+      (activeStatus === "all" || t.status === activeStatus) &&
+      (term === "" ||
+        t.title.toLowerCase().includes(term) ||
+        t.id.toLowerCase().includes(term))
+  );
 }
 
 function renderList() {
@@ -88,6 +96,13 @@ filterEl.addEventListener("click", (ev) => {
     b.setAttribute("aria-pressed", String(b.dataset.status === activeStatus));
   }
   render();
+});
+
+// Only the list depends on the term — re-rendering the detail on every
+// keystroke would replay its aria-live region for a panel that did not change.
+searchEl.addEventListener("input", () => {
+  searchTerm = searchEl.value;
+  renderList();
 });
 
 listEl.addEventListener("click", (ev) => {

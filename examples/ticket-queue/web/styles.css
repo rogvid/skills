@@ -66,6 +66,34 @@ h1 {
   align-items: start;
 }
 
+.queue-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.queue-search label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.queue-search input {
+  flex: 1;
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: inherit;
+}
+
+.queue-search input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .status-filter {
   display: flex;
   gap: 6px;
