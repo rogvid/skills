@@ -41,7 +41,7 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 | `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
 | `evidence/beat-NN.json` | **A working file, not an artifact.** What was on screen at each beat, in text — read by the reviewing agent in the same run that produced it, then thrown away. Greppable plaintext of a real app's DOM | **no** — gitignore it |
 | `frames/` | Review frames pulled out of `demo.mp4`, plus the sheet you hand a reviewer | **no** — a working file of a review; `beat_frames(out_dir)` regenerates it |
-| `failure/` | Only after a take that did not finish: the last frame, the console log, the page text, and the failing beat. See **When a take does not finish** | **no** — it describes one run and the next one rewrites it |
+| `failure/` | Only after a take that did not finish: the last frame, the console log, the page text, and the failing beat. See [reference/failures.md](reference/failures.md) | **no** — it describes one run and the next one rewrites it |
 | `demo-video-FAILED.md` | Only after a take that did not finish: what happened, when, and whether the `demo.mp4` beside it is this take's. Deleted by the next take that writes its own artifacts | **no** |
 
 The storyboard is the durable artifact, not the video. The last four rows are
@@ -49,6 +49,24 @@ neither: they are inputs to a review that happens once, derived from a video
 that is itself not committed, and all four are in this repo's `.gitignore`
 ([#50](https://github.com/rogvid/skills/issues/50)). See **Commit the
 storyboard, not the media** in the Process section.
+
+## Reference — read these when you reach them, not before
+
+This file is what you need to write and run a storyboard. Everything below is
+the argued detail behind one part of it, and each is linked again at the point
+where it applies. **Read a file when the work touches its subject** — do not
+read them all up front, and do not skip one the text tells you to open.
+
+| File | Read it when |
+|---|---|
+| [reference/secrets.md](reference/secrets.md) | Before the first `redact()` or `register_secret()`, and before any take against data you would not publish. Half of it is what redaction does **not** cover |
+| [reference/determinism.md](reference/determinism.md) | Before `deterministic=True`. A frozen clock changes what an app does, and usually does it silently |
+| [reference/timeline.md](reference/timeline.md) | When reading `timeline.json`/`timeline.md`, when a take warns about its `content`, or when consuming the beat log as a contract |
+| [reference/review.md](reference/review.md) | At Process step 6 — handing a take to a reviewing agent, reading `evidence/`, or recording against a ticket with `criteria=` |
+| [reference/failures.md](reference/failures.md) | When a take raises, when `strict=True` refuses one, or when `failure/` appears beside the demo |
+| [reference/terminal.md](reference/terminal.md) | When writing a `TerminalRecorder` storyboard — the full verb table, the four patterns, the gotchas |
+| [reference/narration.md](reference/narration.md) | When `ELEVENLABS_API_KEY` is set and captions will be spoken |
+| [reference/ci.md](reference/ci.md) | When wiring the recording into GitHub Actions so branches record themselves |
 
 ## Setup (once per project)
 
@@ -131,13 +149,13 @@ clean:
 | `DEMO_VIDEO_TERMINAL_SHELL` | shell `TerminalRecorder` launches | `/bin/bash` |
 | `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | recording size, `"1280x720"` | 1280×720 |
-| `DEMO_VIDEO_DETERMINISTIC` | freeze the page clock and flatten motion (`1`/`0`) — see **Determinism** | **off** |
+| `DEMO_VIDEO_DETERMINISTIC` | freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
 | `DEMO_VIDEO_CLOCK` | the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
 | `DEMO_VIDEO_TIMEZONE` | browser timezone (`timezone_id`), always applied | `UTC` |
 | `DEMO_VIDEO_LOCALE` | browser locale (`locale`), always applied | `en-US` |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
 | `DEMO_VIDEO_STRICT` | fail the take on console errors / non-zero exits (`1`/`0`) | off |
-| `DEMO_VIDEO_EVIDENCE` | write `evidence/beat-NN.json` per beat (`1`/`0`) — see **Per-beat evidence** | **on** |
+| `DEMO_VIDEO_EVIDENCE` | write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
 | `DEMO_VIDEO_SKILL_DIR` | where storyboards find this skill | the constant baked into each storyboard |
@@ -146,1294 +164,32 @@ clean:
 `DEMO_VIDEO_BASE_URL` applies to the web `Recorder` only; the terminal
 `*` variables to `TerminalRecorder`. All the rest apply to both.
 
-## Speech narration (optional)
-
-When the `ELEVENLABS_API_KEY` environment variable is set (e.g.
-`set -a; source .env; set +a` before recording), every `caption` and
-`interlude` line is also spoken — synthesized with ElevenLabs and mixed
-onto demo.mp4 at the moment the line appeared. No storyboard changes
-needed; captions are the narration script.
-
-- `Recorder(..., speech=True)` demands narration (fails fast if the key
-  is missing); `speech=False` forces it off; default is auto by env var.
-  `voice_id` / `speech_model` override the voice (default is a premade
-  voice that works on free-tier keys; library voices need a paid plan).
-- Clips are cached in `<out_dir>/.tts/` keyed by voice+model+text —
-  retakes and crashed takes only synthesize lines they haven't seen.
-  Transient 429/5xx responses and network blips retry with backoff (free
-  keys get deprioritized under load).
-- The first take synthesizes each new line mid-recording, which shows as
-  a brief hold before the caption appears. Treat take 1 as a
-  cache-warming rehearsal and judge pacing from take 2, which plays
-  entirely from cache.
-- Pacing self-adjusts: a caption call first waits for the previous line
-  to finish speaking. Storyboard pauses are minimums, never cut-offs, and
-  the recording holds at the end until the last line lands. Because of
-  that wait, the caption-before-spotlight rule matters doubly with speech
-  on — visuals set *before* a caption sit on screen through the tail of
-  the previous spoken line.
-- Write captions for the ear as well as the eye: short sentences, no
-  markup, nothing you wouldn't say aloud.
-- Verify audio like you verify frames: `ffprobe` shows the aac stream;
-  `ffmpeg -af silencedetect` should show speech blocks spanning the video;
-  if the key has STT permission, transcribe the extracted track with
-  ElevenLabs Scribe and compare against the caption lines.
-- Segments all get an audio track (silence if a segment has no lines), so
-  `stitch()` still concatenates losslessly.
-
-## Determinism
-
-Re-recording a storyboard should produce the same video. That is what makes a
-still diffable against the one committed last month, and what makes "did the UI
-actually change?" answerable instead of "the video is different, they always
-are". But the controls that get you there are not equally safe, so they are not
-switched on together.
-
-**Always on, in every recording:**
-
-| Control | What it does |
-|---|---|
-| **Fixed timezone and locale** | The context is pinned to `UTC` / `en-US`, so every date, number and currency the app formats reads the same on your laptop as in CI. |
-| **`prefers-reduced-motion: reduce`** | Requested on the context. An app that honours it was built to. |
-
-**Opt-in, with `deterministic=True`:**
-
-| Control | What it does |
-|---|---|
-| **Frozen wall clock** | `Date.now()`, `new Date()`, `Intl.DateTimeFormat().format()`, `performance.timeOrigin`, `document.lastModified` and a `Worker`'s clock all answer one fixed instant — `2025-01-01T09:00:00Z` by default. Explicit arguments (`new Date(iso)`), `Date.parse` and `Date.UTC` are untouched. |
-| **Flattened motion** | Animations and transitions are compressed to 1 ms, so they land on their finished state within the first frame. Authored delays and fill-modes are left alone. |
-
-```python
-with Recorder(out_dir, deterministic=True) as rec:   # or DEMO_VIDEO_DETERMINISTIC=1
-```
-
-### Why the clock is opt-in — read this before turning it on
-
-**A frozen clock breaks apps, and it usually breaks them silently.** Five
-ordinary patterns, each recorded both ways against a real page:
-
-| Pattern | With the clock frozen | Actually |
-|---|---|---|
-| lodash-shaped debounce (`now - last >= wait`) | never fires; the timer reschedules forever | fires |
-| elapsed-time progress bar | sticks at `0%` | reaches `100%` |
-| token gate (`nbf`/`exp` around now) | "not yet valid (clock skew)" | "signed in" |
-| "last 7 days" chart | draws **0** bars | draws 7 |
-| `while (Date.now() - t0 < ms)` spin | never exits — the take dies on a navigation timeout with **no mp4 written**, and nothing in the error mentions the clock | exits |
-
-Four of the five produce **a plausible wrong screen**: no exception, nothing on
-the console, nothing in `timeline.json` — just a demo that confidently shows a
-reviewer something the app never does. That is a worse outcome than a fresh
-timestamp in every take, which is why you have to ask for it.
-
-So: turn it on deliberately, and **check the stills against the real app the
-first time you do**. If something looks wrong, try moving the frozen instant
-first (`clock="2026-03-01T12:00:00Z"`, so tokens minted at record time are
-still valid), and drop back to the default if the app needs a moving clock.
-
-Every take records what it was given, in `timeline.json`:
-
-```json
-"determinism": { "deterministic": true, "clock": "2025-01-01T09:00:00Z",
-                 "timezone_id": "UTC", "locale": "en-US" }
-```
-
-`"clock": null` means the page's clock was live. Commit it with the stills: a
-year from now it is the only thing that says whether a diff is the UI changing
-or the frozen instant changing.
-
-### Keeping something animated
-
-Motion is flattened to 1 ms rather than to zero on purpose — a transition of
-zero duration never starts, so it never fires `transitionend`, and every
-accordion, modal, carousel and wizard that advances on that event would stall.
-An element that must keep *moving* opts out by name:
-
-```html
-<div class="pulse" data-demo-video-animate>…</div>
-```
-
-The recorder's own overlays (`#__demo…`, `#__term…`) are exempt already, so
-captions still fade. And note what is *not* frozen: `performance.now()`,
-`requestAnimationFrame`, and the document animation timeline. Only the wall
-clock stops. Freezing monotonic time would stop the compositor, and Chromium's
-screencast only emits a frame when the page paints — a still page loses wall
-time out of the recording ([#18](https://github.com/rogvid/skills/issues/18)).
-
-One shape has no right answer and gets a deliberate one: an **infinite**
-animation has no finished state, so it is stopped after a single 1 ms iteration
-and the element shows the style it was declared with. A finite animation —
-including `alternate` — ends where the browser would have left it.
-
-### What it cannot control
-
-The recorder drives a browser. Everything below is upstream of it and is the
-**storyboard author's** job — a demo that ignores them re-records differently
-no matter what this section does:
-
-- **The app's own randomness.** `Math.random()`, `crypto.randomUUID()`,
-  generated ids, shuffled lists, faker-seeded fixtures. Nothing here seeds
-  them. Seed the app yourself (most frameworks and fixture libraries take a
-  seed), or pick a screen that has none.
-- **Server data.** Rows a backend returns, "5 minutes ago" rendered
-  server-side, anything a background job wrote since the last take. Seed the
-  state *before* recording and reset it between takes; storyboards are meant
-  to be idempotent (see Process, step 2).
-- **Network timing.** Which of two requests lands first, whether a spinner is
-  on screen long enough to be photographed, a chart that draws before or after
-  its data arrives. `wait_for` a concrete element rather than a delay, and
-  never assert on a frame that only exists while something is in flight.
-- **The terminal recorder's program.** `TerminalRecorder` runs a real PTY
-  child; it does not see the frozen clock, so `date` in a terminal demo prints
-  the real time. Tracked in [#26](https://github.com/rogvid/skills/issues/26).
-- **Animation the browser does not drive with CSS.** `element.animate()` (Web
-  Animations), `requestAnimationFrame` loops, canvas and WebGL keep running —
-  no stylesheet can reach them
-  ([#35](https://github.com/rogvid/skills/issues/35)). Nor can one reach into
-  a shadow root, or outrank an app's own `!important`
-  ([#36](https://github.com/rogvid/skills/issues/36)).
-- **A module worker's clock.** A classic `Worker` gets the freeze re-injected;
-  `{type: "module"}` workers, shared workers and service workers do not
-  ([#38](https://github.com/rogvid/skills/issues/38)).
-- **The bytes of `demo.mp4`.** H.264 is not byte-reproducible and the
-  screencast's frame timing is not either. Two takes match in what they *show*,
-  not in their checksums — compare the stills, which are lossless PNGs and do
-  reproduce exactly.
-
-
 ## Recorder API (storyboard verbs)
 
 `Recorder(out_dir, base_url=..., segment=None, strict=False, ...)` as a context
 manager; exiting the `with` converts the recording to mp4 and writes the beat
-log. A storyboard that *raises* gets the same treatment plus a `failure/` dump
-— see **When a take does not finish**. `strict=True` refuses a take that
-recorded a console error, an uncaught exception, or a non-zero exit — see
-**Failing the take on a broken app**.
+log. A storyboard that *raises* gets the same treatment plus a `failure/` dump.
+`strict=True` refuses a take that recorded a console error, an uncaught
+exception, or a non-zero exit. Both are
+[reference/failures.md](reference/failures.md).
 
 | Verb | Use |
 |---|---|
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
 | `caption(text)` | Narrator line at the bottom; `""` clears; dies on full page loads, survives SPA routing — clear before navigating either way |
-| `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See **Recording against a ticket**. |
-| `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception**. |
+| `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See [reference/review.md](reference/review.md). |
+| `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
 | `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search) |
 | `wait_for(selector)` | Wait for something the app does on its own |
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition) |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
-| `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. See **Redacting secrets**. |
-| `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. **Refuses values under 8 characters** — see **Redacting secrets**. |
+| `redact(*selectors)` | Blur these elements for the whole take — frames and stills. **Plain CSS selectors only.** Call it **before** the first `goto()`. **Read [reference/secrets.md](reference/secrets.md) before using this** — including what it does not cover. |
+| `register_secret(*values)` | Register literal text that must never be captioned, spoken, or logged. A caption containing it raises `SecretLeak`. **Refuses values under 8 characters** — see [reference/secrets.md](reference/secrets.md). |
 | `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
-
-## Redacting secrets
-
-A published video leaks permanently, and demos run against seeded-but-realistic
-data. Two registrations, at the top of the storyboard, before the first
-`goto()`:
-
-```python
-from demo_recording import Recorder, Secret
-
-with Recorder(Path(__file__).parent) as rec:
-    rec.redact("#api-key", ".customer-email")   # blur where it renders
-    rec.register_secret(os.environ["DEMO_TOKEN"])  # keep the text out of narration
-    rec.goto("/settings")
-    rec.type_into("#token", Secret("sk-live-…"))   # both, automatically
-```
-
-- **`redact(*selectors)`** paints an **opaque cover** over matching elements,
-  in the page — not with an ffmpeg box in post, which needs fixed coordinates
-  while elements scroll, reflow and re-render.
-
-  It covers rather than blurs because a blur is a *how much is enough*
-  question, and every answer to it is a guess about how the ink was produced.
-  Five ways of rendering text larger than its `font-size` says — a
-  `::after`, a `transform: scale()`, `zoom`, an SVG `viewBox`, a value two
-  shadow roots down — each defeated a radius derived from CSS, and there was
-  no reason to think the fifth was the last. A cover is sized from rendered
-  geometry (client rects, which include transforms and zoom by construction)
-  and asks no question about the text at all. `redact(..., style="blur")`
-  keeps the old look; it is an aesthetic choice, and a weaker one. It is installed as a context init
-  script, so it is in place before the page's own scripts run and before the
-  first frame; elements are masked from the instant they enter the DOM, and a
-  `MutationObserver` re-asserts the mask if the app rewrites the element's
-  `style` attribute or replaces the document's stylesheets. Stills inherit it,
-  because the mask is in the page rather than in the video pipeline.
-  - **Plain CSS selectors only** — an id, a class, an attribute. This is the
-    one verb that does not take `text=`, `xpath=`, `>>` or `nth=`, and it
-    refuses them with an error rather than accepting them. Continuous cover
-    comes from a stylesheet injected into the page, and a stylesheet can only
-    express CSS; a Playwright-engine selector can only be re-resolved out of
-    process at whatever moments the recorder happens to check, which measured
-    as four unmasked seconds of a ten-second take on an ordinary
-    fetch-then-render page. Name the element with CSS, or keep the value off
-    the screen and register the text.
-  - **It reaches an open shadow root** — which `document.querySelectorAll`
-    cannot see at all — because the mask is also applied from Python through
-    Playwright's engine, and because it wraps `attachShadow` at document start
-    to hold every root the app opens.
-  - **Sized from what the element paints**, not from what its CSS says: the
-    union of the client rects of everything in its subtree, shadow roots at
-    every depth included, grown by any pseudo-element's font size (generated
-    content has no rect to measure and can paint outside its parent's box).
-    Redacting a wrapper is the ordinary call — `redact("#card")` where the
-    value is an 80px child — and every measurement here is of the child's
-    rendered box, not the wrapper's font.
-  - **A blur stays underneath the cover** as a floor, sized the same way. It
-    is what a stylesheet can do with no JS at all, and `filter` applies to
-    everything an element renders — so it reaches ink the cover's rectangle
-    can miss.
-  - **It fails rather than misses.** At every checkpoint — after a navigation,
-    before every still, around every verb that spends time, and before the mp4
-    is written — the recorder asks Playwright, across every frame, how many
-    elements each selector matches, and then asks the *browser's own hit
-    testing* whether anything is painting over each cover. A cover that
-    something paints above, or a selector that never matched anything, raises
-    `SecretLeak`: the take writes no mp4, no timeline, and deletes the stills
-    it had already taken. A redacted take also withholds the first paint of
-    each navigation until that check has passed.
-- **`register_secret(*values)`** is about *text*, not pixels. A `caption()`,
-  `interlude()`, `terminal()`, `terminal_close()`, `run()` or `send()` line
-  containing a registered value raises `SecretLeak` and **fails the take** — deliberately,
-  rather than masking the line: captions are burned in *and* spoken *and*
-  cached as audio in `.tts/`, and a secret in one is an authoring bug that
-  wants rewording, not blurring. Text you did not author is scrubbed to
-  `[redacted]` instead: `terminal_output()` (a program's output), every string
-  on a beat (`selector`, `still`, `caption`), and `shot()`'s name, which is
-  scrubbed before it becomes a filename so the log and the disk agree.
-- **`Secret("…")`** is a value the demo types but must never show:
-  `type_into(sel, Secret(v))` registers the text, blurs the field before the
-  first keystroke, and types the real value. It is not a `str` — printing one
-  yields `[redacted]`, and it can never be logged as a beat's target by
-  accident.
-
-### Redaction in a terminal demo
-
-`TerminalRecorder` has no `redact()`, and that is not an omission: a CSS
-selector means nothing to a PTY. What it has instead is a **scrubber on the
-output path**, between `os.read()` and the terminal, so a secret a program
-prints never reaches the buffer the frames are drawn from.
-
-```python
-from demo_recording import TerminalRecorder, Secret
-
-with TerminalRecorder(Path(__file__).parent) as rec:
-    rec.register_secret(os.environ["DEMO_TOKEN"])   # exact text: the guarantee
-    rec.run("./deploy --show-config")               # its output comes back masked
-    rec.run("ssh-add -l")                           # wait_for_prompt() sees the mask too
-    rec.send(Secret(os.environ["DEMO_PW"]))         # a password, at a prompt
-```
-
-- **Registered values are the guarantee.** Every occurrence in a program's
-  output becomes `[redacted]` — in the video, in the stills, and in the screen
-  text `wait_for_text()` and `wait_for_prompt()` match against. It holds when
-  the value is chopped across `os.read()` boundaries (the recorder holds back
-  any trailing fragment that could still complete one, with no time limit) and
-  when one of a **listed set** of escape sequences is printed *inside* it —
-  colour and style, cursor show/hide, erase-to-end-of-line, window-title OSC,
-  charset and keypad selection. Not "any sequence that does not move the
-  cursor": that is the shape of the rule, not its reach, and sequences outside
-  the list are where it stops. See below for both halves.
-- **…and what the stream cannot express, the recorder refuses.** Before it
-  writes anything, the take reads the finished terminal — visible screen and
-  scrollback — and raises `SecretLeak` if a registered value is in it: no mp4,
-  no timeline, no stills. That is the backstop for the case the scrubber
-  cannot see (a value written in two pieces at two cursor positions), and it
-  is why "not covered" below means "the take dies", not "it records the key".
-
-  "Finished" and "no stills" both mean it. The check runs after the narration
-  tail and after the recorder has flushed whatever it was still holding, so
-  it reads the screen the recording actually ends on — and it runs on every
-  way out of the `with`, including a storyboard that raised. A
-  `wait_for_text()` that timed out still gets its stills taken back, because
-  a still is written long before a take ends and a terminal still is the raw
-  screen. When that happens the timeout is what gets raised, not the leak:
-  the leak is printed, and the message that says what to fix is the one you
-  wanted.
-- **Shape detection is a safety net under that, not a substitute for it.**
-  Four patterns are masked whether or not anyone registered them:
-
-  | | what it matches |
-  |---|---|
-  | `sk-…` | `sk-` + 16 or more of `A-Za-z0-9_-` |
-  | `ghp_…` | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 16 or more alphanumerics |
-  | `AKIA…` | `AKIA` or `ASIA` + 12 or more of `0-9A-Z` |
-  | JWT | `eyJ` + base64url, a `.`, base64url, optionally `.` and more |
-
-  They are deliberately narrow. Anything looser starts masking ordinary
-  output, and a demo with holes punched in it at random is worse than one that
-  shows a fake key. **Do not plan a demo around them**: a value that does not
-  match one of those four shapes — a database URL with a password in it, a
-  session cookie, an internal token format, a licence key — is not touched
-  unless you register it. They are also the *only* thing the final screen
-  check ignores: a registered value on screen kills the take, a shape-matched
-  one does not, because failing a recording on a heuristic is worse than the
-  heuristic missing.
-- **`run()` and `send()` refuse authored secrets.** A command line is text the
-  storyboard wrote and the PTY echoes on camera, so it is treated like a
-  caption: `run("curl -H 'x-api-key: sk-live-…'")` raises `SecretLeak` and
-  fails the take rather than typing a command the viewer cannot read. Pass the
-  value through the environment instead (`run('curl -H "x-api-key: $KEY"')`),
-  or type it with `send(Secret(...))`.
-- **`send(Secret(v))` is the password case.** It registers the value, types
-  the real thing, and the terminal's own echo of it comes back masked — one
-  character per read, which is exactly the split the carry buffer exists for.
-  Programs that turn echo off (a real `getpass`) show nothing either way.
-- **`key()` refuses one too.** `key(*value)` spells a value out one keystroke
-  at a time, and the beat it records is those keys joined by spaces — which no
-  scrub of the value can match, in a file this skill tells you to commit. So
-  the call raises rather than the log leaking.
-- **A held fragment can make the screen lag.** The recorder cannot know that
-  `sk-live-de` is the start of a registered value until the rest arrives, so
-  it withholds it. If the program then goes quiet — a prompt waiting for
-  input — those characters stay off screen, and a `wait_for_text()` looking
-  for them waits with them. After two seconds the recorder says so on stderr,
-  naming the count. Shape fragments are not held indefinitely: they go out
-  after three seconds, or immediately if they sit in the middle of a word
-  rather than where a token would start.
-
-### What redaction does NOT cover
-
-Read this before trusting a recording to it. It closes a specific, countable
-set of paths — four on the web, one in the terminal — and nothing else:
-
-- **The cover is erasure; `style="blur"` is not.** An opaque rectangle
-  removes the pixels. A blur destroys legibility, not information — a
-  determined attacker with the font and the radius can attempt deconvolution —
-  and it is sized by a rule that has been wrong five times. If you opt into
-  blur, treat it as a visual convention rather than a control. For a real
-  credential, do not render it at all: demo against a fake value.
-- **What the cover is sized from, it can miss.** It is the union of the client
-  rects the recorder can find. Generated content is allowed for by growing the
-  box by the pseudo's font size, but an absolutely positioned pseudo far from
-  its parent, or ink painted outside every rect in the subtree, is outside it —
-  the blur underneath is what covers those, and the blur is the weaker
-  mechanism. Look at the stills.
-- **`redact()` takes plain CSS and nothing else**, unlike every other verb
-  here. `text=`, `xpath=`, `>>` and `nth=` raise. See above for why.
-- **Nothing is registered for you.** `redact()` does not read the element's
-  text, so the value stays *unregistered* — write it into a caption yourself
-  and it will be captioned, spoken and cached without complaint. Register the
-  text separately, or type it as a `Secret`.
-- **Only exact substrings match, on every path but one.** No normalisation —
-  a secret rendered with different whitespace, a soft hyphen, or split across
-  two elements is not caught, and a caption or a beat field is checked
-  literally. The single exception is the terminal recorder's PTY output, which
-  also runs four shape patterns over what a program prints; those are listed
-  under **Redaction in a terminal demo**, they apply nowhere else, and they
-  are a net rather than a promise.
-- **Registering late does not un-record anything.** A caption set before its
-  value was registered is already burned into the frames and already spoken;
-  what registration afterwards buys is only that the files the recorder writes
-  (`timeline.json`, `timeline.md`, still filenames) come back masked. Register
-  before you caption.
-- **Frames recorded before the call are already on disk.** `redact()` after a
-  `goto()` warns for exactly this reason: masking late cannot un-capture a
-  frame.
-- **A *closed* shadow root cannot be masked by anything** — not by an injected
-  stylesheet, not by Playwright, not by `document.querySelector`. A take told
-  to redact something inside one fails loudly and records nothing, which is the
-  only honest outcome; there is no way to record that app with that value on
-  screen.
-- **Iframes: same-origin only, in practice.** The in-page mask is injected
-  into every frame, and masking and verification now run across all of them —
-  but a *cross-origin* frame's contents are a separate document the recorder
-  cannot always reach, and nothing here can mask what it cannot see. A key in
-  a third-party iframe is not covered.
-- **Canvas: the picture is covered, the bitmap is not.** The cover is over
-  the canvas element's rect, so nothing it draws is visible. Anything reading
-  the bitmap back (`toDataURL`, `getImageData`) still sees the original.
-- **The terminal scrubber has its own list, and it is not short.** Everything
-  under **Redaction in a terminal demo** above holds; here is what it does not
-  reach.
-  - **A value split by an escape the scrubber does not know is not masked —
-    and it can be perfectly legible.** Matching runs against a copy with the
-    *inert* sequences removed, and that is a **fixed list**: colour and style
-    (SGR), mode set/reset (`\x1b[?25l`, which every spinner emits),
-    erase-to-end-of-line, window-title OSC, charset and keypad selection. A
-    token broken by one of those is contiguous on screen and is caught.
-
-    A token broken by a non-cursor-moving sequence that is *not* on the list
-    is not. Measured, each of these renders the value as one word on screen
-    while the scrubber writes it in the clear: a CSI with an intermediate byte
-    (`\x1b[1 q`, the cursor-style escape), a DCS string (`\x1bPxx\x1b\\`), and
-    an OSC aborted by an ESC rather than a BEL (`\x1b]0;t\x1b[0m`). For a
-    *registered* value the final screen check below still kills the take, so
-    the guarantee holds — the recording is refused rather than leaked. For a
-    value that only shape detection was hiding, nothing catches it and it is
-    in the frames.
-
-    Cursor movement is different. `\x1b[3;1Hsk-live-` followed by
-    `\x1b[3;15HKEY…` puts the value on screen as one word while no substring
-    of the stream contains it, and masking across the jump would delete the
-    movement and corrupt the redraw. **Do not read this as "the secret comes
-    out scrambled anyway" — it comes out readable.** What saves the recording
-    is the final screen check: the take raises `SecretLeak` and keeps nothing.
-    A recording you wanted, refused. Keep such values off the screen.
-
-    (A line the *terminal* wraps at the right margin is not this case and is
-    caught: wrapping puts no escape in the stream.)
-  - **The final screen check covers registered values only.** A shape-matched
-    token written the same way is not refused and not masked. Register.
-  - **Half a secret still renders.** The recorder cannot know a run of
-    characters is the start of a key until the rest arrives, so a program
-    killed part-way through printing one leaves what it printed on screen.
-    (At teardown a dangling fragment of a registered value, or one that had
-    reached a credential anchor, is masked; up to that point it is on screen
-    because it might have been anything.)
-  - **Shape detection has a clock, and a registered value does not.** A
-    fragment that could still grow into a shape match is held across quiet
-    moments — measured, a token written at 5, 20, 100 or 400 ms per character
-    is masked — but not forever: three seconds where a token would start,
-    and not at all in the middle of a word, because a screen permanently
-    missing its last character is a `wait_for_text()` that never returns. So a
-    program that pauses **longer than three seconds inside a token** defeats
-    shape matching. Registered values have no such limit.
-  - **A shape-matched token longer than 4096 characters may have its head
-    rendered** — the fragment ceiling. A *registered* value of any length is
-    held whole.
-  - **Registering late is worse here than on the web.** The scrubber runs as
-    output arrives, so anything already on screen when you call
-    `register_secret()` stays on screen. Register before the command runs.
-  - **Scrollback is the recording.** A secret masked on screen was never in
-    the buffer at all, so scrollback holds the mask too — but anything the
-    *program* writes elsewhere (a log file, a `tee`, its own history) is
-    untouched. This hides values from the recording, not from the machine.
-  - **The PTY child is a real process.** It sees your real environment; the
-    recorder does not sanitize it. A screen recording of a shell is a
-    recording of a shell.
-- **What CSS cannot reach, the mask cannot hide**: a cross-origin iframe's
-  contents, an OS-level dialog, anything drawn outside the page. A `<canvas>`
-  *is* covered — `filter` on the element blurs its rendered pixels like any
-  other element (verified) — but only what is *displayed*; the bitmap behind it
-  is unchanged, so anything reading it back (`toDataURL`, `getImageData`) still
-  sees the original.
-- **Non-visual channels are untouched.** The value still exists in the DOM
-  (`page.content()`), in the app's network traffic, and in whatever the app
-  logs. Redaction hides it from the *recording*, not from the machine.
-  - The one place this skill *does* dump the DOM is `evidence/beat-NN.json`,
-    and it is plain text, so it cannot inherit a pixel control for free: the
-    recorder reads what each redacted element renders and masks that text out
-    of every evidence file. Read **Per-beat evidence** before trusting it, and
-    do not commit `evidence/`.
-  - What that harvest reads is also masked out of `timeline.json` and
-    `timeline.md`, which *are* committed. Without it a caption or a selector
-    holding a redacted element's text would come back `[redacted]` in the
-    evidence and in the clear in the file you are asked to check in.
-- **A screenshot the storyboard takes itself** — `rec.page.screenshot(...)`
-  rather than `rec.shot(...)` — still goes through the page, so the CSS mask
-  applies; but any artifact your storyboard writes by hand (a `page.content()`
-  dump, a downloaded file) is yours to clean.
-- **`register_secret()` refuses anything under 8 characters**, with an error
-  naming the length rather than the value. Registering is a literal
-  find-and-replace over the beat log, the still filenames, the caption text,
-  every line of terminal output and every evidence file — so `"1234"` would
-  rewrite a `:nth-child(1234)` selector, an unrelated account number and the
-  `1234` in a timestamp, and the damage reads exactly like redaction working.
-  To hide something shorter, use `redact()`: it covers the pixels the element
-  paints and rewrites no text at all.
-- **`caption(Secret(...))` and `interlude(Secret(...))` raise `SecretLeak`**,
-  by name. A caption is burned into every frame and spoken aloud, which is the
-  one thing a `Secret` must never be. `Secret` is for typing —
-  `type_into(sel, Secret(v))`, `send(Secret(v))`.
-- **A failed take deletes its own stills, and only its own.** When the mask
-  cannot be verified the recorder removes the stills *this* take wrote and
-  names each one it removed. Stills a previous take left in the same folder
-  are not touched — and anything your storyboard wrote by hand is yours. It
-  writes no `failure/` dump either: that dump is a text account of the page,
-  which is exactly what a take whose mask cannot be vouched for must not
-  publish. It does leave `demo-video-FAILED.md`, because the previous run's
-  files are still sitting there.
-
-## The beat timeline (`timeline.json` / `timeline.md`)
-
-Every storyboard verb is logged as a **beat** — what was done, when, and what
-caption was on screen while it happened — and exiting the `with` writes the log
-next to the media, whether or not the storyboard finished. No storyboard
-changes are needed; it is a byproduct of recording.
-
-`timeline.md` is the readable version: a table of every beat, then each still
-embedded under the caption it was taken during. **Commit both.** They are
-small, diffable, and unlike `demo.mp4` they survive as a record of what the
-demo showed after the video has been regenerated or thrown away — which is
-what makes them worth reviewing in a PR.
-
-**A segmented demo gets exactly the same pair, written by `stitch()`.** Each
-segment records `<segment>.seg.timeline.json` beside its `<segment>.seg.mp4`,
-with timestamps relative to that segment's own start; `stitch()` merges them
-into one `timeline.json` / `timeline.md` next to `demo.mp4`, moving each
-segment's beats by the **real duration** (ffprobe) of the parts before it.
-Commit the merged pair; gitignore the `*.seg.timeline.*` parts with the
-segment media, exactly as you gitignore `*.seg.mp4`. `stitch()` deletes them
-along with the `.seg.mp4` files unless you pass `keep_parts=True`, which keeps
-both so one expensive segment can be re-recorded and re-stitched.
-
-`timeline.json` is the machine-readable one, and a stable contract — adding a
-key is fine, renaming one is not:
-
-```json
-{ "schema": 1, "generated_by": "demo-video", "recorder": "Recorder",
-  "segment": null, "media": "demo.mp4", "duration": 18.04,
-  "strict": false, "issue_count": 1,
-  "beats": [
-    { "index": 4, "t_start": 3.02, "t_end": 3.06, "caption": "A small dashboard.",
-      "verb": "shot", "selector": "01-dashboard",
-      "still": "images/01-dashboard.png", "segment": null, "segment_index": 4 }
-  ],
-  "issues": [
-    { "kind": "console_error", "t": 0.47, "beat": 0, "verb": "goto",
-      "caption": "", "message": "Cannot read properties of undefined",
-      "url": "http://localhost:3000/app.js", "line": 412 }
-  ] }
-```
-
-- `t_start` / `t_end` are seconds from the start of `media` — the verb
-  starting and returning. A verb built out of other verbs (`click` glides
-  first, `type_into` clicks first) is one beat, not one per internal step.
-- `caption` is the line on screen during the beat: the new text for a
-  `caption` beat, the line shown for an `interlude`, `""` when none is up.
-- `selector` is what the verb acted on, as a string — a CSS selector for the
-  web verbs, the command / keys / pattern for the terminal ones, the name for
-  `shot`. `null` for verbs with no target (`pause`, `hold`, a cleared
-  `spotlight`).
-- `still` is a path relative to the timeline file, so `timeline.md`'s embeds
-  and any tooling resolve the same way.
-- `evidence` is a path, the same way — the beat's own account of what was on
-  screen. See **Per-beat evidence** below.
-- `exit_code` appears on `TerminalRecorder` `run` beats — see **Failing the
-  take** below.
-- `error` appears **only on a beat whose verb raised**, carrying the
-  exception's `type` and its scrubbed `message`; it is absent from every beat
-  that returned. `t_start` and `t_end` are stamped either way, so this is the
-  only thing that tells the two apart — do not read a beat as evidence that
-  something was demonstrated without checking it. The envelope gains a
-  `failure` key on the same terms: absent when the take finished, present with
-  `type`, `message`, `beat` and `verb` when it did not (`beat` is `null` when
-  the failure happened between verbs and no beat may honestly be blamed).
-- `duration` is the length of the mp4 **this take encoded**, and is `null`
-  when it encoded none — even if a `demo.mp4` from an earlier run is sitting
-  right there. A null is the honest answer; the previous take's number is not.
-- `issues` is what the recorder saw *behind* the pixels; `issue_count` is how
-  many it saw, and is larger than `len(issues)` only when a take blew past the
-  200-issue cap.
-- `index` is the beat's position **in this file**, so `stitch()` renumbers it
-  across a merged demo. `segment` and `segment_index` (its position within its
-  own segment) survive the merge untouched — use that pair, not `index`, to
-  name a beat in anything that has to line up across a re-stitch.
-- `content` is the only key here that describes the **frames** rather than the
-  storyboard. See the next section.
-
-### `content` — did the recording show anything?
-
-Every other field above is a statement about what the storyboard *did*, and all
-of them can be exactly right while the recording shows nothing: a title card
-left up, a modal that never closed, an app that stopped painting. That happened
-here, on this skill's own reference demo — a card covered the terminal for 24.3s
-of a 60.2s take, and the beat table, the exit codes, the evidence files and the
-stills all read like a healthy demo.
-
-So the recorder also measures the picture, over the region the app occupies in
-the encoded frame, and writes down what it found:
-
-```json
-"content": { "measured": true, "note": null,
-             "rect": [74, 110, 1132, 432], "sample_fps": 2, "frames": 47,
-             "score": 14.1, "floor": 1.0,
-             "static_for": 21.5, "static_from": 3.5, "static_limit": 15.0,
-             "static_beats": [{ "index": 6, "verb": "caption", "acting": false },
-                              { "index": 7, "verb": "hold", "acting": false }],
-             "opening": { "gap": 0.0, "held": 0.4, "limit": 1.5, "note": null },
-             "warnings": [] }
-```
-
-- `score` is the median luma standard deviation over `rect`. Under `floor` the
-  frames are featureless — a page that never painted, a take recorded black.
-- `static_for` is the longest stretch, in seconds, where **nothing inside
-  `rect` changed**, and `static_from` is when it started. Both are reported
-  always, whatever they are.
-- `static_beats` is what the storyboard was doing during that stretch, and it
-  is what decides whether the stretch is worth a warning. See below.
-- `warnings` is empty on a healthy take, and each entry is one sentence saying
-  what to go and look at. They are also printed on stderr as the take ends, so
-  an author who never opens this file is still told.
-- `measured` is `false`, with `note` saying why, when the check could not run.
-  `content` itself is `null` only when the take encoded no mp4.
-- `opening` says what the take opened on — and, on a web take, what the
-  recorder did about it. Read the next section: `held` above zero means the
-  first frames of your video are not frames the recording captured.
-
-### `opening` — the first frames of a web take are a hold
-
-Chromium starts recording when the page is created, and the page is
-`about:blank` until your first `goto()` returns. `about:blank` paints white, so
-a web take's recording genuinely begins with a few hundred milliseconds of flat
-white inside a correct-looking window frame — which reads as *the app loaded
-blank*, and is the most plausible-looking way a demo can misrepresent an app.
-
-The recorder covers that gap: it finds the first frame that differs from the one
-the take opened on, and composites **that** frame over the app area for the
-seconds before it. So a web demo opens on the application, as you would want it
-to.
-
-**Two things follow, and neither is hidden from you:**
-
-- Those opening frames show the app slightly before it painted. `held` is how
-  many seconds were covered, it is in `timeline.json`, and the take says it on
-  stderr as it finishes. Nothing else in the video is touched — the duration,
-  the audio and every beat timestamp are exactly what they were, because the
-  hold is an overlay switched off rather than a trim.
-- The video is therefore not a measurement of your app's load time, and was
-  never a good one: the gap it covers is the recorder's own startup as much as
-  the app's.
-
-`gap` is measured **afterwards**, off the encoded mp4 — so on a healthy web take
-it reads `0.0` *because* the hold landed, and a hold that silently did nothing
-shows up here as a non-zero number and a warning.
-
-Past `limit` (1.5s) nothing is held and the take warns instead. An app that
-takes that long to paint is telling the viewer something true about itself, and
-covering seconds of it would be inventing a demo rather than repairing one.
-
-`held` is `null` on a terminal take. The terminal recorder draws its own window
-inside the page, so it has no equivalent gap; open a terminal segment on a title
-card if you want its first frame to be deliberate (see *Opening a terminal
-segment on a title card*).
-
-### A long held stretch is not a problem, and this is the part to understand
-
-The example above holds one picture for **21.5s** — well past `static_limit` —
-and produces no warning at all. That is correct, and it is not a special case:
-
-> `static_for` on its own cannot tell a healthy demo from a broken one.
-
-Measured on real takes: a demo touring a rendered screen with three captions
-holds the measured region for **20–22s**. The title card that covered this
-skill's own reference demo held it for **23s**. There is no threshold between
-those two numbers, because the region measured excludes the recorder's caption
-bar — and swapping captions over a still screen is exactly what this guide tells
-you to do during a wait.
-
-So the warning needs a second condition: **did a verb that acts on the app run
-inside the stretch?**
-
-| beats inside the held stretch | verdict |
-|---|---|
-| `caption`, `interlude`, `bridge`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
-| `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to`, `redact` | worth looking at — warns |
-
-A `run()` that printed nothing visible, a `click()` that moved nothing: those
-are the shapes worth a human's two minutes. A caption change over a screen
-nobody touched is not.
-
-**What the warning does and does not claim.** It states what was measured — the
-stretch, the acting beats inside it, and the region — and then says plainly that
-an overlay left up, an app that stopped painting, and a demo that legitimately
-holds still through those verbs all look identical from here. It does **not**
-name a cause. It cannot know one, and an artifact that confidently attributes
-something to the wrong place is the failure this whole field exists to remove.
-
-**It warns; it never fails a take.** Treat a warning as "watch the video at this
-timestamp before believing the beats", not as a verdict.
-
-**It does not judge whether the demo shows the _right_ thing** — only whether
-it captured anything at all. `rect` deliberately excludes the recorder's own
-window chrome and its caption bar: a whole-frame score is dominated by them, to
-the point where a recording with the app painted flat scores *higher* than a
-working one.
-
-**Five limits worth knowing before you rely on it:**
-
-- **A held stretch containing only narration is never reported.** This is the
-  verb correlation doing its job, and it is also the one blind spot that can
-  hide a real fault: a demo that raises an interlude card and then only
-  captions, holds and takes stills behind it is silent, however long the card
-  stays up. Measured: a card over 31.5s of a 34s take, no warning. There is no
-  third answer available from the frames — with the caption band excluded, an
-  honest tour of a still screen and a card left up are byte-identical. If your
-  storyboard raises a card, take it down explicitly; do not rely on this check
-  to notice.
-
-- **A caption change is invisible to the held-picture arm, by design.** The
-  caption bar is the recorder's own drawing and it renders over an interlude
-  card as readily as over the app, so counting it would defeat the detector on
-  the exact occlusion it exists for. The verb correlation above is what makes
-  that survivable.
-- **The bottom fifth of the app is not measured at all** — that is where the
-  caption bar sits, and there is no room to shrink the exclusion. On a terminal
-  demo that is the last few rows *before the screen starts scrolling*. Once it
-  scrolls, every new line moves the whole picture and the blind window closes.
-- **A caption long enough to wrap reaches back into the measured region.** The
-  bar grows upward, so a two- or three-line caption crosses the exclusion and a
-  caption change then does count as the picture changing. Measured at 266 pixels
-  per wrap. The effect is to make a held stretch read *shorter* than it is. It
-  cannot touch a take occluded by the recorder's **own** interlude card, which
-  is opaque and paints above the caption — but an app-level overlay or modal is
-  app DOM, the caption paints *over* it, so a wrapping caption can split a real
-  occlusion into stretches that each sit under the limit. Measured: 25s becomes
-  11s + 8s + 6s, and goes silent. Keep captions to one line if you want
-  `static_for` to mean what it says.
-- **A run of held frames is measured per segment.** Two parts of a stitched
-  demo that each hold still for 8s across the cut are reported as 8s, not 16s.
-
-Three of the five can hide a real occlusion — the first, the fourth and the
-fifth. A card behind narration only, a wrapping caption splitting an app-level
-overlay into short stretches, and a hold that straddles a segment cut each
-produce a clean report on a take that shows nothing.
-
-The second and third cannot: excluding the caption bar, and not measuring the
-bottom fifth, both mean *less* of the picture counts as moving, so a stretch
-grows rather than shrinks. They push toward reporting a hold that is not there,
-not toward missing one.
-
-**A silent content report is not a guarantee that the demo shows your app.** It
-rules out the two loud failures — a recording that never rises above blank, and
-a screen that never moved while a verb was acting on it — and nothing more.
-
-On a stitched demo each part measures its own `.seg.mp4` — two segments can be
-two media with two geometries — so the envelope's `content` is the worst of the
-parts on each arm with `rect: null`, every warning tagged with the segment it
-came from, and each part's own report under `segments`.
-
-You can re-run it on a demo you already have, without re-recording. Pass the
-beat log too — without it the held-picture arm still measures and reports, but
-never warns, because there is nothing to correlate the stretch against:
-
-```python
-import json
-from pathlib import Path
-from demo_recording import content_report
-
-d = Path("demos/2026-07-26-x")
-doc = json.loads((d / "timeline.json").read_text())
-print(content_report(d / "demo.mp4", tuple(doc["content"]["rect"]), doc["beats"]))
-```
-
-A merged timeline says so, and says what it was built from:
-
-```json
-{ "segment": null, "media": "demo.mp4", "duration": 15.2,
-  "recorder": "Recorder",
-  "segments": [
-    { "segment": "part1", "media": "part1.seg.mp4", "duration": 6.6,
-      "offset": 0.0, "beats": 6, "recorder": "Recorder",
-      "determinism": {…}, "content": {…} },
-    { "segment": "part2", "media": "part2.seg.mp4", "duration": 8.6,
-      "offset": 6.6, "beats": 9, "recorder": "Recorder",
-      "determinism": {…}, "content": {…} }
-  ] }
-```
-
-`offset` is where each part starts inside `demo.mp4`, which is what maps a
-merged timestamp back to the file it came from. `recorder` and `determinism`
-at the top level carry the value every segment agrees on — `"mixed"`, and
-`null` per key, where they do not; the per-segment truth is in `segments`. A
-timeline a single take wrote has no `segments` key at all.
-
-`stitch()` refuses before it encodes anything if the parts cannot honestly be
-joined: a missing or unreadable `.seg.mp4`, a beat log of the wrong schema or
-one written for a *different recording* of that segment, or parts that
-disagree on codec, resolution, frame rate or having an audio track.
-`concat -c copy` accepts all of those and exits 0, and the damage is invisible
-afterwards — a frame-rate mismatch moves every later beat away from its frame,
-a resolution mismatch keeps the first part's dimensions, and one silent part
-makes concat drop every later part's narration. Recording every segment with
-the same `Recorder` settings is what keeps you clear of it.
-
-## Recording against a ticket (`coverage`)
-
-A demo can be perfectly clear and demonstrate the wrong thing. The fresh-agent
-review in step 6 answers *"is this story clear?"*; a review gate has to answer
-*"does this show what the ticket asked for?"*, which is a different question
-with a different answer.
-
-Declare the criteria on the recorder and tag the beats that demonstrate them:
-
-```python
-with Recorder(OUT, criteria={
-    "AC-1": "The queue can be filtered to one status.",
-    "AC-2": "A filter that matches nothing explains itself.",
-    "AC-3": "The CLI prints the same filtered list.",
-}) as rec:
-    rec.goto("/")
-    rec.caption("Filtering to one status.", ac="AC-1")
-    rec.shot("01-filtered", ac="AC-1")
-    rec.caption("Nothing matches, and the queue says why.", ac="AC-2")
-    rec.shot("02-empty", ac="AC-2")
-```
-
-`timeline.md` then carries a table above the beats, and `timeline.json` a
-`coverage` object:
-
-```
-| criterion                                   | claimed by | at   | still                 |
-| **AC-1** — The queue can be filtered…       | beat 1     | 3.20 |                       |
-|                                             | beat 2     | 5.46 | `images/01-filtered…` |
-| **AC-2** — A filter that matches nothing…   | beat 3     | 7.10 | `images/02-empty.png` |
-| **AC-3** — The CLI prints the same…         | *nothing claims this* |    |            |
-
-**1 of 3 criteria have no beat claiming them: `AC-3`.**
-```
-
-### What this does and does not tell you
-
-**The report is what the storyboard *claimed*, never what it proved**, and every
-name in it says so — `claimed` and `unclaimed`, not "demonstrated" and
-"missing". An `ac=` tag is a string you typed. A beat tagged `AC-3` whose frames
-show an error page is still tagged `AC-3`.
-
-That is not pedantry about naming. The failure this feature exists to catch is
-the **tautology**: a storyboard derived from the diff rather than from the
-ticket produces a polished, convincing demo of a misread requirement. If this
-file said "AC-3 demonstrated", the conformance reviewer below would be taking
-your word for the exact thing it was convened to check.
-
-So there is one machine-checkable finding here, and it is `unclaimed` — safe to
-automate precisely because it takes no judgement: nobody even asserted those.
-Everything else is the reviewer's call, and the artifact's job is to put them in
-front of the right frames.
-
-### Rules that follow
-
-- **Derive the storyboard from the ticket, the ADR or the RFC — not from the
-  diff.** A scenario generated from the implementation cannot fail to match it.
-  Write the criteria down first, then work out how to show each one.
-- **Criteria are declared up front**, not accumulated from the tags. The useful
-  half of the report is the criteria *nothing* claimed, and that cannot be
-  derived from the tags alone.
-- **A tag naming an undeclared criterion raises.** Left through, the criterion
-  you meant comes back unclaimed while the storyboard looks complete — wrong in
-  the one direction nobody checks. Fix the typo at the line that made it.
-- **Most beats claim nothing**, and that is ordinary: navigation, waits and
-  scene-setting captions are not demonstrating anything in particular. Tag the
-  moment a reviewer should look at, not every beat.
-- One beat may claim several criteria (`ac=["AC-1", "AC-2"]`) when one screen is
-  the evidence for both.
-- Without `criteria=`, `coverage` is `null` and `ac=` is refused. A take
-  recorded outside a ticket has no coverage to report, and an empty report would
-  read as a take that covered nothing.
-- On a **segmented** demo, `stitch()` recomputes coverage over the merged beats
-  against the union of the segments' criteria — so the joined timeline can name
-  a criterion *no* segment claimed, which neither segment's own report could.
-  Segments declaring different text for one id are reported as a conflict rather
-  than silently resolved.
-
-## Review frames (`frames/`)
-
-Nobody reviewing a demo through this skill can watch a video, so every review
-is a review of frames pulled out of it. A clean exit writes them: one PNG per
-beat under `frames/`, named `beat-NN.png` for the beat's index in
-`timeline.json`, plus `frames/frames.md` — the sheet to hand a reviewer, which
-embeds them in order — and `frames/frames.json` for anything reading them by
-machine.
-
-They are aligned to **beats, not to a clock**. The old advice was
-`ffmpeg -vf fps=1/3`, which misses a short beat entirely and photographs a long
-static one twice. Each frame is taken at its beat's **midpoint** — `t_start` is
-0% into the caption bar's fade and before the verb has done anything.
-
-**How accurate that aim is, honestly.** The beat log is wall-clock; the video
-is whatever Chromium's screencast managed to record, and it drops wall time
-during idle stretches ([#18](https://github.com/rogvid/skills/issues/18)). So a
-frame cut at a beat's midpoint shows a moment slightly *ahead* of that beat in
-the demo's own story — measured at **40–120 ms** on instrumented takes, and up
-to **~600 ms** on a take that loses the browser's start-up window whole (about
-1 in 12). The practical consequence: for a beat comfortably longer than that,
-the frame is of that beat; **for a beat shorter than the drift — a bare
-`shot()`, a `wait_for()` that returned immediately — the frame can be of the
-beat after it.** `tests/smoke` measures exactly this and shows it: with the
-drift allowance removed, the frame for a 50 ms `shot()` beat that sits against
-a caption change is already showing the next beat's screen.
-
-Read the frames as *"roughly here in the demo"*, not as *"exactly this beat"*.
-When a specific short moment matters, use `shot()` — `images/*.png` are
-Playwright screenshots taken synchronously at the beat, with no video clock
-between the moment and the file. `frames/frames.md` reports the take's own
-lower bound on how much wall time the capture lost, when it lost any.
-
-**They carry no caption, and that is deliberate.** Printing the line that was
-on screen during a frame's beat under that frame is the obvious next step and
-it is not sound: the beat log and the video run on different clocks
-([#18](https://github.com/rogvid/skills/issues/18)), so the caption under a
-frame can belong to the frame next to it — and a confident wrong caption is
-worse review material than no caption at all. An earlier version tried to
-recover the mapping by finding caption transitions in the video; it mislabelled
-frames on ordinary storyboards (two captions of the same length give it no
-signal, an app that repaints under the bar gives it a stronger edge than the
-caption does, and a mid-take `goto()` destroys the bar while logging no caption
-change at all). [#60](https://github.com/rogvid/skills/issues/60) is how the
-pairing gets earned back: have the recorder render the beat index into the
-frame so extraction reads it rather than infers it.
-
-`frames.md` also carries **no verb and no selector**, for the same reason step
-6 tells you to give the reviewer nothing else: it is the document a
-context-free reviewer reads before answering what story the pictures tell.
-
-Inside a beat long enough to hide something the storyboard never scripted (3 s
-and up) the recorder also runs scene-change detection and adds
-`beat-NN-scene-1.png` for each transition it finds. Beat alignment sees what
-the storyboard wrote down; a redirect, a toast or a load finishing mid-hold is
-invisible to it.
-
-**A stitched demo gets frames; a single segment does not.** Each segment
-numbers its beats from zero and its timeline names a `.seg.mp4` that `stitch()`
-deletes, so two segments writing into one directory would collide on
-`beat-00.png` and the sheet would embed a file that is gone — a segment take
-therefore writes no frames and says why. `stitch()` writes them instead, off
-the **merged** timeline, at the first moment a whole demo exists. Nothing extra
-to run, and it is the case that needs a sheet most: a demo long enough to
-record in parts is a demo nobody wants to review by scrubbing.
-
-`frames/` is a review artifact, not documentation: **gitignore it** along with
-`demo.mp4` — it is in the file table at the top for the same reason. Nothing
-downstream reads it; `beat_frames(out_dir)` from `demo_recording` regenerates
-it from `demo.mp4` and `timeline.json` without re-recording, and clears the
-previous run's frames first.
-
-## Per-beat evidence (`evidence/beat-NN.json`)
-
-A reviewing agent handed frames has to infer what the page said from pixels.
-The recorder is *driving* the page, so at the end of every beat it also writes
-down what was on screen, in text, next to the frame that beat's timestamps
-point at. No storyboard changes; it is a byproduct of recording, like the
-timeline. `Recorder(..., evidence=False)` or `DEMO_VIDEO_EVIDENCE=0` turns it
-off.
-
-```json
-{ "schema": 1, "generated_by": "demo-video", "recorder": "Recorder",
-  "segment": null, "media": "demo.mp4",
-  "beat": { "index": 6, "t_start": 5.31, "t_end": 5.44, "verb": "shot",
-            "selector": "01-dashboard", "caption": "A small dashboard.",
-            "still": "images/01-dashboard.png",
-            "evidence": "evidence/beat-06.json" },
-  "scope": "#kpi-rev",
-  "url": "http://localhost:3000/", "title": "Northwind Ops",
-  "aria_format": "aria-yaml",
-  "aria": "- banner:\n  - heading \"Northwind Ops\" [level=1]\n- text: Revenue $128,400 …",
-  "scope_aria": "- text: $128,400",
-  "html": "<div id=\"kpi-rev\">$128,400</div>",
-  "truncated": [], "limits": { "aria": 12000, "html": 8000 } }
-```
-
-| Field | What it is |
-|---|---|
-| `aria` | **`Recorder`**: the page's ARIA snapshot — a compact YAML tree of roles and accessible names, the same thing `expect(...).toMatchAriaSnapshot` compares. Semantic, ~10× smaller than the markup, and stable across restyling, which is why it is preferred over raw HTML |
-| `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML` with every value-bearing attribute stripped. All three are null when no spotlight is up |
-| `screen` | **`TerminalRecorder`**: the rendered screen, ANSI resolved by xterm.js, scrollback included — the same text `wait_for_text()` matches against |
-| `truncated` / `limits` | which fields were cut, and at what budget. A cut field also says so inline where it stops |
-| `omitted` | present *instead of* the page text when the recorder would have had to guess — see below. `timeline.json` is unaffected |
-
-**`outerHTML` is only ever the spotlight target's, never the page's.** A whole
-document's markup is an order of magnitude bigger than its ARIA tree and
-carries two things nobody put on screen: the text of every inline `<script>`,
-and `srcdoc` attributes — i.e. source code and whole embedded documents. The
-clone that gets serialized drops both, along with `<style>`, the recorder's own
-overlays, and anything `redact()` is covering.
-
-Fields are capped (12 000 characters of ARIA or screen text, 8 000 of markup)
-and truncation is **marked, never silent** — a TUI's scrollback is 5 000 lines,
-and an uncapped `evidence/` outgrows the mp4 it describes.
-
-### Evidence is plain text — what that means for secrets
-
-**This is the artifact where a secret is cheapest to find**, and it is worth
-being blunt about why: everything else this skill writes is pixels, and
-`redact()` is a *pixel* control. It covers where a value renders. The value is
-still in the DOM — and an evidence file is a text dump of that DOM. "It is
-blurred in the video" is no protection here at all.
-
-So evidence is masked twice over, and the second one is what makes redaction
-carry across:
-
-- every registered secret (`register_secret()`, a typed `Secret`) is replaced
-  with `[redacted]`, as everywhere else;
-- **the rendered text of everything `redact()` is covering** is read out of the
-  page as the take runs — the matched element and every node under it, shadow
-  roots at every depth, light DOM assigned into a `<slot>`, `::before`/`::after`
-  content, input values, value-bearing attributes, and any element an
-  `aria-labelledby` points at, however far away it is — and every occurrence of
-  any of it is replaced too, in every beat's evidence, including beats recorded
-  before the value first appeared. `redact()` never tells the recorder what the
-  element *says*, so this is the step that turns a pixel control into a text
-  one. Whitespace is elastic on both sides of the match: `textContent` carries
-  the source's own indentation and an ARIA tree does not, and a value on its own
-  line in hand-written HTML is otherwise the most ordinary leak there is;
-- markup is elided structurally as well as by substring, because a value split
-  across tags (`sk-live-<b>FAKE</b>`) has a `textContent` a string mask finds
-  and an `outerHTML` it does not. Where the split value is a *registered* one
-  rather than a redacted element's, the markup is **withheld** for that beat
-  with a line saying so — there is no safe way to edit a value out of a
-  serialization that interleaves it with elements;
-- `outerHTML` also drops every value-bearing attribute — `data-*`, `title`,
-  `alt`, `placeholder`, `aria-label`, `href`, `src` — from every element, not
-  just redacted ones. An attribute nothing renders was in no frame, no still,
-  no caption and no narration clip, so serializing it would make evidence the
-  only place it exists.
-
-**A harvested string is only used as a mask if it renders nowhere outside the
-mask.** Harvesting every node of a redacted card also harvests its label, and
-`redact("#revenue-card")` would otherwise register "Revenue" as a forbidden
-literal and rewrite every unrelated paragraph in every file. That rule is not a
-guess about what a secret looks like: a string that renders in the clear
-somewhere the mask does not cover is already in the frames and the stills, so
-masking it in a text file buys nothing and costs the file its meaning.
-
-"Renders outside" means **painted**, which is narrower than it sounds, and every
-relaxation of it has been a leak:
-
-- only **text nodes and `::before`/`::after` content** count. An attribute never
-  does — not `title`, `alt`, `placeholder`, `aria-label`, `data-*`, `content` or
-  `srcdoc` — and neither does an input's `value`. A copy-to-clipboard button
-  carrying the key it copies in `title` is ordinary UI, and it was enough to
-  exempt that key from masking in every evidence file *and* in `timeline.json`.
-  The same reasoning already strips those attributes out of `html`;
-- **hidden means hidden by any mechanism the browser will admit to**:
-  `display`, `visibility`, `opacity`, `content-visibility`, a box under 2×2 CSS
-  pixels (the screen-reader-only clip), and a box entirely off the top or left
-  of the document (the `-9999px` skip link). Only `display:none` was excluded
-  for one round, which was the one shape the fixture happened to use;
-- `<script>` text does not count — it is source, not screen;
-- light DOM slotted into a redacted element counts as *inside* it;
-- and **the recorder's own caption bar does not count at all** — captioning a
-  redacted value would otherwise exempt it from masking everywhere, turning one
-  mistake in the frames into the same mistake in `timeline.json`.
-
-What is left uncovered is occlusion: an element painted underneath an opaque
-sibling, or clipped away by a `clip-path` on an ancestor, still counts as
-rendered ([issue #69](https://github.com/rogvid/skills/issues/69)).
-
-Nothing reaches the disk until the take exits cleanly and the mask has been
-verified: the documents are built in memory and written beside `timeline.json`,
-so a take that dies on a `SecretLeak` has no evidence file to delete — and a
-take that *succeeds* first deletes any evidence a previous recording into the
-same folder left behind, since re-running `record.py` into the same directory is
-the normal way to use this skill and yesterday's files would otherwise sit there
-holding the value you just added a `redact()` for. If a document cannot be made
-safe, the take fails.
-
-**A page that repaints while it is being read gets no page text.** The ARIA
-snapshot is a protocol call and the harvest is a page evaluation, so they cannot
-be one operation: a card rewritten on a 5 ms interval — a countdown, a ticker,
-a rotating token — hands the harvest one value and the snapshot the next. The
-harvest is therefore taken on both sides of the snapshot and the two must agree;
-if they will not settle, that beat's evidence is written as `{"omitted": …}`
-with no `aria`, `scope_aria` or `html` in it. On a page where something inside a
-redacted region never holds still, expect most beats to come back that way —
-`timeline.json` is unaffected, and it is the safe direction.
-
-**What it still does not cover:**
-
-- **`TerminalRecorder` has no `redact()`** (that is
-  [issue #5](https://github.com/rogvid/skills/issues/5)), so `screen` is the
-  whole terminal, scrubbed for registered secrets only. A command that
-  *prints* a value nobody registered writes it here verbatim — the same
-  exposure the recording already has, in a form that greps.
-- **`url` and `title` go through the registered-secret scrub and nothing
-  else.** A token in a query string that nobody registered lands in the file —
-  `redact()` cannot name it, because nothing renders it, and the harvest that
-  turns redaction into text masking therefore never sees it. If your demo
-  navigates through a magic link, a `?token=`, or a session id in a path,
-  `register_secret()` it: that is the author's job and there is no mechanism
-  here that does it for you
-  ([issue #50](https://github.com/rogvid/skills/issues/50)).
-- **Accessible names are still names.** `alt` and `title` become an element's
-  accessible name, so they are in `aria` by design even though they are
-  stripped from `html`. That is what a screen-reader user perceives; if it is a
-  secret, redact the element.
-- **Matching is exact, modulo a stated list of transformations — and that list
-  is the boundary, not a promise to keep growing.** Every leak this feature has
-  had was the same shape: a comparison between a value somebody registered and
-  a transformation of that value the code did not anticipate. Three are
-  handled, and they are handled by normalizing rather than by special cases:
-
-  | Transformation | Where it comes from | How it is matched |
-  |---|---|---|
-  | whitespace the value has, the text does not | `textContent` keeps the source's indentation; an ARIA tree does not | a run of whitespace in the value matches any run in the text |
-  | whitespace the text has, the value does not | a terminal wrapping at the last column; anything that reflows | inside a token of 8+ characters, every character may be followed by whitespace |
-  | HTML entities and character references | `outerHTML` writes `&` as `&amp;`, NBSP as `&nbsp;` | entities are resolved before the check, in `html` and in the end-of-document guard |
-  | JSON string escapes | the guard runs over the serialized document, where a newline is `\n` | resolved the same way, so the guard cannot miss what the mask missed |
-
-  **Not** handled, and not planned: case differences, Unicode normalization
-  forms and confusables, percent- / base64- / backslash-encoding, a value the
-  app itself reformats (inserted hyphens, an ellipsis, a thousands separator),
-  and a value split across two elements that are not both redacted. This is an
-  asymptotic surface; a demo whose secret survives one of those is a demo whose
-  author should `redact()` the element rather than rely on a string match.
-- **The ARIA snapshot needs Playwright ≥ 1.49.** Older versions get a null
-  `aria` and an `aria_format` saying so, rather than a fallback nobody tests.
-
-**Evidence is not committed.** Gitignore `evidence/`. It is a byproduct
-regenerated on every take, it churns completely on each re-record, and — the
-reason that matters — it is greppable plaintext of a real app's DOM, which is
-exactly the thing a git history should not carry permanently and cannot be
-made to forget afterwards. `timeline.json` and `timeline.md` stay the
-committed, diffable record of what the demo showed; evidence is for the
-reviewer looking at *this* take, alongside `demo.mp4`, which is not committed
-either.
-
-### Naming, and merged segments
-
-A beat's `index` is its position in **its own take**, so two segments of one
-demo both start at 0. Two things make that a non-event: a segment's evidence
-carries the segment in its filename
-(`evidence/part1.seg.beat-03.json`, mirroring `<segment>.seg.timeline.json`),
-and the path is written **onto the beat** as `evidence` rather than derived
-from `index` by whoever reads the log. Read the pointer, never rebuild it —
-then a merge that renumbers beats has only to carry the string across, and
-every evidence file names its own `segment` and `index` internally anyway.
-
-## Failing the take on a broken app
-
-**A demo that looks perfect while the app throws `TypeError` on every render
-passes any review that only watches pixels.** This is the failure mode with no
-visual signature at all: the captions are right, the stills are pretty, the
-video is convincing, and the feature is broken. So every take also watches the
-app itself and writes what it saw into `timeline.json` as `issues`:
-
-| `kind` | What it is | Fatal under `strict=True`? |
-|---|---|---|
-| `console_error` | `console.error(…)` from the page | yes |
-| `console_warning` | `console.warn(…)` from the page | no |
-| `page_error` | an uncaught exception or unhandled rejection | yes |
-| `request_failed` | a request that never got a response | no |
-| `http_error` | a response with status ≥ 400 (3xx redirects are normal) | no |
-| `nonzero_exit` | a `TerminalRecorder` `run()` whose command failed | yes |
-
-Each issue is **attributed to the beat that was running when it fired** —
-`beat` (an index into `beats`), plus the beat's `verb` and `caption` copied
-alongside so the list reads on its own. "The take broke" is not a bug report;
-"the take broke during `click('#refresh')`, under the caption *Refresh reloads
-it*" is. `timeline.md` gets an **Issues** section saying the same thing in
-prose, so a reviewer reading the PR sees it without opening the JSON.
-
-**`beat` is `null` when no beat can honestly claim the problem**, and that is a
-real answer rather than a gap. Playwright hands the recorder page events only
-while it is being called, so the naive reading — blame the most recently
-started beat — invents attributions in both directions: an error thrown during
-a three-second `hold()` would be blamed on the beat *after* the hold and quoted
-under a caption that had not appeared yet. Holds therefore pump events as they
-wait, and anything still ambiguous — a problem surfacing between two verbs,
-or after a long stretch where nothing reached Playwright — records `beat: null`
-instead of a confident guess. Trust `beat`; `t` is when the problem was
-*observed*, which can lag when it happened.
-
-Nothing has to be asked for: **a summary prints on stderr at the end of every
-take**, listing each problem and its beat, or saying plainly that there were
-none.
-
-`TerminalRecorder.run()` additionally records `exit_code` on its beat, and
-`timeline.md` gets an `exit` column when any beat has one. The shell reports
-the status through an invisible escape in its own prompt, carrying `$?` and
-bash's command number, which the recorder strips before the terminal ever
-renders it — so the status is known without typing `echo $?` into the demo.
-
-The command number is what makes it trustworthy. The shell prints a prompt at
-startup before any command, and reprints one for an empty Enter or a Ctrl-C, and
-each of those reports a status belonging to no command; the number is what tells
-them apart. Two `run()`s with no wait between them queue, and each status
-reaches the beat that typed it, because the shell still runs them in order.
-
-An `exit_code` is either right or `null`, never wrong. It is `null` when the
-status never arrived: a `run()` the storyboard never waited on and the take
-ended, a program still running at the end, or a shell that does not expand `$?`
-in its prompt (zsh needs `PROMPT_SUBST`; only bash is exercised). Pair every
-`run()` with `wait_for_prompt()` and it is always there.
-
-### `strict=True`
-
-```python
-with Recorder(Path(__file__).parent, strict=True) as rec:
-    ...
-```
-
-`Recorder(..., strict=True)` / `TerminalRecorder(..., strict=True)` (or
-`DEMO_VIDEO_STRICT=1`) makes the take **raise `StrictTakeFailed` on exit** if it
-recorded any fatal issue, naming the kind, the beat and the message for each.
-Default is off, so a take that would otherwise have shipped silently still
-records everything and still succeeds.
-
-It fails *after* writing demo.mp4, the stills and the timeline. A broken take
-is exactly the one somebody wants to look at, so failing it must not also
-destroy the evidence.
-
-Strict means strict. Chromium writes its own `Failed to load resource: …` to
-the console for anything that 404s or refuses a connection, and that is a real
-console error — so a missing favicon fails a strict take too. Use it when you
-want the demo to be a check that the app works, not when you want it to be
-lenient.
-
-## When a take does not finish
-
-A storyboard that raises — a `wait_for()` that times out, an assertion of your
-own, a Ctrl-C on a hung demo — used to leave **nothing at all**: the webm the
-browser already had was discarded, and the beats sitting in memory were never
-written. In CI, where there is no screen to look at, that means blind retries.
-
-It now keeps everything it had, and marks it:
-
-```
-demo.mp4               the partial recording, cut off where the storyboard
-                       gave up — converted from the webm rather than deleted
-timeline.json/.md      the beats. The one whose verb raised carries `error`;
-                       the envelope carries `failure`
-evidence/, frames/     as usual, off the recording that exists
-failure/               failure.json  the failing beat in full, every issue the
-                                     take recorded, and what was written
-                       failure.md    the same for a person
-                       screen.txt    the page's accessibility tree, or the
-                                     rendered terminal buffer
-                       last-frame.png the final frame of demo.mp4
-demo-video-FAILED.md   what happened, when, and whether the demo.mp4 beside it
-                       is this take's or an earlier run's
-```
-
-The original exception still propagates, unchanged — it is the message that
-says what to fix, and the recorder does not replace it. What the recorder adds
-is a line on stderr naming the beat and pointing at `failure/`.
-
-**`demo-video-FAILED.md` is the one file written on every abnormal exit**,
-including the refusal path that keeps nothing else. That path is the reason it
-exists: a take that cannot verify its mask writes no mp4 and no timeline, and
-what it does *not* touch is what a previous run left in the same folder — so
-the folder ends up holding a watchable `demo.mp4`, an emptied `images/`, and a
-`timeline.json` from the run before. That reads as a successful take with
-missing stills, and the video is a recording of different code. The next take
-that writes its own artifacts deletes the marker, so its presence always
-describes the most recent run.
-
-**Redaction covers all of it.** `failure/` is a crash dump of a page that may
-be mid-secret, which is the worst leak path this package has, so: the page is
-read exactly once, *before* the final redaction check vouches for it; the
-documents are built in memory, masked against the registered secrets and
-against the rendered text of everything `redact()` covers, and refused whole
-if anything survives; and the last frame is extracted from `demo.mp4` rather
-than screenshotted, so it inherits the recording's guarantee instead of needing
-its own. A take whose mask cannot be verified writes no dump at all.
-
-**This holds with `evidence=False` too**, and that is not free. `redact()` is a
-pixel control — it covers where a value renders and leaves the value in the
-DOM, which is exactly what `failure/screen.txt` dumps — and the only thing that
-reads what the mask is hiding is a harvest off the live page. Per-beat evidence
-does that on the clean path and does not run at all when evidence is off, so
-the failure path harvests for itself, on both sides of the snapshot, whatever
-the flag says. Without it, switching evidence off published every redacted
-value in the crash dump in the clear.
-
-**What this does not do.** It does not make a crashed take's `demo.mp4` a
-complete demo — it stops where the storyboard did. It does not diagnose the
-crash. And if the *browser* died (so the redaction check cannot run), the take
-is treated as unverifiable and keeps nothing but the marker: a page nothing can
-vouch for is not a page to dump.
-
-**Timestamps are wall-clock offsets, and the video can drift under them.**
-Chromium's screencast emits a frame when the page paints and nothing pads the
-gap when it does not, so an idle stretch costs the recording ~0.6 s of wall
-time and every frame after it lands that much earlier than the timestamps say.
-The beat log itself is good to ~100–200 ms of the frame it describes; the drift
-is the capture's, and it shows up as `duration` being shorter than the take
-really was. Tracked in [issue #18](https://github.com/rogvid/skills/issues/18)
-— read it before relying on a beat timestamp to extract a frame.
 
 ## Pacing and perception
 
@@ -1513,101 +269,30 @@ with TerminalRecorder(Path(__file__).parent) as rec:
     rec.wait_for_prompt()
 ```
 
-### TerminalRecorder verbs (plus the shared ones above)
-
-| Verb | Use |
-|---|---|
-| `run(command)` | Type a shell command visibly, press Enter. Pair with `wait_for_prompt()`. |
-| `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). Takes a `Secret(v)` for a password: the value is registered, typed for real, and the terminal's echo of it comes back masked. |
-| `key(*names)` | Send keys: `"Up" "Down" "Left" "Right" "Enter" "Tab" "Escape" "Home" "End" "PageUp" "PageDown" "Backspace" "Delete" "Space"`, `"C-<letter>"` (e.g. `"C-c"`), or any single literal char (`"q"`, `"/"`). |
-| `wait_for_prompt(timeout_s=60)` | Wait until the shell prompt returns — i.e. the command finished. |
-| `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI-stripped) matches `pattern`; `^`/`$` anchor to screen lines. |
-| `rec.page` | The live Playwright page (escape hatch). `rec._write(str)` sends raw bytes to the PTY. |
-
-### Opening a terminal segment on a title card
-
-**Pass `interlude=` to the constructor — do not make `interlude()` the
-storyboard's first statement.**
-
-```python
-with TerminalRecorder(
-    out_dir, segment="part2",
-    interlude="…the same thing, on the command line.",
-    interlude_hold=2.8,          # optional; the default
-) as rec:
-    rec.caption("Same filter, one command.")
-    rec.run("orders --city Berlin")
-```
-
-The recorder starts capturing when it creates the page, which is before any
-storyboard statement can paint anything — so a card raised by the first verb
-arrives ~290 ms late and the segment opens on an empty terminal with a lone
-prompt. `interlude=` raises the card from a context init script instead,
-before the page has painted at all, and the PTY, the terminal's own setup and
-the shell's first prompt all happen behind it. The recorder also **takes it
-down** when `interlude_hold` is up, so there is no `interlude("")` to forget.
-
-It records an ordinary `interlude` beat, so `timeline.json` reads the same
-either way. `Recorder` (web) has no such argument and does not need one: its
-page is blank until `goto()`, so there is no "before" to flash — and a card
-painted before that first `goto()` would be destroyed by it.
-
-### Driving the four patterns
-
-- **Non-interactive CLI:** `run(cmd)` → `wait_for_prompt()`.
-- **Interactive prompt / REPL:** `run(cmd)` → `wait_for_text(prompt)` →
-  `send(answer)` → repeat.
-- **Full-screen TUI:** `key(...)` → `wait_for_text(a marker on the new
-  screen)` or `pause(...)` → `shot(...)`; quit, then `wait_for_prompt()`.
-- **Long-running / streaming:** `run(server)` → `wait_for_text("Listening…")`,
-  tour the output; skip big waits with the same `segment=` + `interlude` +
-  `stitch` machinery the web path uses. Output streams into the recording
-  live, so you see it scroll.
-
-### Terminal gotchas
-
-- **Sync on the *rendered screen*, not a guessed delay.** `wait_for_text`
-  reads what xterm.js actually displays (scrollback included), so it
-  survives TUIs that repaint continuously and never print a clean "done".
-- **`wait_for_prompt` keys on an *idle* prompt** — the last screen line
-  being exactly the prompt marker. Programs that clear the screen (`top`,
-  `clear`, most TUIs) erase earlier prompt lines, which is why counting
-  prompts does not work and this does.
-- **Typing is real echo.** `run`/`send` write to the PTY; the terminal
-  echoes each key, so it appears typed. Programs that turn echo off
-  (password prompts, raw-mode TUIs) correctly show nothing.
-- **A secret a command prints is masked on the way in.** `register_secret()`
-  before the command runs, and its output — plus the screen text
-  `wait_for_text()` reads — comes back `[redacted]`. `run()` and `send()`
-  refuse a command line holding a registered value outright. Read
-  **Redacting secrets → Redaction in a terminal demo**, and the list of what
-  it does not cover, before trusting it.
-- **Keep the prompt distinctive.** The default `❯ ` rarely collides with
-  output. If you theme it via `terminal_prompt`, keep it a string unlikely
-  to appear as the last line of a command's output.
-- **A program that never returns** (a server) needs `wait_for_text`, not
-  `wait_for_prompt` — there is no prompt until it exits.
-- **Pagers are disabled by default.** A real PTY makes `git`, `man`,
-  `systemctl`, etc. pipe through `less`, which holds the terminal and hangs
-  `wait_for_prompt`. The recorder sets `PAGER`/`GIT_PAGER`/`SYSTEMD_PAGER` to
-  `cat` so commands print inline. To demo a pager on purpose, launch it and
-  drive it with `key` (`"Space"`, `"q"`).
+**Read [reference/terminal.md](reference/terminal.md) before writing one.** It
+carries the full verb table (`run`, `send`, `key`, `wait_for_prompt`,
+`wait_for_text`), how to open a segment on a title card, the four patterns a
+terminal demo takes, and the gotchas — pagers, echo, prompts that never
+return. A terminal take that handles a secret needs
+[reference/secrets.md](reference/secrets.md) too: `TerminalRecorder` has no
+`redact()`, and what it has instead works differently.
 
 ## Process
 
 1. **Pick a demo story that is deterministic, and know where the slow
    parts are.** Prefer flows the app completes on its own in seconds. Seed
    needed state *before* recording starts. The recorder pins the browser's
-   timezone and locale for you, and will freeze its clock if you ask (see
-   **Determinism**); the app's own randomness and its server data are yours to
+   timezone and locale for you, and will freeze its clock if you ask
+   ([reference/determinism.md](reference/determinism.md) — read it before you
+   do); the app's own randomness and its server data are yours to
    pin down. If the story includes minutes
    of real background work, don't record the wait — record **segments**:
    `Recorder(out_dir, segment="part1")`, poll between segments until the
    work is done, open the next segment with `rec.interlude("…a few minutes
    later…")` on `about:blank` before navigating, and `stitch()` into
    demo.mp4. A **terminal** segment takes its opening card as
-   `TerminalRecorder(interlude="…")` instead — see **Opening a terminal
-   segment on a title card**. `stitch()` also merges the segments' beat logs into one
+   `TerminalRecorder(interlude="…")` instead — see
+   [reference/terminal.md](reference/terminal.md). `stitch()` also merges the segments' beat logs into one
    `timeline.json` / `timeline.md`, so a segmented demo commits the same two
    files as any other — you do not have to do anything for that.
 2. **Write `record.py`** in the demo folder as a short storyboard. Capture
@@ -1648,19 +333,25 @@ painted before that first `goto()` would be destroyed by it.
    shows up there without decoding a frame. **Read the problem summary the
    recorder prints on stderr**, and the Issues section of `timeline.md`: a
    demo of an app throwing on every render looks exactly like a demo of a
-   working one, and this is the only place it shows (see **Failing the take
-   on a broken app**). To check what a *specific* frame showed without
-   decoding it, open the beat's `evidence` file — that is what it is for.
+   working one, and this is the only place it shows
+   ([reference/failures.md](reference/failures.md)). To check what a *specific*
+   frame showed without decoding it, open the beat's `evidence` file — that is
+   what it is for. What every field in `timeline.json` means, and what its
+   `content` warnings do and do not claim, is
+   [reference/timeline.md](reference/timeline.md).
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you. The
    recorder has already written what they need: `frames/`, one PNG per
    beat, and `frames/frames.md`, which embeds them in order. **Hand them
-   `frames/frames.md`.**
+   `frames/frames.md`.** Read
+   [reference/review.md](reference/review.md) first — it says how accurately a
+   frame is aimed at its beat, which is what decides how much weight a
+   reviewer's reading of one can carry.
 
    Give them the pictures and nothing else — no storyboard, no feature
    name, no captions. `frames.md` is built that way on purpose (see
-   **Review frames** above): a `click('#refresh')` in the margin answers
-   the question you are asking before they look at anything.
+   [reference/review.md](reference/review.md)): a `click('#refresh')` in the
+   margin answers the question you are asking before they look at anything.
 
    A tmpdir, or `frames/` beside `demo.mp4` if the reviewer needs a stable
    path. Either way they are working files — `frames/` is gitignored for the
@@ -1704,8 +395,8 @@ painted before that first `goto()` would be destroyed by it.
    > DEMONSTRATED even though the table lists it.
 
    That instruction is the whole point of the pass. Without it the reviewer
-   reads the coverage table back to you, which is a tautology — see **Recording
-   against a ticket**.
+   reads the coverage table back to you, which is a tautology — see
+   [reference/review.md](reference/review.md).
 
    `unclaimed` needs no reviewer: nothing claimed those, and the timeline
    already says so. Either the demo does not show them or the storyboard did
@@ -1747,88 +438,14 @@ painted before that first `goto()` would be destroyed by it.
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has
    no public API, so it stays a manual step. To stop doing it by hand
-   entirely, run the recording in the pipeline instead: see **Recording on a
-   pull request (CI)** below, which publishes the video as a job artifact and
+   entirely, run the recording in the pipeline instead:
+   [reference/ci.md](reference/ci.md) publishes the video as a job artifact and
    the beat table as text in one comment.
 
    The exception is a video that is itself permanent documentation: a
    hand-authored showcase for a stable feature, recorded once and not
    per-change. Commit that one deliberately, knowing the repo carries it
    forever.
-
-## Recording on a pull request (CI)
-
-Everything above is a storyboard being run by hand. The point of the skill is
-that a reviewer never has to do that, so the same run belongs in the pipeline:
-a reusable GitHub Actions workflow lives at
-[`.github/workflows/demo-video.yml`](https://github.com/rogvid/skills/blob/main/.github/workflows/demo-video.yml)
-in this repository. A consuming repo calls it in a few lines:
-
-```yaml
-# .github/workflows/demo.yml
-on:
-  pull_request:
-    paths: ["app/**"]          # the coarse gate — see "What gates it" below
-
-permissions:
-  contents: read
-
-concurrency:                    # ten pushes should cost one recording
-  group: demo-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  demo:
-    permissions:
-      contents: read
-      pull-requests: write      # required: the workflow writes one comment
-    uses: rogvid/skills/.github/workflows/demo-video.yml@main
-    with:
-      working-directory: app
-      app-command: npm run dev -- --port 3000
-      base-url: http://127.0.0.1:3000
-      demo-retention-days: 30
-```
-
-**What the pull request gets.** One comment, found by a hidden marker and
-**rewritten** on every push rather than appended, carrying two things:
-
-1. **The beat table as text** — every caption in order, straight out of
-   `timeline.json`. No hosting, no expiry, no Actions access needed, and it
-   renders on GitLab and Bitbucket too. This is the tier that survives the
-   artifact expiring.
-2. **A deep link to the artifact** — `…/actions/runs/<id>/artifacts/<id>`, so
-   watching is one click and an unzip.
-
-`demo.mp4`, `timeline.md`/`.json` and `images/` upload as the `demo-video`
-artifact on an explicit `retention-days`; `evidence/` and `frames/` upload
-separately on a short one (1–7 days, long enough to check a disputed finding
-and not long enough to be an archive) and are **not** linked from the comment;
-`failure/` uploads on the failure path only. A take that does not finish fails
-the check *after* publishing all of it — the crashed take is exactly the one
-somebody needs to look at.
-
-**What gates it.** Recording is not a test job: it runs a browser and a
-software encoder, and costs minutes. Two gates, doing different work:
-
-- the caller's `paths:` filter, which decides whether a runner starts at all;
-- the workflow's own discovery, which records a storyboard only when the
-  branch changed something under the app that storyboard demonstrates — the
-  directory containing its `demos/`. A branch that changed neither exits in
-  seconds. Pass `storyboards:` explicitly to override.
-
-A label was the alternative and was rejected: it needs a human action on every
-branch, and when somebody forgets, the failure mode is *no video*.
-
-**It refuses to record against production.** The mp4 is an outbound artifact —
-it leaves the repository boundary the moment anyone downloads it, showing
-whatever was on screen. So `base-url`, the caller's `extra-env`, and the
-`http(s)://` literals inside each storyboard are all classified before the
-browser opens: loopback always passes, a private or internal host needs
-`allow-private-network-target: true`, and a **public host is refused with no
-input that permits it**. That is a static check on configuration and source
-text, not an egress control: a storyboard that computes its URL at run time is
-invisible to it.
 
 ## Common mistakes
 
@@ -1855,13 +472,14 @@ invisible to it.
   target after any wait that can reflow the page.
 - **Recording real data and planning to blur it later.** There is no later: the
   frame is captured the moment it paints, and a published video leaks forever.
-  Decide what must not appear *before* the first `goto()` — see **Redacting
-  secrets**, and read what it does not cover.
+  Decide what must not appear *before* the first `goto()` — see
+  [reference/secrets.md](reference/secrets.md), and read what it does not cover.
 - **Reading the beat table as proof the demo showed something.** It is proof
   the storyboard *ran*. A card left up, a modal that never closed or an app
   that stopped painting produces a complete, correct, entirely successful
   timeline over a recording nobody can watch. Check `content` in the same file
-  — that is the field that describes the frames.
+  — that is the field that describes the frames
+  ([reference/timeline.md](reference/timeline.md)).
 - **Reading `content.static_for` as a score.** It is not one. A healthy demo
   that narrates a rendered screen holds it for 20s or more, which is what a
   covering card also measures. Read `warnings`; the number alone means nothing
@@ -1874,9 +492,9 @@ invisible to it.
 
 ## Sharing this skill
 
-The skill is self-contained: this file, the `helpers/demo_recording/`
-package, the vendored `helpers/assets/xterm/` terminal assets, and
-`README.md`. Install it with the `skills` CLI — into the current project:
+The skill is self-contained: this file, the `reference/` directory it links
+into, the `helpers/demo_recording/` package, the vendored
+`helpers/assets/xterm/` terminal assets, and `README.md`. Install it with the `skills` CLI — into the current project:
 
 ```sh
 npx skills add https://github.com/rogvid/skills/tree/main/skills/demo-video
