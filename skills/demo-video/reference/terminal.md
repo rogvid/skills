@@ -11,7 +11,7 @@
 | Verb | Use |
 |---|---|
 | `run(command)` | Type a shell command visibly, press Enter. Pair with `wait_for_prompt()`. |
-| `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). Takes a `Secret(v)` for a password: the value is registered, typed for real, and the terminal's echo of it comes back masked. |
+| `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). The PTY echoes it, so it is on camera; a program that turns echo off shows nothing either way. |
 | `key(*names)` | Send keys: `"Up" "Down" "Left" "Right" "Enter" "Tab" "Escape" "Home" "End" "PageUp" "PageDown" "Backspace" "Delete" "Space"`, `"C-<letter>"` (e.g. `"C-c"`), or any single literal char (`"q"`, `"/"`). |
 | `wait_for_prompt(timeout_s=60)` | Wait until the shell prompt returns — i.e. the command finished. |
 | `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI-stripped) matches `pattern`; `^`/`$` anchor to screen lines. |
@@ -69,12 +69,12 @@ painted before that first `goto()` would be destroyed by it.
 - **Typing is real echo.** `run`/`send` write to the PTY; the terminal
   echoes each key, so it appears typed. Programs that turn echo off
   (password prompts, raw-mode TUIs) correctly show nothing.
-- **A secret a command prints is masked on the way in.** `register_secret()`
-  before the command runs, and its output — plus the screen text
-  `wait_for_text()` reads — comes back `[redacted]`. `run()` and `send()`
-  refuse a command line holding a registered value outright. Read
-  [secrets.md](secrets.md) → *Redaction in a terminal demo*, and the list of what
-  it does not cover, before trusting it.
+- **A secret a command prints is on screen, and nothing here hides it.**
+  There is no scrubber on the output path and no `redact()` for a terminal —
+  what a program writes to the PTY is what the recording shows, and what
+  `evidence/` dumps. Demo against example data; see "What this records, and
+  what it does not defend against" at the top of
+  [SKILL.md](../SKILL.md).
 - **Keep the prompt distinctive.** The default `❯ ` rarely collides with
   output. If you theme it via `terminal_prompt`, keep it a string unlikely
   to appear as the last line of a command's output.
