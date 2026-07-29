@@ -7,8 +7,7 @@
 
 Serves `tests/fixture/` with a throwaway `python3 -m http.server`, records a
 short web demo against it with `Recorder`, records a short terminal demo with
-`TerminalRecorder`, records a third take against a page that renders a secret,
-and grades each take on separate axes:
+`TerminalRecorder`, and grades each take on separate axes:
 
 1. **Artifacts** — demo.mp4 and every still exist, were written by *this* run,
    are not trivially small, and are not repeats of each other.
@@ -32,15 +31,11 @@ and grades each take on separate axes:
    storyboard is recorded three times against a page that renders four clocks
    and an animation; the two takes with `deterministic=True` must match byte
    for byte, and the one recorded with the recorder's *defaults* must not.
-5. **Redaction** — a registered secret reaches no frame, still, caption or TTS
-   cache entry. Graded on pixel sharpness against an unredacted control key in
-   the same frame, and on a byte search of everything the take wrote. The
-   terminal half (issue #5) grades the PTY scrubber the same way, against a
-   value split across `os.read()` boundaries on purpose.
 6. **Evidence** — every beat left a text account of what was on screen, capped
    and explicitly truncated, from which a reader can state what the frame
-   showed without decoding one. Its own leak path, because it is the only
-   artifact here that is *plain text* and `redact()` only covers pixels.
+   showed without decoding one. Graded on its own because it is the only
+   artifact here that is *plain text*: a picture can only hold what was
+   painted, and this can hold more than that.
 
 Playwright 1.49 or newer: evidence uses `locator.aria_snapshot()`, and the
 `page.accessibility` API that predates it has since been removed.
@@ -428,7 +423,7 @@ SERVER_START_TIMEOUT_S = 15.0
 #
 # The graded takes stay recordings of a working app on purpose. They are the
 # reference demo a reader watches, and the fixture hooks belong in takes of
-# their own — the pattern the sibling PRs use for `?secret=1`.
+# their own — the pattern `?evidence=1` and `?entropy=1` follow.
 MISSING_PATH = "/definitely-missing.json"
 
 
@@ -464,25 +459,6 @@ BETWEEN_BEATS_JS = "() => console.error('__M__')".replace("__M__", BETWEEN_BEATS
 # rather than 1 because it proves the *status* was read rather than "something
 # went wrong" inferred from any other signal.
 TERMINAL_FAILING_COMMAND = "(exit 3)"
-
-# ...and the same, printed on a line long enough to **wrap**. `__termText()`
-# emits one xterm.js buffer row per line joined with newlines and never consults
-# `isWrapped`, so a credential that crosses the last column arrives split:
-# `"…sk-live-WRAP0000\n000000000000 wrapped-marker…"` — fully legible, and
-# recovered by anyone who pipes the file through `tr -d '\n'`. The mask missed
-# it, and so did the end-of-document backstop, which is the failure a backstop
-# exists to not have.
-#
-# The take before this one could never provoke it: `echo printed-below` plus a
-# 20-character secret is ~60 columns against a ~120-column terminal. A real
-# `env`, `aws configure get` or `curl -v` wraps every time. So this one is
-# padded to the measured width of the terminal, deliberately, and the padding
-# is computed at record time from `term.cols` rather than guessed.
-TERMINAL_WRAP_MARKER = "wrapped-marker"
-# How many characters of the secret land on the first row. Any value strictly
-# between 1 and len(secret) exercises the split; 8 keeps both halves long enough
-# to be obviously a fragment of one string in the failure message.
-TERMINAL_WRAP_HEAD = 8
 
 # The regression from the first round of review: two run()s with no wait
 # between them. The shell buffers the second command and runs it after the
@@ -1233,19 +1209,22 @@ TERMINAL_EVIDENCE = [
 # nothing else — no video, no stills. It carries three things the graded takes
 # structurally cannot:
 #
-#   1. **The leak shapes.** Every element in that panel reached an evidence
-#      file readable during review, and none of them is visible to any pixel
-#      assertion ever written here: a value is not less legible in JSON for
-#      having been covered on screen. They are graded by a byte sweep, the same
-#      way redaction is, with unredacted controls proving the sweep is not
-#      looking at an empty file.
+#   1. **What a text account can hold that a picture cannot.** The fixture
+#      renders one element whose attributes carry strings it never paints, and
+#      the storyboard injects two more shapes of the same kind (inline script
+#      text, a `srcdoc` document). None of them is visible to any pixel
+#      assertion ever written here — an attribute is in no frame either way —
+#      so the serializer that drops them needs a check of its own.
 #   2. **The size cap.** Truncation cannot be provoked on the fixture as it
-#      stands — its whole ARIA tree is 2.3 kB against a 12 kB cap — and
+#      stands — its whole ARIA tree is ~1.5 kB against a 12 kB cap — and
 #      slackening the cap to meet the fixture would be grading the wrong
 #      number. So the take bloats the page on purpose.
 #   3. **The segment naming.** It records with `segment=`, which no other take
 #      here does, so `evidence/<segment>.seg.beat-NN.json` is exercised rather
 #      than merely designed (issue #22).
+#
+# The segment is still called "shapes" after the leak shapes it was written
+# for (#138). The name is load-bearing only as a path component.
 EVIDENCE_SEGMENT = "shapes"
 # What the evidence take grades, after #150 removed everything about masking.
 #
@@ -1258,9 +1237,12 @@ EVIDENCE_SEGMENT = "shapes"
 EVIDENCE_RENDERED_TEXT = "nothing rendered here"
 # The same string, asserted in the *markup* of the element that renders it.
 EVIDENCE_ATTR_RENDERED = "nothing rendered here"
-# An ARIA tree under this is not a page. The fixture's evidence view is several
-# thousand characters; this is a floor on "something was captured", not a bar
-# on the fixture's size.
+# An ARIA tree under this is not a page. The fixture's evidence view measures
+# 1,463 characters on the control beat; this is a floor on "something was
+# captured", not a bar on the fixture's size. The margin narrowed when #145
+# took the leak-shape panel out of that view (it was ~2.3 kB), which is worth
+# knowing before anything else is deleted from the fixture — but 400 is still
+# well clear of what a *blank* capture produces, which is what it grades.
 EVIDENCE_MIN_ARIA_CHARS = 400
 # The element whose attributes carry strings it never renders.
 EVIDENCE_ATTR_TARGET = "#ev-spot-attrs"
@@ -1306,60 +1288,6 @@ EVIDENCE_BLOAT_JS = """(n) => {
   }
   document.body.appendChild(box);
 }""".replace("__ID__", EVIDENCE_BLOAT_ID)
-
-
-# The recorder's narration defaults, written out by hand so this file computes
-# the cache path the way core.py does rather than by asking core.py. If either
-# default changes, the "the innocent line really was cached" assertion below
-# fails — which is the point: that assertion is what makes the absence of the
-# leaking line's entry mean something.
-TTS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
-TTS_MODEL_ID = "eleven_multilingual_v2"
-
-# Sharpness, as mean absolute difference between neighbouring pixels of a
-# crop. Text has hard glyph edges and scores tens; a gaussian blur is exactly
-# the operation that removes them.
-#
-# **The crop is normalised to a fixed text height first**, and that is the
-# whole reason this number means "legible" rather than "small". Sharpness is
-# scale-dependent: the bigger the text, the fewer edges per pixel, so a sharp
-# 44 px key scores *lower* than a sharp 15 px one. Measured on this fixture
-# with a constant 8 px blur and only the font size varied:
-#
-#   font    control   blurred   ratio    legible to a human?
-#   15px      37.7      1.0      2.7%    no
-#   40px      16.4      1.6     10.0%    borderline
-#   52px      12.3      1.6     13.4%    YES
-#   68px       9.4      1.7     17.7%    YES
-#
-# The denominator collapses while the numerator stays flat, so a raw ratio
-# passes text anyone can read. Scaling every crop to the same text height
-# before measuring removes that: a blur that is proportional to the text
-# survives the rescale as a blur, and a constant 8 px blur on 44 px text
-# rescales into a ~3 px blur on 15 px text, which is legible and scores like
-# it. The measurement then tracks legibility instead of geometry.
-#
-# Both bars are needed and neither alone is enough:
-#
-#   * MIN_CONTROL_EDGE — the unredacted control key must be legibly sharp in
-#     the same frame. Without it, a black video, a blank page, or a mask that
-#     blurred everything all pass the ratio trivially.
-#   * MAX_REDACTED_EDGE_RATIO — the redacted key, as a fraction of that
-#     control, both normalised. Self-calibrating: a fraction of a reference
-#     measured off the same frame needs no absolute threshold tied to CI font
-#     rendering.
-#
-# Calibration numbers live in tests/README.md, measured across both font sizes
-# and against the injected faults.
-NORMALISED_TEXT_H = 22
-MIN_CONTROL_EDGE = {"still": 8.0, "video": 6.0}
-
-# How many of the redaction take's review frames have to show a legible
-# control before "the key is blurred in all of them" means anything. The take
-# opens on about:blank, raises the paint gate on purpose, and navigates once,
-# so a handful of its ~31 frames legitimately show nothing; a mask that blanked
-# the recording would show nothing in every one of them.
-MIN_GRADED_REVIEW_FRAMES = 10
 
 
 class _StoryboardFailed(RuntimeError):
@@ -2806,36 +2734,6 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
             max(2, int(box["height"] * scale_y)),
         )
     return EntropyTake(b.problems, out_dir, clock, still_rect, video_rect, spin_rect)
-
-
-# -- redaction take ----------------------------------------------------------
-
-# The tightest box around an element's rendered text, in page coordinates.
-# The element's own box is mostly empty background (these are display:block),
-# and empty background has no edges either way — measuring it would dilute the
-# sharp control and the blurred key by the same large factor and cost the
-# measurement most of its margin. Falls back to the element box for an <input>,
-# whose value is not in a text node a Range can select.
-_TEXT_RECT_JS = """(el) => {
-  if (!el) return null;
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  let box = range.getBoundingClientRect();
-  if (box && box.width >= 4 && box.height >= 4)
-    return [box.x, box.y, box.width, box.height];
-  // An <input>: its value is not in a text node a Range can select, so fall
-  // back to the element box minus its border and padding. The border is a
-  // hard edge that survives being blurred with the text behind it, and
-  // including it measures the chrome instead of the secret.
-  const cs = getComputedStyle(el);
-  const inset = (a, b) => parseFloat(cs[a] || 0) + parseFloat(cs[b] || 0) + 1;
-  box = el.getBoundingClientRect();
-  const l = inset('borderLeftWidth', 'paddingLeft');
-  const t = inset('borderTopWidth', 'paddingTop');
-  const r = inset('borderRightWidth', 'paddingRight');
-  const b = inset('borderBottomWidth', 'paddingBottom');
-  return [box.x + l, box.y + t, box.width - l - r, box.height - t - b];
-}"""
 
 
 # -- assertions --------------------------------------------------------------

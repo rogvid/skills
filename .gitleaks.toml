@@ -1,6 +1,6 @@
 # gitleaks configuration.
 #
-# The default ruleset, plus one narrowly-scoped allowlist. Nothing else is
+# The default ruleset, plus one narrowly-scoped path allowlist. Nothing else is
 # relaxed: if a scan trips on something new, fix the leak, do not widen this.
 
 [extend]
@@ -8,148 +8,41 @@ useDefault = true
 
 [allowlist]
 description = """
-Two narrow exemptions.
+One exemption, and it is not about secrets.
 
-paths: skills/demo-video/helpers/assets/ holds vendored xterm.js. A full-history
-scan reports two generic-api-key hits in it — both false positives in minified
+skills/demo-video/helpers/assets/ holds vendored xterm.js. A full-history scan
+reports two generic-api-key hits in it — both false positives in minified
 third-party code that this repo does not author and will not edit. PR-event
 scans only see the diff, so the job is green today and would go red the first
 time anyone adds a schedule or workflow_dispatch trigger. ruff.toml excludes the
 same directory for the same reason.
 
-regexes: three deliberately fake API keys the redaction test (issue #4) needs to
-look for. Two are rendered by the fixture behind ?secret=1
-(tests/fixture/index.html) — #api-key, which redaction hides, and
-#api-key-control, identical in shape and never redacted, so the smoke test has a
-sharp-text reference measured off the same frame. The third is typed by
-tests/smoke into #token as a Secret(...), so that the two ways of registering a
-secret can be proved apart. Note this entry is belt-and-braces, not
-load-bearing: the default ruleset does not flag that literal with or without
-this config — every one is spelled as a short all-caps tag followed by nothing
-but zeroes, precisely so no scanner and no human mistakes any of them for a
-credential. They are kept so that a future gitleaks release which does start
-flagging them cannot turn the job red for strings that were never secrets. The
-pattern is anchored to that fixed, closed word list and a run of literal zeroes.
-It masks nothing else.
+## The regex allowlist that used to be here, and why it is gone
 
-(The tags are four letters apart from `BIG` and `BGC`, which are three. An
-earlier version of this note said "four-letter word" as though it were a rule;
-it is not one, and the word list is what does the narrowing.)
+This file carried a second exemption: a closed word list of about thirty
+deliberately fake API keys — `sk-live-FAKE0000…`, `sk-live-CTRL0000…` — rendered
+by tests/fixture/index.html so the redaction tests had something secret-shaped
+to hide, and something secret-shaped to leave sharp as a reference.
 
-The words, and what each fixture element they belong to is for:
+demo-video no longer masks anything (#138). The fixture views that rendered
+those values are gone, the assertions that swept for them are gone, and the
+values themselves are gone: `grep -c 'sk-live-' tests/fixture/index.html` is 0.
+The one evidence-panel element that survives carries `zz-` shaped attribute
+values, which match no rule in the default set and need no exemption.
 
-  FAKE  #api-key           rendered by the app, hidden with redact()
-  CTRL  #api-key-control   never redacted — the sharp reference
-  TYPE  #token             typed as Secret(...), which registers and masks it
-  BIG   #hero-key          the same, at hero font size
-  BGC   #hero-key-control  its control
-  TEXT  #alt-key           registered through a `text=` selector
-  XPTH  #xp-key            registered through an `xpath=` selector
-  SHDW  #sd-key            inside an open shadow root
-  SHTY  #sd-token          typed into the field inside that root
-  IFRM  #if-key            inside an iframe
-  PSEU  #a1-key            rendered by a ::after pseudo-element at 48px
-  TFRM  #a2-key            a descendant scaled 4x by transform
-  ZOOM  #a3-key            a descendant at zoom: 4
-  SVGT  #a4-key            SVG <text> scaled by its viewBox
-  DEEP  #a5-key            two open shadow roots below the redacted wrapper
-  CLSD  #sd-closed-key     inside a *closed* one, which nothing can mask —
-                           the take that is told to redact it must fail
-  STMP  terminal_close()   a stamp holding a secret, which must be refused,
-                           and a shot() name that must be scrubbed
-  TKCT  #token-control     a field's control — same chrome, never redacted
-  SDCT  #sd-token-control  the same, inside the shadow root
-  LATE  a caption          set before the value in it was registered
+Note the entry was documented as belt-and-braces rather than load-bearing even
+while the fixture did render those values — the default ruleset flagged none of
+them, every one being a short all-caps tag followed by nothing but zeroes. It
+was kept against a future gitleaks release that might start flagging them. With
+no such string left in the tree, there is nothing for that to protect.
 
-...and the ?evidence=1 panel (issue #9), whose shapes leak into a *text* dump
-of the page rather than into a picture of it:
+## Why the job itself stays
 
-  WSPC  #ev-ws-key         indented on its own line in hand-written markup
-  BLED  #ev-bleed-key      in a card whose label also renders outside it
-  CHLD  #ev-child-key      split into text nodes that are ordinary on their own
-  LBLD  #ev-label-src      an accessible name sourced from outside the subtree
-  SLOT  #ev-slot-light     light DOM slotted into a redacted shadow host
-  VALU  #ev-value-key      an input value that lives on the property
-  TICK  #ev-tick-key       rewritten every 5 ms with a value nothing has seen
-  ATTR  #ev-spot-attrs     a data-* attribute the page never renders
-  JSON  #ev-spot-attrs     the same, inside a JSON blob in another attribute
-
-...and two that never render at all — they exist only inside tests/smoke, one
-per assertion about how the writer handles a value it was told about:
-
-  STAL  a planted file      a previous take's evidence, which a re-record into
-                            the same folder has to delete
-  CUTT  a padded list item  positioned so the markup cap cuts through it, which
-                            is the only place "mask, then cap" is observable.
-                            It is the one with more than sixteen zeroes — that
-                            length is what makes the straddle arithmetic land,
-                            hence the wider run below
-
-...and four more from the second review round, each a channel the recorder was
-comparing a registered value against a *transformation* of:
-
-  HATT  #ev-attr-card      mirrored into title/data-value/aria-label and an
-                           input value on siblings nothing redacts
-  VEIL  #ev-veil-card      mirrored into elements CSS hides four different ways
-                           (**not** the terminal family's HIDE below — the two
-                           were the same tag for one rebase, and `sk-live-HIDE`
-                           with eight zeroes is a *prefix* of the terminal
-                           one's sixteen, so each take's byte sweep could have
-                           matched the other's literal)
-  AMPS  #ev-spot-amp       contains an `&`, which outerHTML writes `&amp;`
-
-The wrap shape in `terminal-wrap/` is `zz-wrap-` + zeroes and gets **no**
-allowlist entry, for the same reason the terminal family below gets none: it
-matches no rule in the default set, and it cannot be `sk-live-` shaped because
-the stream scrubber's shape net would mask it before it ever reached the screen
-— which is the whole thing that take is trying to put there.
-
-`AMPS` is the one entry that is not "tag then zeroes": it is
-`sk-live-AMPS0000&sig=0000000000`, and the `&sig=` in the middle is the entire
-point of the shape. It is listed as its own alternative rather than by
-loosening the pattern, so the closed word list still does the narrowing.
-
-The word list is what keeps this narrow, not the run length: every literal is a
-short all-caps tag from that list followed by zeroes, and lengthening the run
-admits no string the word list did not already admit.
-
-The terminal half of redaction (issue #5) adds a family of its own, and they
-are not all `sk-live-` shaped because the shapes themselves are what is being
-tested. **No allowlist entry was added for any of them, and none is needed** —
-the `regexes` list below covers the web literals only. They are described here
-because this file's comments are the audit trail for every fake credential in
-the repo, and a value nobody wrote down is a value the next person has to
-re-derive:
-
-  PTYK  sk-live-…   registered, printed by a command under a PTY
-  ANSI  sk-live-…   the same, printed with a colour escape inside it
-  HIDE  sk-live-…   the same, cut by a cursor-hide escape
-  OSCT  sk-live-…   the same, cut by a window-title escape
-  PAUS  sk-live-…   the same shape, paused mid-value inside the hold window
-  SHAP  ghp_…       registered by nobody — the shape net is all that hides it
-  STRM  ghp_…       the same, written one character at a time
-  ANCH  ghp_…       the same, paused after its first character
-  SLOW  ghp_…       the same, paused *past* the hold window — the one value in
-                    the take that is supposed to render in the clear, because
-                    it grades a documented limit
-  CURS  sk-live-…   written at two cursor positions, which must kill the take
-  KEYD  sk-live-…   spelled out through key(), which must be refused
-  AKIA…             an AWS-shaped id nobody registered
-  eyJ….eyJ….        a JWT-shaped token nobody registered
-  SEND  pw-live-…   sent as Secret(...); deliberately matches no shape, so
-                    that what masks it can only be the registration
-  TCTL  zz-live-…   never registered and matching no shape, on purpose: it is
-                    the legible reference every masked row is measured against
-
-Same convention as above — a four-letter word and a run of zeroes — and the
-same reasoning: the default ruleset flags none of them. The GitHub rule wants
-exactly 36 characters after `ghp_` and these have 24; the AWS rule wants
-exactly 16 after `AKIA` and this has 24; the JWT rule wants 17 or more in each
-of the first two segments and needs the second to begin `ey`, and this one has
-neither. Verified by running gitleaks over the whole tree, not assumed.
+The scan guards against a real credential being committed to this repository by
+accident. That is unrelated to what #138 removed, which was demo-video's ability
+to hide a secret *in a recording*. Conflating the two would be exactly the
+confusion the boundary section in skills/demo-video/SKILL.md exists to prevent:
+the recorder does not defend against a secret reaching the screen, and this job
+never had anything to do with the screen.
 """
 paths = ['''^skills/demo-video/helpers/assets/''']
-regexes = [
-  '''sk-live-(FAKE|CTRL|TYPE|BIG|BGC|SHDW|SHTY|IFRM|PSEU|TFRM|ZOOM|SVGT|DEEP|CLSD|STMP|LATE|TKCT|SDCT|WSPC|BLED|CHLD|LBLD|SLOT|VALU|TICK|ATTR|JSON|STAL|CUTT|HATT|VEIL)0{4,24}''',
-  '''sk-live-AMPS0000&sig=0000000000''',
-]

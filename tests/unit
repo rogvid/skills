@@ -11,11 +11,11 @@
 
 **`dependencies = []` is the point of this file, not an accident.** Everything
 tested here — the coverage report, the timeline's two renderings, the content
-and opening measurements, the merge a stitch performs, the two secret types —
-is a function of documents and values. None of it drives a browser. Until
-issue #139 it was nonetheless unreachable without one, because `core` imported
-Playwright at module scope and `__init__` imported both recorders eagerly, so
-the recorder's only check was `tests/smoke`: 12,369 lines, Chromium and ffmpeg
+and opening measurements, the merge a stitch performs — is a function of
+documents and values. None of it drives a browser. Until issue #139 it was
+nonetheless unreachable without one, because `core` imported Playwright at
+module scope and `__init__` imported both recorders eagerly, so the recorder's
+only check was `tests/smoke`: 12,369 lines at the time, Chromium and ffmpeg
 required, ten minutes, one suite at a time behind an exclusive `flock`.
 
 That cost is what issue #136 measures, and it is why the fault-injection rule
@@ -654,6 +654,71 @@ class SkillDocs(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# tests/smoke carries nothing it does not read (issue #156)
+# --------------------------------------------------------------------------
+#
+# When #138 deleted the masking surface it left seven constants and a block of
+# JavaScript behind in `tests/smoke` — `MIN_CONTROL_EDGE`, `NORMALISED_TEXT_H`,
+# `MIN_GRADED_REVIEW_FRAMES`, `TERMINAL_WRAP_MARKER`, `TERMINAL_WRAP_HEAD`,
+# `TTS_VOICE_ID`, `TTS_MODEL_ID`, `_TEXT_RECT_JS` — each with the prose that
+# justified it, and each describing machinery that no longer exists. Nothing
+# noticed for three merged pull requests: a constant nobody reads breaks
+# nothing.
+#
+# It is worth an assertion rather than a habit because the residue is the thing
+# a reader trusts most: `MIN_CONTROL_EDGE`'s comment stated a bar the suite was
+# no longer applying, in a file whose whole job is to state what is graded.
+#
+# The limit of the check, stated because it is the kind that quietly narrows: a
+# name referenced *only* from inside a string — a `getattr`, a config key — reads
+# as dead here. There are none today. If one appears, the fix is to read it in
+# code or to say in a comment why it cannot be.
+
+SMOKE = Path(os.environ.get("UNIT_SMOKE", REPO / "tests" / "smoke"))
+
+# Below this, `tests/smoke` was not parsed — an empty or truncated file makes
+# "nothing is unread" hold trivially, the catalogue's vacuous sweep. It is 271
+# today; this is a floor on "a suite was read", not a bar on its size.
+SMOKE_DEFINITION_FLOOR = 200
+
+
+class SmokeResidue(unittest.TestCase):
+    def test_no_module_level_definition_in_tests_smoke_goes_unread(self):
+        import ast
+        from collections import Counter
+
+        tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
+        defined: dict[str, int] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        defined[target.id] = node.lineno
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                defined[node.target.id] = node.lineno
+            elif isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                defined[node.name] = node.lineno
+
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(len(defined), SMOKE_DEFINITION_FLOOR)
+
+        read = Counter(
+            n.id
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        )
+        dead = sorted((line, name) for name, line in defined.items() if not read[name])
+        self.assertEqual(
+            dead,
+            [],
+            f"{len(dead)} definition(s) in {SMOKE.name} that nothing reads: "
+            + ", ".join(f"{name} (line {line})" for line, name in dead),
+        )
+
+
+# --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
 
@@ -820,6 +885,17 @@ INJECTIONS = [
         "| reference/narration.md | When",
         ["SkillDocs.test_every_reference_file_is_linked_from_skill_md"],
     ),
+    (
+        "a deletion leaves a constant in tests/smoke that nothing reads",
+        "tests/smoke",
+        # Modelled on what #138 actually left behind: a name defined beside a
+        # live one, with prose that reads as though it still grades something.
+        'TERMINAL_FAILING_COMMAND = "(exit 3)"',
+        'TERMINAL_FAILING_COMMAND = "(exit 3)"\n'
+        "# How sharp the control key has to be for the ratio to mean anything.\n"
+        "MIN_CONTROL_EDGE = 8.0",
+        ["SmokeResidue.test_no_module_level_definition_in_tests_smoke_goes_unread"],
+    ),
 ]
 
 
@@ -830,15 +906,20 @@ def fault_inject() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             # The whole skill, not just the package: two injections break
             # SKILL.md, and the documentation assertions are as much a check
-            # as the behavioural ones.
+            # as the behavioural ones. `tests/smoke` is copied alongside it
+            # because one assertion reads that file rather than the package —
+            # residue in the *harness* is the defect it grades.
             skill = Path(tmp) / "demo-video"
             shutil.copytree(REPO / "skills" / "demo-video", skill)
             root = skill / "helpers"
-            target = (
-                skill / module
-                if module.endswith(".md")
-                else root / "demo_recording" / module
-            )
+            smoke = Path(tmp) / "smoke"
+            shutil.copy(REPO / "tests" / "smoke", smoke)
+            if module == "tests/smoke":
+                target = smoke
+            elif module.endswith(".md"):
+                target = skill / module
+            else:
+                target = root / "demo_recording" / module
             text = target.read_text(encoding="utf-8")
             hits = text.count(old)
             if hits != 1:
@@ -860,6 +941,7 @@ def fault_inject() -> int:
                     **os.environ,
                     "UNIT_HELPERS": str(root),
                     "UNIT_SKILL_DIR": str(skill),
+                    "UNIT_SMOKE": str(smoke),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}
@@ -898,10 +980,10 @@ def fault_inject() -> int:
 # Stated plainly rather than implied by silence:
 #
 # - **Anything that drives a browser or a PTY.** `_DemoBase`, `Recorder` and
-#   `TerminalRecorder` — every storyboard verb, the redaction masking and its
-#   verification, per-beat evidence harvesting, the failure dump, narration
-#   pacing and the ffmpeg composite — are `tests/smoke`'s, and this suite does
-#   not reduce what smoke has to run. It runs the half that never needed one.
+#   `TerminalRecorder` — every storyboard verb, per-beat evidence capture, the
+#   failure dump, narration pacing and the ffmpeg composite — are
+#   `tests/smoke`'s, and this suite does not reduce what smoke has to run. It
+#   runs the half that never needed one.
 # - **Anything measured off real frames.** `content_report`'s ffmpeg sampling,
 #   `opening_gap`, `_luma_stddev` and `_moved_pixels` need a video to be true
 #   about. What is graded here is the logic *around* them: the warning

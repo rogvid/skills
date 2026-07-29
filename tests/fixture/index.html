@@ -88,40 +88,6 @@
   .pill.hold { background: rgba(180, 121, 26, 0.14); color: var(--warn); }
   #empty { padding: 26px 20px; color: var(--ink-soft); }
 
-  /* Secret panel (only with ?secret=1) -------------------------------- */
-  /* Pinned, not in the flow. The redaction test measures pixels inside the
-     two keys below, so their rect has to be the same in every frame of a
-     take: in the flow this panel sits under the table, below the fold, and
-     anything that scrolls (Playwright scrolls a field into view before
-     typing into it) would move the measured region mid-recording — which
-     reads as a leak or hides one, depending on what slid into the crop. */
-  /* Kept clear of the bottom 160px, where the recorder burns its caption bar.
-     A measured element behind that bar is measured *through* sharp white
-     caption text, which reads as an unmasked secret; the test asserts the
-     clearance too, so this cannot regress silently. */
-  #secret-panel {
-    position: fixed; top: 10px; right: 20px; width: 620px; z-index: 5;
-    padding: 12px 16px; background: var(--surface);
-    border: 1px solid var(--line); border-radius: var(--radius);
-    box-shadow: 0 8px 24px rgba(28, 26, 23, 0.10);
-  }
-  #secret-panel .label {
-    font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--ink-soft); margin-top: 8px;
-  }
-  #secret-panel .label:first-child { margin-top: 0; }
-  /* One rule for both keys: the control is only a useful reference for the
-     redacted one if they render identically. */
-  /* One rule for every body-size key: a control is only a useful reference
-     for a redacted element if the two render identically. #sd-key lives
-     inside a shadow root and #if-key inside an iframe — all measured against
-     the same control. */
-  #api-key, #api-key-control {
-    display: block; margin-top: 4px;
-    font: 15px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    color: var(--ink);
-  }
-
   /* Entropy panel (only with ?entropy=1) ------------------------------ */
   /* The two things a re-recording is allowed to differ by, made large and
      high-contrast on purpose: a wall clock and a running animation. With
@@ -146,85 +112,6 @@
        angle and prove nothing about animation phase. */
     clip-path: polygon(50% 0, 100% 100%, 50% 72%, 0 100%);
     animation: entropy-spin 1.7s linear infinite;
-  }
-  /* A field is not measurable against a bare <code>. Its border blurs along
-     with its contents and smears a gradient across the crop, and its box is
-     wider than its text; both push the number up for reasons that have
-     nothing to do with the secret (measured: 2.5-3.6 against 0.8 for the same
-     value as text). So each secret field gets a control field beside it —
-     same border, same width, same padding, same font — and is graded against
-     that. Side by side, because the panel has to stay clear of the caption
-     bar and a stacked row would not fit. */
-  .field-row { display: flex; gap: 10px; margin-top: 4px; }
-  /* An iframe: same-origin via srcdoc, so `frame.evaluate` reaches it while
-     `page.locator` does not descend into it. Counting matches on the page
-     alone reported zero for an element that was in fact masked, and failed
-     the take for a leak that did not exist. */
-  /* Borderless on purpose. The redaction test crops the key inside this
-     frame, and while the frame is reloading — which it does when the take
-     clicks the reload link — it is empty; a border would then be the only
-     hard edge in the crop, and a hard edge is exactly what a measurement of
-     sharpness is looking for. It read 18% of control against a 7% bar, and
-     the "leak" was a 1px line. */
-  #if-frame {
-    display: block; margin-top: 4px; width: 265px; height: 26px;
-    border: 0; background: #fff;
-  }
-  #token, #token-control {
-    width: 265px; box-sizing: border-box; padding: 5px 9px;
-    font: 15px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    color: var(--ink);
-    border: 1px solid var(--line); border-radius: 8px; background: #fff;
-  }
-  /* The large pair, and the reason #hero-card exists: the test redacts the
-     *wrapper*, whose own font-size is 12px, while the value inside it is
-     44px. A recorder that scales its radius from the element the selector
-     matched blurs 44px glyphs by 8px and leaves them readable. Redacting a
-     container is the natural call — SKILL.md's own example redacts a class —
-     so this is the shape that has to work, not an edge case. */
-  #hero-card { font-size: 12px; }
-
-  /* The sufficiency axis: one shape per way CSS can render text larger than
-     its font-size says. Every one of these was a live leak against a mask
-     whose radius came from getComputedStyle(el).fontSize — which is why the
-     radius now comes from rendered geometry, and why the cover is sized from
-     client rects rather than from any text metric at all.
-
-     Their own panel, on the other side of the viewport: they are deliberately
-     large, and the redaction take needs every measured element clear of the
-     caption bar along the bottom. */
-  #shape-panel {
-    position: fixed; top: 10px; left: 20px; width: 520px; z-index: 5;
-    padding: 12px 16px; background: var(--surface);
-    border: 1px solid var(--line); border-radius: var(--radius);
-    box-shadow: 0 8px 24px rgba(28, 26, 23, 0.10);
-  }
-  #shape-panel .label {
-    font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--ink-soft); margin-top: 8px;
-  }
-  #shape-panel .label:first-child { margin-top: 0; }
-  #a1-card, #a2-card, #a3-card, #a4-card, #a5-card { font-size: 12px; }
-  #a1-card .val::after {
-    content: attr(data-secret);
-    font: 48px/1.05 ui-monospace, monospace; color: var(--ink);
-  }
-  #a1-card { height: 52px; }
-  #a2-card { height: 52px; }
-  #a2-card .val {
-    display: inline-block; transform: scale(4); transform-origin: 0 0;
-    font: 12px/1.15 ui-monospace, monospace; color: var(--ink);
-  }
-  #a3-card .val {
-    zoom: 4; font: 12px/1.15 ui-monospace, monospace; color: var(--ink);
-  }
-  #a4-card svg { display: block; width: 460px; height: 52px; }
-  #a4-card text { font: 13px/1 ui-monospace, monospace; fill: var(--ink); }
-  #hero-card .caption { color: var(--ink-soft); }
-  #hero-key, #hero-key-control {
-    display: block; margin-top: 4px;
-    font: 44px/1.05 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    color: var(--ink); letter-spacing: -0.01em;
   }
 </style>
 </head>
@@ -290,17 +177,13 @@
  *   ?console-error=1  page logs a console error and throws on load (issue #3)
  *   ?bad-fetch=<url>  page fetches a missing path and <url>, both on load,
  *                     so the failures land during the recorder's goto (#3)
- *   ?secret=1         renders #api-key holding an obviously-fake secret (issue #4)
  *   ?entropy=1        renders four clock readings (Date, Intl, the Date
  *                     constructor, and one posted back by a Worker) and a
  *                     spinning shape — what determinism pins down (issue #10)
- *   ?evidence=1       renders the shapes that leak into a *text* dump of the
- *                     page but not into a picture of it: whitespace-padded
- *                     markup, an accessible name sourced from outside the
- *                     subtree, slotted light DOM, a property-only input
- *                     value, a value rewritten every 5 ms, a value split
- *                     across elements, and value-bearing attributes nothing
- *                     renders (issue #9)
+ *   ?evidence=1       renders one element carrying value-bearing attributes
+ *                     the page never paints, beside text it does — what a
+ *                     *text* account of a page can hold that a picture of it
+ *                     cannot (issue #9)
  */
 
 // Three fixed snapshots. #refresh cycles through them in order, so a
@@ -402,224 +285,6 @@ render();
 
 var params = new URLSearchParams(window.location.search);
 
-if (params.has("secret")) {
-  var panel = document.createElement("div");
-  panel.id = "secret-panel";
-  var label = document.createElement("div");
-  label.className = "label";
-  label.textContent = "Integration key";
-  var code = document.createElement("code");
-  code.id = "api-key";
-  // NOT a credential. A fixture literal, spelled FAKE and all zeroes on
-  // purpose so both gitleaks and a human read it as scenery. Used by the
-  // redaction work (issue #4) to prove a secret never reaches a frame.
-  code.textContent = "sk-live-FAKE0000000000000000";
-  panel.appendChild(label);
-  panel.appendChild(code);
-  // The control. Same font, same size, same length, same shape — and
-  // deliberately NOT registered for redaction, so the smoke test has a
-  // sharp-text reference measured off the very same frame as the blurred
-  // one. That is what makes the blur assertion self-calibrating (no absolute
-  // sharpness threshold tied to CI font rendering) and what stops a recorder
-  // that blurs the entire page from passing: the control must stay sharp.
-  var controlLabel = document.createElement("div");
-  controlLabel.className = "label";
-  controlLabel.textContent = "Control key (never redacted)";
-  var control = document.createElement("code");
-  control.id = "api-key-control";
-  control.textContent = "sk-live-CTRL0000000000000000";
-  panel.appendChild(controlLabel);
-  panel.appendChild(control);
-  // An empty field for a secret the demo *types* rather than one the app
-  // renders — the type_into(selector, Secret(...)) half of issue #4.
-  var tokenLabel = document.createElement("div");
-  tokenLabel.className = "label";
-  tokenLabel.textContent = "Paste a token / control";
-  var tokenRow = document.createElement("div");
-  tokenRow.className = "field-row";
-  var token = document.createElement("input");
-  token.id = "token";
-  token.type = "text";
-  token.autocomplete = "off";
-  token.placeholder = "sk-live-…";
-  // The control field: identical chrome, never redacted. The test types into
-  // it too, rather than pre-filling it, so the encoder sees both fields
-  // change at the same moment — a freshly re-coded region carries ringing a
-  // static one does not, which on its own measured 2.5 against 0.8.
-  var tokenControl = document.createElement("input");
-  tokenControl.id = "token-control";
-  tokenControl.type = "text";
-  tokenControl.autocomplete = "off";
-  tokenControl.placeholder = "sk-live-…";
-  tokenRow.appendChild(token);
-  tokenRow.appendChild(tokenControl);
-  // A second pair at hero size. A blur radius calibrated for 15px text leaves
-  // this readable, so the recorder scales its radius and the test measures
-  // both sizes (issue #4 review).
-  var heroCard = document.createElement("div");
-  heroCard.id = "hero-card";
-  var heroLabel = document.createElement("div");
-  heroLabel.className = "label";
-  heroLabel.textContent = "Hero key (wrapper is redacted, not the value)";
-  var hero = document.createElement("code");
-  hero.id = "hero-key";
-  hero.textContent = "sk-live-BIG000000000";
-  var heroControlLabel = document.createElement("div");
-  heroControlLabel.className = "label";
-  heroControlLabel.textContent = "Hero control (never redacted)";
-  var heroControl = document.createElement("code");
-  heroControl.id = "hero-key-control";
-  heroControl.textContent = "sk-live-BGC000000000";
-  heroCard.appendChild(heroLabel);
-  heroCard.appendChild(hero);
-  panel.appendChild(heroCard);
-  panel.appendChild(heroControlLabel);
-  panel.appendChild(heroControl);
-  // An iframe holding a key, reached by a plain CSS selector. srcdoc keeps
-  // it same-origin and dependency-free; the point is the frame boundary,
-  // which page.locator() does not cross even when frame.evaluate() does.
-  var ifLabel = document.createElement("div");
-  ifLabel.className = "label";
-  ifLabel.textContent = "Key inside an iframe";
-  var iframe = document.createElement("iframe");
-  iframe.id = "if-frame";
-  iframe.setAttribute(
-    "srcdoc",
-    '<body style="margin:0;padding:3px 8px;font:15px/1.4 ui-monospace,monospace">' +
-    '<code id="if-key">sk-live-IFRM00000000</code></body>'
-  );
-  panel.appendChild(ifLabel);
-  panel.appendChild(iframe);
-
-  panel.appendChild(tokenLabel);
-  panel.appendChild(tokenRow);
-
-  // -- the sufficiency shapes ----------------------------------------------
-  //
-  // Each is a wrapper with a small font-size, holding a value rendered much
-  // larger by a different mechanism, and each is redacted *by the wrapper* —
-  // which is how a storyboard names a card. A mask that asks the wrapper how
-  // big its text is gets 12px for all five.
-  var shapePanel = document.createElement("div");
-  shapePanel.id = "shape-panel";
-  var shapes = [
-    ["a1", "Pseudo-element (::after, 48px)", function (card, val) {
-      // The value is not in the DOM as text at all: it is generated content.
-      val.setAttribute("data-secret", "sk-live-PSEU0000");
-    }],
-    ["a2", "Descendant transform: scale(4)", function (card, val) {
-      val.textContent = "sk-live-TFRM0000";
-    }],
-    ["a3", "Descendant zoom: 4", function (card, val) {
-      val.textContent = "sk-live-ZOOM0000";
-    }],
-    ["a4", "SVG text scaled by viewBox", function (card, val) {
-      val.innerHTML =
-        '<svg viewBox="0 0 115 15" preserveAspectRatio="xMinYMin meet">' +
-        '<text x="0" y="12">sk-live-SVGT0000</text></svg>';
-    }],
-    ["a5", "Value two shadow roots below the wrapper", function (card, val) {
-      // A host inside the redacted wrapper, whose own shadow root holds
-      // another host, whose shadow root holds the value: the ordinary
-      // composition of "redact a card" and "the value is in a child
-      // component". One level of shadow recursion misses it.
-      var outer = val.attachShadow({ mode: "open" });
-      var inner = document.createElement("div");
-      outer.appendChild(inner);
-      var deep = inner.attachShadow({ mode: "open" });
-      deep.innerHTML =
-        '<code style="font:44px/1.1 ui-monospace,monospace;color:#1c1a17">' +
-        'sk-live-DEEP0000</code>';
-    }],
-  ];
-  shapes.forEach(function (shape) {
-    var id = shape[0], label = shape[1], fill = shape[2];
-    var head = document.createElement("div");
-    head.className = "label";
-    head.textContent = label;
-    var card = document.createElement("div");
-    card.id = id + "-card";
-    var val = document.createElement(id === "a5" ? "div" : "span");
-    val.className = "val";
-    val.id = id + "-key";
-    card.appendChild(val);
-    fill(card, val);
-    shapePanel.appendChild(head);
-    shapePanel.appendChild(card);
-  });
-  document.body.appendChild(shapePanel);
-
-  // A link that navigates the page without the recorder's goto(). Every
-  // navigation raises the first-paint gate, and for a while only goto()
-  // lowered it — so a link click, go_back(), a form submit or location.href
-  // left the rest of the take a blank white window that still reported
-  // success.
-  var again = document.createElement("a");
-  again.id = "reload-link";
-  again.href = window.location.search || "?secret=1";
-  again.textContent = "Reload this view";
-  again.style.cssText =
-    "display:inline-block;margin-top:8px;font-size:12px;color:#1f6feb";
-  panel.appendChild(again);
-
-  // -- shadow DOM ----------------------------------------------------------
-  //
-  // A web component, the way Lit / Stencil / LWC / Shoelace / Ionic build one:
-  // an *open* shadow root holding a key and a field. Playwright's engine sees
-  // straight through the boundary (`page.locator('#sd-key').count()` is 1) and
-  // `document.querySelectorAll('#sd-key').length` is 0, so a mask built on
-  // querySelectorAll silently covers nothing while click() and type_into()
-  // work perfectly — a live credential typed into a clear field on camera.
-  // Styles do not cross the boundary either: a document-level rule computes
-  // to `none` on these elements, only an inline style or a stylesheet placed
-  // *inside* the root reaches them.
-  var host = document.createElement("div");
-  host.id = "sd-host";
-  panel.appendChild(host);
-  var root = host.attachShadow({ mode: "open" });
-  root.innerHTML =
-    '<style>' +
-    '  .label { font-size: 11px; font-weight: 600; letter-spacing: .08em;' +
-    '    text-transform: uppercase; color: #6b6558; margin-top: 8px; }' +
-    '  code, input { display: block; margin-top: 4px;' +
-    '    font: 15px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;' +
-    '    color: #1c1a17; }' +
-    '  input { width: 265px; box-sizing: border-box; padding: 5px 9px;' +
-    '    border: 1px solid #e2ddd3; border-radius: 8px; background: #fff; }' +
-    '  .row { display: flex; gap: 10px; margin-top: 4px; }' +
-    '  .row input { margin-top: 0; }' +
-    '</style>' +
-    '<div class="label">Shadow key</div>' +
-    '<code id="sd-key">sk-live-SHDW00000000</code>' +
-    '<div class="label">Shadow token / control</div>' +
-    '<div class="row">' +
-    '  <input id="sd-token" type="text" autocomplete="off" placeholder="sk-live-…">' +
-    '  <input id="sd-token-control" type="text" autocomplete="off"' +
-    '    placeholder="sk-live-…">' +
-    '</div>';
-
-  // A *closed* root, which nothing can reach: not document.querySelector, not
-  // Playwright's engine, not an injected stylesheet. There is no way to mask
-  // what is in here, so the only honest behaviour is for a take that was told
-  // to redact it to fail loudly instead of recording a clean-looking leak.
-  // Only reached when explicitly asked for, so the normal redaction take does
-  // not have to fail.
-  if (params.get("secret") === "closed") {
-    var closedHost = document.createElement("div");
-    closedHost.id = "sd-closed-host";
-    panel.appendChild(closedHost);
-    var closed = closedHost.attachShadow({ mode: "closed" });
-    closed.innerHTML =
-      '<div style="font-size:11px;font-weight:600;letter-spacing:.08em;' +
-      'text-transform:uppercase;color:#6b6558;margin-top:8px">Closed key</div>' +
-      '<code id="sd-closed-key" style="display:block;margin-top:4px;' +
-      'font:15px/1.4 ui-monospace,monospace;color:#1c1a17">' +
-      'sk-live-CLSD00000000</code>';
-  }
-
-  document.body.appendChild(panel);
-}
-
 if (params.has("bad-fetch")) {
   // Deliberate network breakage for the failed-request detection work
   // (issue #3). Two shapes: a response the server answers with 404, and a
@@ -701,192 +366,34 @@ if (params.has("entropy")) {
   document.querySelector(".page").prepend(entropy);
 }
 
-if (params.has("gate-attack")) {
-  // Two ways an ordinary page defeats a first-paint gate built out of
-  // `html{visibility:hidden}`, both of them things real apps do by accident:
-  //
-  //   1. a descendant declaring `visibility: visible` — Tailwind's `visible`
-  //      utility, a `.modal` rule, an animation end-state — which wins over
-  //      an inherited `hidden` on the root;
-  //   2. a script that removes unknown <style> elements from <head>, or
-  //      re-renders the head wholesale.
-  //
-  // Both run for the first two seconds of the page's life, which is exactly
-  // the window the gate exists to cover.
-  var unhide = document.createElement("style");
-  unhide.textContent =
-    "#secret-panel, #secret-panel * { visibility: visible !important; }";
-  document.head.appendChild(unhide);
-  var attack = setInterval(function () {
-    var gate = document.getElementById("__demo_redact_gate");
-    if (gate) gate.remove();
-    document.querySelectorAll("style").forEach(function (node) {
-      if (node !== unhide && node.textContent.indexOf("visibility") !== -1) {
-        node.remove();
-      }
-    });
-  }, 16);
-  setTimeout(function () { clearInterval(attack); }, 2000);
-}
-
 if (params.has("evidence")) {
-  // Per-beat evidence (issue #9) is a *text* dump of the page, so it leaks in
-  // shapes that no pixel assertion has ever had to care about. Each element
-  // here is one of those shapes, and every one of them reached an evidence
-  // file readable before it existed.
+  // Per-beat evidence (issue #9) is a *text* account of the page, so it can
+  // carry strings that were never on anybody's screen. This view renders one
+  // element of that shape: visible text, plus two attributes holding values
+  // the page never paints — one plain, one a JSON blob, because those reach
+  // the serializer through the same getAttribute() path but read differently
+  // to a human.
   //
-  // Its own hook rather than rows in `?secret=1`, because that panel's exact
-  // rect is what the redaction take measures sharpness over: adding to it
-  // moves the crops and silently regrades the pixel assertions.
+  // The panel used to hold thirty more elements. They were the leak shapes the
+  // masking assertions swept for, and they went with the mask (#142, #144):
+  // 30 of the 31 ids here had no reader left in tests/smoke. What remains is
+  // what `run_evidence` names — this element's markup, and the text it
+  // renders, which is the control proving the absence assertions are not
+  // holding trivially over an empty capture.
   //
-  // The keys are written into the *markup* below rather than assigned from JS
-  // on purpose. `el.textContent = "…"` produces one unpadded text node, which
-  // is precisely the case that does *not* leak — the fixture was passing by
-  // accident until this panel was written the way a human writes HTML.
+  // The values are `zz-` shaped rather than credential-shaped. The assertions
+  // grade the attribute *names*, so the shape is free, and a value that looked
+  // like a key would only earn back a .gitleaks.toml allowlist entry.
   var ev = document.createElement("div");
   ev.id = "ev-panel";
   ev.style.cssText =
     "position:fixed;top:8px;left:8px;width:520px;z-index:5;background:#fff;" +
     "border:1px solid #d8d2c6;border-radius:8px;padding:8px 10px;" +
     "font:12px/1.5 ui-monospace,monospace;color:#1c1a17;";
-  ev.innerHTML = [
-    // L1 — a value on its own line, indented, the way hand-written HTML puts
-    // it. textContent comes back "\n      sk-live-WSPC…\n    " while the ARIA
-    // tree says "sk-live-WSPC…", and a plain str.replace between the two
-    // finds nothing at all.
-    '<div id="ev-ws-card"><span class="lbl">Whitespace key</span>',
-    '  <code id="ev-ws-key">',
-    '    sk-live-WSPC00000000',
-    '  </code>',
-    '</div>',
-    // The mirror defect: a redacted card whose *label* is an ordinary word
-    // that also renders, unredacted, elsewhere on the page. Harvesting every
-    // node of the card registers "Revenue" as a mask unless the harvest knows
-    // what else the page renders.
-    '<div id="ev-bleed-card"><span class="lbl">Revenue</span>',
-    '  <code id="ev-bleed-key">sk-live-BLED00000000</code>',
-    '</div>',
-    // "live" is in here on purpose too: the split key below breaks into the
-    // text nodes "sk-", "live" and "-CHLD…", and a harvest that masked every
-    // one of them would rewrite every other key on the page.
-    '<p id="ev-bleed-outside">Revenue for the quarter was steady, and the ',
-    'feed is live.</p>',
-    // ...and the same defect one level meaner: a key whose own characters are
-    // split into text nodes that are each ordinary strings on their own.
-    '<div id="ev-child-card"><span class="lbl">Split key</span>',
-    '  <code id="ev-child-key">sk-<i>live</i>-CHLD00000000</code>',
-    '</div>',
-    // L2 — the accessible name comes from an element *outside* the redacted
-    // subtree, so no walk of that subtree can find it.
-    // display:none on purpose: aria-labelledby names a hidden element just as
-    // happily as a visible one, so this value is on nobody's screen and in
-    // nobody's frame — and it is still the redacted card's accessible name.
-    '<span id="ev-label-src" style="display:none">sk-live-LBLD00000000</span>',
-    // role= is load-bearing: a plain <div> has no role, so an ARIA snapshot
-    // shows no accessible name for it and the shape would prove nothing. With
-    // a role, the hidden element's text *is* this card's name in the tree.
-    '<div id="ev-labelled-card" role="group" aria-labelledby="ev-label-src">',
-    '  <span class="lbl">Labelled elsewhere</span></div>',
-    // L4 — light DOM slotted into a redacted element that lives *inside* a
-    // shadow root. The redacted element is #ev-slot-inner below, whose own
-    // textContent is empty: the value is a light child of the host, painted
-    // through the <slot>. It is inside the redaction in the flattened tree and
-    // outside it in the DOM, and only one of those is what renders.
-    '<div id="ev-slot-card"><span id="ev-slot-light">',
-    'sk-live-SLOT00000000</span></div>',
-    // An input value that lives on the *property*. Set from JS below, with no
-    // `value` attribute at all, so reading attributes finds nothing.
-    '<div id="ev-value-card"><span class="lbl">Field</span>',
-    '  <input id="ev-value-key" readonly></div>',
-    // L3 — rewritten every 5 ms with a value nothing has seen before, which
-    // is what a countdown, a ticker or a rotating token does.
-    '<div id="ev-tick-card"><span class="lbl">Rotating</span>',
-    '  <code id="ev-tick-key">sk-live-TICK00000000</code></div>',
-    // L5/L6 live in a spotlight target that is deliberately NOT redacted.
-    // Their values are registered as secrets instead, which is the other half
-    // of the contract: register_secret() has to reach markup too.
-    '<div id="ev-spot-split">a token: harbor<b>zenith</b>7725 </div>',
-    '<div id="ev-spot-attrs" data-token="sk-live-ATTR00000000"',
-    '  data-cfg=\'{"key":"sk-live-JSON00000000"}\'>nothing rendered here</div>',
-    // B1a — the value is inside a redacted card AND mirrored into attributes
-    // on siblings that are *not* redacted. The harvest reads those attributes
-    // when deciding what "renders in the clear", so every one of them was
-    // enough to exempt the key from masking everywhere: in all six evidence
-    // files, and — because the storyboard captions it — in timeline.json and
-    // timeline.md as well.
-    //
-    // A copy-to-clipboard button carrying the key it copies is ordinary UI,
-    // which is what makes this the shape a real app hits first. `srcdoc`,
-    // `alt`, `placeholder` and `content` reach the harvest through the
-    // identical getAttribute() path and need no separate element here; the
-    // input below is the one channel that does, because its value lives on the
-    // property and no attribute holds it.
-    '<div id="ev-attr-card"><span class="lbl">Copyable key</span>',
-    '  <code id="ev-attr-key">sk-live-HATT00000000</code>',
-    '</div>',
-    '<button id="ev-attr-title" title="sk-live-HATT00000000">Copy</button>',
-    '<button id="ev-attr-data" data-value="sk-live-HATT00000000">Copy</button>',
-    '<button id="ev-attr-label" aria-label="sk-live-HATT00000000">Copy</button>',
-    '<input id="ev-attr-input" readonly>',
-    // B1b — the same trick with CSS instead of attributes. Every one of these
-    // is reported visible by `checkVisibility()` called with no arguments,
-    // which models `display` and `content-visibility` and nothing else. Only
-    // the `display:none` case above was ever excluded, and that is the one
-    // shape this fixture happened to use.
-    '<div id="ev-veil-card"><span class="lbl">Mirrored key</span>',
-    '  <code id="ev-veil-key">sk-live-VEIL00000000</code>',
-    '</div>',
-    // A screen-reader-only clip: 1x1 with the content clipped away. In the
-    // accessibility tree, on nobody\'s screen.
-    '<span id="ev-veil-sr" style="position:absolute;width:1px;height:1px;',
-    'overflow:hidden;clip-path:inset(50%);white-space:nowrap">',
-    'sk-live-VEIL00000000</span>',
-    '<span id="ev-veil-opacity" style="opacity:0">sk-live-VEIL00000000</span>',
-    '<span id="ev-veil-vis" style="visibility:hidden">sk-live-VEIL00000000</span>',
-    '<span id="ev-veil-off" style="position:absolute;left:-9999px">',
-    'sk-live-VEIL00000000</span>',
-    // B3 — a registered secret containing an ampersand, which `outerHTML`
-    // writes as `&amp;`. The mask searches for the raw literal and misses; the
-    // withhold fallback strips tags but not entities and misses; the
-    // end-of-document backstop is a raw substring test and misses. The file
-    // came out with `aria` saying `token=[redacted]` and `html` carrying the
-    // value in full, two lines apart. `&` in a credential is ordinary — a
-    // presigned URL, a SAS token.
-    '<div id="ev-spot-amp">token=sk-live-AMPS0000&amp;sig=0000000000</div>'
-  ].join("\n");
+  ev.innerHTML =
+    '<div id="ev-spot-attrs" data-token="zz-attr-00000000"\n' +
+    '  data-cfg=\'{"key":"zz-json-00000000"}\'>nothing rendered here</div>';
   document.body.appendChild(ev);
-
-  // The slot host: a shadow root whose <slot> renders the light child above,
-  // wrapped in the element the take actually redacts.
-  var slotHost = document.getElementById("ev-slot-card");
-  var slotRoot = slotHost.attachShadow({ mode: "open" });
-  slotRoot.innerHTML =
-    '<span class="lbl">Slotted</span> ' +
-    '<span id="ev-slot-inner"><slot></slot></span>';
-
-  // Property, not attribute: `getAttribute("value")` returns null for this.
-  document.getElementById("ev-value-key").value = "sk-live-VALU00000000";
-
-  // ...and the same, on an input that is *outside* every redacted card. The
-  // harvest used to read `node.value` when deciding what renders in the clear,
-  // so this one field exempted the key in #ev-attr-card from masking. An
-  // input's value is not painted in the general case at all — a password field
-  // renders dots — and this is the only channel in that family that no
-  // attribute carries.
-  document.getElementById("ev-attr-input").value = "sk-live-HATT00000000";
-
-  // A fresh value every 5 ms. Deliberately faster than the ~15 ms a capture
-  // spends reading the page (harvest, ARIA snapshot, harvest): at 25 ms the
-  // three round trips often fit between two ticks, and the recorder's refusal
-  // to straddle a repaint went untested about half the time.
-  var tick = 0;
-  setInterval(function () {
-    var el = document.getElementById("ev-tick-key");
-    if (el) {
-      tick += 1;
-      el.textContent = "sk-live-TICK" + String(tick).padStart(8, "0");
-    }
-  }, 5);
 }
 
 if (params.has("console-error")) {

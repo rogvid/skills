@@ -156,9 +156,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Config is .gitleaks.toml at the repo root: the default ruleset plus two
-      # narrow allowlist entries (vendored xterm.js, and the fixture's fake
-      # API key).
+      # Config is .gitleaks.toml at the repo root: the default ruleset plus one
+      # narrow path allowlist for vendored xterm.js.
+      #
+      # This job stays after #138, deliberately. #138 removed demo-video's
+      # ability to hide a secret *in a recording*; this scan is about a real
+      # credential reaching *the repository*, which is a different thing and
+      # costs ten seconds. The fixture's fake keys are gone, so the regex
+      # allowlist that existed for them is gone too — see .gitleaks.toml.
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

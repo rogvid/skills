@@ -74,8 +74,8 @@ tests/smoke --keep                # keep the temp dir even when it passes
 **One suite at a time, per machine.** The script takes an exclusive `flock` on
 `$TMPDIR/demo-video-smoke.lock` and refuses to start while another run holds
 it. This is not tidiness: two suites share the CPU and the software encoder,
-and the bars that measure *time* — `REDACT_DURATION_S`, `MAX_BLANK_RUN_S` — go
-red on a recorder that is working perfectly. Two such false failures cost an
+and the bars that measure *time* — `MAX_BLANK_RUN_S` and the duration ranges —
+go red on a recorder that is working perfectly. Two such false failures cost an
 afternoon, and worse, they made a genuine intermittent bug undiagnosable
 because every red run had a second, more plausible explanation.
 [#78](https://github.com/rogvid/skills/issues/78) is about the bars themselves
@@ -771,7 +771,10 @@ So the assertions were **written rather than trimmed**, and there are three:
   holds trivially in an empty file. The control asserts that the fixture's own
   rendered string is in the ARIA tree, over a floor of 400 characters, before
   anything else is claimed. It is the catalogue's vacuous sweep, and it is the
-  one assertion that fires if the capture wrote nothing.
+  one assertion that fires if the capture wrote nothing. The control beat
+  measures 1,463 characters since #145 took the leak-shape panel out of that
+  view — a narrower margin than the ~2.3 kB it had, and worth knowing before
+  anything else is deleted from the fixture.
 - **the markup serializer drops what was never on screen.** Inline `<script>`
   text, a `srcdoc` document, and value-bearing attributes (`data-*`, `title`,
   `href`, …). This survives `redact()`'s deletion for a reason that has nothing
@@ -1296,23 +1299,11 @@ knows is missing is worse than one that is openly absent.
   but not recorded is unexercised, as is a `run()` whose prompt never comes
   back and therefore ends `exit_code: null`.
 - **Nothing checks what teardown flushes.** `_pump` holds back trailing bytes
-  that could still become an exit-status escape *or* the start of a secret,
-  and `_stop` writes both to the terminal on teardown — masking a dangling
-  fragment of a registered value as it goes. No assertion reads the final
-  frame, so a regression there would lose the last few bytes of a program's
-  output silently, and `_StreamRedactor._mask_dangling` is unexercised. Making
-  it fail needs a take that ends mid-secret and an assertion on the last
-  frames of the mp4, which is a race with the screencast.
-- **Every remaining line of masking, scrubbing and redaction is now shipped
-  and completely ungraded**, and that is this slice's one real cost. #150
-  deletes the arms; #142, #143 and #144 delete the code they graded. Between
-  this pull request and those three, `redact()`, `register_secret()`, the PTY
-  scrubber and the evidence masking family are all still in the package with
-  nothing watching them at all. The window is deliberate — the arms could not
-  be split along the source-file boundaries (see #150) — and it is short by
-  construction, but a regression in any of it during that window is invisible.
-  Nothing in this repository depends on those paths: `SKILL.md` already states
-  that the recorder does not defend against a secret reaching the screen.
+  that could still become an exit-status escape, and `_stop` writes them to the
+  terminal on teardown. No assertion reads the final frame, so a regression
+  there would lose the last few bytes of a program's output silently. Making it
+  fail needs an assertion on the last frames of the mp4, which is a race with
+  the screencast.
 - **The segmented take records two parts of one storyboard, not a real
   time-skip.** Nothing waits between them, both are the web recorder against
   the same fixture, and no segment is re-recorded on its own — so the flow
@@ -1391,13 +1382,13 @@ It is deterministic on purpose — no `Math.random()`, no clock on screen, no
 animations. `#refresh` cycles three hard-coded snapshots in order, so a
 recording made today is frame-for-frame the story of one made next year.
 
-Two query-string hooks exist, inert unless asked for:
+Four query-string hooks exist, inert unless asked for:
 
 | URL | Effect | For |
 |---|---|---|
 | `?console-error=1` | logs a `console.error` **and** throws an uncaught error (Playwright `pageerror`), while the page stays usable | the Problems axis |
 | `?bad-fetch=<url>` | fetches `/definitely-missing.json` (404) and `<url>` (connection refused), both during load | the Problems axis — during load so the failures land inside the recorder's `goto` beat |
-| `?secret=1` | renders `#api-key` holding `sk-live-FAKE0000000000000000` | issue #4, redacting secrets from frames and stills |
+| `?evidence=1` | renders one element carrying `data-token` and `data-cfg` attributes the page never paints, beside text it does | issue #9, the Evidence axis |
 | `?entropy=1` | renders four clock readings (`Date`, `Intl`, `new Date().constructor`, and one posted back by a `Worker`, each read once at load) and `#entropy-spinner`, a shape turning once every 1.7 s | issue #10, the determinism takes |
 
 `?entropy=1` is the one hook the fixture's own "keep it deterministic" rule is
@@ -1417,35 +1408,6 @@ controls-off assertion, which is exactly what that assertion is for.
 One hook, one take. The graded `web/` take loads none of them, so the reference
 recording stays a recording of a working app — which is also the assertion that
 the recorder does not invent problems.
-| `?console-error=1` | logs a `console.error` **and** throws an uncaught error (Playwright `pageerror`), while the page stays usable | issue #3, failing a take on console errors |
-| `?secret=1` | pins a panel of keys to redact and controls not to: body-size, hero-size, two reachable only by `text=`/`xpath=`, two fields, and an **open shadow root** holding a third key and a third field | issue #4, redacting secrets from frames and stills |
-| `?secret=closed` | the same, plus a **closed** shadow root holding a key nothing can mask | issue #4, proving an unmaskable selector fails the take |
-
-None of them is a credential. Each is spelled with a four-letter word followed
-by nothing but zeroes so both gitleaks and a human read it as scenery — the
-default ruleset does not flag them either way. `.gitleaks.toml` allowlists the
-shape anyway, and lists what each word belongs to, as insurance against a
-future release that does start flagging it.
-
-The panel is `position: fixed` rather than in the flow, which is load-bearing
-rather than cosmetic: the redaction take measures pixels inside those elements,
-so their rect has to be identical in every frame. In the flow the panel sits
-below the fold, and anything that scrolls — Playwright scrolls a field into view
-before typing into it — would move the measured region mid-take, which reads as
-a leak or hides one depending on what slid into the crop.
-
-It also has to stay clear of the bottom 160 px, where the recorder burns its
-caption bar. A measured crop that overlaps the bar is measuring sharp white
-caption text: the shadow field scored 34% of its control that way while being,
-on inspection of the extracted pixels, thoroughly blurred. The take asserts the
-clearance for every measured element, so the layout cannot drift back into it
-silently — and two other measurement artifacts found the same way are worth
-knowing about, because both looked exactly like a leak: the recorder's own
-cursor dot parked inside a field's crop by `type_into`'s click (5.0 against
-0.8), and an `<input>`'s border blurring into its own crop (2.5 against 0.8 for
-the same value as text). Every number in this section was checked by extracting
-the crop and looking at it before it was believed.
-
 ## Adding a case
 
 - **A new thing to record** — add a beat to `record_web` / `record_terminal` in
@@ -1497,26 +1459,6 @@ the crop and looking at it before it was believed.
   "the take raises" cannot be asserted about a take that has to succeed for
   everything else to be graded, so they exist, and they are kept to a few
   seconds each and graded on nothing else.
-  over another take. Takes cost ~15 s each in CI; assertions are free. The
-  redaction take is the exception that earned its own recording: it needs a
-  different page state (`?secret=1`), a different narration setting
-  (`speech=True`), and it deliberately provokes failures — a refused caption, a
-  torn-out mask — that would corrupt the expectations of the take it shared.
-- **A new thing redaction must hide** — add it to the `?secret=1` panel, add a
-  literal to the `REDACT_*` constants in `tests/smoke`, allowlist its shape in
-  `.gitleaks.toml`, and give it *both* a masked and an unmasked measurement.
-  A redaction assertion with nothing sharp to compare against is the most
-  dangerous kind of vacuous test: it passes on a black frame. Adding it to
-  `REDACT_LITERALS` carries it into the evidence sweep for free — but check
-  that a *control* of the same kind is still found in `evidence/`, or that
-  sweep is grading an empty directory.
-- **A new thing the *terminal* scrubber must hide** — add a line to
-  `term_printer_script()`, a literal to the `TERM_*` constants, a row to
-  `TERM_MASKED_ROWS`, and allowlist the shape in `.gitleaks.toml`. Keep it 28
-  characters so it lands in the same columns as the `ctl` and `ref` rows,
-  which are what it is measured against. If it is meant to be caught by shape
-  rather than registration, do not register it — that separation is the only
-  thing that says the two mechanisms work apart.
 - **A new fact evidence must record** — add a `(verb, target, present, absent)`
   row to `WEB_EVIDENCE` / `TERMINAL_EVIDENCE`. **Fill in `absent`.** A `present`
   list alone passes on a recorder that dumped the page once and copied it into
@@ -1525,21 +1467,16 @@ the crop and looking at it before it was believed.
   are facts about `fixture/index.html`, written by hand, never read back off a
   recording.
 - **A new field in an evidence document** — give it a budget in
-  `EVIDENCE_LIMITS` if it can grow, mirror that number in
-  `EVIDENCE_LIMITS_EXPECTED` in `tests/smoke`, and make sure it is built
-  *before* the masking pass in `_evidence_doc` rather than after. Anything
-  assembled after that pass is plaintext the recorder never checked, and only
-  the end-of-document guard stands between it and the file.
-- **A new way for a value to reach evidence without reaching a picture** —
-  add it to the `?evidence=1` panel, add a literal to `EVIDENCE_SECRETS`, and
-  allowlist its shape in `.gitleaks.toml`. **Then check `EVIDENCE_KEEP` still
-  holds.** Every leak fixed here has a mirror defect: the mask that reaches
-  the new shape is the same mask that can eat an unrelated paragraph, and a
-  run where all nine secrets are absent because all nine files are
-  `[redacted]` is not a pass. Write the shape in the *markup*, the way a
-  person writes HTML, rather than assigning it from JS — an unpadded text node
-  is precisely the case that does not leak, and building the fixture that way
-  is how this axis passed for a round while five shapes walked through it.
+  `EVIDENCE_LIMITS` if it can grow, and mirror that number in
+  `EVIDENCE_LIMITS_EXPECTED` in `tests/smoke`. The two are asserted equal, so a
+  cap widened on one side has to fail rather than pass by agreeing with itself.
+- **A new thing the markup serializer must drop** — say so with a *pair* of
+  assertions, never one. Every claim in this axis is that something is
+  **absent**, and absence holds trivially over an empty capture: the arm asserts
+  `EVIDENCE_RENDERED_TEXT` is present first, and anything added here needs the
+  same kind of control. Inject the element from the storyboard
+  (`EVIDENCE_SOURCE_JS` is the pattern) rather than adding it to the fixture,
+  unless a spotlight has to be able to name it.
 
 **Prove any new assertion can fail.** Break the thing it watches — stub the verb
 out in `skills/demo-video/helpers/`, or blank the fixture — run `tests/smoke`,
