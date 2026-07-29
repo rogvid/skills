@@ -3,10 +3,13 @@
 Three suites. Two of them are fast and one is not, and which is which is the
 whole of how this directory is organised.
 
-`smoke` answers four questions: **does the demo-video recorder still produce a
-real video, does it still notice when the thing it recorded was broken, does a
-registered secret stay out of everything it produces, and can a reader say what
-each frame showed without decoding one?** Nothing short of running the recorder
+`smoke` answers three questions: **does the demo-video recorder still produce a
+real video, does it still notice when the thing it recorded was broken, and can
+a reader say what each frame showed without decoding one?** It used to answer a
+fourth — whether a registered secret stayed out of everything the take wrote —
+and that went with the masking it graded ([#138](https://github.com/rogvid/skills/issues/138)).
+The recorder does not defend against a secret reaching the screen and no longer
+claims to; see the top of `skills/demo-video/SKILL.md`. Nothing short of running the recorder
 can check any of that — its interesting behaviour is "shell out to ffmpeg,
 drive a headless browser, come back with an mp4" — so the smoke test runs it,
 end to end, and asserts on what lands on disk. It costs about ten minutes and
@@ -14,8 +17,7 @@ takes an exclusive lock.
 
 `unit` answers everything that never needed a browser: the coverage report, the
 timeline's two renderings, the content and opening warnings, the merge a stitch
-performs, the two secret types, and whether `SKILL.md`'s reference links still
-resolve. It costs 0.07 s and has no dependencies at all.
+performs, and whether `SKILL.md`'s reference links still resolve. It costs 0.07 s and has no dependencies at all.
 
 **That split is the point, not tidiness.** [#136] measured the asymmetry it
 exists to remove: the fault-injection rule was *executed* for `ci-unit` and
@@ -36,12 +38,9 @@ tests/
 [#136]: https://github.com/rogvid/skills/issues/136
 
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
-problem takes, `redaction/` — the web recorder against a page that renders
-a secret, plus a second few-second take that must *fail* — `segments/`,
-one demo recorded in two parts and joined with `stitch()`,
-`terminal-redaction/`, the redaction question asked of the PTY output path,
-and `evidence/`, a few seconds against the shapes that leak into text and into
-nothing else.
+problem takes, `segments/` — one demo recorded in two parts and joined with
+`stitch()` — and `evidence/`, a few seconds against what a beat's page text
+carries and what it caps.
 
 ## Running it
 
@@ -62,7 +61,6 @@ tests/smoke                       # every take, output to a temp dir
 tests/smoke --web-only            # just the Playwright takes
 tests/smoke --terminal-only       # just the PTY/xterm.js takes
 tests/smoke --determinism-only    # just the three re-recording takes
-tests/smoke --redaction-only      # just the secret-redaction takes
 tests/smoke --segments-only       # just the two-segment take and its stitch
 tests/smoke --evidence-only       # just the per-beat evidence takes
 tests/smoke --failure-only        # just the takes that do not finish
@@ -88,66 +86,110 @@ Prerequisites: `uv`, `ffmpeg`/`ffprobe` on PATH, and Chromium for Playwright
 (`uv run --with playwright playwright install chromium`; add `--with-deps` on a
 fresh Linux box). The script's PEP 723 header pins **Playwright ≥ 1.49**:
 per-beat evidence uses `locator.aria_snapshot()`, which arrived there, and the
-`page.accessibility` API it replaced has since been removed outright. A pass
-looks like this, and takes about half a minute:
+`page.accessibility` API it replaced has since been removed outright. A pass looks like this:
 
 ```
-smoke: serving …/tests/fixture at http://127.0.0.1:36321
-smoke: web demo.mp4 ok (20.2s, 279 kB, content 16.0)
+smoke: serving …/tests/fixture at http://127.0.0.1:41847
+smoke: web demo.mp4 ok (20.6s, 277 kB, content 16.0)
 smoke: web still 01-dashboard.png ok (77 kB, content 16.9)
+smoke: web still 02-filtered.png ok (49 kB, content 15.9)
+smoke: web still 03-refreshed.png ok (51 kB, content 15.5)
 smoke: web caption is visible on screen (delta 25.6)
-smoke: web first caption 'A small dashboard.' logged at 3.03s, on screen at 2.95s (-80 ms)
-smoke: web closing caption 'Recorded end to end.' logged at 17.03s, on screen at 16.99s (-40 ms)
-smoke: web beat clock holds across the take (+40 ms)
+smoke: web content ok (score 16.0, longest still 6.0s against a 15.0s limit, over 1 rect(s) [(128, 90, 1024, 460)])
+smoke: web first caption 'A small dashboard.' logged at 3.11s, on screen at 3.03s (-80 ms)
+smoke: web closing caption 'Recorded end to end.' logged at 17.36s, on screen at 17.36s (+0 ms)
+smoke: web beat clock holds across the take (+80 ms)
 smoke: web timeline.json ok (23 beats)
 smoke: web each review frame shows its own beat's caption state (10 captioned frames from 11.2, 4 bare ones to 3.3; 9 within 0.75s of a caption change and not graded)
 smoke: web frames/ ok (23 beat frames, each byte-identical to the demo.mp4 frame it claims to be)
-smoke: web evidence ok (23 beats, 39 kB, largest 2468 bytes)
+smoke: web evidence ok (23 beats, 38 kB, largest 2450 bytes)
+smoke: web opens on the app (frame 0 scores 17.25 against a 15.99 median, over a 0.45s hold)
+smoke: opening-gap reads a blank opening and a static picture differently (blank-then-painted, painted-throughout)
 smoke: web healthy app under strict=True records no problems
-smoke: redaction #api-key is blurred in every frame of demo.mp4 (worst 1.5 vs control 52.0, 3%)
-smoke: redaction all 9 masked elements are blurred in the review frames (18 gradable of 31; worst #a4-card 0.2 vs control 21.8 in beat-23.png, 1%, bar 7%)
-smoke: redaction still 01-key-blurred.png ok (key 1.0, token 2.9, control 39.3)
-smoke: redaction .tts/ holds 2 clips — the narrated lines, and nothing for the refused one
-smoke: redaction evidence ok (34 beats, 90 kB, largest 3369 bytes)
-smoke: redaction none of the 13 secrets appears verbatim in any of the 48 files the take wrote (34 of them per-beat evidence, which the controls prove is not empty)
-smoke: segments recorded 2 parts, each with its own beat log (part1 6.8s, part2 7.8s)
+smoke: terminal demo.mp4 ok (18.2s, 165 kB, content 8.4)
+smoke: terminal still 01-echo.png ok (135 kB, content 5.1)
+smoke: terminal still 02-listing.png ok (150 kB, content 8.3)
+smoke: terminal caption is visible on screen (delta 2.7)
+smoke: terminal content ok (score 8.43, longest still 9.5s against a 15.0s limit, over 1 rect(s) [(74, 110, 1132, 432)])
+smoke: terminal first caption 'A real shell, recorded.' logged at 2.37s, on screen at 2.29s (-80 ms)
+smoke: terminal closing caption 'Recorded end to end.' logged at 11.97s, on screen at 11.93s (-40 ms)
+smoke: terminal beat clock holds across the take (+40 ms)
+smoke: terminal timeline.json ok (18 beats)
+smoke: terminal each review frame shows its own beat's caption state (7 captioned frames from 2.7, 2 bare ones to 0.3; 9 within 0.75s of a caption change and not graded)
+smoke: terminal frames/ ok (18 beat frames, each byte-identical to the demo.mp4 frame it claims to be)
+smoke: terminal evidence ok (18 beats, 9 kB, largest 629 bytes)
+smoke: terminal healthy app under strict=True records no problems
+smoke: serving …/tests/fixture at http://127.0.0.1:38885
+smoke: segments recorded 2 parts, each with its own beat log (part1 6.6s, part2 7.9s)
 smoke: segments part1's probe caption is +0 ms from where its own segment puts it (-120 ms in part1.seg.mp4, -120 ms in demo.mp4)
-smoke: segments part2's probe caption is +0 ms from where its own segment puts it (-80 ms in part2.seg.mp4, -80 ms in demo.mp4)
-smoke: segments stitched 2 parts into a 14.6s demo.mp4 and merged their beat logs (15 beats); keep_parts=True kept every part and its log, the default removed them
-smoke: segments closing caption 'Recorded end to end.' logged at 11.43s, on screen at 11.35s (-80 ms)
+smoke: segments part2's probe caption is +0 ms from where its own segment puts it (-40 ms in part2.seg.mp4, -40 ms in demo.mp4)
+smoke: segments stitched 2 parts into a 14.5s demo.mp4 and merged their beat logs (15 beats); keep_parts=True kept every part and its log, the default removed them
+smoke: segments demo.mp4 ok (14.5s, 245 kB, content 17.0)
+smoke: segments still 01-part1.png ok (78 kB, content 16.9)
+smoke: segments caption is visible on screen (delta 26.0)
+smoke: segments content ok (score 16.97, longest still 6.0s against a 15.0s limit, over 2 rect(s) [(128, 90, 1024, 460), (128, 90, 1024, 460)])
+smoke: segments first caption 'One demo, in two parts.' logged at 3.06s, on screen at 2.95s (-120 ms)
+smoke: segments closing caption 'Recorded end to end.' logged at 11.23s, on screen at 11.19s (-40 ms)
+smoke: segments beat clock holds across the take (+80 ms)
 smoke: segments timeline.json ok (15 beats)
-…
+smoke: segments each review frame shows its own beat's caption state (2 captioned frames from 16.8, 5 bare ones to 0.2; 8 within 0.75s of a caption change and not graded)
+smoke: segments frames/ ok (15 beat frames, each byte-identical to the demo.mp4 frame it claims to be)
+smoke: segments healthy app under strict=True records no problems
+smoke: serving …/tests/fixture at http://127.0.0.1:50223
+smoke: spotlight demo.mp4 ok (7.5s, 106 kB, content 17.0)
+smoke: spotlight eases both ways (enter 4 intermediate frames, exit 3)
+smoke: spotlight healthy app under strict=True records no problems
+smoke: terminal-opening demo.mp4 ok (12.8s, 105 kB, content 4.6)
+smoke: terminal-opening card covers the first 2.80s (corner 26 -> 226), then clears
+smoke: terminal-opening healthy app under strict=True records no problems
+smoke: all 22 storyboard verbs are classified (14 acting, 8 passive)
+smoke: content static limit 15.0s sits in [8.8, 21.3]s (healthy 5.5s, covered 30.5s)
+smoke: content-covered stills 1/5 distinct where the terminal is, video 47.5 dB apart, over 6 evidence screens
+smoke: content-shown stills 5/5 distinct where the terminal is, video 25.5 dB apart, over 6 evidence screens
+smoke: content video held 47.5 dB against moved 25.5 dB — 22.0 dB apart, over the 8.0 dB gap
+smoke: content rect 6.58 vs blanked 0.22 (floor 1.0); whole frame 82.25 vs blanked 90.33 — the frame ranks the blank recording higher, the rect does not
+smoke: content-toured held one picture for 29.0s, over the 15.0s limit, across ['wait_for_prompt', 'shot', 'caption', 'hold', 'caption', 'hold', 'caption', 'hold'] — and the recorder said nothing, which is correct
+smoke: serving …/tests/fixture at http://127.0.0.1:55241
+smoke: coverage ok (3 criteria, 4 tagged beats, unclaimed ['AC-3'])
+smoke: coverage refusals ok (6 refused, 3 controls accepted)
+smoke: coverage merge ok (union of 3 criteria, unclaimed AC-3, merged indices, 1 wording conflict named)
+smoke: serving …/tests/fixture at http://127.0.0.1:40453
 smoke: web-problems timeline.json records 8 problem(s), 6 of them fatal under strict — take still passed
+smoke: serving …/tests/fixture at http://127.0.0.1:32881
 smoke: web-strict strict=True refused the take, naming beat 0 (goto) (4 fatal issues, artifacts kept)
-smoke: evidence a SecretLeak raised while capturing a beat kills the take and keeps nothing
-smoke: evidence a registered secret spans the markup budget (chars 7984-8016 of 72716, budget 8000)
-smoke: evidence ok (18 beats as shapes.seg.beat-NN.json, 12 leak shapes clean, 4 controls intact, 2 beat(s) refused a moving target)
+smoke: serving …/tests/fixture at http://127.0.0.1:48441
+smoke: evidence ok (9 beats as shapes.seg.beat-NN.json, 2181 chars of page text on the control beat, source and unrendered attributes out of the markup, all three fields capped and marked)
 smoke: terminal-problems timeline.json records 2 problem(s), 2 of them fatal under strict — take still passed
 smoke: terminal-race exit status survives a shell that starts 1.2s late (logged 5)
-smoke: terminal-wrap a registered secret split by a line wrap at column 120 (chars 112-140) is still refused, and keeps nothing
 smoke: terminal-strict strict=True refused the take, naming beat 1 (run) (1 fatal issues, artifacts kept)
+smoke: serving …/tests/fixture at http://127.0.0.1:40413
 smoke: determinism froze all four clocks identically in both takes
 smoke:   frozen  1/1/2025, 9:00:00 AM · 1735722000000
 smoke:   frozen  intl 01/01/2025, 09:00:00 AM
 smoke:   frozen  ctor 1735722000000 · same true
 smoke:   frozen  worker 1735722000000
-smoke:   default 7/25/2026, 6:23:51 PM · 1785003831823
-smoke:   default intl 07/25/2026, 06:23:51 PM
-smoke:   default ctor 1785003831823 · same true
-smoke:   default worker 1785003831865
-smoke: determinism stills reproduce byte for byte across takes (the same two stills move 28.6 over the spinner with the recorder's default settings)
-smoke: determinism demo.mp4 reproduces (takes differ by 0.44, against 6.85 with the default settings)
+smoke:   default 7/28/2026, 12:37:19 PM · 1785242239679
+smoke:   default intl 07/28/2026, 12:37:19 PM
+smoke:   default ctor 1785242239679 · same true
+smoke:   default worker 1785242239723
+smoke: determinism stills reproduce byte for byte across takes (the same two stills move 22.4 over the spinner with the recorder's default settings)
+smoke: determinism demo.mp4 reproduces (takes differ by 0.31, against 6.84 with the default settings)
 smoke: determinism ok (3 takes)
+smoke: serving …/tests/fixture at http://127.0.0.1:52509
+smoke: crash-web crashed and kept everything it had — demo.mp4 (5.9s), timeline.json, failure/ (dump, page text, last frame), demo-video-FAILED.md
+smoke: crash-interrupt crashed and kept everything it had — demo.mp4 (3.9s), timeline.json, failure/ (dump, page text, last frame), demo-video-FAILED.mddemo-video: narration OFF — no ELEVENLABS_API_KEY in this environment, so captions record silently. Export the key (e.g. `set -a; source .env; set +a`) before recording to enable spoken narration.
+smoke: crash-between crashed and kept everything it had — demo.mp4 (3.9s), timeline.json, failure/ (dump, page text, last frame), demo-video-FAILED.md
+smoke: stale-media a take that encoded nothing reports duration: null beside a 2.0s file it did not write, extracts no frames from it, and says so on stderr and in demo-video-FAILED.md
+smoke: marker-cleared a successful take removed the demo-video-FAILED.md and the failure/ dump a previous run left
+smoke: crash-terminal crashed and kept everything it had — demo.mp4 (10.8s), timeline.json, failure/ (dump, page text, last frame), demo-video-FAILED.md
 smoke: PASSED
+smoke: recordings kept in /tmp/claude-1000/-home-kvist-personal-projects-skills/b621d914-48bb-4de5-9397-3cc9102d52e7/scratchpad/smoke3
 ```
 
 Re-running into the same `--out-dir` is safe: the take subdirectories
-(`web/`, `terminal/`, `segments/`, `redaction/`, `terminal-redaction/`,
-`terminal-cursor-leak-clean/`, `terminal-cursor-leak-crash/`,
-`terminal-cursor-leak-tail/`, `web-problems/`, `terminal-problems/`,
-`terminal-race/`, `terminal-wrap/`, `web-strict/`, `terminal-strict/`,
-`evidence/`, `evidence-leak-fatal/`, `determinism-a/`, `determinism-b/`,
-`determinism-off/`) are deleted before each take. Only the first two are graded
+(`web/`, `terminal/`, `segments/`, `web-problems/`, `terminal-problems/`,
+`terminal-race/`, `web-strict/`, `terminal-strict/`, `evidence/`,
+`determinism-a/`, `determinism-b/`, `determinism-off/`) are deleted before each take. Only the first two are graded
 on their video; the rest are short and exist to break, or to reproduce, in one
 specific way each. That is not tidiness — every artifact assertion works by
 path, so without it a leftover `demo.mp4` from the previous run would grade a
@@ -167,18 +209,15 @@ terminal *take* additionally skips itself with a message if `os.name` is not
 
 The runner deletes every `DEMO_VIDEO_*` variable plus `ELEVENLABS_API_KEY` from
 its own environment before recording, so a sourced project `.env` cannot change
-what the test measures. The web and terminal takes then force narration off
-(`speech=False`).
+what the test measures. Every take then forces narration off (`speech=False`).
 
-The **redaction take is the exception, and deliberately so**: it records with
-`speech=True` against a stubbed synthesizer (`stub_narration`), which writes a
-short silent mp3 under the same cache key `tts_clip` computes. The `.tts/`
-cache is one of the four leak paths, and with narration off it does not exist —
-"no cache entry holds the secret" would then be a statement about an empty
-directory. Only the network call is replaced; the guard that refuses to speak a
-secret, the cache path, the pacing and the ffmpeg audio mix are the recorder's
-own code. That also makes this the one take that exercises the speech path at
-all (see Known gaps).
+**Nothing here exercises the speech path any more, and that is a gap this file
+states rather than leaves to be discovered.** One take used to record with
+`speech=True` against a stubbed synthesizer, because the `.tts/` cache was a
+leak path it had to prove clean and with narration off it does not exist. That
+take went with the masking ([#138](https://github.com/rogvid/skills/issues/138)),
+and the synthesizer, the cache key, the pacing and the ffmpeg audio mix went
+ungraded with it. See "Known gaps".
 
 ## What it asserts
 
@@ -481,7 +520,7 @@ over-reporting does not merely get noticed, it aborts the take.
 
 Keeping the graded takes healthy also matters for what they *are*. They are the
 reference demo a reader watches; the fixture hooks belong in takes of their
-own, the way `?secret=1` does.
+own, the way `?evidence=1` does.
 
 **A broken app must record what broke, where.** `web-problems/` loads
 `?console-error=1&bad-fetch=<url>`: the fixture logs a `console.error`, throws
@@ -634,247 +673,6 @@ consistently. The take reads the line and requires `worker <frozen epoch>`.
 All three takes also run `strict=True` (issue #3's machinery), which is what
 would catch the blob shim breaking worker *loading* rather than its clock.
 
-**Redaction** — a third take, `redaction/`, records `?secret=1` with
-`rec.redact("#api-key")` and `rec.type_into("#token", Secret(...))`, and grades
-the four leak paths of [#4](https://github.com/rogvid/skills/issues/4)
-separately. Its acceptance criterion is *no frame, still, caption or TTS cache
-entry containing the secret*, so it is graded on pixels and bytes, never on the
-recorder agreeing that it did the right thing.
-
-Six elements are masked and graded, each reached a different way, because
-each is a different way for a mask to miss:
-
-| element | why it is there |
-|---|---|
-| `#api-key` | the ordinary case: a leaf with the value in it |
-| `#hero-key` | 44px text inside a **12px wrapper**, and the wrapper is what `redact()` is given — a radius scaled from the matched element leaves the value readable |
-| `#sd-key` | inside an **open shadow root**: `page.locator` sees it, `document.querySelectorAll` does not, and a document stylesheet does not apply to it |
-| `#if-key` | inside an **iframe**: `frame.evaluate` reaches it, `page.locator` does not descend into it |
-| `#token`, `#sd-token` | typed into as `Secret(...)`, one of them across the shadow boundary |
-| `#a1-card` … `#a5-card` | the **sufficiency shapes**: a wrapper with a small font-size holding a value rendered four to five times larger by a `::after`, a `transform: scale(4)`, `zoom: 4`, an SVG `viewBox`, and two nested shadow roots. Each is redacted by the wrapper, and each reported 12–13 px to a mask that asked CSS how big its text was |
-
-The sufficiency axis tests *shapes*, plural, on purpose. For two rounds it was
-exercised by exactly one — a wrapper with a plain 44 px descendant — and five
-constructions walked straight through it. A single shape tests the shape, not
-the property.
-
-`redact()` takes **plain CSS only**, and the take asserts that the dialects
-every other verb accepts — `text=`, `xpath=`, `>>`, `:has-text()` — are
-*refused*. That is the honest trade rather than a limitation: continuous cover
-is a stylesheet, a stylesheet is CSS, and a Playwright-engine selector can only
-be re-resolved at checkpoints. Measured before the change, a `text=` selector
-sat unmasked for four seconds of a ten-second take on an ordinary
-fetch-then-render page while its CSS sibling holding the same value was covered
-throughout — and the end-of-take check then found it masked and passed.
-
-**The mask is an opaque cover, not a blur**, and that is a decision this
-harness forced. A blur has to answer "how much is enough", and the answer is a
-guess about how the ink was produced; five separate ways of rendering text
-larger than its `font-size` says — a `::after`, `transform: scale()`, `zoom`,
-an SVG `viewBox`, a value two shadow roots down — each defeated a radius
-derived from CSS, and nothing suggested the fifth was the last. A cover is
-sized from client rects, which include transforms and zoom by construction, and
-asks nothing about the text.
-
-**What the in-page check can and cannot prove.** For two rounds it compared the
-filter it had just applied against the value it had just computed —
-`applied < needed` was unreachable by construction, so it read as a check and
-could not fail. It now asks the *browser's hit testing* whether anything paints
-over each cover, at nine points per element, which is a fact the recorder does
-not decide. That covers **stacking** — z-index, the top layer, paint order.
-It does **not** cover **extent**: whether the cover is over the right pixels is
-geometry, and the only independent grading of that is the pixel measurement
-below. Nothing in the page can grade it, because the same walk that positions
-the cover would be the one grading it.
-
-The pixel measurement is **sharpness**, not contrast: `edge_energy()` is the
-mean absolute difference between neighbouring pixels of a crop. A gaussian blur
-is precisely the operation that removes glyph edges, so it separates a masked
-key from a legible one by more than an order of magnitude — where luma stddev
-would happily score a blurred-but-colourful smear as "content".
-
-**The crop is normalised to a fixed text height first, and that is what makes
-the number mean "legible" rather than "small".** Sharpness is scale-dependent:
-bigger text has fewer glyph edges per pixel, so a *sharp* 44 px key scores
-lower than a *blurred* 15 px one. Measured with only the font size varied and a
-constant 8 px blur:
-
-| font | control | blurred | ratio | legible to a human? |
-|---|---|---|---|---|
-| 15px | 37.7 | 1.0 | 2.7% | no |
-| 40px | 16.4 | 1.6 | 10.0% | borderline |
-| 52px | 12.3 | 1.6 | 13.4% | **yes** |
-| 68px | 9.4 | 1.7 | 17.7% | **yes** |
-
-The denominator collapses while the numerator stays flat, so a raw ratio passes
-text anyone can read — and at 68px the control is about to trip its own floor,
-three sizes after the secret became readable. Scaling every crop to the same
-text height removes that: a blur proportional to the text survives the rescale
-as a blur, while a constant 8 px blur on 44 px text rescales into a ~3 px blur
-on 15 px text and scores like the legible thing it is.
-
-**What it is measured against is the whole trick again.** Every masked element
-has a control of the same kind and size in the same frame, never registered:
-`#api-key-control` for the body-size keys, `#hero-key-control` for the hero
-one, and a control *field* beside each secret field. Fields need their own
-control because a field is not comparable with text — its border blurs along
-with its contents and smears a gradient across the crop — and the control
-fields are **typed into**, not pre-filled, because a freshly re-coded region
-carries ringing that a static one does not.
-
-| | control | masked | mask off | constant 8px radius, hero | radius 8→3 | whole page blurred |
-|---|---|---|---|---|---|---|
-| stills, text | 26 – 30 | 0.8 – 0.9 | 40.6 | 3.5 (12%) | 3.0 (11%) | 0.4 |
-| video, text | 30 – 36 | 0.8 – 1.2 | 53.6 | 3.4 (11%) | 3.7 (10%) | 0.7 |
-| video, fields | 27 – 28 | 2.5 – 3.6 | ~100% | — | 7.7 (28%) | — |
-
-So the bar is per kind: **7%** for text, where the interesting faults (a blur
-that does not scale, a radius cut to 3px) land at 10–12%, and **25%** for
-fields, whose floor is structurally higher (9–13% while being, on inspection of
-the extracted crop, a featureless smear — the same crop in the lossless still
-reads 3%). The looser field bar still catches the failure that matters there,
-a field not masked at all, by 4x.
-
-With covers, a masked element reads **0.0–0.2** where a blurred one read
-0.7–1.4, against controls at 25–35. The bars below are unchanged and are now
-a long way from anything healthy.
-
-**Bar headroom, stated because it is thinner than the rest of this file.**
-Injecting a radius cut from 8px to 3px puts `#sd-token` at 28% against a 25%
-field bar and `#token` at 22% — two near-identical fields either side of the
-line. The 7% text bar catches a 44px hero under a 15px-calibrated radius at
-11–12%, but a 28–30px hero would likely slip under it. Both bars are backstops
-now rather than the primary check: a radius too small for the text fails
-*verification*, in the page, deterministically, before any pixel is measured —
-which is where that class of bug is actually caught.
-
-The control also carries an absolute floor (8.0 stills / 6.0 video), and that
-floor is the anti-vacuity guard: without it a black recording, a blank page, or
-a mask that blurred *everything* — all of which score near zero everywhere —
-would pass the ratio trivially. Injecting exactly that (mask every element)
-trips the floor in all four artifacts.
-
-Video is sampled at 2 fps and graded on the **worst** frame, not the median:
-one frame showing the key is a leak, because a paused video is a screenshot.
-Rects come from the recorder's own `_geom` mapped through `to_video_rect()`,
-never a hardcoded scale factor. The two fields are graded only from the moment
-they were typed into — before that they hold a placeholder, and grading a
-placeholder would force the bar up for everything else.
-
-**A control that cannot be measured is a failure, not a skip.** For one round
-the field controls were missing from the dict the loop reads, both fields went
-ungraded, and the run printed PASSED. It now says which element was not graded
-and why.
-
-**Two axes exist only because a mask can succeed by hiding everything.**
-
-*Blankness*: the recorder withholds the first paint of each navigation until
-the mask is verified, which means a gate that never comes down records a blank
-window — and every leak assertion above passes on a blank frame. The take
-measures the longest run of blank frames in the app rect (bar 1.5s, observed
-0.6s) after clicking an ordinary link, because for one round the gate was
-lowered from `goto()` alone and a link click left four of ten seconds white
-with the take reporting success.
-
-*Gate integrity*: the gate is raised again deliberately, mid-take, and attacked
-the way an ordinary page does it by accident — a descendant declaring
-`visibility: visible`, and a script stripping `<style>` elements it does not
-recognise. A still taken while it is up must show **nothing**, including the
-controls, which are never redacted. This is the only assertion that can fail
-when the gate is weakened: with CSS-only redaction the in-page stylesheet
-already masks from the first paint, so no *leak* assertion depends on the gate
-— it is defence in depth, and the honest way to test defence in depth is to
-test the mechanism directly rather than to claim a leak it no longer prevents.
-
-Two things that line does **not** cover, and the phrasing should not be read as
-covering: content in the browser's **top layer** (`<dialog>.showModal()`, a
-popover, fullscreen) ignores z-index entirely. The gate and the covers ask for
-the top layer when the browser offers it, and a cover that something paints
-over is caught by the hit test — but a *dialog opened after* a cover is
-ordered above it in the top layer, and only the hit test at the next checkpoint
-notices. And the attack the fixture runs is the two ordinary ones, not an
-adversary.
-
-The **review frames** (`frames/`, issue #8) are a fifth artifact on disk and
-are graded on pixels like the rest. They are frames of `demo.mp4`, so they
-inherit its mask by construction — which is a reason to expect them clean, not
-a reason to skip measuring them, and this file's whole premise is that
-"inherits it by construction" is a claim rather than evidence. **Every element
-the video is graded over** is scored in the frames too, each against its own
-control **in the same frame**, worst frame wins by *ratio*, same 7% text bar as
-the video — and `#if-key` carries the video's window with it, since it holds
-its secret only until the take navigates and an emptied iframe is not a masked
-one.
-
-For one round this graded `#api-key` alone, which was the wrong single element
-to pick: `#api-key` is clean in every run, and `#if-key` is the one measured
-leaking into `demo.mp4` intermittently ([#68](https://github.com/rogvid/skills/issues/68)).
-The frames are the artifact a reviewer is *handed*, so the element most likely
-to leak was the one they were least protected from.
-
-Only frames where the *control* is legible are graded, and the count of those
-is asserted (≥ 10 of ~31, per element). That skip is not a loophole while the
-control is what decides it: this take opens on `about:blank` for five
-`redact()` beats, raises the paint gate on purpose mid-take, and navigates
-once, so a handful of its frames legitimately show nothing at all — and a mask
-that blanked the whole recording takes the gradable count to zero and fails.
-
-And the take that *cannot* verify its mask must leave none of them behind:
-`check_unmatched_redaction` requires an empty `frames/` alongside the absent
-stills and the absent `.video/`.
-
-That assertion needs a **planted `demo.mp4`** to mean anything, and for one
-round it did not have one. `beat_frames()` returns "there is no demo.mp4 to
-extract frames from" *before* it creates `frames/`, and a refused take never
-converts its webm — so "no review frames survived" was true whatever the exit
-path did, and the `if clean:` guard that is supposed to keep frames off a
-refused take could be deleted without a single assertion moving. It now writes
-a real two-second mp4 into the directory first, which makes that guard the only
-thing standing between the refusal and a `frames/` directory. The mp4 check
-changes with it, from "the file does not exist" to "the file is still the one
-we planted" — the same claim, since conversion writes over it, and equally
-sharp.
-
-The two text paths are checked by searching bytes, not by asking the recorder:
-
-- every file the take wrote — `timeline.json`, `timeline.md`, the stills, the
-  mp4, the narration clips, `frames/` and its two manifests — is read and
-  searched for both literals, with no exemptions, so a leak path nobody
-  anticipated still shows up. It is an `rglob`, not a list, which is why the
-  review frames were covered by it the moment they existed;
-- `.tts/` must hold **exactly** the clips for the lines that were narrated —
-  not merely "nothing for the refused line", which is also true of an empty
-  directory. The innocent line's clip existing is what makes the refused line's
-  absence mean anything;
-- the refused caption must leave **no beat** behind, and exactly one beat must
-  carry a `[redacted]` selector — the `terminal()` call whose command held the
-  key. Asserted positively, because "no beat contains the secret" is equally
-  true of a log that dropped the beat.
-
-The storyboard also tears the mask out mid-take the way a real app does —
-rewriting the element's `style` attribute wholesale and removing the injected
-stylesheet, which is what a framework re-render and this recorder's own
-`spotlight()` clear both do — and requires that the next frame is masked again.
-That is the assertion the `MutationObserver` exists for; with the observer
-stubbed out, the video check fails on the frames between the tamper and the
-next `shot()`.
-
-**A mask that cannot be applied must kill the take, not quietly cover
-nothing.** A second, few-second recording (`check_unmatched_redaction`) points
-`redact()` at a key inside a *closed* shadow root — reachable by neither
-Playwright nor an injected script, so there is no way to mask it — and requires
-`SecretLeak`, no `demo.mp4`, no `.frame.png`, no raw capture in `.video/`, and
-**no stills**. It takes one first, on purpose: web stills are full-bleed, and
-for one round a failed take left them on disk holding the value it had refused
-to write an mp4 for, while reporting that it had written nothing. The same
-path covers the plain typo, `redact("#api-ky")`, which is the same failure with
-a friendlier cause.
-
-Two premises of the shadow-DOM case are asserted rather than assumed, because
-if the fixture ever stopped putting those elements behind a real boundary the
-take would go on passing while proving nothing: `page.locator("#sd-key")` must
-find exactly one, and `document.querySelectorAll("#sd-key")` exactly none.
-
 **Segments and the merge** — a demo recorded in two parts and joined by
 `stitch()` ([#7](https://github.com/rogvid/skills/issues/7)). `segments/`
 records the storyboard `SKILL.md` prescribes for a real time-skip: part one,
@@ -954,430 +752,53 @@ The rest is what is true of a merge and of nothing else:
 | a take recorded in one piece carries no `segments` key | that key means "assembled by stitch()", and a reader would otherwise be told a single recording has parts |
 
 
-**Terminal redaction** — `terminal-redaction/`, the PTY half
-([#5](https://github.com/rogvid/skills/issues/5)). Different mechanism,
-different failure mode: there is no DOM to cover, so the only intervention is
-a scrubber between `os.read()` and `term.write()`, and everything downstream —
-the frames, the stills, and the xterm buffer `wait_for_text()` matches
-against — is drawn from what that scrubber let through.
+**Evidence** — every beat left `evidence/<segment>.seg.beat-NN.json`, a text
+account of what was on screen, and it says what it does not know.
 
-A shell script prints one tagged value per line, all 28 characters wide so
-they share a column, and the take is graded on the pixels of those rows:
+**Most of this axis used to be about masking** and went with it (#150). The
+`evidence/` take once recorded nine redacted cards, swept every file it wrote
+for thirteen literals, and graded the mask's edges: a value split across tags,
+one spelled with an `&`, one mirrored into a `title` attribute, a card
+rewritten every 5 ms that had to refuse capture rather than guess. None of
+those shapes exists now — per-beat evidence is not a masking feature, and what
+survives is what it was always for: a reviewer reading what a frame showed
+without decoding it.
 
-| row | what it is | what hides it |
-|---|---|---|
-| `key` | a registered value printed by a command | the registry |
-| `ans` | a registered value with a **colour escape inside it** | matching an escape-stripped copy |
-| `hid` | the same, cut by `ESC[?25l` — what every spinner emits mid-line | the same, once "inert" means more than SGR |
-| `osc` | the same, cut by a window-title OSC | the same |
-| `shp` | a `ghp_`-shaped token **nobody registered**, printed in one burst | shape detection alone |
-| `str` | a `ghp_`-shaped token written **one character at a time** | shape detection *across quiet boundaries* |
-| `pau` | an `sk-`-shaped token **paused 0.4 s mid-value** | the same |
-| `anc` | a `ghp_`-shaped token paused after its **first character** | the same, plus the token-boundary rule |
-| `slw` | a `ghp_`-shaped token paused **past** the hold window | nothing — it is the documented limit, graded as one |
-| `aws` | an `AKIA`-shaped token nobody registered | shape detection alone |
-| `jwt` | a JWT nobody registered | shape detection alone |
-| `pwd` | `send(Secret(...))`, echoed back by the PTY | the registry, one character per read |
-| `ctl` | never registered, matches no shape | nothing — it is the reference |
-| `ref` | the literal string `[redacted]` | nothing — it is the reference |
+So the assertions were **written rather than trimmed**, and there are three:
 
-The `str`, `pau`, `anc` and `slw` rows are the ones a scrubber that flushes on
-an idle poll gets wrong, and they are why the printer is a shell script rather
-than a `printf`.
-Capping `os.read()` cannot manufacture a *time* boundary: capped reads come
-back-to-back off a full buffer and the scrubber never sees the PTY go idle
-mid-value. `str` writes at 5 ms per character, which is slower than the
-recorder drains, so `select()` reports nothing ready between every character.
-`pau` and `anc` stop dead in the middle of a token — `anc` after one
-character, where nothing yet says "credential" and only *where it sits* does.
+- **the page text is real.** Every other check here is an absence — this
+  attribute is not in the markup, this script text is not — and an absence
+  holds trivially in an empty file. The control asserts that the fixture's own
+  rendered string is in the ARIA tree, over a floor of 400 characters, before
+  anything else is claimed. It is the catalogue's vacuous sweep, and it is the
+  one assertion that fires if the capture wrote nothing.
+- **the markup serializer drops what was never on screen.** Inline `<script>`
+  text, a `srcdoc` document, and value-bearing attributes (`data-*`, `title`,
+  `href`, …). This survives `redact()`'s deletion for a reason that has nothing
+  to do with secrets: an attribute nothing renders was in no frame, no still
+  and no caption, so serializing it here would make evidence the only place it
+  exists. **It had no check of its own** — every old one reached the same code
+  through the mask, so deleting the mask deleted the only thing watching a
+  serializer that still has this job. The take now injects an element holding a
+  script and a `srcdoc`, spotlights it, and requires neither in the markup.
+- **truncation is marked, never silent**, on all three text fields — `aria`,
+  `scope_aria` and `html` — cut *to* the budget with only the marker past it,
+  and named in `truncated`. A cap applied to `aria` and not to `scope_aria` is
+  a cap on a third of what a spotlight beat writes.
 
-`slw` stops for longer than the recorder will hold, and is the only row that
-must come out **legible**. That is not a gap in the take, it is the take
-grading a gap: `SKILL.md` says shape detection has a clock, and the clock has
-to be measurable from outside as well as inside. `pau` pauses 2.0 s and must be
-masked, `slw` pauses 4.0 s and must not; together they pin `_ANCHORED_HOLD_S`
-(3.0 s) from both sides, with a second of margin either way because the
-quantity the recorder measures is wall-clock idle time on a loaded CI box.
-Injected at 5.0 s, `slw` comes out masked and the take says the documented
-limit moved; injected at 1.0 s, `pau` and `anc` come out legible at 41-45
-against the mask. Before this pair, `_ANCHORED_HOLD_S` could be set to any
-value above ~0.45 s and the whole suite still passed.
+Plus the two that never touched masking: a previous take's evidence is cleared
+from the directory on a re-record while another *segment's* files survive, and
+the beat's `evidence` pointer is what names the file rather than anything
+derived from `index`.
 
-**The split across `os.read()` boundaries is forced, not hoped for**, and that
-is the assertion the acceptance criterion turns on. `capped_pty_reads()`
-replaces the `os` module *in `demo_recording.terminal` only* with one whose
-`read()` returns at most 7 bytes and keeps every fragment. The take then
-asserts, from those fragments, that the printed key was reassembled from more
-than one of them — measured 5 — and prints the number. Without the cap this
-box hands the whole value over in a single read: injected, the assertion fires
-and says so, which is the difference between testing a carry buffer and
-hoping one was needed. The `pwd` row needs no help; the PTY echoes a typed
-character as it is typed, so it arrives in 28 fragments on any box.
+**The three new assertions were fault-injected**, since none of them had ever
+been watched to fail:
 
-The ANSI case is asserted at the byte level too, over the printer's output
-only: the raw stream must contain `value-head`, `ESC[32m`, `value-tail` and
-must **not** contain the value whole — otherwise a literal substring match
-would have found it and the row proves nothing.
-
-**The pixels are graded three ways, and the second is what makes the first
-mean anything.** Every crop is the same 28 cells of one row at native
-resolution:
-
-- a masked row against the `ref` row must be **the same picture** — mean
-  absolute luma difference 0.0 in the stills, 1.2-2.4 in the mp4 (codec noise
-  on identical glyphs), bar 3.0 / 6.0;
-- the `ctl` row against the same `ref` row must **not** be: 40.6 in the
-  stills, 42.7 in the mp4, bar 12.0. That row is a 28-character key in the
-  same font at the same size in the same frame — exactly what a leak looks
-  like — so this says the comparison can tell a key from `[redacted]` at all.
-  With the scrubber taught to swallow the control too, it collapses to 0.0-1.4
-  and the take says every reading below it is vacuous;
-- the `ctl` row must be **sharp** (edge energy 28-31, floor 6.0 / 5.0). With
-  the terminal's foreground colour set to its background it scores 0.0-0.2 and
-  the take refuses to grade anything, which is the answer a blank recording
-  needs: every "these two crops match" reading is also true of two crops of
-  nothing.
-
-Not OCR, and not a claim to be. It says the pixels at that row are the mask
-and not a key; it cannot say *which* mask, and no assertion here reads text
-back out of a frame (the same gap the web half has).
-
-**Two more paths, checked without pixels.** The rendered screen — what
-`wait_for_text()` and `wait_for_prompt()` read, and the buffer every frame is
-drawn from — must hold none of the thirteen values and must hold the control
-intact. And every byte the take writes is swept for all thirteen, with no
-exemptions; the printer script lives in a temp directory of its own precisely
-so the sweep grades what the *recorder* wrote.
-
-**Two values are longer than the recorder's 4096-character fragment ceiling**,
-and they pull in opposite directions. A 4208-character JWT says a hold clamped
-mid-match must not write the head of a credential and mask the tail; a
-4208-character *registered* value says the ceiling must not bound the registry
-at all, whose hold is already bounded by the value's own length. Neither is
-graded on pixels — 4 kB of base64 wraps over fifty rows and scrolls every
-measured row away — so they go last, the video is graded only up to that
-point, and both are checked on the screen text and the byte sweep against a
-64-character witness. The whole value is the wrong needle: a clamped hold
-leaks a *prefix*, and a take rendering the first 111 characters in the clear
-was measured passing a check for the token itself.
-
-**`key()` must refuse too**, and its beat log used to leak whether it did or
-not. The beat opens before the refusal, so it records the keys joined by
-spaces, and no *literal* match on the value can see `'s k - l i v e - …'` in
-`timeline.json`. That is the same shape a terminal line wrap produces, and the
-beat-log scrub now matches it (issue #9): `terminal-redaction/` requires three
-scrubbed selectors, not two, and reverting the elasticity puts that string back
-in the committed log. The refusal is still the control that matters — a secret
-spelled into a TUI is on screen — but it is no longer the only one.
-
-**`run()` and `send()` must refuse.** Both are authored text echoed on camera,
-the terminal's `caption()`. Each is called with a registered value, must raise
-`SecretLeak`, must not type a character before doing so (asserted on the
-screen afterwards), and must not quote the value in the exception. The two
-refused beats are asserted to carry a `[redacted]` selector — positively,
-because "no beat holds the secret" is equally true of a log that lost the
-beats — and exactly one `send` beat must carry **no** target at all, which is
-the `Secret`: it is deliberately not a `str` so that `_verb_target` cannot
-write it into `timeline.json`, and teaching `_verb_target` to stringify it
-fails this.
-
-**The `hld` row is the other half of the carry rule, and it is timed.** The
-scrubber holds back any trailing fragment that could still complete a secret —
-which means a program whose last characters could begin a token renders short
-until it writes again, and every sync verb reads that screen. So the printer
-ends with `hld xe` and no newline, then parks on a `read`.
-
-`xe` and not `gh`, and that is the case. Both are shape fragments — `e` could
-begin a JWT — but this one sits *in the middle of a word*, where a credential
-never starts, so it must go out on the first quiet poll. The take measures how
-long it takes to appear and fails past 1.5 s. A rule that cannot tell `hld xe`
-from `hld gh` puts it on the three-second anchored clock: injected, it arrives
-at 3.9 s and this fails, which no assertion about the *final* screen can see.
-Remove the release altogether and it never arrives at all.
-
-The three arms are asserted separately and injected separately: this row (a
-fragment mid-word, released at once), the `str`/`pau`/`anc` rows (a fragment
-where a token would start, held for seconds), and the `pwd` row (a fragment of
-a *registered* value, held with no clock — the echo arrives one character per
-read with an idle pump between each, so releasing those would print a password
-one character at a time).
-
-**And a value the stream can never show contiguous must kill the take — on
-every way out of the `with`.** A program that writes `ESC[6;1Hcup <head>` and
-then `ESC[6;13H<tail>` puts the registered value on screen as one word while
-no substring of the byte stream contains it; the premise is asserted, not
-assumed, by requiring the value to be on the finished screen. The scrubber
-cannot see that. Documented as uncovered, and uncovered has to mean *refused*,
-so `_verify_redaction_final()` reads the finished terminal buffer (visible
-screen *and* scrollback) and raises `SecretLeak`. No `demo.mp4`, no
-`timeline.json`, no still, nothing in `.video/`, and a message that says the
-value was found *on screen* without quoting it.
-
-Three recordings, because "every way out" is three different bugs and the
-first version of this check only covered the first:
-
-| arm | how the `with` ends | what it caught |
-|---|---|---|
-| `clean` | the storyboard finishes | with the check removed: a normal mp4, the key legible in every frame, `issues: []`, `strict=True` satisfied — the quietest failure in this harness |
-| `crash` | the storyboard raises after the value is on screen | the check was gated on `exc_type is None`, so a `wait_for_text()` timeout or a Ctrl-C skipped it entirely and **kept the still** — 129 kB of PNG with the key on it. On the web side the same structure is harmless because a still is CSS-masked when it is taken; here a still is the raw screen |
-| `tail` | the value lands *after* the last verb, inside the window a narrated take holds open so it does not end mid-sentence | the check ran before that window and before the scrubber's final flush, so it vouched for a screen the recording does not end on. Injected, it writes an 82 kB mp4 and a timeline and reports nothing wrong |
-
-The `crash` arm asserts the recorder re-raises what the *storyboard* threw
-rather than a leak report: the timeout is the message that says what to fix,
-and the leak has already cost the artifacts, which is the part that matters.
-
-The `tail` arm needs a narration tail and the smoke run has no
-`ELEVENLABS_API_KEY`, so it sets `_line_end` directly — the one field
-`_finish_line()` reads, and the one `_start_line()` sets from
-`media_duration(clip)`. Same code path, no key required.
-
-**Evidence** — every beat left `evidence/beat-NN.json`, a text account of what
-was on screen. Its acceptance criterion ([#9](https://github.com/rogvid/skills/issues/9))
-is that *a reviewer given only those files can state what the frame showed
-without seeing an image*, which is not a sentence a test can assert. It is
-asserted as its consequence instead: named facts about the fixture app, written
-out by hand in `WEB_EVIDENCE` / `TERMINAL_EVIDENCE`, looked for in the page text
-the recorder captured for the beat that showed them.
-
-**The lists come in pairs, and the second one is the one that bites.**
-
-| beat | must be readable | must **not** be |
-|---|---|---|
-| `shot("01-dashboard")` | `$128,400`, `snapshot 1 of 3`, `Refresh`, `Harbor Supply Co.`, `Ferrari Logistics`, and the caption `A small dashboard.` | `$134,950`, `snapshot 2 of 3` |
-| `shot("02-filtered")` | `Harbor Supply Co.`, `Seattle`, `Filter by city.` | `Ferrari Logistics`, `Cascade Outfitters`, `Pine & Poplar` |
-| `shot("03-refreshed")` | `$134,950`, `snapshot 2 of 3`, `Refresh reloads it.` | `$128,400`, `snapshot 1 of 3` |
-| `shot("01-echo")` (terminal) | `echo hello from demo-video` **and** `hello from demo-video` | `ls -1`, `AGENTS.md` |
-| `shot("02-listing")` (terminal) | `ls -1`, `skills`, `tests`, and the earlier `hello from demo-video` still in scrollback | — |
-
-Without the right-hand column every one of these passes on a recorder that
-captured the page **once** and wrote the same dump into all 23 files: `$128,400`
-appears in that dump, so does `Refresh`, so does everything else. With it, a
-single stale capture fails on the first beat that should have moved on. The
-same shape does the work in `02-filtered`: the evidence has to show the four
-rows the filter *removed* are gone, which is the fixture's own post-condition
-restated in text.
-
-The facts are searched in the **page text only** — `aria`, `scope_aria`,
-`html`, `screen` — never in the beat record embedded alongside them. Every
-caption is in `beat.caption` already, so searching the whole file for one would
-pass on a recorder that captured no page text at all: the assertion has to be
-about what the page said, not about the log quoting itself.
-
-Structure, checked both directions like the stills: every beat in
-`timeline.json` names an `evidence` path, every named file exists and parses,
-`evidence/` holds nothing no beat names, and each file's embedded beat block
-matches that beat's `index`, `verb`, `selector`, `caption` and both timestamps.
-Without that last check every file could hold the same screen and the facts
-above would still be found *somewhere*.
-
-**The spotlight scope** is graded on its own, because it is what the issue says
-the capture is scoped to: the `spotlight("#kpi-rev")` beat must name that
-selector in `scope`, carry `$128,400` in `scope_aria` and `id="kpi-rev"` in
-`html`; the beat that *clears* the spotlight must carry neither, or the scope
-outlives the highlight.
-
-**The size cap is graded in the same take.** The fixture's whole ARIA tree is
-2.3 kB against a 12 kB cap, so truncation cannot be provoked on it, and
-slackening the cap to meet the fixture would be grading the wrong number. The
-take appends 900 list items to the page and spotlights them, and then:
-
-- the `pause` beat **before** the bloat must come back with `truncated == []`
-  and an ARIA tree under the cap — a recorder that marked every field
-  truncated would satisfy everything else here;
-- the `pause` beat **after** it must have `aria`, `scope_aria` *and* `html` in
-  `truncated`, all three carrying the marker text inline where they stop, and
-  all three cut *to* the budget (`limit < len(field) <= limit + marker`) rather
-  than merely under some ceiling. All three, because a cap applied to `aria`
-  and not to `scope_aria` is a cap on a third of what a spotlight beat writes;
-- the package's own `EVIDENCE_LIMITS` and `EVIDENCE_SCHEMA` must equal the
-  numbers written in `tests/smoke`. Reading the caps off the code being graded
-  would agree with it whatever it says; asserting they match means widening one
-  has to be done on purpose.
-
-`screen` is the fourth budget and no take here bloats a TUI far enough to reach
-it, so it is graded as the **contract of `_cap_text` itself** — under its
-budget nothing is cut, 500 over it exactly 500 are, the marker is there, and
-the result never exceeds budget plus marker. That is a unit check, stated as
-one, and it is the only assertion on this axis that does not come from a
-recording.
-
-Per file the ceiling is 136 kB and per directory 512 kB — observed 39 kB across
-23 web beats and 9 kB across 18 terminal ones. The file ceiling is deliberately
-loose because **the caps count characters and it counts bytes**: 32 000
-characters of CJK is ~96 kB of UTF-8 before JSON escaping, so a tight byte
-ceiling would fail on a legitimately-capped file. What grades the caps is the
-character count per field above; this only catches one that stopped being
-applied at all.
-
-**Evidence is the fifth leak path, and it is the one with no pixels in it.**
-Every other artifact here is an image; `redact()` is a *pixel* control, and the
-value it covers is still in the DOM — which is what an evidence file is a dump
-of. Two takes grade it, and they grade different halves.
-
-`redaction/` sweeps its evidence for the same 13 literals as everything else,
-which works only because that take now **sets a spotlight**. For one review
-round it did not, `html` was null in all 31 files, and the entire `outerHTML`
-surface sat outside the sweep — the take with the secrets in it graded none of
-the field most likely to carry one. It also runs `check_evidence`, because the
-sweep alone grades nothing: replacing `_evidence_payload` with a constant
-returning two control strings **passed the whole take**, sweep and all.
-
-`evidence/` is the take for the shapes that leak into *text and nothing else*.
-It records `?evidence=1`, redacts nine cards, registers two values, and sweeps
-for twelve literals — every one of which was readable in `evidence/*.json` when
-the round that introduced it was reviewed:
-
-| shape | why a picture never sees it |
+| break | what fired |
 |---|---|
-| `WSPC` | a value indented on its own line in hand-written markup. `textContent` returns `"\n      sk-live-WSPC…\n    "`; the ARIA tree returns `sk-live-WSPC…`; `str.replace` between them finds nothing. **The most ordinary shape there is** — the older fixture escaped it only because every key was assigned from JS, which makes one unpadded text node |
-| `TICK` | rewritten every 5 ms. The capture reads the page three times, so the harvest sees one value and the snapshot the next |
-| `LBLD` | the accessible name of a redacted card, sourced by `aria-labelledby` from a `display:none` element outside it. On nobody's screen, in nobody's frame, and in the ARIA tree. The card carries `role="group"` deliberately: a plain `<div>` has no role, an ARIA snapshot shows it no name, and the shape would prove nothing |
-| `SLOT` | light DOM slotted into a redacted element *inside* a shadow root. The redacted element's own `textContent` is empty and the value is a light child of the host — inside the redaction in the flattened tree, outside it in the DOM. It takes two separate mechanisms to hold: walking `assignedNodes()` when harvesting, and following `assignedSlot` when deciding what counts as outside |
-| `VALU` | an `<input>` value set from JS, so there is no `value` **attribute** to read — only the property |
-| `CHLD` | a key whose characters are three text nodes, each an ordinary string alone |
-| `ATTR`, `JSON` | `data-*` attributes the page never renders, which only exist in evidence because the markup dump is a surface this feature created |
-| `BLED` | in a card whose *label* also renders outside it — the mirror defect, below — and **captioned** by the storyboard, which is the case that reaches `timeline.json` |
-| `HATT` | mirrored into `title`, `data-value`, `aria-label` and an input's `value` on siblings nothing redacts. The harvest read those when deciding what "renders in the clear", so a copy-to-clipboard button carrying the key it copies exempted that key from masking **everywhere**. None of those channels is painted by anything, and `_EVIDENCE_HTML_JS` already strips the same attributes out of `html` on exactly that reasoning — the feature contradicted itself for a round |
-| `VEIL` | the same trick in CSS: a `.sr-only` clip, `opacity:0`, `visibility:hidden`, `left:-9999px`. `checkVisibility()` called with no arguments reports all four visible; it models `display` and `content-visibility` and nothing else, and `display:none` was the one shape this fixture happened to use. Measured leaking into `timeline.json` and `timeline.md` as well as all six evidence files |
-| `AMPS` | a registered secret containing `&`, which `outerHTML` writes `&amp;`. The mask searched the raw literal, the withhold fallback stripped tags but not entities, and the end-of-document backstop was a plain `in` — all three missed, and the file came out with `aria` reading `token=[redacted]` and `html` carrying the value in full |
-
-`VEIL` is spelled that way because the terminal family already has a `HIDE`
-(a value cut by a cursor-hide escape), and `sk-live-HIDE` with eight zeroes is
-a **prefix** of the terminal one's sixteen — so each take's byte sweep would
-have matched the other's literal. Found by a rename in this repo doing exactly
-that.
-
-One literal covers each of `HATT` and `VEIL` rather than one per channel, and
-that is deliberate: every element in a family holds the same value, so any
-single channel regressing puts that value back into `outside` and un-masks it
-everywhere. One assertion, four shapes, and the failure names the family.
-
-Three of those were written the wrong way first and passed while proving
-nothing: the slotted value was a DOM descendant of the redacted element, the
-labelled card had no role, and the input's value was an attribute. Each was
-found by injecting the fault the shape exists to catch and watching the run
-stay green. **A leak fixture that cannot be made to fail is a comment**, the
-same as an assertion.
-
-The sweep runs over **every file the take wrote**, not only `evidence/`. That
-is what catches the storyboard's captioned value in `timeline.json` and
-`timeline.md` — the two files this skill tells people to commit. The harvest
-that keeps a redacted value out of the evidence has to reach them too, or the
-same string is `[redacted]` in one file and in the clear in the one beside it.
-
-Against the secrets, `EVIDENCE_KEEP`: four strings that must **survive** — the
-sentence sharing a word with a redacted card's label, an ordinary KPI, the text
-of the element whose attributes hold keys, and a table row. Without that half,
-every assertion above is satisfied by a recorder that captured nothing, and by
-one that masked everything. Both happened: harvesting every node of a redacted
-card also harvests its label, and an earlier round rewrote every unrelated
-paragraph as `[redacted] for the quarter was steady.` A card holding
-`sk-<i>live</i>-CHLD…` registered `"live"` and rewrote every other key on the
-page.
-
-The rule that fixes it — a harvested string is a mask only if it renders
-nowhere outside the mask — turns on what "renders outside" means, and two
-readings of that were wrong before this one:
-
-- a first version counted the page's own inline `<script>` text, so every
-  literal in the fixture's source read as "already on screen in the clear" and
-  four keys stopped being masked at all;
-- the second counted the recorder's **own caption bar**. A storyboard that
-  captions a redacted card's value writes that value into an element outside
-  the mask — so the value was exempted everywhere, and one authoring mistake in
-  the frames (which no recorder can undo) became the same mistake in
-  `timeline.json` (which it can). Recorder chrome does not get a vote on what
-  the app renders.
-
-Five more assertions in that take, each for a claim that would otherwise be
-untested:
-
-- **The refusal.** Two beats run while the rotating card is live and must come
-  back `omitted`, with no `aria`, `scope_aria` or `html` — and a third, after
-  the card is removed, must **not**, or "every beat refuses" would satisfy the
-  first one and grade nothing. Injecting a payload that always refuses fails
-  the third *and* all four `EVIDENCE_KEEP` controls, which is the shape the
-  whole axis is built on.
-- **Elided, not withheld.** A third spotlight lands on `#ev-child-card`, which
-  the take *redacts*, and its markup must come back as the target's own tag
-  wrapped around one `[redacted]` — two tags, nothing between them.
-  `querySelectorAll('*')` never returns the element it was called on, so a
-  serializer that elides only descendants misses exactly the element a
-  storyboard redacts and spotlights together. What it writes instead is
-  `sk-<i>live</i>[redacted]`: elided wherever the substring mask happened to
-  reach, in the clear everywhere else, and passing every other assertion here
-  — measured. Counting the tags is what catches it.
-- **A refusal in the capture is fatal.** `evidence-leak-fatal/` records three
-  beats with a `Recorder` subclass whose `_evidence_payload` raises
-  `SecretLeak`, and the take must die with that exception and leave **nothing**
-  — no mp4, no timeline, no evidence. `_capture_evidence()` runs in a `finally`
-  and wraps the payload in a broad `except` so a diagnostic cannot lose an
-  otherwise fine take; a `SecretLeak` travelling that path was being swallowed,
-  and the take passed with the mp4 written. Injected rather than provoked, on
-  purpose: every real source of one is also a source elsewhere in the take, so
-  a fixture would not say which path refused.
-- **Mask-then-cap, where the two meet.** The take re-pads a list item until a
-  registered secret's characters *span* the 8 000-character markup budget
-  (asserted, and printed: `chars 7984-8016`), then looks for 12- and
-  20-character heads of it as well as the whole literal. Cap first and the
-  head survives as the last thing in the file, which a search for the literal
-  misses — injecting that order leaves `sk-live-CUTT` in the evidence and only
-  the 12-character search finds it.
-- **Stale evidence.** Two files are planted in `evidence/` before the take, as
-  a previous recording would have left them: one this take's naming owns,
-  which must be deleted, and one belonging to another segment, which must not.
-  `record.py` is committed precisely so it can be re-run into the same folder,
-  and yesterday's files would otherwise sit there holding the value you added a
-  `redact()` for today.
-
-It is also the only take that records with `segment=`, so
-`evidence/<segment>.seg.beat-NN.json` is exercised rather than merely designed
-([#22](https://github.com/rogvid/skills/issues/22)).
-
-`terminal-wrap/` is the take for the one transformation the terminal
-introduces on its own. `_screen()` walks the xterm.js buffer a row at a time and
-joins with newlines without consulting `isWrapped`, so a credential crossing the
-last column is two rows with a newline through the middle: contiguous to a
-viewer, contiguous in the frames, and a substring of nothing. Two mechanisms
-missed it for that one reason — the evidence mask, and
-`_verify_redaction_final()`, which is the check that decides whether the mp4 may
-be written at all and which asked `secret in screen`. They now share one
-matcher and cannot disagree.
-
-Three things about the take are forced rather than chosen, and each was found by
-the take failing loudly:
-
-- **the value is printed by a script**, not by a `run()` argument. A command
-  line is echoed, and a registered secret in one trips `run()`'s own guard
-  ([#5](https://github.com/rogvid/skills/issues/5));
-- **it is registered *after* it is printed.** The stream scrubber masks what it
-  knows about as the bytes go past, so a value registered up front never reaches
-  the buffer and the shape cannot exist. Late registration is the ordinary shape
-  of the mistake — a token rotates into output before the storyboard names it —
-  and what is on screen at the end of the take is in the frames whenever it was
-  registered;
-- **it is `zz-wrap-` shaped, not `sk-live-`.** The scrubber's shape net
-  (`sk-[A-Za-z0-9_-]{16,}` among others) masks an `sk-live-` value whether or not
-  anyone registered it, so such a value can never reach the screen. `zz-` matches
-  no shape, exactly as `terminal-redaction/`'s own `TCTL` control does.
-
-The take measures `term.cols` at record time and pads so `TERMINAL_WRAP_HEAD`
-characters land before the boundary; the geometry is asserted and printed
-(`chars 112-140` at column 120), because a take that quietly stopped wrapping
-would be a test of an ordinary echo. It is graded on the refusal **and** on what
-survived it — `SKILL.md` promises a `SecretLeak` keeps nothing, and a terminal
-still is the raw screen.
-
-**The same elasticity closed a leak `key()` documented as unfixable.** `key()`
-refuses a registered secret spelled one keystroke at a time, but the beat opens
-before the refusal, so `timeline.json` recorded the keys **joined by spaces** —
-`s k - l i v e - K E Y D 0 0 …`, which is the value with whitespace inserted
-between every character and which no literal match could see. The docstring said
-so. `terminal-redaction/` now requires **three** scrubbed selectors rather than
-two, and reverting the elasticity puts that string back in the log.
-
-`tests/smoke --evidence-only` records just the evidence take and the refusal
-take, which is what makes an injection loop over this axis affordable.
+| `drop(clone, 'script,…')` stops naming `script` | beat 6's `html` carries inline script text, and a `<script` tag |
+| `srcdoc` leaves the stripped-attribute list | beat 6's `html` carries a srcdoc document, and the attribute |
+| the page ARIA snapshot returns `""` | beat 2's tree is 0 characters, under the 400 this grades |
 
 ### How the recording looks — the spotlight's exit, and the card a terminal segment opens on
 
@@ -1745,16 +1166,16 @@ either current, or absent, or explicitly marked stale.**
 | take | the way out of the `with` | what it grades |
 |---|---|---|
 | `crash-web` | a `wait_for()` timeout | the common case: mp4, timeline, `failure/`, marker |
-| `crash-no-evidence` | a `wait_for()` timeout, `evidence=False` | that the crash dump masks a `redact()`ed value that was never registered. The only thing that reads what the mask hides is a harvest off the live page, and per-beat evidence — which does that on the clean path — is switched off here |
 | `crash-terminal` | a `wait_for_text()` timeout | the same, where `failure/screen.txt` is the *only* account of what went wrong — a TUI's state is not recoverable from a frame |
 | `crash-interrupt` | `KeyboardInterrupt` inside a `pause` beat | `BaseException`, not `Exception`. A handler written for the latter misses a Ctrl-C entirely, and a Ctrl-C on a hung demo is exactly the take somebody is about to look at |
 | `crash-between` | a raise in storyboard code, no beat open | the *absence* of a confidently wrong attribution: no beat may claim a failure it did not cause |
 | `stale-media` | ffmpeg cannot write `demo.mp4` | `duration: null` beside a previous run's recording, no review frames off it, and a stderr line saying so |
 | `marker-cleared` | it succeeds, into a folder a failure left | the marker and the stale dump are removed. A marker that outlives its run is the same lie inverted |
 
-Plus `refused-take-marker`, which reads the directory `redaction-unmatched`
-leaves rather than recording again — that is the only path that writes
-*nothing*, which is what makes the marker the whole defence there.
+`refused-take-marker` went with the masking (#150): the only path that wrote
+*nothing* was a take whose mask could not be verified, and no such path exists
+now. `stale-media` and `marker-cleared` still grade the marker on the paths
+that remain.
 
 Three things about how these are built are worth knowing before trusting them:
 
@@ -1775,34 +1196,15 @@ Three things about how these are built are worth knowing before trusting them:
   deviation against the same 6.0 floor the web stills use — which transitively
   says `demo.mp4` has a picture where it stopped.
 
-The secret-input checks (`register_secret`'s 8-character floor,
-`caption(Secret(...))`) run in the same phase and record nothing: both raise
-before a page is used, so they cost a `Recorder(...)` construction and no
-browser. The floor is tested **at** 8 characters and **at** 7, because a floor
-only tested from well inside it is a constant nothing pins.
-
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
 
-- **The failure arms do not cover a dead browser.** If Chromium itself goes
-  away, the final redaction check cannot run, the take is treated as
-  unverifiable, and it keeps nothing but the marker — which is the correct
-  policy and is not exercised here. What *is* exercised is the storyboard
-  raising while the page is alive, which is the ordinary case.
-- **The `SecretLeak` raised out of `_build_failure` is unreachable in the
-  suite.** `crash-no-evidence` grades the dump's masking on a page holding a
-  redacted value and a registered one, and finds neither. What nothing reaches
-  is the *refusal* — a dump that still holds a forbidden literal after masking,
-  which must raise and leave no `failure/`, no mp4 and no timeline. The
-  masking would have to be broken for that path to run.
 - **A conversion failure writes no `failure/` dump**, only the marker, the
   timeline with `duration: null` and the stderr line. The dump is built from
   the exception that came out of the `with`, before conversion is attempted,
-  so a failure that happens *after* that point has nowhere to land. Stated
-  rather than fixed: building it afterwards would mean a mask refusal could
-  arrive with the mp4 already on disk.
+  so a failure that happens *after* that point has nowhere to land.
 
 - **A total stylesheet failure is below the luma floor.** Measured with real
   screenshots: unstyled-HTML fallback scores 9.97, a sparse white page 3.54, an
@@ -1901,97 +1303,16 @@ knows is missing is worse than one that is openly absent.
   output silently, and `_StreamRedactor._mask_dangling` is unexercised. Making
   it fail needs a take that ends mid-secret and an assertion on the last
   frames of the mp4, which is a race with the screencast.
-- **The terminal scrubber's colour bookkeeping is unasserted.** A masked run
-  swallows any SGR sequence inside it and re-emits it after the mask, so the
-  rest of the line keeps its colour. In this fixture the colour is reset
-  inside the same run, so removing that re-emission changes no pixel here.
-  It is cosmetic either way — nothing about *what* is hidden depends on it.
-- **Only SGR-interleaved secrets are caught by the *stream* scrubber, and only
-  that is tested.** A value broken up by a cursor movement — a redrawn progress
-  line, a TUI painting in two passes — is not contiguous in the stream and is
-  deliberately not matched there (see SKILL.md); what catches it is
-  `_verify_redaction_final()` on the finished screen. A **wrapped** line is the
-  mirror case: contiguous on screen, split in `_screen()`, and it used to defeat
-  that check too — `terminal-wrap/` is the take for it. Nothing here records a
-  redrawn progress line, so the harness does not measure how common that is.
-- **Shape detection is graded on how a token is *split*, not on the pattern
-  list.** All four patterns are printed unregistered and pixel-graded — `ghp_`
-  on the `shp`, `str` and `anc` rows, `sk-` on `pau`, `AKIA` on `aws`, a JWT
-  on `jwt` — so removing any one of them fails the take. What is not covered
-  is the *inside* of each pattern: one spelling of each shape is printed, so a
-  regression that narrowed `gh[pousr]_` to `ghp_`, or dropped `ASIA` from the
-  AWS pattern, still passes.
-- **Nothing checks a non-bash shell.** The exit status arrives through `$?` and
-  `\#` expanded in `PS1`, which is bash behaviour; zsh needs `PROMPT_SUBST` and
-  would leave every `exit_code` null. Only `/bin/bash` is recorded here — the
-  `terminal-race/` take's slow shell `exec`s it.
-- **Determinism's motion rule is asserted only where a stylesheet can reach.**
-  `element.animate()` (Web Animations), `requestAnimationFrame` loops and
-  canvas rendering are untouched by it and unasserted here
-  ([#35](https://github.com/rogvid/skills/issues/35)); so are animations
-  inside a shadow root, and any the app declares `!important` at higher
-  specificity ([#36](https://github.com/rogvid/skills/issues/36)). The
-  `::before`/`::after` arms of the rule *are* asserted, because an animated
-  pseudo-element is the most common spinner on the web and dropping them from
-  the rule passed this harness until a probe was planted for it.
-- **No take records with a non-default `clock`, `timezone_id` or `locale`.**
-  Every take uses the built-in defaults, so the parameter path and
-  `_clock_epoch_ms()`'s parsing are exercised nowhere, and the locale
-  assertion had to be fault-injected with a forced `de-DE` to be seen failing
-  at all — this box is already `en-US`. Tracked in
-  [#37](https://github.com/rogvid/skills/issues/37).
-- **The determinism takes prove nothing about what the recorder cannot
-  control.** They record a static fixture served off the local disk, so
-  "identical twice" says the *browser* was pinned — not that an app with its
-  own `Math.random()`, a server that returns fresh rows, or a page whose layout
-  depends on when a request came back would reproduce. Nothing here can assert
-  that, because there is nothing in the recorder to assert about it; it is
-  called out in `SKILL.md` as the storyboard author's problem instead. The
-  fixture's `?entropy=1` hook deliberately does **not** include a random number
-  for the same reason — seeding it in the fixture would be testing a control
-  that does not exist.
-- **`TerminalRecorder`'s PTY child is outside all of it.** The determinism
-  controls are context options and page init scripts, so a `date` run in a
-  terminal demo prints the real time in the machine's own zone. Tracked in
-  [#26](https://github.com/rogvid/skills/issues/26).
-- **Nothing checks audio.** Narration is forced off and no assertion touches the
-  aac track, so the whole speech path — `tts_clip`, the `.tts/` cache, the
-  `adelay`/`amix` mixing in `_convert` — is untested here.
-- **Nothing checks audio.** The redaction take narrates (against a stubbed
-  synthesizer) and asserts *which lines were cached*, which exercises
-  `_prepare_line`, the cache path and the `adelay`/`amix` mixing in `_convert`
-  far enough that a crash would surface — but no assertion decodes the aac
-  track, and the clips are silence, so nothing here can tell a correctly mixed
-  narration from a silent one landing at the wrong offset. The real
-  ElevenLabs call is never made.
-- **Nothing reads the burned-in caption text off the video, which the
-  redaction take needs and does not have.** A caption holding a secret is
-  refused before it is drawn, so the leak is prevented rather than detected —
-  but if that guard were bypassed *only* on the drawing path, the words would
-  be in the frames and every pixel assertion here would still pass. What
-  catches the caption path today is the beat log, the `.tts/` set and the byte
-  sweep, all of which are downstream text checks, not pixels. Same OCR-shaped
-  hole as the caption-wording gap above.
-- **Four guard sites cannot be fault-injected on their own.** Each is a
-  redundant belt, and removing any one alone leaves the run green:
-  - the first-paint gate. With `redact()` restricted to CSS the in-page
-    stylesheet masks from the first paint, so weakening the gate leaks
-    nothing — which is why its integrity is asserted directly (see above)
-    rather than through a leak it no longer prevents.
-  - `_before_shot()`, which re-pushes the mask before a still. The mask is in
-    the page, the observer keeps it there, and a still *is* the page. It only
-    becomes load-bearing with the observer *also* disabled, and then the
-    tampered still leaks and the check fires.
-  - the blur underneath the cover. It is what a stylesheet can do with no JS,
-    and it reaches ink outside the cover's rectangle — but with the cover
-    working, removing it changes no measurement here.
-  - `caption()`'s own `_no_secrets` call, and `_prepare_line()`'s. The
-    relationship is **symmetric**: `caption()` calls `_prepare_line()`
-    immediately, so removing either one still leaves the other to refuse the
-    line. Only removing both leaks, and then six assertions fire. An earlier
-    version of this file presented the first as tested and the second as the
-    redundant one; that was wrong in a way worth stating, because it claimed
-    coverage that does not exist.
+- **Every remaining line of masking, scrubbing and redaction is now shipped
+  and completely ungraded**, and that is this slice's one real cost. #150
+  deletes the arms; #142, #143 and #144 delete the code they graded. Between
+  this pull request and those three, `redact()`, `register_secret()`, the PTY
+  scrubber and the evidence masking family are all still in the package with
+  nothing watching them at all. The window is deliberate — the arms could not
+  be split along the source-file boundaries (see #150) — and it is short by
+  construction, but a regression in any of it during that window is invisible.
+  Nothing in this repository depends on those paths: `SKILL.md` already states
+  that the recorder does not defend against a secret reaching the screen.
 - **The segmented take records two parts of one storyboard, not a real
   time-skip.** Nothing waits between them, both are the web recorder against
   the same fixture, and no segment is re-recorded on its own — so the flow
@@ -2044,66 +1365,10 @@ knows is missing is worse than one that is openly absent.
   handed only `evidence/` could actually narrate the demo is the same
   unautomatable question as `SKILL.md` step 6's fresh-agent review, and
   nothing here asks it.
-- **The recorder's own end-of-document guard cannot be shown catching a leak.**
-  Before writing, each evidence document is re-checked over its serialized
-  bytes for anything registered or redacted. It runs against the same list the
-  masking does, so for a plain string value it **cannot disagree with it** —
-  this is not a second opinion and nothing here should be read as saying it is.
-  It exists for what the walker structurally cannot reach: a field a later
-  slice adds *after* the scrub, or a secret that ends up in a dict key. What
-  actually grades this axis is the byte sweep over `evidence/`.
-- **`url` and `title` are only scrubbed for registered secrets.** No take puts
-  an unregistered value in a query string, so the one path where evidence
-  records something the app never rendered on screen is untested
-  ([#50](https://github.com/rogvid/skills/issues/50)).
 - **Nothing records with `evidence=False`.** The off switch, and the
   `DEMO_VIDEO_EVIDENCE=0` env var behind it, are exercised nowhere — every
   take here writes evidence
   ([#48](https://github.com/rogvid/skills/issues/48)).
-- **Terminal evidence has no `redact()` to inherit.** `screen` is the whole
-  rendered terminal and `register_secret()` is the only thing masked out of it,
-  because `TerminalRecorder` has no `redact()` at all
-  ([#5](https://github.com/rogvid/skills/issues/5)).
-  `terminal-redaction/` proves the registered path reaches the screen dump and
-  the byte sweep over every file the take wrote, evidence included; a value
-  nobody registered and matching no shape is written verbatim, and there is
-  nothing yet to assert about it.
-- **A crash that is not a `SecretLeak` skips the stale-evidence clearing**
-  ([#79](https://github.com/rogvid/skills/issues/79)), the end-of-document
-  guard runs after capping and so cannot see a literal cut in half by a budget
-  ([#80](https://github.com/rogvid/skills/issues/80)), and an unsegmented take
-  never clears a previous *segmented* take's evidence
-  ([#81](https://github.com/rogvid/skills/issues/81)). All three fail safe —
-  nothing new is written — and all three are exercised by nothing here.
-- **The normalization boundary is stated, not tested to its edges.** Matching
-  is exact modulo whitespace in either direction, HTML entities and JSON string
-  escapes — the four transformations `SKILL.md` lists, each with a shape here.
-  Case differences, Unicode normalization forms and confusables, percent- and
-  base64-encoding, and a value the app itself reformats are all outside it and
-  are exercised by nothing. That is a deliberate boundary rather than a gap to
-  close: it is an asymptotic surface, and the answer for a value that survives
-  one of those is `redact()` on the element, not a longer list here.
-- **Sub-frames are not harvested, and the argument that they need not be is
-  not itself asserted.** Nothing an iframe renders can reach an evidence file
-  — `aria_snapshot` is taken of the top document's `body` and stops at the
-  `iframe` node, and the markup dump strips `srcdoc` — so the harvest is
-  main-frame only. What holds that up is the byte sweep requiring the
-  fixture's in-iframe key to be absent, which is a consequence of the claim
-  rather than the claim itself. A future change that made `aria` descend into
-  frames would be caught; one that made only `html` do so, on a page with no
-  iframe in the spotlight, would not.
-- **"Renders in the clear" still cannot see occlusion.** The rule that keeps
-  the mask from eating the page exempts any string that renders outside it, and
-  "renders" is now four conditions: `checkVisibility()` with `opacityProperty`,
-  `visibilityProperty` and `contentVisibilityAuto` set; a box of at least 2×2
-  CSS pixels; a box not entirely off the top or left of the document; and no
-  attribute or input `value` counting at all. `HIDE` exercises the first three
-  through four shapes at once. What none of it models is an element **painted
-  underneath an opaque sibling**, or clipped away by a `clip-path` on an
-  *ancestor* rather than on itself — both count as rendered, and a value
-  visible only there would go unmasked
-  ([#69](https://github.com/rogvid/skills/issues/69)). Deciding that properly
-  needs per-node hit testing, which is a different order of cost.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
