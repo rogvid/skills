@@ -312,7 +312,8 @@ return.
    of real background work, don't record the wait — record **segments**:
    `Recorder(out_dir, segment="part1")`, poll between segments until the
    work is done, open the next segment with `rec.interlude("…a few minutes
-   later…")` on `about:blank` before navigating, and `stitch()` into
+   later…")` on `about:blank` before navigating, and
+   `from demo_recording import stitch` to concatenate them into
    demo.mp4. A **terminal** segment takes its opening card as
    `TerminalRecorder(interlude="…")` instead — see
    [reference/terminal.md](reference/terminal.md). `stitch()` also merges the segments' beat logs into one

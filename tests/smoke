@@ -2831,7 +2831,7 @@ def _check_video(
     duration_range: tuple[float, float],
     video_rect: Rect,
 ) -> list[str]:
-    from demo_recording import media_duration
+    from demo_recording.content import media_duration
 
     failures: list[str] = []
     size = mp4.stat().st_size
@@ -3405,7 +3405,8 @@ def check_coverage_refusals(out_root: Path) -> list[str]:
     """Tagging and declaring are refused where they would produce a wrong
     report. No browser: `Recorder(...)` does not launch one until `__enter__`.
     """
-    from demo_recording import Recorder, coverage_report
+    from demo_recording import Recorder
+    from demo_recording.coverage import coverage_report
 
     failures: list[str] = []
     out = out_root / "coverage-refusals"
@@ -3589,7 +3590,7 @@ def check_opening_gap(out_root: Path) -> list[str]:
     frame to last must measure a 0.0 gap. Delete the floor and this is the
     assertion that goes red.
     """
-    from demo_recording import opening_gap
+    from demo_recording.content import opening_gap
 
     failures: list[str] = []
     root = out_root / "opening-gap"
@@ -3653,7 +3654,7 @@ def check_verb_classification() -> list[str]:
     the arm quietly stops noticing a whole class of demo. Free to check, and it
     needs no recording.
     """
-    from demo_recording import CONTENT_ACTING_VERBS, CONTENT_PASSIVE_VERBS
+    from demo_recording.content import CONTENT_ACTING_VERBS, CONTENT_PASSIVE_VERBS
 
     declared = declared_verbs()
     if len(declared) < 15:
@@ -4398,7 +4399,8 @@ def check_timeline(
     segment each beat was recorded in (all None for a single take), and
     `expected_interludes` the lines any `interlude` beats show.
     """
-    from demo_recording import TIMELINE_SCHEMA, media_duration
+    from demo_recording.content import media_duration
+    from demo_recording.timeline import TIMELINE_SCHEMA
 
     failures: list[str] = []
     json_path = out_dir / "timeline.json"
@@ -4841,7 +4843,7 @@ def check_beat_frames(
         neither of them can see it. This one looks at the pixels, against the
         hand-written storyboard, and says so.
     """
-    from demo_recording import FRAMES_SCHEMA
+    from demo_recording.frames import FRAMES_SCHEMA
 
     failures: list[str] = []
     frames_dir = out_dir / "frames"
@@ -5226,7 +5228,7 @@ def _check_scene_fallback(label: str, out_dir: Path, doc: dict) -> list[str]:
     At a threshold separating those, an ordinary terminal repaint would be
     reported as a cut. Issue #57.
     """
-    from demo_recording import SCENE_MIN_SPAN_S, scene_times
+    from demo_recording.frames import SCENE_MIN_SPAN_S, scene_times
 
     failures: list[str] = []
     mp4 = out_dir / "demo.mp4"
@@ -5356,7 +5358,7 @@ def check_issues(
     that was running when it fired. "The take broke" is not a bug report; "the
     take broke during `click('#refresh')`" is.
     """
-    from demo_recording import ISSUE_KINDS, STRICT_KINDS
+    from demo_recording.timeline import ISSUE_KINDS, STRICT_KINDS
 
     failures: list[str] = []
     json_path = out_dir / "timeline.json"
@@ -6448,7 +6450,8 @@ def check_strict_failure(
     somebody wants to look at; failing it by destroying the evidence would be
     worse than not failing it.
     """
-    from demo_recording import STRICT_KINDS, StrictTakeFailed
+    from demo_recording import StrictTakeFailed
+    from demo_recording.timeline import STRICT_KINDS
 
     failures: list[str] = []
     if exc is None:
@@ -6551,7 +6554,7 @@ def last_frame(mp4: Path, rect: Rect) -> bytes | None:
     """The final second of a recording, reduced over `rect`, last frame first
     available. Both takes end on the same static page, so this is the frame
     they should agree on."""
-    from demo_recording import media_duration
+    from demo_recording.content import media_duration
 
     try:
         seconds = media_duration(mp4)
@@ -6957,7 +6960,8 @@ def stitch_segments(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
     function that grades a single take. What is here is only what is true of a
     merge and of nothing else.
     """
-    from demo_recording import media_duration, stitch
+    from demo_recording import stitch
+    from demo_recording.content import media_duration
 
     failures: list[str] = []
     demo = out_dir / "demo.mp4"
@@ -7222,7 +7226,8 @@ def run_evidence(out_root: Path) -> list[str]:
        reached it through the mask.
     3. **truncation is marked, never silent**, on all three text fields.
     """
-    from demo_recording import EVIDENCE_LIMITS, EVIDENCE_SCHEMA, Recorder
+    from demo_recording import Recorder
+    from demo_recording.timeline import EVIDENCE_LIMITS, EVIDENCE_SCHEMA
 
     label = "evidence"
     failures: list[str] = []
@@ -7914,7 +7919,8 @@ def check_crash_take(
     arm that fails between beats — where the requirement is the opposite one:
     no beat may claim it.
     """
-    from demo_recording import FAILURE_MARKER, media_duration
+    from demo_recording.content import media_duration
+    from demo_recording.failure import FAILURE_MARKER
 
     failures: list[str] = []
     if raised is None:
@@ -8346,7 +8352,9 @@ def run_stale_media(out_root: Path, base_url: str) -> list[str]:
     second, `duration: null` would also be true of a broken fix, and the
     assertion would grade nothing.
     """
-    from demo_recording import FAILURE_MARKER, Recorder, media_duration
+    from demo_recording import Recorder
+    from demo_recording.content import media_duration
+    from demo_recording.failure import FAILURE_MARKER
 
     out_dir = fresh_take_dir(out_root, "stale-media")
     mp4 = out_dir / "demo.mp4"
@@ -8480,7 +8488,8 @@ def run_marker_cleared(out_root: Path, base_url: str) -> list[str]:
     it is a plaintext dump of a page, which may hold exactly the value the new
     take was rewritten to hide.
     """
-    from demo_recording import FAILURE_MARKER, Recorder
+    from demo_recording import Recorder
+    from demo_recording.failure import FAILURE_MARKER
 
     out_dir = fresh_take_dir(out_root, "marker-cleared")
     marker = out_dir / FAILURE_MARKER

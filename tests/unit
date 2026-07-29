@@ -753,6 +753,99 @@ class SkillDocs(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# The package's front door is the storyboard surface (issue #148)
+# --------------------------------------------------------------------------
+#
+# `__all__` published 50 names for a storyboard that imports three, because
+# `tests/smoke` read the recorder's own thresholds back through the front door
+# to grade itself. An interface as wide as its implementation is not an
+# interface, and a storyboard author opening `__init__.py` met
+# `CONTENT_MOVED_PIXELS` before `Recorder`.
+#
+# **The bar is the documentation, not a second copy of the list.** Asserting
+# `__all__ == [six literals]` would be the catalogue's ungraded constant: it
+# would pass for whatever list somebody typed, and the interesting failure —
+# `__all__` and the docs drifting apart — is invisible to it. So the test reads
+# every `from demo_recording import ...` out of SKILL.md and reference/ and
+# requires the two to agree.
+#
+# Its limit, stated: prose that *names* a helper without showing the import is
+# not counted. `stitch()` is discussed all over SKILL.md, and only one line
+# imports it.
+
+SKILL_IMPORT_RE = re.compile(r"from demo_recording import ([A-Za-z_, ]+)")
+
+
+class PublicSurface(unittest.TestCase):
+    def documented(self) -> set[str]:
+        names: set[str] = set()
+        docs = [SKILL_DIR / "SKILL.md", *sorted((SKILL_DIR / "reference").glob("*.md"))]
+        for doc in docs:
+            for match in SKILL_IMPORT_RE.finditer(doc.read_text(encoding="utf-8")):
+                names |= {n.strip() for n in match.group(1).split(",") if n.strip()}
+        return names
+
+    def test_every_name_the_documentation_imports_is_exported(self):
+        import demo_recording
+
+        documented = self.documented()
+        # The haystack first: a docs sweep that found no imports would make the
+        # subset check below hold over an empty set.
+        self.assertGreaterEqual(len(documented), 3, "no documented imports found")
+        missing = sorted(documented - set(demo_recording.__all__))
+        self.assertEqual(
+            missing, [], f"SKILL.md/reference tell an author to import {missing}"
+        )
+
+    def test_nothing_is_exported_that_no_caller_needs(self):
+        # The other direction, and the one #148 is about. `StrictTakeFailed` is
+        # named in reference/failures.md as the exception a strict take raises
+        # but never shown in an import line, so it is allowed explicitly rather
+        # than by widening the regex to catch prose.
+        import demo_recording
+
+        allowed = self.documented() | {"StrictTakeFailed"}
+        extra = sorted(set(demo_recording.__all__) - allowed)
+        self.assertEqual(
+            extra,
+            [],
+            f"{len(extra)} name(s) on the front door that no documented "
+            f"storyboard imports: {extra}. Internals belong to the module that "
+            f"owns them — a test may reach in, a storyboard may not.",
+        )
+
+    def test_every_exported_name_resolves(self):
+        # `__all__` is hand-written and the recorders are resolved by PEP 562,
+        # so a typo in it is not a syntax error anywhere — it surfaces as an
+        # ImportError in somebody's storyboard.
+        #
+        # The two lazy names are checked by reading the module they point at
+        # rather than by importing it. `getattr(demo_recording, "Recorder")`
+        # would resolve `.web`, which imports Playwright — and this file's
+        # `dependencies = []` is the thing that split bought. Parsing the
+        # module for a definition of that name proves the same fact and keeps
+        # the suite browser-free.
+        import ast
+
+        import demo_recording
+
+        for name in demo_recording.__all__:
+            with self.subTest(name=name):
+                lazy = demo_recording._LAZY.get(name)
+                if lazy is None:
+                    getattr(demo_recording, name)
+                    continue
+                module = _PKG_PARENT / "demo_recording" / f"{lazy.lstrip('.')}.py"
+                self.assertTrue(module.is_file(), f"{name} points at {module}")
+                defined = {
+                    node.name
+                    for node in ast.parse(module.read_text(encoding="utf-8")).body
+                    if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+                }
+                self.assertIn(name, defined, f"{module.name} defines no {name}")
+
+
+# --------------------------------------------------------------------------
 # tests/smoke carries nothing it does not read (issue #156)
 # --------------------------------------------------------------------------
 #
@@ -1022,6 +1115,27 @@ INJECTIONS = [
         "TTS_KEY_CHARS = 20",
         "TTS_KEY_CHARS = 12",
         ["TtsKey.test_the_key_is_a_filename_stem_and_not_a_path"],
+    ),
+    (
+        "an internal threshold drifts back onto the package's front door",
+        "__init__.py",
+        '__all__ = [\n    "Recorder",',
+        '__all__ = [\n    "CONTENT_MOVED_PIXELS",\n    "Recorder",',
+        ["PublicSurface.test_nothing_is_exported_that_no_caller_needs"],
+    ),
+    (
+        "a name the documentation tells an author to import is dropped",
+        "__init__.py",
+        '    "beat_frames",\n',
+        "",
+        ["PublicSurface.test_every_name_the_documentation_imports_is_exported"],
+    ),
+    (
+        "a lazily-resolved export names a module that does not define it",
+        "__init__.py",
+        '"TerminalRecorder": ".terminal",',
+        '"TerminalRecorder": ".stitching",',
+        ["PublicSurface.test_every_exported_name_resolves"],
     ),
     (
         "a deletion leaves a constant in tests/smoke that nothing reads",
