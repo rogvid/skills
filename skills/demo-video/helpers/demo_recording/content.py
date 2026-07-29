@@ -244,7 +244,6 @@ CONTENT_ACTING_VERBS = frozenset(
         "goto",
         "key",
         "move_to",
-        "redact",
         "run",
         "scroll_to",
         "send",

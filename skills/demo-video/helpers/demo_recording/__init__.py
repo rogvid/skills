@@ -65,7 +65,6 @@ from .frames import (
     scene_times,
     write_beat_frames,
 )
-from .secrets import SECRET_MASK, SECRET_MIN_LEN, Secret, SecretLeak
 from .stitching import stitch
 from .timeline import (
     EVIDENCE_DIR,
@@ -140,11 +139,7 @@ __all__ = [
     "OPENING_WARN_S",
     "Recorder",
     "SCENE_MIN_SPAN_S",
-    "SECRET_MASK",
-    "SECRET_MIN_LEN",
     "STRICT_KINDS",
-    "Secret",
-    "SecretLeak",
     "StrictTakeFailed",
     "TIMELINE_SCHEMA",
     "TerminalRecorder",

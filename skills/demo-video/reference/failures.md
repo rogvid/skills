@@ -125,29 +125,18 @@ missing stills, and the video is a recording of different code. The next take
 that writes its own artifacts deletes the marker, so its presence always
 describes the most recent run.
 
-**Redaction covers all of it.** `failure/` is a crash dump of a page that may
-be mid-secret, which is the worst leak path this package has, so: the page is
-read exactly once, *before* the final redaction check vouches for it; the
-documents are built in memory, masked against the registered secrets and
-against the rendered text of everything `redact()` covers, and refused whole
-if anything survives; and the last frame is extracted from `demo.mp4` rather
-than screenshotted, so it inherits the recording's guarantee instead of needing
-its own. A take whose mask cannot be verified writes no dump at all.
+**`failure/screen.txt` is a text dump of the page, and nothing in it is
+hidden.** It is the ARIA tree (or the rendered terminal buffer) exactly as the
+recorder read it — see the top of [SKILL.md](../SKILL.md). The last frame is
+extracted from `demo.mp4` rather than screenshotted, so it is a frame of the
+recording rather than a second capture of the page.
 
-**This holds with `evidence=False` too**, and that is not free. `redact()` is a
-pixel control — it covers where a value renders and leaves the value in the
-DOM, which is exactly what `failure/screen.txt` dumps — and the only thing that
-reads what the mask is hiding is a harvest off the live page. Per-beat evidence
-does that on the clean path and does not run at all when evidence is off, so
-the failure path harvests for itself, on both sides of the snapshot, whatever
-the flag says. Without it, switching evidence off published every redacted
-value in the crash dump in the clear.
+The page is read once, after `_stop()` has flushed whatever the medium was
+holding back, so the dump is of the screen the recording ends on.
 
 **What this does not do.** It does not make a crashed take's `demo.mp4` a
-complete demo — it stops where the storyboard did. It does not diagnose the
-crash. And if the *browser* died (so the redaction check cannot run), the take
-is treated as unverifiable and keeps nothing but the marker: a page nothing can
-vouch for is not a page to dump.
+complete demo — it stops where the storyboard did, and it does not diagnose
+the crash.
 
 **Timestamps are wall-clock offsets, and the video can drift under them.**
 Chromium's screencast emits a frame when the page paints and nothing pads the

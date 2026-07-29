@@ -13,7 +13,6 @@ checkable without recording anything.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import cast
 
@@ -216,49 +215,6 @@ EVIDENCE_LIMITS = {
     "screen": EVIDENCE_MAX_SCREEN,
 }
 EVIDENCE_TRUNCATED = "\n…[demo-video: truncated here, {n} more characters]"
-
-# What `html` says instead of markup when a registered or redacted value is
-# interleaved with elements inside it. Spelled out rather than left null, so a
-# reader can tell "no spotlight was up" from "the markup was withheld".
-EVIDENCE_HTML_WITHHELD = (
-    "[demo-video: markup withheld — a registered or redacted value is split "
-    "across elements here, and there is no safe way to edit it out of the "
-    "serialization. The ARIA snapshot above is unaffected.]"
-)
-
-# A token this long or longer, found with whitespace *inside* it, was broken by
-# something that reflowed the text rather than written that way. A terminal wrap
-# is the case that matters: xterm.js emits one buffer row per line, so a 28-
-# character credential that crosses column 120 comes back as
-# `"…sk-live-WRAP0000\n00000000…"` and an exact search finds neither half.
-#
-# Eight is where "no natural text breaks this in the middle" starts being true.
-# Below it, allowing whitespace between every character turns a two-character
-# mask into a pattern that matches ordinary prose — `ok` would match `o k`, and
-# over-masking is the failure this whole `outside` machinery exists to prevent.
-# Above it, the cost of being wrong is that a value the author registered gets
-# masked in one more place than strictly necessary.
-EVIDENCE_WRAP_MIN_TOKEN = 8
-
-# The escapes `json.dumps` introduces, undone for *detection* by
-# `_evidence_probe`. The backstop runs over the serialized document, where a
-# newline is the two characters `\` and `n` — which no amount of elastic
-# whitespace in a pattern can match, so the backstop used to miss exactly what
-# the mask missed. A backstop that fails in the same direction as the thing it
-# backs up is not one.
-_JSON_STRING_ESCAPE = re.compile(r'\\[nrtbf"/\\]')
-_JSON_ESCAPES = {
-    r"\n": "\n", r"\r": "\r", r"\t": "\t", r"\b": "\b", r"\f": "\f",
-    r"\"": '"', r"\/": "/", "\\\\": "\\",
-}
-_JSON_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
-
-# Harvested text shorter than this is not used as a mask. `redact()` pointed at
-# an element rendering "$" would otherwise replace every dollar sign in every
-# evidence file, which costs the evidence its meaning and hides nothing: a
-# one-character secret is not one. Registered secrets are masked at any length
-# — `register_secret()` was told, explicitly, that the value matters.
-EVIDENCE_MIN_MASK_LEN = 2
 
 # Print a warning past this much evidence in one take. Not a cap — the
 # per-field budgets are the cap — but a large accessibility tree times a long

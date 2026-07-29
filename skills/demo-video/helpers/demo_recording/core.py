@@ -35,7 +35,6 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from html import unescape as html_unescape
 from pathlib import Path
 from types import TracebackType
 
@@ -57,25 +56,13 @@ from .failure import (
     FAILURE_SCHEMA,
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
-from .secrets import (
-    SECRET_MASK,
-    SECRET_MIN_LEN,
-    Secret,
-    SecretLeak,
-)
 from .timeline import (
-    _JSON_ESCAPES,
-    _JSON_STRING_ESCAPE,
-    _JSON_UNICODE_ESCAPE,
     ATTRIBUTION_SLACK_S,
     EVIDENCE_DIR,
     EVIDENCE_DIR_WARN_BYTES,
-    EVIDENCE_HTML_WITHHELD,
     EVIDENCE_LIMITS,
     EVIDENCE_MAX_SCREEN,
-    EVIDENCE_MIN_MASK_LEN,
     EVIDENCE_SCHEMA,
-    EVIDENCE_WRAP_MIN_TOKEN,
     MAX_ISSUES,
     PUMP_INTERVAL_S,
     STRICT_KINDS,
@@ -676,9 +663,6 @@ class _DemoBase:
         # "erase" paints an opaque cover over what the element renders;
         # "blur" is the aesthetic opt-out. See Recorder.redact().
         self._redact_style = "erase"
-        # Stills this take wrote, so a take that fails to verify its mask can
-        # take them back off disk (they are full-bleed, and may hold it).
-        self._shots: list[Path] = []
         # Did *this* take encode an mp4? Not "is there an mp4 in the folder" —
         # that question has a stale answer, and every consumer of it was
         # reading the previous run's file: `duration` in timeline.json (issue
@@ -702,25 +686,13 @@ class _DemoBase:
         self._failure_screen_text: str | None = None
         self._failure_json: dict | None = None
         self._failure_docs: list[tuple[Path, str]] = []
-        # Per-beat evidence (see "per-beat evidence" above). Buffered as
-        # (beat record, medium payload) and only turned into files on a clean
-        # exit — nothing plaintext reaches the disk before the mask has been
-        # verified, which is why there is no evidence file for
-        # _discard_artifacts to take back. `_evidence_masks` accumulates the
-        # rendered text of everything redact() is covering; the union is
-        # applied to *every* beat's evidence on the way out, so a value first
-        # seen at beat 20 is masked out of beat 3 as well.
+        # Per-beat evidence. Buffered as (beat record, medium payload) while
+        # the page is alive and turned into documents in `__exit__`, which is
+        # what keeps the capture off the page's critical path.
         if evidence is None:
             evidence = _env_flag("EVIDENCE")
         self._evidence_on = True if evidence is None else bool(evidence)
         self._evidence: list[tuple[dict, dict]] = []
-        self._evidence_masks: set[str] = set()
-        # Text the page renders *outside* every redacted subtree, deduplicated
-        # across beats. A harvested string found in here is rendered in the
-        # clear somewhere, so masking it would only damage the evidence — see
-        # `_evidence_forbidden`.
-        self._evidence_outside: set[str] = set()
-        self._evidence_res: dict[str, re.Pattern[str]] = {}
         self._evidence_docs: list[tuple[Path, dict]] = []
         # Announce narration state up front — a silent recording when the
         # user expected voice (usually the key just isn't in this process's
@@ -800,142 +772,6 @@ class _DemoBase:
         """
         return None
 
-    def _checkpoint(self) -> None:
-        """Re-establish and re-verify the medium's masking, cheaply.
-
-        Called wherever a take spends time. No-op unless the medium masks."""
-
-    def _before_shot(self) -> None:
-        """Last thing before `shot()` screenshots the page.
-
-        Exists so a medium can re-assert its masking on the still path. Web
-        stills are captured full-bleed — no window frame, the whole page — so
-        this is the path where a secret is most exposed if masking is skipped.
-        No-op by default."""
-
-    # -- secrets (shared registry; see "secrets" at the top of this file) ----
-
-    def register_secret(self, *values: str | Secret) -> None:
-        """Register literal text that must never be captioned, spoken, or
-        logged.
-
-        A caption or interlude line containing a registered value raises
-        SecretLeak and fails the take. Beat-log fields are scrubbed. It does
-        **not** hide the value where the app renders it — that is what the
-        medium's own redaction does (`Recorder.redact` for the web).
-
-        Typing a `Secret` registers it for you; call this directly for a value
-        the demo does not type but the app displays, or that a command prints.
-
-        Values shorter than `SECRET_MIN_LEN` are refused. Registering one is
-        find-and-replace over every text artifact the take writes, and a short
-        literal matches ordinary output — see `SECRET_MIN_LEN`. The error names
-        the length, never the value: an exception message ends up in terminal
-        scrollback, CI logs and bug reports, which is the set of places this
-        method exists to keep the value out of.
-        """
-        for value in values:
-            text = value.reveal() if isinstance(value, Secret) else value
-            if not isinstance(text, str) or not text:
-                raise ValueError("register_secret() takes non-empty strings")
-            if len(text) < SECRET_MIN_LEN:
-                raise ValueError(
-                    f"register_secret() was given a {len(text)}-character "
-                    f"value, and the floor is {SECRET_MIN_LEN}. Registering is "
-                    f"a literal find-and-replace over the beat log, the still "
-                    f"filenames, the caption text, every line of terminal "
-                    f"output and every evidence file — a value this short "
-                    f"matches things that are not it (a selector, an index, a "
-                    f"timestamp), and the corruption reads as redaction "
-                    f"working. To hide a short value on screen use redact(), "
-                    f"which covers the pixels and rewrites no text."
-                )
-            if text not in self._secrets:
-                self._secrets.append(text)
-
-    @property
-    def secrets(self) -> tuple[str, ...]:
-        """Every registered secret, longest first.
-
-        Longest first so that scrubbing overlapping values (a token and the
-        header line that contains it) masks the larger one whole instead of
-        leaving its tail behind. This is the accessor a medium-specific
-        scrubber should read — see issue #5's PTY path.
-        """
-        return tuple(sorted(self._secrets, key=len, reverse=True))
-
-    def scrub(self, text: str) -> str:
-        """`text` with every registered secret replaced by SECRET_MASK.
-
-        For output nobody authored — a command's stdout, a page title. Text a
-        *storyboard* wrote goes through `_no_secrets` instead, which fails the
-        take rather than quietly editing what the author asked to say.
-        """
-        for secret in self.secrets:
-            text = text.replace(secret, SECRET_MASK)
-        return text
-
-    def _verify_redaction_final(self) -> None:
-        """Last word before conversion: raise if anything registered was
-        never masked. No-op unless the medium implements masking."""
-
-    def _scrub_deep(self, value: object) -> object:
-        """`scrub()` over a whole structure, not just its top-level strings.
-
-        A beat's `extra` keys and an issue's detail can be lists and dicts —
-        a stack trace, a list of request URLs — and a scrub that only walked
-        the outermost values left those untouched in the two files this skill
-        tells people to commit.
-        """
-        if isinstance(value, str):
-            return self.scrub(value)
-        if isinstance(value, dict):
-            return {key: self._scrub_deep(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [self._scrub_deep(item) for item in value]
-        return value
-
-    def _no_secrets(self, text: "str | Secret", where: str) -> None:
-        """Raise unless `text` is free of every registered secret.
-
-        The message never contains the secret: it names the leak site and
-        quotes the *scrubbed* line, which is enough to find the offending
-        storyboard line without writing the value into a terminal, a CI log,
-        or a bug report.
-
-        A `Secret` handed in where a string belongs is refused here rather than
-        left to fail somewhere downstream, and this is the single choke point
-        every authored-text verb already goes through — `caption`,
-        `interlude`, `terminal`, `terminal_close`, `run`, `key`, `send`, and
-        `_prepare_line`. `Secret` is deliberately not a `str` (see its
-        docstring), so `caption(Secret(v))` used to die three different obscure
-        deaths depending on whether the registry happened to be empty: a
-        `TypeError: argument of type 'Secret' is not iterable` from `secret in
-        text`, or a serialization failure much later, or nothing until the
-        value reached the TTS cache. None of them said what was wrong.
-        """
-        if isinstance(text, Secret):
-            raise SecretLeak(
-                f"{where} was given a Secret, and a Secret is the one thing it "
-                f"can never take: a caption is burned into every frame and "
-                f"spoken aloud, and the other authored-text verbs are drawn on "
-                f"screen the same way. Secret() exists to be typed, not shown "
-                f"— pass it to type_into() or send(). If the *words* need to "
-                f"mention it, reword them; if the value has to be on screen "
-                f"and hidden, that is redact()."
-            )
-        if not text:
-            return
-        for secret in self.secrets:
-            if secret in text:
-                raise SecretLeak(
-                    f"{where} contains a registered secret ({len(secret)} "
-                    f"chars) and would be burned into the frames"
-                    + (" and spoken aloud" if self._speech else "")
-                    + f": {self.scrub(text)!r}. A secret in narration is an "
-                    f"authoring bug, not something to blur after the fact — "
-                    f"reword the line. This take wrote no mp4."
-                )
 
     # -- context manager ----------------------------------------------------
 
@@ -1011,121 +847,57 @@ class _DemoBase:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        # A mask that never matched anything is the failure redaction can
-        # least afford: the take looks redacted and is not. Checked while the
-        # page is still alive, and remembered rather than raised, so the
-        # browser and the Playwright driver still get torn down — then
-        # re-raised at the end, having skipped conversion. A take that cannot
-        # prove it masked what it was told to writes no mp4.
-        #
-        # The order of the next three statements is the whole guarantee, and
-        # every one of them was wrong once:
+        # **The order of the next three statements is load-bearing, and the
+        # reason it was written down is gone while the requirement is not.**
+        # The redaction verifier that used to run last was what this sequence
+        # was argued for; #144 deleted it. Two of the three constraints
+        # survive it untouched, and both were wrong once:
         #
         #   * the narration tail runs **first**. It holds the frame open so a
         #     take does not end mid-sentence, and it pumps — a terminal take's
-        #     child process is still running and still writing. Verifying
-        #     before it vouched for frames that were not the frames recorded.
+        #     child process is still running and still writing, and a take
+        #     that stops pumping here loses that output from the recording.
         #   * `_stop()` runs **second**, because a medium can be sitting on
-        #     output: the terminal's stream scrubber withholds any trailing
-        #     fragment that might still grow into a secret, and flushes it
-        #     here. Verifying before that read a screen the recording does not
-        #     end on.
-        #   * the check runs **last, on every path out of the `with`**, not
-        #     only the clean one. A storyboard that raises — a wait_for_text()
-        #     timeout, a Ctrl-C on a hung demo — used to skip it altogether
-        #     and keep its stills, and a terminal still is the raw screen.
-        unmasked: BaseException | None = None
+        #     output: the terminal flushes what its exit-marker reader was
+        #     holding back here, and a screen read before that is not the
+        #     screen the recording ends on.
+        #   * the failure screen is read **after both**, on every path out of
+        #     the `with` that carries an exception, for exactly that reason.
         if exc_type is None:
             self._finish_line(tail=0.5)  # don't end mid-sentence
         self._stop()
-        # The one page read the failure path adds, and it goes **here**: after
-        # `_stop()` has flushed whatever the medium was withholding, and before
-        # the verifier below vouches for the page. Reading it after the
-        # verifier would be dumping page text that nothing had checked — a
-        # post-verification window, which is the class of hole this ordering
-        # exists to close. Buffered in memory; it becomes a file only if the
-        # verifier passes and only after `_build_failure` has masked it.
+        # Buffered in memory here and turned into a file by `_build_failure`
+        # below — see that split, which survives #144 for a reason unrelated
+        # to the one it was written for.
         if exc_type is not None:
             self._capture_failure_screen()
-        try:
-            self._verify_redaction_final()
-        except SecretLeak as leak:
-            unmasked = leak
-        except Exception as exc_check:  # noqa: BLE001 - unverifiable is not clean
-            # The check itself broke — a dead page, a closed context. On a
-            # clean take that is a leak by another name: nothing can vouch for
-            # the frames, so nothing is kept. On a take that had already
-            # failed it is almost certainly a consequence of *that* failure,
-            # so the artifacts still go, but the original exception is what
-            # the author gets to read.
-            unmasked = SecretLeak(
-                f"the take's redaction could not be verified at the end "
-                f"({type(exc_check).__name__}: {exc_check}), so nothing can "
-                f"vouch for what is in the frames. This take wrote no mp4."
-            )
-        # Evidence documents are assembled **after** the mask has been vouched
-        # for and only when there is still a take to keep — the same treatment
-        # an unverifiable mask gets, because evidence is the one artifact that
-        # is plain text and a pixel control never protected it.
+        # Evidence documents are assembled here, after `_stop()`, and that is
+        # safe rather than merely convenient: the captures were buffered per
+        # beat while the page was alive, and this turns them into documents in
+        # memory — it opens no beat, touches no page, and writes no file.
         #
-        # It runs after `_stop()` deliberately, and that is safe rather than
-        # merely convenient: the captures were buffered per beat while the page
-        # was alive, and this turns them into documents in memory — it opens no
-        # beat, touches no page, and writes no file. Nothing here can add
-        # content to the recording after the verifier has vouched for it, which
-        # is the property the ordering above exists to protect.
-        #
-        # It runs on the **failure** path too now, and that is issue #11 step 1
-        # rather than a liberty: every beat in the timeline this take is about
-        # to write carries an `evidence` path, so writing that timeline while
+        # It runs on the **failure** path too, which is issue #11 step 1 rather
+        # than a liberty: every beat in the timeline this take is about to
+        # write carries an `evidence` path, so writing that timeline while
         # skipping this would point every beat at a file that is not there.
-        # The refusal is unchanged — a document that cannot be made safe raises
-        # SecretLeak here, before anything has been written, and then nothing
-        # is.
-        #
-        # `failure/` is built in the same breath and for the same reason: a
-        # crash dump of a page mid-secret is the worst leak path this package
-        # has, so it is masked, checked and refused in memory rather than
-        # written and regretted.
         failure: dict | None = (
             None if exc_type is None else self._failure_summary(exc_type, exc)
         )
-        leaked = unmasked is not None or (
-            exc_type is not None and issubclass(exc_type, SecretLeak)
-        )
-        if not leaked:
-            try:
-                self._build_evidence()
-                if failure is not None:
-                    self._build_failure(failure)
-            except SecretLeak as leak:
-                unmasked = leak
-            except Exception as exc_build:  # noqa: BLE001 - same verdict
-                # Not a leak that was found, but a document nobody can say is
-                # clean — which is the same verdict for the same reason. The
-                # message says which of the two happened, because "could not be
-                # verified" and "holds a secret" send an author to different
-                # places.
-                unmasked = SecretLeak(
-                    f"this take's evidence could not be assembled "
-                    f"({type(exc_build).__name__}: {exc_build}), so the "
-                    f"recorder cannot say whether it holds a registered or "
-                    f"redacted value. This take wrote no mp4."
-                )
-        # **`keep`, not `clean`** — and that one word is issue #11 (with #32).
-        # The old guard was `exc_type is None`, so a storyboard that raised
-        # threw away the webm the browser already had in hand, wrote no beat
-        # log for beats that were sitting in memory, and left nothing at all
-        # behind. In CI, where there is no screen to look at, that means blind
-        # retries — and #3 had already settled the principle in the other
-        # direction: a strict take fails *after* writing every artifact,
-        # because a broken take is precisely the one somebody wants to see.
+        self._build_evidence()
+        if failure is not None:
+            self._build_failure(failure)
+        # **Every take keeps what it had** — issue #11 (with #32). The old
+        # guard was `exc_type is None`, so a storyboard that raised threw away
+        # the webm the browser already had in hand, wrote no beat log for beats
+        # that were sitting in memory, and left nothing at all behind. In CI,
+        # where there is no screen to look at, that means blind retries — and
+        # #3 had already settled the principle in the other direction: a strict
+        # take fails *after* writing every artifact, because a broken take is
+        # precisely the one somebody wants to see.
         #
-        # What still keeps nothing is a leak, and only a leak. That distinction
-        # is the whole of `leaked` above: an unverifiable mask means the
-        # recording, the stills and the beat log may each hold the value, and
-        # an artifact nobody can vouch for is worse than no artifact.
-        keep = not leaked and unmasked is None
+        # The one thing that used to keep *nothing* was an unverifiable mask,
+        # and #144 removed it. There is no longer any path out of this method
+        # that discards what the take recorded.
         convert_error: BaseException | None = None
         video = self.page.video
         self._context.close()
@@ -1133,7 +905,7 @@ class _DemoBase:
         self._browser.close()
         self._pw.stop()
         try:
-            if keep and webm and webm.exists():
+            if webm and webm.exists():
                 try:
                     self._convert(webm)
                 except Exception as exc_convert:  # noqa: BLE001 - see below
@@ -1153,55 +925,40 @@ class _DemoBase:
                         f"because the only mp4 here would be a previous run's.",
                         file=sys.stderr,
                     )
-            if keep:
-                # Before the timeline, because the timeline carries the answer
-                # (issue #97). Gated on `self._converted` for the same reason
-                # `duration` is: measuring a previous run's demo.mp4 and filing
-                # the result under this take's beats is the exact class of lie
-                # this check exists to remove. On a take that crashed but is
-                # being kept, this still runs — the mp4 is that take's, however
-                # short, and a partial recording of nothing is worth saying.
-                self._measure_content()
-                # Before the timeline, because every beat in it carries an
-                # `evidence` path: a timeline pointing at files that are not
-                # there yet is the one ordering a reader can be caught by.
-                self._write_evidence()
-                # The beat log is the durable, diffable record of the take — it
-                # outlives the mp4, which is not committed. Written after
-                # conversion so `duration` is the encoder's answer, not a guess.
-                doc = self._timeline_doc(failure)
-                json_path, _ = write_timeline(self.out_dir, doc)
-                print(f"wrote {json_path} ({len(self._beats)} beats)")
-                if failure is not None:
-                    self._write_failure()
-                # Only off a recording *this* take encoded. `beat_frames()`
-                # otherwise reads `media` out of the timeline, finds a previous
-                # run's demo.mp4 sitting there, and hands a reviewer a sheet of
-                # frames from a different recording under this take's beat
-                # names — the same lie as the stale `duration` (issue #20), one
-                # directory down.
-                if self._converted:
-                    self._write_beat_frames(doc)
+            # Before the timeline, because the timeline carries the answer
+            # (issue #97). Gated on `self._converted` for the same reason
+            # `duration` is: measuring a previous run's demo.mp4 and filing
+            # the result under this take's beats is the exact class of lie
+            # this check exists to remove. On a take that crashed but is
+            # being kept, this still runs — the mp4 is that take's, however
+            # short, and a partial recording of nothing is worth saying.
+            self._measure_content()
+            # Before the timeline, because every beat in it carries an
+            # `evidence` path: a timeline pointing at files that are not
+            # there yet is the one ordering a reader can be caught by.
+            self._write_evidence()
+            # The beat log is the durable, diffable record of the take — it
+            # outlives the mp4, which is not committed. Written after
+            # conversion so `duration` is the encoder's answer, not a guess.
+            doc = self._timeline_doc(failure)
+            json_path, _ = write_timeline(self.out_dir, doc)
+            print(f"wrote {json_path} ({len(self._beats)} beats)")
+            if failure is not None:
+                self._write_failure()
+            # Only off a recording *this* take encoded. `beat_frames()`
+            # otherwise reads `media` out of the timeline, finds a previous
+            # run's demo.mp4 sitting there, and hands a reviewer a sheet of
+            # frames from a different recording under this take's beat
+            # names — the same lie as the stale `duration` (issue #20), one
+            # directory down.
+            if self._converted:
+                self._write_beat_frames(doc)
         finally:
             # Whatever went wrong above, don't leave .video/ behind — the
             # next take into this directory would trip over it.
             for leftover in self._video_dir.glob("*"):
                 leftover.unlink()
             self._video_dir.rmdir()
-            # A take that could not vouch for its mask must not leave its
-            # stills behind. They are full-bleed — the whole page, no window
-            # frame — and they are the artifact somebody picks up first,
-            # precisely because they are cheap to look at. The mp4 was never
-            # written; these were, before the failure was known.
-            # Any SecretLeak, not only the one raised on the way out. A leak
-            # refused inside the storyboard — a captioned secret, a
-            # terminal_close() stamp, a Secret typed into a field the mask
-            # could not find — leaves the same stills behind, and SKILL.md
-            # promises unconditionally that a SecretLeak keeps nothing.
-            if unmasked is not None or (
-                exc_type is not None and issubclass(exc_type, SecretLeak)
-            ):
-                self._discard_artifacts()
             # The marker (#46), and its removal, in the one place that runs on
             # every path out of `__exit__`.
             #
@@ -1212,26 +969,16 @@ class _DemoBase:
             #
             #   exc_type        the storyboard raised. demo.mp4 is this take's,
             #                   partial, and the marker says so.
-            #   unmasked        the mask could not be verified, so this take
-            #                   keeps *nothing* — and what it does not touch is
-            #                   what a previous run left in the same folder.
-            #                   That folder is the one in #46: a watchable
-            #                   demo.mp4, an emptied images/, and last week's
-            #                   timeline.json. The marker is the entire defence
-            #                   there, because it is the only file written.
             #   convert_error   the storyboard finished and ffmpeg did not, so
             #                   the timeline is this week's and any mp4 is not.
+            #
+            # A third way in — a take whose mask could not be verified, which
+            # kept nothing and left a previous run's files sitting there — was
+            # the case #46 was actually filed about, and #144 removed it.
             #
             # A strict failure is none of these: it writes every artifact and
             # they are all current, so its marker is cleared like any success's.
             marker_failure = failure
-            if marker_failure is None and unmasked is not None:
-                marker_failure = {
-                    "type": type(unmasked).__name__,
-                    "message": str(unmasked)[:FAILURE_MESSAGE_CHARS],
-                    "beat": None,
-                    "verb": None,
-                }
             if marker_failure is None and convert_error is not None:
                 marker_failure = {
                     "type": type(convert_error).__name__,
@@ -1242,7 +989,7 @@ class _DemoBase:
             if marker_failure is not None:
                 self._write_failure_marker(marker_failure)
                 if failure is not None:
-                    self._report_failure(failure, wrote_dump=keep)
+                    self._report_failure(failure, wrote_dump=True)
             else:
                 self._clear_failure_marker()
                 self._clear_failure_dir()
@@ -1254,31 +1001,10 @@ class _DemoBase:
             # recording nobody can see is not something to bury above ffmpeg's
             # output (issue #97).
             print_content_summary(self._content, self._media_path().name)
-        # Two failure modes that disagree about what to leave behind, and the
-        # disagreement is deliberate:
-        #
-        #   StrictTakeFailed  the take recorded console errors or a bad exit
-        #                     code. The mp4, the stills and the timeline are
-        #                     written first and kept — they are the evidence
-        #                     somebody needs to see what the app did.
-        #   SecretLeak        the mask could not be verified. Nothing is kept:
-        #                     the recording, the stills and the beat log may
-        #                     each hold the value, and an artifact nobody can
-        #                     vouch for is worse than no artifact at all.
-        #
-        # So the leak is raised first and suppresses everything, and the strict
-        # verdict is only reached when there was no leak to suppress it.
-        #
-        # Except over a storyboard that had already raised. Replacing a
-        # wait_for_text() timeout with a leak report costs the author the one
-        # message that says what to fix, and the leak has already cost the
-        # artifacts — which is the part that matters. So it is said loudly and
-        # the original exception is left to propagate.
-        if unmasked is not None:
-            if exc_type is not None:
-                print(f"demo-video: {unmasked}", file=sys.stderr)
-                return
-            raise unmasked
+        # `StrictTakeFailed` is the take's verdict when it recorded console
+        # errors or a bad exit code — and it is raised *after* the mp4, the
+        # stills and the timeline are written and kept, because they are the
+        # evidence somebody needs to see what the app did.
         # A storyboard that raised propagates its own exception — returning
         # None from here is what lets it. Only when nothing is already on its
         # way out does the encoder failure get to be the take's verdict; it
@@ -1532,10 +1258,10 @@ class _DemoBase:
             "index": len(self._beats),
             "t_start": round(time.monotonic() - self._t0, 3),
             "t_end": None,
-            "caption": self.scrub(self._caption if caption is None else caption),
+            "caption": self._caption if caption is None else caption,
             "verb": verb,
-            "selector": self.scrub(selector) if selector else selector,
-            "still": self.scrub(still) if still else still,
+            "selector": selector,
+            "still": still,
             "segment": self.segment,
             # Equal to `index` here, and deliberately written anyway: `stitch`
             # renumbers `index` across a merged demo and leaves this one alone,
@@ -1575,7 +1301,7 @@ class _DemoBase:
             # can hold anything the program printed.
             record["error"] = {
                 "type": type(raised).__name__,
-                "message": self.scrub(str(raised)),
+                "message": str(raised),
             }
             raise
         finally:
@@ -1583,7 +1309,7 @@ class _DemoBase:
             # are accounted for *inside* the beat that paid for them and no
             # unexplained gap opens up between one beat and the next. Nested
             # try/finally so `t_end` is stamped even when the capture refuses
-            # (a SecretLeak out of a medium's payload is fatal, on purpose).
+            # (the beat is closed either way, so the log stays honest).
             try:
                 if self._evidence_on:
                     self._capture_evidence(record)
@@ -1616,20 +1342,12 @@ class _DemoBase:
     def _capture_evidence(self, beat: dict) -> None:
         """Buffer one beat's evidence.
 
-        Raises only SecretLeak, and that exclusion is the whole point of the
-        handler below rather than an afterthought. A broad `except` here would
-        swallow one — this runs in a `finally`, and everything a medium's
-        payload touches (the mask, the page) is a place SecretLeak comes from.
-        Catching it would turn a control that used to kill a take into one that
-        prints a line and lets the mp4 be written. Every other failure is a
-        diagnostic and must not lose an otherwise fine take: the beat gets a
-        file saying what went wrong, which keeps the `evidence` pointer on
-        every beat pointing at something real.
+        A failure here is a diagnostic and must not lose an otherwise fine
+        take: the beat gets a file saying what went wrong, which keeps the
+        `evidence` pointer on every beat pointing at something real.
         """
         try:
             payload = self._evidence_payload()
-        except SecretLeak:
-            raise
         except Exception as exc:  # noqa: BLE001 - a diagnostic must not kill a take
             payload = {"error": f"{type(exc).__name__}: {exc}"}
             print(
@@ -1645,198 +1363,11 @@ class _DemoBase:
         """Whitespace collapsed to single spaces, ends trimmed."""
         return " ".join(text.split())
 
-    def _evidence_forbidden(self) -> tuple[str, ...]:
-        """Every literal that must not appear in an evidence file, longest first.
-
-        Two sources, and the second is the reason this exists at all:
-
-          * `self.secrets` — text somebody registered. `scrub()` already covers
-            this everywhere else, and nothing below can drop one: the author
-            said explicitly that the value matters.
-          * `self._evidence_masks` — the *rendered text of everything redact()
-            is covering*, read out of the page as the take ran. `redact()` is a
-            pixel control: it hides where a value renders and leaves the value
-            in the DOM, so a text dump of that DOM is not protected by it at
-            all. This is what makes evidence inherit redaction.
-
-        **A harvested string is only used as a mask if it appears nowhere
-        outside the redacted subtrees**, and without that rule this feature
-        destroys the artifact it exists to produce. Harvesting *every* node of a
-        redacted card also harvests its label: `redact("#revenue-card")` around
-        a `<span>Revenue</span>` would otherwise register "Revenue" as a global
-        forbidden literal and rewrite every unrelated paragraph in every file as
-        `[redacted] for the quarter was $128,400`. Worse, a card holding
-        `sk-<i>live</i>-CHLD…` harvests the text nodes "sk-" and "live" on their
-        own and rewrites every other key on the page.
-
-        The rule is not a heuristic about what a secret looks like: a string
-        that also renders *in the clear* somewhere the mask does not cover is,
-        by construction, not being hidden by that mask — it is in the frames, in
-        the stills and in the video. Masking it in a text file buys nothing and
-        costs the file its meaning. What is left is exactly what only exists
-        behind the mask.
-
-        Longest first so overlapping values (a token, and the header line
-        holding it) mask the larger one whole instead of leaving its tail.
-        """
-        outside = "\n".join(self._evidence_outside)
-        literals = set(self._secrets)
-        for text in self._evidence_masks:
-            flat = self._flatten(text)
-            if len(flat) < EVIDENCE_MIN_MASK_LEN:
-                continue
-            if flat in outside:
-                continue  # rendered in the clear elsewhere: not this mask's
-            literals.add(text)
-        return tuple(sorted(literals, key=len, reverse=True))
-
-    def _evidence_re(self, literal: str) -> "re.Pattern[str]":
-        """`literal` as a pattern whose whitespace is elastic in both directions.
-
-        Every leak this has had is the same shape: a comparison between a value
-        somebody registered and *a transformation of that value* that the code
-        did not anticipate. Whitespace is where two of those transformations
-        land, and they pull opposite ways:
-
-          * **Whitespace the literal has and the text does not.** The harvest
-            reads `textContent`, which carries the source's own indentation: a
-            value on its own line in hand-written HTML comes back as
-            `'\\n      wombatxray7714\\n    '`, while an ARIA tree renders it
-            `- code: wombatxray7714`. So a run of whitespace in the literal
-            matches any run in the text, and the ends are trimmed.
-          * **Whitespace the text has and the literal does not.** Anything that
-            reflows text inserts it. `__termText()` emits one xterm.js buffer
-            row per line joined with newlines and does not consult `isWrapped`,
-            so a credential crossing the last column arrives split in two —
-            `"…sk-live-WRAP0000\\n00000000…"` — fully legible, trivially
-            recovered with `tr -d '\\n'`, and matched by neither half of an
-            exact search. So inside a token of `EVIDENCE_WRAP_MIN_TOKEN`
-            characters or more, every character may be followed by whitespace.
-
-        The token-length floor is what keeps the second rule from eating the
-        page: separating the characters of a short mask by `\\s*` makes it match
-        ordinary prose, and over-masking is the failure `_evidence_forbidden`'s
-        whole `outside` rule exists to prevent. See `EVIDENCE_WRAP_MIN_TOKEN`.
-
-        What this does **not** normalize is written down in SKILL.md, under
-        "What it still does not cover". This is an asymptotic surface and the
-        boundary is stated rather than chased.
-        """
-        pattern = self._evidence_res.get(literal)
-        if pattern is None:
-            tokens = literal.split()
-            if not tokens:
-                pattern = re.compile(re.escape(literal))
-            else:
-                parts = []
-                for token in tokens:
-                    if len(token) >= EVIDENCE_WRAP_MIN_TOKEN:
-                        parts.append(r"\s*".join(re.escape(c) for c in token))
-                    else:
-                        parts.append(re.escape(token))
-                pattern = re.compile(r"\s+".join(parts))
-            self._evidence_res[literal] = pattern
-        return pattern
-
-    @staticmethod
-    def _evidence_probe(text: str) -> str:
-        """`text` with the escapes a *serializer* added resolved. Detection only.
-
-        Never written anywhere — this exists so the two checks that ask "is a
-        forbidden value still in here" can see through the encodings the writer
-        itself introduces on the way to disk:
-
-          * **HTML entity escaping.** `outerHTML` writes `&` as `&amp;`, `<` as
-            `&lt;`, a non-breaking space as `&nbsp;`. A registered
-            `sk-live-AMPS0000&sig=0000000000` — an ordinary shape for a
-            presigned URL or a SAS token — is in the markup in full and matches
-            no raw search, so the mask left it and the backstop waved it
-            through, in a file whose `aria` said `[redacted]` two lines above.
-          * **JSON string escaping.** The backstop runs over `json.dumps(doc)`,
-            where a newline is the two characters `\\n`. Elastic whitespace in
-            the pattern cannot match that, so the backstop missed every wrapped
-            value the mask missed — the two failed identically, which is the
-            one thing a backstop must not do.
-
-        Resolving both, on a copy, costs one pass and removes the whole class.
-        The output is deliberately not valid markup or valid JSON; nothing may
-        serialize it.
-        """
-        probe = _JSON_STRING_ESCAPE.sub(
-            lambda m: _JSON_ESCAPES.get(m.group(0), m.group(0)), text
-        )
-        probe = _JSON_UNICODE_ESCAPE.sub(
-            lambda m: chr(int(m.group(1), 16)), probe
-        )
-        return html_unescape(probe)
-
-    def _recoverable_secret(self, text: str) -> str | None:
-        """The first registered secret recoverable from `text`, or None.
-
-        The same matching an evidence file gets — whitespace elastic in both
-        directions, entity and serializer escapes resolved — pointed at a
-        medium's *finished output* rather than at a document, so a final
-        redaction check and the evidence writer cannot disagree about whether
-        a value is present.
-
-        A terminal screen is what needs it. `__termText()` joins xterm.js
-        buffer rows with newlines and does not consult `isWrapped`, so a
-        credential crossing the last column is two rows with a newline through
-        the middle, and `secret in screen` sees neither half — the same blind
-        spot the evidence mask had, in the check that decides whether the
-        frames are safe to keep.
-        """
-        return self._evidence_holds(text, tuple(self._secrets))
-
-    def _evidence_holds(self, text: str, literals: "tuple[str, ...]") -> str | None:
-        """The first forbidden literal still findable in `text`, or None.
-
-        Checked against the text as written *and* against
-        `_evidence_probe(text)`, because a value that only survives in an
-        escaped form is exactly as readable to whoever opens the file.
-        """
-        probed = self._evidence_probe(text)
-        for literal in literals:
-            pattern = self._evidence_re(literal)
-            if pattern.search(text) or pattern.search(probed):
-                return literal
-        return None
-
-    def _evidence_mask(self, text: str, forbidden: tuple[str, ...]) -> str:
-        for literal in forbidden:
-            text = self._evidence_re(literal).sub(SECRET_MASK, text)
-        return text
-
-    def _evidence_scrub_deep(self, value: object, forbidden: tuple[str, ...]) -> object:
-        """`_evidence_mask` over a whole structure, keys included.
-
-        Keys as well as values: a payload key is a string the recorder chose
-        today, but the schema is append-only and the next slice to add a field
-        may not be. Masking both costs nothing and removes a hole nobody would
-        think to look for.
-        """
-        if isinstance(value, str):
-            return self._evidence_mask(value, forbidden)
-        if isinstance(value, dict):
-            return {
-                self._evidence_mask(str(key), forbidden)
-                if isinstance(key, str) else key:
-                self._evidence_scrub_deep(item, forbidden)
-                for key, item in value.items()
-            }
-        if isinstance(value, (list, tuple)):
-            return [self._evidence_scrub_deep(item, forbidden) for item in value]
-        return value
 
     def _evidence_doc(self, beat: dict, payload: dict) -> dict:
         """One evidence document: masked, then capped, then checked.
 
-        Order matters and is not interchangeable. Masking runs *before*
-        capping, because capping first can cut a secret in half and leave its
-        first twenty characters as the last thing in the file — which no later
-        substring search would find.
         """
-        forbidden = self._evidence_forbidden()
         doc: dict = {
             "schema": EVIDENCE_SCHEMA,
             "generated_by": "demo-video",
@@ -1850,29 +1381,6 @@ class _DemoBase:
             },
         }
         doc.update(payload)
-        doc = self._evidence_scrub_deep(doc, forbidden)  # type: ignore[assignment]
-        # Markup is the one field a substring mask cannot finish the job on, and
-        # it has two ways of hiding a value from one:
-        #
-        #   * **structure.** A value written `harbor<b>zenith</b>7725` has a
-        #     `textContent` the mask finds and an `outerHTML` it does not, and
-        #     only elements the *mask* reached are elided structurally (web.py)
-        #     — a `register_secret()` value split across tags in an ordinary
-        #     paragraph is reached by neither. So the tags are stripped.
-        #   * **entity escaping.** `outerHTML` writes `&` as `&amp;`, so a
-        #     registered `…AMPS0000&sig=0000000000` is in the file whole and
-        #     matches no raw search. `_evidence_holds` resolves entities before
-        #     looking, which is the only reason this branch sees it at all.
-        #
-        # Markup that still holds a forbidden value after both is withheld
-        # rather than published: the field is a convenience, and there is no
-        # safe way to edit a value out of markup that interleaves it with
-        # elements or spells it in character references.
-        html = doc.get("html")
-        if isinstance(html, str):
-            bare = re.sub(r"<[^>]*>", "", html)
-            if self._evidence_holds(bare, forbidden) is not None:
-                doc["html"] = EVIDENCE_HTML_WITHHELD
         truncated: list[str] = []
         for field, limit in EVIDENCE_LIMITS.items():
             text = doc.get(field)
@@ -1884,30 +1392,6 @@ class _DemoBase:
                 doc[field] = capped
         doc["truncated"] = sorted(truncated)
         doc["limits"] = {k: v for k, v in EVIDENCE_LIMITS.items() if k in doc}
-        # A backstop over the *serialized bytes*, not a second opinion on the
-        # masking above — run against the same list, it cannot disagree with it
-        # about a plain string value, and this file does not pretend otherwise.
-        # What it does reach is everything the walker structurally cannot: a
-        # field added to this schema by a later slice that is built after the
-        # scrub, a non-string key, a literal that only exists once serialization
-        # has run. The grading that can actually fail is the byte sweep over
-        # `evidence/` in tests/smoke.
-        #
-        # It goes through `_evidence_holds` rather than `in`, and that is the
-        # difference between a backstop and a comment. `json.dumps` writes a
-        # newline as the two characters `\` and `n`, so a plain substring test
-        # here missed every wrapped value the mask missed — failing in the same
-        # direction as the thing it backs up, which is the one thing it must
-        # not do.
-        blob = json.dumps(doc, ensure_ascii=False)
-        held = self._evidence_holds(blob, forbidden)
-        if held is not None:
-            raise SecretLeak(
-                f"a beat's evidence still holds a {len(held)}-character "
-                f"value that is registered or redacted, after masking — so "
-                f"the recorder cannot vouch for what it was about to write. "
-                f"No evidence file, no mp4 and no timeline were written."
-            )
         return doc
 
     def _build_evidence(self) -> None:
@@ -2063,7 +1547,6 @@ class _DemoBase:
         issues and the beats have been in memory since they happened, and the
         media is named rather than opened.
         """
-        forbidden = self._evidence_forbidden()
         beat = self._failed_beat()
         doc: dict = {
             "schema": FAILURE_SCHEMA,
@@ -2087,18 +1570,6 @@ class _DemoBase:
             "media": self._media_path().name,
             "screen_captured": self._failure_screen_text is not None,
         }
-        doc = self._evidence_scrub_deep(self._scrub_deep(doc), forbidden)  # type: ignore[assignment]
-        blob = json.dumps(doc, ensure_ascii=False)
-        held = self._evidence_holds(blob, forbidden)
-        if held is not None:
-            raise SecretLeak(
-                f"the failure dump still holds a {len(held)}-character value "
-                f"that is registered or redacted, after masking — so the "
-                f"recorder cannot vouch for what it was about to write. A "
-                f"crash dump of a page mid-secret is the worst leak path this "
-                f"package has, so it is refused whole: no failure/, no mp4, no "
-                f"timeline and no evidence were written."
-            )
         return doc
 
     def _failure_md(self, doc: dict) -> str:
@@ -2181,17 +1652,16 @@ class _DemoBase:
     def _build_failure(self, failure: dict) -> None:
         """Turn the crash into documents. Writes nothing.
 
-        Separate from writing for the reason `_build_evidence` is: a document
-        that cannot be made safe raises here, before the first byte, so a
-        refusal cannot leave half a `failure/` behind.
-
-        It therefore runs **before** `_convert`, which is why the two facts
-        that depend on whether the mp4 was encoded — `media_written_by_this_take`
-        and the last frame — are filled in by `_write_failure` instead. Writing
-        them here produced a dump that said "this take encoded no mp4" beside
-        an mp4 this take had just encoded, which is the class of lie this whole
-        change exists to remove. They are a boolean and a file name; deferring
-        them cannot introduce a literal the masking above did not see.
+        **The split from `_write_failure` survives #144, and its original
+        reason does not.** It was argued for as "a document that cannot be made
+        safe raises before the first byte" — there is nothing to refuse now.
+        What it also carries is the `_convert` ordering: this runs *before* the
+        encode, which is why the two facts that depend on whether the mp4 was
+        written — `media_written_by_this_take` and the last frame — are filled
+        in by `_write_failure` instead. Building them here produced a dump that
+        said "this take encoded no mp4" beside an mp4 this take had just
+        encoded, which is the class of lie the whole `failure/` feature exists
+        to remove.
         """
         out = self.out_dir / FAILURE_DIR
         self._failure_json = self._failure_doc(failure)
@@ -2200,18 +1670,8 @@ class _DemoBase:
         if screen is not None:
             # Its own file rather than a JSON field: a terminal buffer or an
             # ARIA tree is what somebody greps, and `\n` written as the two
-            # characters `\` and `n` is not greppable. Masked and checked with
-            # the same list and the same matcher as everything else.
-            forbidden = self._evidence_forbidden()
-            masked = self._evidence_mask(screen, forbidden)
-            held = self._evidence_holds(masked, forbidden)
-            if held is not None:
-                raise SecretLeak(
-                    f"the failure dump's page text still holds a {len(held)}-"
-                    f"character value that is registered or redacted, after "
-                    f"masking. No failure/, no mp4 and no timeline were written."
-                )
-            capped, _ = _cap_text(masked, EVIDENCE_MAX_SCREEN)
+            # characters `\` and `n` is not greppable.
+            capped, _ = _cap_text(screen, EVIDENCE_MAX_SCREEN)
             docs.append((out / "screen.txt", capped))
         self._failure_docs = docs
 
@@ -2281,18 +1741,7 @@ class _DemoBase:
         marker = self.out_dir / FAILURE_MARKER
         mp4 = self._media_path()
         stale = mp4.exists() and not self._converted
-        try:
-            forbidden = self._evidence_forbidden()
-            message = self._evidence_mask(
-                self.scrub(str(failure.get("message") or "")), forbidden
-            )
-            if self._evidence_holds(message, forbidden) is not None:
-                message = (
-                    "(withheld: the message still held a registered or "
-                    "redacted value after masking)"
-                )
-        except Exception:  # noqa: BLE001 - the marker must be written regardless
-            message = "(withheld: the message could not be masked)"
+        message = str(failure.get("message") or "")
         when = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
         beat = failure.get("beat")
         where = (
@@ -2530,27 +1979,8 @@ class _DemoBase:
         #
         # Note the coupling this creates: with `evidence=False` nothing
         # harvests *on the clean path*, so this falls back to `scrub()` alone
-        # there. Turning evidence off is turning off the only thing that reads
-        # what redact() hides.
-        #
-        # The failure path is the exception, and it has to be: `_failure_screen`
-        # harvests regardless of the flag, because `failure/screen.txt` is a
-        # text dump of the page and `redact()` never protected text. That is
-        # also why a timeline written after a crash is masked at least as well
-        # as one written after a clean take, never worse.
-        forbidden = self._evidence_forbidden()
-        beats = [
-            self._evidence_scrub_deep(self._scrub_deep(beat), forbidden)
-            for beat in self._beats
-        ]
-        # The issue log too: it quotes console messages, request URLs and
-        # process output — none of it authored, all of it capable of carrying
-        # a secret the app printed, and all of it written into the same two
-        # committed files.
-        issues = [
-            self._evidence_scrub_deep(self._scrub_deep(issue), forbidden)
-            for issue in self._issues
-        ]
+        beats = [dict(beat) for beat in self._beats]
+        issues = [dict(issue) for issue in self._issues]
         doc: dict = {
             "schema": TIMELINE_SCHEMA,
             "generated_by": "demo-video",
@@ -2579,9 +2009,7 @@ class _DemoBase:
             # selector today and deliberately so (see `_content_report`), but
             # this file is committed and a field that grows a quoted string
             # later must not be the one place the mask does not reach.
-            "content": self._evidence_scrub_deep(
-                self._scrub_deep(self._content), forbidden
-            ),
+            "content": self._content,
             # Built from the *scrubbed* beats, not from `self._beats`, so a
             # still path or a caption that the mask reached is masked here too
             # rather than reappearing in the coverage table (issue #12).
@@ -2596,9 +2024,7 @@ class _DemoBase:
         # byte-for-byte what it was before this key existed — and so that its
         # presence is the whole signal, with no `failure: null` to skim past.
         if failure is not None:
-            doc["failure"] = self._evidence_scrub_deep(
-                self._scrub_deep(failure), forbidden
-            )
+            doc["failure"] = failure
         return doc
 
     # -- shared storyboard verbs -------------------------------------------
@@ -2612,10 +2038,6 @@ class _DemoBase:
         not accumulated slices: the pump costs about a millisecond and a
         storyboard's pacing must not drift by however many of them it took."""
         # Holding the frame is where a take spends most of its time, and it is
-        # where a page that navigated on its own sits behind a raised paint
-        # gate waiting for somebody to notice. Checking here is what keeps the
-        # gate from outliving the navigation that raised it.
-        self._checkpoint()
         end = time.monotonic() + seconds
         while True:
             self._pump_events()
@@ -2689,9 +2111,6 @@ class _DemoBase:
         `caption("The overdraft is rejected at submit.", ac="AC-3")`. It is a
         **claim**, recorded as one: see "acceptance criteria and coverage".
         """
-        # Before anything else, and specifically before _prepare_line() —
-        # which would synthesize the line and cache the audio on disk.
-        self._no_secrets(text, "caption()")
         claims = self._checked_ac(ac, "caption()")
         # Synthesizing and waiting out the previous spoken line happens
         # *before* the beat opens: the beat's t_start is when this caption
@@ -2724,7 +2143,6 @@ class _DemoBase:
         time-skips (minutes of background work) between segments. style="light"
         is a centered label over a soft scrim with the scene still visible —
         lighter, for short transitions where a full takeover feels heavy."""
-        self._no_secrets(text, "interlude()")
         clip = self._prepare_line(text)
         fn = "__demoBridge" if style == "light" else "__demoInterlude"
         with self._beat("interlude", selector=style, caption=text):
@@ -2743,78 +2161,6 @@ class _DemoBase:
         remaining = self._line_end - time.monotonic()
         self._idle(max(min_s, remaining))
 
-    def _discard_artifacts(self) -> None:
-        """Take back everything this take put on disk, and say what went.
-
-        Only what *this* take wrote: `self._shots`, not `images/*.png`, so a
-        failed retake into a directory holding a previous take's stills does
-        not delete somebody's committed guide. The message names each file
-        rather than claiming a general cleanup, because "cleaned up" without a
-        list is exactly the sentence people believe and do not check.
-        """
-        # A previous take's evidence, before anything else. This take wrote
-        # none — the documents never left memory — but the folder may hold the
-        # last take's, and the reason this take is failing is usually that
-        # somebody has just added a `redact()` for a value those files contain.
-        # Unlike a still, no evidence file is ever a committed artifact, so
-        # there is nothing here worth preserving.
-        stale = self._stale_evidence()
-        self._clear_stale_evidence()
-        gone: list[str] = [f"{EVIDENCE_DIR}/{p.name}" for p in stale if not p.exists()]
-        # A previous run's failure dump, for exactly the same reason: it is a
-        # text dump of the page, this take wrote none (the documents never left
-        # memory), and the folder may hold the last one's.
-        gone += self._clear_failure_dir()
-        # `.hold.png` is the opening frame the web recorder composites over a
-        # blank open (issue #119) — a full-size picture of the app, so it
-        # belongs here beside the stills rather than only in `_postprocess`'s
-        # own cleanup. It cannot normally exist at this point (a take that
-        # cannot vouch for its mask never reaches the encode), which is the
-        # argument for listing it rather than against.
-        for path in self._shots + [
-            self.out_dir / ".frame.png",
-            self.out_dir / ".hold.png",
-        ]:
-            try:
-                if path.is_file():
-                    path.unlink()
-                    gone.append(path.name)
-            except OSError:  # noqa: PERF203 - report what could not be removed
-                print(
-                    f"demo-video: WARNING — could not delete {path}, which may "
-                    f"hold a secret this take failed to mask",
-                    file=sys.stderr,
-                )
-        print(
-            "demo-video: the take could not verify its mask, so it wrote no "
-            "mp4, no timeline, no evidence and no failure dump, and deleted "
-            + (", ".join(gone) if gone else "nothing (it had written nothing)")
-            + f". The raw capture in .video/ is gone too. (Per-beat evidence "
-            f"and the failure dump are held in memory until the mask has been "
-            f"vouched for, precisely so there is nothing to take back here — "
-            f"they are the artifacts that are plain text.) {FAILURE_MARKER} "
-            f"has been written, because anything a *previous* run left in this "
-            f"folder is still there and is not this take's.",
-            file=sys.stderr,
-        )
-
-    def _safe_shot_name(self, name: str) -> str:
-        """A still's name with any secret removed, safely.
-
-        Scrubbing to the bare mask is not enough for something that becomes a
-        *filename*: two shots whose names differ only inside the secret would
-        both become `04-[redacted]` and the second would silently overwrite the
-        first, and `[`/`]` are glob metacharacters for everything downstream
-        that walks `images/`. So the mask is spelled plainly and a short digest
-        of the original name is appended — stable across runs, distinct per
-        name, and readable.
-        """
-        scrubbed = self.scrub(name)
-        if scrubbed == name:
-            return name
-        digest = hashlib.sha256(name.encode()).hexdigest()[:8]
-        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", scrubbed.replace(SECRET_MASK, "redacted"))
-        return f"{cleaned.strip('-')}-{digest}"
 
     def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
         """Still for the written guide -> images/<name>.png.
@@ -2825,20 +2171,11 @@ class _DemoBase:
         """
         claims = self._checked_ac(ac, "shot()")
         # Scrubbed here rather than only in the beat record, so the file on
-        # disk carries the same name the log does. Scrubbing the log alone
-        # would leave images/04-sk-live-….png sitting next to a beat that
-        # says the name was masked.
-        name = self._safe_shot_name(name)
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()
-        self._shots.append(path)
         with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):
-            # Stills are the exposed path: the web recorder captures them
-            # full-bleed — the whole page, no window frame — so a mask that
-            # only covers the video would leave every still readable. Nothing
-            # here re-derives the masking; it re-asserts the same in-page one
-            # the frames get, immediately before the shutter.
-            self._before_shot()
+            # Full-bleed on the web recorder — the whole page, no window
+            # frame — so a still is not a crop of the video.
             self.page.screenshot(path=str(path))
         return path
 
@@ -2848,12 +2185,6 @@ class _DemoBase:
         """Synthesize (or fetch cached) audio for a narration line, and wait
         out the previous line — never speak two lines at once, never show a
         caption while the voice is still on the previous one."""
-        # The single choke point for everything this package speaks, and the
-        # last thing that runs before text becomes a file in .tts/ — which is
-        # keyed by the text and holds the spoken words as audio. Both callers
-        # (caption, interlude) already checked; this is here so that a future
-        # spoken path inherits the check instead of having to remember it.
-        self._no_secrets(text, "a narration line")
         clip = None
         if self._speech and text:
             clip = tts_clip(
