@@ -65,12 +65,16 @@ Playwright 1.49 or newer: evidence uses `locator.aria_snapshot()`, and the
     tests/smoke --content-only
     tests/smoke --out-dir /tmp/smoke
 
-Narration is forced off (`speech=False`) throughout: CI has no
-ELEVENLABS_API_KEY and no assertion here depends on audio. The one take that
-exercised the speech path did so because the `.tts/` cache was a leak path it
-had to prove clean, and it went with the masking (#150) — so the synthesizer,
-the pacing and the audio mix are now **ungraded**, which is stated here rather
-than left to be discovered. See "Known gaps".
+Narration is forced off (`speech=False`) in every take but one: CI has no
+ELEVENLABS_API_KEY and nothing else here depends on audio.
+
+The exception is the narration take (#157), which records with `speech=True`
+against a **seeded cache**. `tts_clip` returns a cached clip before it reads
+`api_key`, so a take whose every line is already in `.tts/` runs the real path
+— pacing, the line log, the ffmpeg mix — with no key and no network. The
+endpoint is pinned at a closed local port for the length of that take, so a
+miss cannot reach the real service either. What stays ungraded is the HTTP
+call and its retry ladder; see "Known gaps".
 
 Unix only, because the terminal takes drive a PTY. The *package* no longer
 requires one — `demo_recording/__init__.py` resolves both recorders lazily
@@ -1202,6 +1206,88 @@ TERMINAL_EVIDENCE = [
         [],
     ),
 ]
+
+# -- the narration take (issue #157) ------------------------------------------
+#
+# The speech path used to be graded by accident. The redaction axis swept every
+# file a take wrote for a registered value, `.tts/` was one of those files, and
+# so some take had to really synthesize speech for the sweep to mean anything.
+# #150 deleted the sweep, and with it the only reason any take ran the
+# synthesizer, the pacing or the audio mix at all.
+#
+# **The trick that makes this affordable: a seeded cache.** `tts_clip` returns a
+# cached clip before it reads `api_key`, and the recorder only requires the env
+# var to be non-empty. So a take whose every line is already in `.tts/` runs the
+# entire real path — pacing, `_lines`, `media_duration`, the ffmpeg mix — with
+# no key, no network, and no non-determinism from a remote service. What stays
+# ungraded is the HTTP call and its retry ladder, which is stated in
+# tests/README.md rather than implied.
+#
+# The clips are tones of a known duration rather than speech, which is what
+# makes the pacing assertion exact: a real clip's length is whatever ElevenLabs
+# decided, and a bar you cannot predict is a bar you end up widening until it
+# passes.
+NARRATION_KEY = "not-a-real-key-and-must-never-be-used"
+# The recorder's narration defaults, written out by hand so this file computes
+# the cache path the way core.py does rather than by asking core.py.
+#
+# **Hand-written on purpose**, and this is the catalogue's "check that shares
+# the bug's blind spot" avoided deliberately: a harness that seeded its cache by
+# calling `_tts_key` would agree with that function's bugs by construction, and
+# a key that dropped the voice would still find every clip. Here, a key the
+# recorder computes differently from this file is a cache *miss*, the miss goes
+# to the network with a fake key, and the take fails loudly.
+#
+# If either default changes this file has to change with it, which is the cost
+# of that property and is meant to be paid.
+NARRATION_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+NARRATION_MODEL_ID = "eleven_multilingual_v2"
+NARRATION_KEY_CHARS = 20
+
+# (line, clip seconds). The first is deliberately *long* against its beat's
+# hold, so the recorder has to wait it out and the wait is visible in the beat
+# log. The second is deliberately short, and is the control: if the pacing
+# assertion fired on any narrated line rather than on the one whose clip
+# outlasts its hold, a recorder that simply idled after every line would pass.
+NARRATION_LONG_LINE = "This line runs longer than the beat that carries it."
+NARRATION_LONG_S = 1.6
+NARRATION_SHORT_LINE = "This one is over quickly."
+NARRATION_SHORT_S = 0.3
+# The hold each of the two lines is given. The long clip outlasts its hold by
+# 1.1s; the short one finishes with 0.5s to spare.
+NARRATION_HOLD_S = 0.5
+NARRATION_LINES = (
+    (NARRATION_LONG_LINE, NARRATION_LONG_S),
+    (NARRATION_SHORT_LINE, NARRATION_SHORT_S),
+)
+
+# Mean volume, in dBFS, measured over a 0.4s window of the finished mp4.
+#
+# Both bars are needed and neither alone means anything:
+#
+#   * NARRATION_LOUD_DBFS — a window inside a spoken line has to carry audio.
+#     Without it, `anullsrc` silence passes every other assertion here: the
+#     stream is present, stereo, 44.1 kHz and exactly as long as the video.
+#     Silence is *the* failure this take exists to catch, because it is the one
+#     that leaves every artifact looking right.
+#   * NARRATION_QUIET_DBFS — a window before the first line has to be silent.
+#     Without it, a mix that laid one clip across the whole track, or a track of
+#     noise, passes the loud bar everywhere.
+#
+# Measured on the tone clips this take seeds: -25 dB inside a line against
+# -91 dB before one, so the bars sit either side of a 66 dB gap and are nowhere
+# near either measurement.
+NARRATION_LOUD_DBFS = -60.0
+NARRATION_QUIET_DBFS = -80.0
+NARRATION_WINDOW_S = 0.4
+# What `stitch()`'s lossless concat requires of every segment's audio, and the
+# reason `_convert` pins the format rather than letting amix decide: mono TTS
+# clips would otherwise yield a mono track that `-c copy` cannot join with the
+# stereo silence of a segment that narrated nothing.
+NARRATION_CODEC = "aac"
+NARRATION_CHANNELS = 2
+NARRATION_SAMPLE_RATE = 44100
+
 
 # -- the evidence take (issue #9) ---------------------------------------------
 #
@@ -7418,6 +7504,289 @@ def run_evidence(out_root: Path) -> list[str]:
     return failures
 
 
+def seed_tts_cache(out_dir: Path) -> dict[str, Path]:
+    """Put a clip of known duration where the recorder will look for one.
+
+    The key is computed here rather than imported — see `NARRATION_VOICE_ID`
+    for why that separation is the point and not an oversight.
+    """
+    tts = out_dir / ".tts"
+    tts.mkdir(parents=True, exist_ok=True)
+    seeded: dict[str, Path] = {}
+    for text, seconds in NARRATION_LINES:
+        joined = f"{NARRATION_VOICE_ID}|{NARRATION_MODEL_ID}|{text}"
+        key = hashlib.sha256(joined.encode()).hexdigest()[:NARRATION_KEY_CHARS]
+        clip = tts / f"{key}.mp3"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency=440:duration={seconds}",
+                "-b:a",
+                "128k",
+                str(clip),
+            ],
+            check=True,
+        )
+        seeded[text] = clip
+    return seeded
+
+
+def mean_dbfs(mp4: Path, start: float, seconds: float) -> float | None:
+    """Mean volume of one window of the mp4's audio, in dBFS.
+
+    `None` when ffmpeg reported no measurement at all, which is a different
+    failure from a quiet window and is reported as one.
+    """
+    done = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "info",
+            "-ss",
+            f"{start}",
+            "-t",
+            f"{seconds}",
+            "-i",
+            str(mp4),
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", done.stderr)
+    return float(match.group(1)) if match else None
+
+
+def record_narration(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
+    """A take that really narrates, from a cache seeded before it starts."""
+    from demo_recording import Recorder, narration
+
+    b = Beats("narration")
+    seeded = seed_tts_cache(out_dir)
+    before = sorted(p.name for p in (out_dir / ".tts").iterdir())
+
+    # Point a cache miss at a closed local port. Every line here is seeded, so
+    # nothing should be requested — this is what makes that "cannot" rather
+    # than "should": when a break makes the recorder compute a different key
+    # than `seed_tts_cache` did, the miss dies against a dead socket in
+    # milliseconds. Before this, that break put NARRATION_KEY on the wire to
+    # api.elevenlabs.io and read the 401 back, which is a network dependency
+    # and a fabricated credential sent to a third party, on a path a test is
+    # *expected* to take while someone is breaking things deliberately.
+    real_base = narration.TTS_API_BASE
+    narration.TTS_API_BASE = f"http://127.0.0.1:{free_port()}/v1/text-to-speech"
+
+    # The recorder reads this at construction and refuses `speech=True`
+    # without it. It is never sent anywhere: every line is a cache hit, and
+    # `tts_clip` returns before it builds a request.
+    os.environ["ELEVENLABS_API_KEY"] = NARRATION_KEY
+    try:
+        with Recorder(out_dir, base_url=base_url, speech=True, strict=True) as rec:
+            b.expect("constructing with speech=True", rec._speech, True)
+            rec.goto("/")
+            rec.wait_for("#kpi-rev")
+            rec.interlude(NARRATION_LONG_LINE, hold=NARRATION_HOLD_S)
+            rec.caption(NARRATION_SHORT_LINE)
+            rec.pause(NARRATION_HOLD_S)
+            rec.caption("")
+            rec.pause(0.4)
+            lines = list(rec._lines)
+    finally:
+        os.environ.pop("ELEVENLABS_API_KEY", None)
+        narration.TTS_API_BASE = real_base
+
+    after = sorted(p.name for p in (out_dir / ".tts").iterdir())
+    b.fail_if(
+        after != before,
+        f"the take wrote to .tts/: {sorted(set(after) - set(before))}. Every "
+        f"line was seeded, so a new file means the recorder computed a "
+        f"different key than this file did and went to the network for it",
+    )
+    b.expect("recording two narrated lines", len(lines), len(NARRATION_LINES))
+    return b.problems, {"lines": lines, "seeded": seeded}
+
+
+def check_narration_pacing(out_dir: Path) -> list[str]:
+    """A beat cannot start while the previous line is still being spoken."""
+    label = "narration"
+    failures: list[str] = []
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    beats = doc.get("beats", [])
+
+    def after(verb: str, caption: str) -> tuple[dict, dict] | None:
+        for i, beat in enumerate(beats[:-1]):
+            if beat.get("verb") == verb and beat.get("caption") == caption:
+                return beat, beats[i + 1]
+        return None
+
+    long_pair = after("interlude", NARRATION_LONG_LINE)
+    short_pair = after("caption", NARRATION_SHORT_LINE)
+    if long_pair is None or short_pair is None:
+        return [
+            f"{label}: timeline.json has no interlude/caption pair to measure "
+            f"pacing over — verbs recorded: "
+            f"{[b.get('verb') for b in beats]}"
+        ]
+
+    # The long clip outlasts its beat's hold, so the *next* beat cannot begin
+    # until the clip has finished. This is the only observable the pacing has:
+    # `_finish_line` idles between beats, so the wait lands in the gap rather
+    # than inside either one.
+    line, following = long_pair
+    elapsed = float(following["t_start"]) - float(line["t_start"])
+    if elapsed < NARRATION_LONG_S:
+        failures.append(
+            f"{label}: the beat after a {NARRATION_LONG_S}s line started "
+            f"{elapsed:.2f}s after it began — the recorder cut its own "
+            f"narration off, and the mp4 carries a clip that outlives the "
+            f"caption it belongs to"
+        )
+
+    # The control, and the reason the bar above is not "everything is slow":
+    # the short clip finishes inside its hold, so nothing is added. A recorder
+    # that idled a fixed amount after every line would pass the assertion above
+    # and fail this one.
+    line, following = short_pair
+    elapsed = float(following["t_start"]) - float(line["t_start"])
+    if elapsed >= NARRATION_LONG_S:
+        failures.append(
+            f"{label}: the beat after a {NARRATION_SHORT_S}s line was held "
+            f"{elapsed:.2f}s, past even the long line's clip — the wait is not "
+            f"the clip's length, so the assertion above grades nothing"
+        )
+    return failures
+
+
+def check_narration_audio(out_dir: Path, lines: list) -> list[str]:
+    """The mp4 carries audio where a line is, and silence where none is."""
+    label = "narration"
+    failures: list[str] = []
+    mp4 = out_dir / "demo.mp4"
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_name,channels,sample_rate,duration",
+            "-of",
+            "json",
+            str(mp4),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    streams = json.loads(probe.stdout or "{}").get("streams", [])
+    if len(streams) != 1:
+        return [
+            f"{label}: demo.mp4 carries {len(streams)} audio streams, expected "
+            f"exactly 1 — a take with narration on and no track is a silent "
+            f"demo that every other artifact reports as healthy"
+        ]
+    stream = streams[0]
+    for field, wanted in (
+        ("codec_name", NARRATION_CODEC),
+        ("channels", NARRATION_CHANNELS),
+        ("sample_rate", str(NARRATION_SAMPLE_RATE)),
+    ):
+        if str(stream.get(field)) != str(wanted):
+            failures.append(
+                f"{label}: demo.mp4's audio {field} is {stream.get(field)!r}, "
+                f"expected {wanted!r} — stitch() concatenates segments with "
+                f"-c copy and cannot join streams that disagree"
+            )
+
+    # The first line's offset, as the recorder logged it. Measured from the
+    # recorder's own `_lines` rather than from the beat log, because that list
+    # is what `_convert` turns into `adelay` values — grading the mix against
+    # anything else would grade agreement between two records instead of
+    # whether the audio is where the recorder said it put it.
+    if not lines:
+        return failures + [f"{label}: the recorder logged no narration lines"]
+    first_offset = float(lines[0][0])
+
+    loud = mean_dbfs(mp4, first_offset + 0.1, NARRATION_WINDOW_S)
+    if loud is None:
+        failures.append(
+            f"{label}: ffmpeg reported no volume for the window at "
+            f"{first_offset + 0.1:.2f}s — the measurement itself failed, which "
+            f"is not the same as a silent window"
+        )
+    elif loud < NARRATION_LOUD_DBFS:
+        failures.append(
+            f"{label}: the {NARRATION_WINDOW_S}s window inside the first "
+            f"narration line measures {loud:.1f} dBFS, under the "
+            f"{NARRATION_LOUD_DBFS} dBFS this grades — the track is there and "
+            f"silent, which every other assertion in this suite reads as a "
+            f"healthy take"
+        )
+
+    # The control. Before the first line there is nothing to hear, and a mix
+    # that smeared one clip across the whole track — or a track of noise —
+    # passes the bar above everywhere.
+    if first_offset < NARRATION_WINDOW_S + 0.1:
+        failures.append(
+            f"{label}: the first line starts at {first_offset:.2f}s, too early "
+            f"to measure a silent window before it — this take's storyboard is "
+            f"supposed to leave room, so the control is missing"
+        )
+    else:
+        quiet = mean_dbfs(mp4, 0.0, NARRATION_WINDOW_S)
+        if quiet is None:
+            failures.append(
+                f"{label}: ffmpeg reported no volume for the opening window"
+            )
+        elif quiet > NARRATION_QUIET_DBFS:
+            failures.append(
+                f"{label}: the {NARRATION_WINDOW_S}s window *before* the first "
+                f"line measures {quiet:.1f} dBFS, over the "
+                f"{NARRATION_QUIET_DBFS} dBFS this grades — audio is playing "
+                f"where no line was spoken, so 'loud inside a line' says "
+                f"nothing about the mix"
+            )
+    return failures
+
+
+def run_narration(out_root: Path) -> list[str]:
+    """Speech end to end, from a seeded cache: pacing and the audio mix."""
+    out_dir = fresh_take_dir(out_root, "narration")
+    with fixture_server() as base_url:
+        try:
+            problems, info = record_narration(out_dir, base_url)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            return [f"narration: Recorder raised {type(exc).__name__}: {exc}"]
+    mp4 = out_dir / "demo.mp4"
+    if not mp4.is_file():
+        return problems + [f"narration: {mp4} was never written"]
+    failures = (
+        problems
+        + check_narration_pacing(out_dir)
+        + check_narration_audio(out_dir, info["lines"])
+        + check_healthy("narration", out_dir)
+    )
+    if not failures:
+        offsets = ", ".join(f"{off:.2f}s" for off, _ in info["lines"])
+        print(
+            f"smoke: narration ok ({len(info['lines'])} lines spoken from a "
+            f"seeded cache at {offsets}, no key sent, audio present where a "
+            f"line is and silent before the first)"
+        )
+    return failures
+
+
 def run_terminal(out_root: Path) -> list[str]:
     if os.name != "posix":
         print(
@@ -8264,6 +8633,11 @@ def main() -> int:
         help="record only the per-beat evidence take (issue #9)",
     )
     parser.add_argument(
+        "--narration-only",
+        action="store_true",
+        help="record only the speech take, from a seeded cache (issue #157)",
+    )
+    parser.add_argument(
         "--failure-only",
         action="store_true",
         help="record only the takes that do not finish (issues #11/#20/#24/#46)",
@@ -8315,6 +8689,7 @@ def main() -> int:
             ("--determinism-only", args.determinism_only),
             ("--segments-only", args.segments_only),
             ("--evidence-only", args.evidence_only),
+            ("--narration-only", args.narration_only),
             ("--failure-only", args.failure_only),
             ("--polish-only", args.polish_only),
             ("--content-only", args.content_only),
@@ -8406,6 +8781,11 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
         failures += run_strict_web(out_root)
     if only in (None, "--web-only", "--evidence-only"):
         failures += run_evidence(out_root)
+    # Speech end to end (issue #157). A web take, so it is reachable from
+    # --web-only as well as its own flag — whoever changes the narration path
+    # is running one of the two.
+    if only in (None, "--web-only", "--narration-only"):
+        failures += run_narration(out_root)
     if only in (None, "--terminal-only"):
         failures += run_terminal_problems(out_root)
         failures += run_terminal_race(out_root)

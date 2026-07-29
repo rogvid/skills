@@ -68,6 +68,11 @@ from demo_recording.coverage import (  # noqa: E402
     _merged_coverage,
     coverage_report,
 )
+from demo_recording.narration import (  # noqa: E402
+    TTS_KEY_CHARS,
+    TTS_KEY_SEP,
+    _tts_key,
+)
 from demo_recording.timeline import (  # noqa: E402
     _coverage_md,
     _fmt_t,
@@ -556,6 +561,100 @@ class MergeContent(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# narration.py — the cache key (issue #157)
+# --------------------------------------------------------------------------
+#
+# The whole speech path was ungraded until #157. It had been graded by accident:
+# the redaction axis swept everything a take wrote for a registered value, and
+# `.tts/` was one of those things, so some take had to really synthesize speech
+# for that sweep to mean anything. #150 deleted the sweep and with it the only
+# reason any take ran the synthesizer at all.
+#
+# What is graded here is the key, because the key is where a wrong answer is
+# **invisible**. Every other failure in this path announces itself: no clip
+# means no audio, a broken mix means ffmpeg exits non-zero. A key that drops
+# the voice hands a take recorded in one voice the clips of another, and the
+# mp4 comes out with a full, correctly-timed, entirely wrong-sounding track —
+# which no assertion downstream of it can tell from a right one.
+#
+# The pacing and the audio mix are graded end to end in `tests/smoke`, against
+# a seeded cache: `tts_clip` returns a cached clip before it reads `api_key`,
+# so a take whose lines are all hits runs the real path with no network. What
+# stays ungraded is the HTTP call itself and its retry ladder.
+
+
+class TtsKey(unittest.TestCase):
+    LINE = "The queue can be filtered to one status."
+    VOICE = "EXAVITQu4vr4xnSDxMaL"
+    MODEL = "eleven_multilingual_v2"
+
+    def key(self, text=None, voice=None, model=None) -> str:
+        return _tts_key(
+            self.LINE if text is None else text,
+            self.VOICE if voice is None else voice,
+            self.MODEL if model is None else model,
+        )
+
+    def test_the_same_line_in_the_same_voice_is_the_same_clip(self):
+        # The point of the cache: a retake of an unchanged storyboard hits the
+        # API zero times. Without this the key is a cache that never hits.
+        self.assertEqual(self.key(), self.key())
+
+    def test_each_of_the_three_inputs_changes_the_key_on_its_own(self):
+        # Named separately in the failure message, because "the key changed"
+        # is satisfied by a key that varies on text alone — which is the exact
+        # bug: switching voice would then replay the previous voice's audio.
+        base = self.key()
+        for label, other in (
+            ("text", self.key(text=self.LINE + " ")),
+            ("voice", self.key(voice="21m00Tcm4TlvDq8ikWAM")),
+            ("model", self.key(model="eleven_turbo_v2")),
+        ):
+            with self.subTest(input=label):
+                self.assertNotEqual(base, other, f"{label} is not in the key")
+
+    def test_the_separator_is_one_no_voice_or_model_id_can_hold(self):
+        # Joining three fields is only unambiguous because the separator
+        # cannot occur in the first two. Voice and model ids are alphanumeric,
+        # so the contract is exactly "not alphanumeric" — asserted here rather
+        # than left to the comment that states it.
+        #
+        # Graded on the property, not on the character: `assertEqual(SEP, "|")`
+        # would pass for any separator somebody typed, including `a`, which is
+        # the break this is here to catch.
+        self.assertTrue(TTS_KEY_SEP, "there is no separator at all")
+        self.assertFalse(
+            any(c.isalnum() for c in TTS_KEY_SEP),
+            f"{TTS_KEY_SEP!r} can occur in a voice or model id, so two "
+            f"different takes can hash the same string",
+        )
+
+    def test_moving_a_field_boundary_changes_the_key(self):
+        # The separator's job, stated as behaviour: these two triples have the
+        # same naive concatenation, and must not share a clip. Holds for any
+        # separator; fails for none at all.
+        self.assertNotEqual(
+            _tts_key(text="c", voice_id="a", model_id="b"),
+            _tts_key(text="", voice_id="ab", model_id="c"),
+        )
+
+    def test_the_key_is_a_filename_stem_and_not_a_path(self):
+        # It is interpolated straight into `cache_dir / f"{key}.mp3"`. A key
+        # holding a slash or a dot would write outside the cache directory or
+        # collide with the `.part` file the atomic rename uses.
+        #
+        # **20 is written out, not read from `TTS_KEY_CHARS`.** The code slices
+        # by that constant, so comparing the length against it would be the
+        # catalogue's environment-agreeing assertion: it holds for any value
+        # either of them takes, and grades nothing. Shortening the key is a
+        # decision about collision odds, and it should cost an edit here.
+        key = self.key()
+        self.assertEqual(len(key), 20)
+        self.assertEqual(TTS_KEY_CHARS, 20)
+        self.assertTrue(all(c in "0123456789abcdef" for c in key), key)
+
+
+# --------------------------------------------------------------------------
 # SKILL.md and its reference/ files (issue #140)
 # --------------------------------------------------------------------------
 #
@@ -884,6 +983,45 @@ INJECTIONS = [
         "| [reference/narration.md](reference/narration.md) | When",
         "| reference/narration.md | When",
         ["SkillDocs.test_every_reference_file_is_linked_from_skill_md"],
+    ),
+    (
+        "the narration cache keys on the line alone, ignoring the voice",
+        "narration.py",
+        "TTS_KEY_SEP.join((voice_id, model_id, text))",
+        "text",
+        ["TtsKey.test_each_of_the_three_inputs_changes_the_key_on_its_own"],
+    ),
+    (
+        # Same search string as the entry above, different break: that one
+        # drops voice *and* model, this one drops the model alone. The pair is
+        # the difference between "the key varies" and "the key varies with
+        # each input", which is the claim the test actually makes.
+        "the narration cache key drops the model but keeps the voice",
+        "narration.py",
+        "TTS_KEY_SEP.join((voice_id, model_id, text))",
+        "TTS_KEY_SEP.join((voice_id, text))",
+        ["TtsKey.test_each_of_the_three_inputs_changes_the_key_on_its_own"],
+    ),
+    (
+        "the three fields are joined with nothing between them",
+        "narration.py",
+        "TTS_KEY_SEP.join((voice_id, model_id, text))",
+        '"".join((voice_id, model_id, text))',
+        ["TtsKey.test_moving_a_field_boundary_changes_the_key"],
+    ),
+    (
+        "the key's separator becomes a character a voice id can hold",
+        "narration.py",
+        'TTS_KEY_SEP = "|"',
+        'TTS_KEY_SEP = "a"',
+        ["TtsKey.test_the_separator_is_one_no_voice_or_model_id_can_hold"],
+    ),
+    (
+        "the cache key is shortened, raising the collision odds silently",
+        "narration.py",
+        "TTS_KEY_CHARS = 20",
+        "TTS_KEY_CHARS = 12",
+        ["TtsKey.test_the_key_is_a_filename_stem_and_not_a_path"],
     ),
     (
         "a deletion leaves a constant in tests/smoke that nothing reads",
