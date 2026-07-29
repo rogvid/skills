@@ -24,15 +24,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import functools
-import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -56,6 +53,7 @@ from .failure import (
     FAILURE_SCHEMA,
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
+from .narration import tts_clip
 from .timeline import (
     ATTRIBUTION_SLACK_S,
     EVIDENCE_DIR,
@@ -409,54 +407,6 @@ def _env_flag(name: str) -> bool | None:
     if value is None:
         return None
     return value.lower() in ("1", "true", "yes", "on")
-
-
-def tts_clip(
-    text: str,
-    cache_dir: Path,
-    voice_id: str,
-    model_id: str,
-    api_key: str,
-) -> Path:
-    """Synthesize one narration line with ElevenLabs, cached by content.
-
-    The cache key includes voice and model, so switching either re-generates.
-    Cached clips make retakes free — the API is only hit for new lines.
-    """
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256(f"{voice_id}|{model_id}|{text}".encode()).hexdigest()[:20]
-    clip = cache_dir / f"{key}.mp3"
-    if clip.exists():
-        return clip
-    req = urllib.request.Request(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-        "?output_format=mp3_44100_128",
-        data=json.dumps({"text": text, "model_id": model_id}).encode(),
-        headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-    )
-    # Free-tier keys get 429 "system_busy" under load, and any network can
-    # blip mid-recording — retry with backoff rather than losing a take.
-    for attempt in range(5):
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                partial = clip.with_suffix(".part")
-                partial.write_bytes(resp.read())
-                partial.rename(clip)  # atomic: no truncated clip is cached
-            return clip
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:300]
-            if e.code in (429, 500, 502, 503) and attempt < 4:
-                time.sleep(2 ** (attempt + 1))
-                continue
-            raise RuntimeError(
-                f"ElevenLabs TTS failed ({e.code}): {detail}"
-            ) from e
-        except (urllib.error.URLError, TimeoutError) as e:
-            if attempt < 4:
-                time.sleep(2 ** (attempt + 1))
-                continue
-            raise RuntimeError(f"ElevenLabs TTS failed: {e}") from e
-    raise AssertionError("unreachable")
 
 
 def _verb_target(args: tuple, kwargs: dict) -> str | None:

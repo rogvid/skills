@@ -209,20 +209,37 @@ terminal *take* additionally skips itself with a message if `os.name` is not
 
 The runner deletes every `DEMO_VIDEO_*` variable plus `ELEVENLABS_API_KEY` from
 its own environment before recording, so a sourced project `.env` cannot change
-what the test measures. Every take then forces narration off (`speech=False`).
+what the test measures. Every take then forces narration off (`speech=False`) —
+except one.
 
-**Nothing here exercises the speech path any more, and that is a gap this file
-states rather than leaves to be discovered.** One take used to record with
-`speech=True` against a stubbed synthesizer, because the `.tts/` cache was a
-leak path it had to prove clean and with narration off it does not exist. That
-take went with the masking ([#138](https://github.com/rogvid/skills/issues/138)),
-and the synthesizer, the cache key, the pacing and the ffmpeg audio mix went
-ungraded with it. See "Known gaps".
+**The narration take records with `speech=True`, from a seeded cache**
+([#157](https://github.com/rogvid/skills/issues/157)). The speech path had been
+graded only by accident: the redaction axis swept every file a take wrote for a
+registered value, `.tts/` was one of those files, so some take had to really
+synthesize speech for that sweep to mean anything. #150 deleted the sweep and
+with it the only reason anything ran the synthesizer, the pacing or the mix.
+
+What makes it affordable to grade on purpose: `tts_clip` returns a cached clip
+*before* it reads `api_key`, and the recorder only requires the env var to be
+non-empty. So a take whose every line is already in `.tts/` runs the entire real
+path with no key, no network, and none of the non-determinism a remote service
+brings. The clips are tones of a known length rather than speech, which is what
+makes the pacing bar exact — a real clip's duration is whatever ElevenLabs
+decided, and a bar you cannot predict is one you end up widening until it
+passes.
+
+The cache is seeded by a key this file computes **by hand**, not by calling
+`_tts_key`. A harness that seeded itself through the function under test would
+agree with that function's bugs by construction, and a key that dropped the
+voice would still find every clip. Here a divergence is a cache *miss*, and a
+miss fails the take.
+
+Still ungraded: the HTTP call itself and its retry ladder. See "Known gaps".
 
 ## What it asserts
 
-Ten independent axes, because a recorder can fail on any one of them while
-looking perfect on the other nine.
+Eleven independent axes, because a recorder can fail on any one of them while
+looking perfect on the other ten.
 
 **Artifacts** — `demo.mp4` and every still the storyboard asked for exist, were
 modified by *this* run rather than a previous one, clear a size floor
@@ -803,6 +820,55 @@ been watched to fail:
 | `srcdoc` leaves the stripped-attribute list | beat 6's `html` carries a srcdoc document, and the attribute |
 | the page ARIA snapshot returns `""` | beat 2's tree is 0 characters, under the 400 this grades |
 
+**Narration** — the take really spoke, waited for itself, and the audio landed
+where the line did. Recorded from a seeded cache, as described above.
+
+Four things, and the third is the one the axis exists for:
+
+- **nothing was synthesized.** `.tts/` holds exactly the files seeded before the
+  take and no more. A new file means the recorder computed a different key than
+  this harness did — the two are written independently on purpose — and went
+  looking for it.
+- **a beat cannot start while the previous line is still speaking.** The first
+  line's clip (1.6 s) outlasts its beat's hold (0.5 s), so the *next* beat's
+  `t_start` must be at least 1.6 s after the line began. `_finish_line` idles
+  between beats, so this gap is the only place the wait is observable.
+  **With a control**: the second line's clip is 0.3 s and finishes inside its
+  hold, so nothing is added — a recorder that idled a fixed amount after every
+  line passes the first bar and fails this one.
+- **the mix carries audio where a line is, and silence where none is.** Mean
+  volume over a 0.4 s window, measured with `volumedetect`. Inside the first
+  line it must clear −60 dBFS; over the window *before* it, it must stay under
+  −80. **Neither bar means anything alone.** A silent track passes every other
+  assertion in this suite — it is present, `aac`, stereo, 44.1 kHz, and exactly
+  as long as the video — and that is precisely the failure that leaves every
+  artifact looking healthy. A track of noise, or a mix that laid one clip across
+  the whole timeline, clears the loud bar everywhere and fails the quiet one.
+  Measured on the seeded tones: **−25 dBFS inside a line against −91 before
+  one**, so both bars sit a long way from either number.
+- **the stream is shaped the way `stitch()` needs.** `aac`, 2 channels,
+  44100 Hz. `_convert` pins these with `aformat` rather than letting `amix`
+  decide, because mono TTS clips otherwise yield a mono track that `-c copy`
+  cannot concatenate with the stereo silence of a segment that narrated nothing.
+
+**All four were fault-injected**, none of them having been watched to fail
+before:
+
+| break | what fired |
+|---|---|
+| `_finish_line` stops idling out the remaining clip | *the beat after a 1.6s line started 0.56s after it began — the recorder cut its own narration off* |
+| `_convert` takes the `anullsrc` branch with lines present | *the window inside the first line measures −91.0 dBFS, under the −60.0 this grades* |
+| `adelay` is pinned to 0 instead of the line's offset | *the window **before** the first line measures −19.4 dBFS — audio is playing where no line was spoken* |
+| the `aformat` filter is dropped from the graph | *audio channels is 1, expected 2 — stitch() cannot join streams that disagree* |
+| `_tts_key` hashes different text than the harness seeds | the take raises: `ElevenLabs TTS failed: Connection refused` |
+
+The last one is why `TTS_API_BASE` exists as a module constant. Before it, that
+break put `NARRATION_KEY` on the wire to `api.elevenlabs.io` and read a 401
+back — an outbound request carrying a fabricated credential to a third party, on
+a path somebody breaking things deliberately is *expected* to take. The take now
+pins the endpoint to a closed local port for its duration, so a miss cannot
+leave the machine.
+
 ### How the recording looks — the spotlight's exit, and the card a terminal segment opens on
 
 Two takes, and the only two in this file that grade defects **a human found by
@@ -1203,6 +1269,23 @@ Three things about how these are built are worth knowing before trusting them:
 
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
+
+- **Nothing calls the ElevenLabs API.** The narration take grades everything a
+  cache hit reaches — the key, the pacing, the mix — and by construction never
+  takes the miss path, which is the point. So `tts_clip`'s request, its 429/5xx
+  retry ladder with backoff, the `.part`-then-rename that keeps a truncated
+  download out of the cache, and every error message it raises are unexercised.
+  A regression there costs a take at record time with a legible exception, which
+  is the mildest failure in this file — but it is a gap, and closing it needs a
+  local HTTP stub rather than a real key. `TTS_API_BASE` is the seam that would
+  take one.
+
+- **The no-lines audio branch is ungraded.** `_convert` gives a speech-enabled
+  segment that narrated nothing a track of `anullsrc` silence, so `stitch()`'s
+  `-c copy` concat sees uniform streams. Every take here either narrates or
+  disables speech, so that branch runs nowhere. Ironically it is exactly what
+  the mix injection above *produces*, which is how we know the silence is well
+  formed — but nothing asserts it is what a line-less segment gets.
 
 - **A conversion failure writes no `failure/` dump**, only the marker, the
   timeline with `duration: null` and the stderr line. The dump is built from

@@ -65,6 +65,7 @@ from .frames import (
     scene_times,
     write_beat_frames,
 )
+from .narration import tts_clip
 from .stitching import stitch
 from .timeline import (
     EVIDENCE_DIR,
@@ -83,16 +84,17 @@ from .timeline import (
 )
 
 if TYPE_CHECKING:  # the real classes, for type checkers and editors only
-    from .core import tts_clip
     from .terminal import TerminalRecorder
     from .web import Recorder
 
-# Everything that cannot be reached without Playwright. `tts_clip` is here for
-# the same reason the recorders are: it lives in `core`, which imports it.
+# Everything that cannot be reached without Playwright — which is now only the
+# two recorders. `tts_clip` used to be here too, for the same reason: it lived
+# in `core`, which imports Playwright at module scope. It does not need one
+# (a cache key is a function of three strings), so #157 moved it to
+# `narration` and it is imported eagerly above like everything else.
 _LAZY = {
     "Recorder": ".web",
     "TerminalRecorder": ".terminal",
-    "tts_clip": ".core",
 }
 
 
