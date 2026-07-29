@@ -173,20 +173,15 @@ TIMELINE_SCHEMA = 1
 # attributes — i.e. source code and whole embedded documents that nobody put
 # on screen. The clone that is serialized drops both (see web.py).
 #
-# **Evidence is plain text, and that makes it the leak path with the fewest
-# natural defences.** Every other artifact this package writes is pixels, and
-# `redact()` is a *pixel* control: it covers where a value renders and leaves
-# the value in the DOM, which is exactly what is being dumped here. So:
+# **Evidence is plain text, and nothing in it is hidden.** This recorder does
+# not defend against a value reaching the screen (see SKILL.md), so a string
+# the app renders is in here verbatim, in a form that greps. That is the same
+# exposure the recording already has — it is worth saying because pixels feel
+# private and a JSON file does not, and it is why `evidence/` is gitignored
+# rather than committed.
 #
-#   * every string written is masked against the registered secrets *and*
-#     against the rendered text of everything `redact()` is covering, harvested
-#     from the page at capture time (see `Recorder._redacted_rendered_text`);
-#   * nothing reaches the disk until the take has exited cleanly and the mask
-#     has been verified — the documents are built in memory and written
-#     alongside timeline.json, so a take that dies on a SecretLeak leaves no
-#     evidence file to delete;
-#   * a document that still holds a forbidden literal when it is serialized
-#     raises SecretLeak and kills the take rather than being written.
+# The documents are built in memory while the page is alive and written in
+# `__exit__`, which is what keeps the capture off the page's critical path.
 #
 # Naming, and issue #22. A beat's `index` is its position in *its own take*, so
 # two segments of one demo both start at 0. Evidence therefore does two things
