@@ -64,7 +64,9 @@ key is fine, renaming one is not:
 - `exit_code` appears on `TerminalRecorder` `run` beats — see **Failing the
   take** below.
 - `error` appears **only on a beat whose verb raised**, carrying the
-  exception's `type` and its scrubbed `message`; it is absent from every beat
+  exception's `type` and its `message` verbatim — `wait_for_text()` quotes a
+  thousand characters of terminal screen into a timeout, and nothing filters
+  that; it is absent from every beat
   that returned. `t_start` and `t_end` are stamped either way, so this is the
   only thing that tells the two apart — do not read a beat as evidence that
   something was demonstrated without checking it. The envelope gains a

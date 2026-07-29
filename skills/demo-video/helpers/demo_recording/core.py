@@ -1260,10 +1260,10 @@ class _DemoBase:
             # exactly the take somebody is about to go looking at, and
             # `KeyboardInterrupt` does not derive from `Exception`.
             #
-            # Scrubbed at record time as well as on the way out. The message is
-            # not the recorder's: `wait_for_text()` quotes a thousand
-            # characters of terminal screen into its timeout, and that screen
-            # can hold anything the program printed.
+            # The message is not the recorder's: `wait_for_text()` quotes a
+            # thousand characters of terminal screen into its timeout, and that
+            # screen can hold anything the program printed. It is written
+            # through verbatim — this recorder scrubs nothing (#138).
             record["error"] = {
                 "type": type(raised).__name__,
                 "message": str(raised),

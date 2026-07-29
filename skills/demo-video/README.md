@@ -40,17 +40,12 @@ and a real terminal session (voice on):
 - **`evidence/beat-NN.json`** — what was on screen at every beat, in text:
   the page's ARIA tree (or the terminal's rendered screen), the spotlight
   target's markup, capped and explicitly truncated. An agent reviewing the
-  demo reads what the app said instead of inferring it from pixels. It is
-  plain text, which makes it the one artifact a pixel control cannot protect
-  for free — so the recorder reads what `redact()` is covering out of the page
-  and masks *that* out too, refuses to write page text it cannot vouch for,
-  and clears what a previous take left behind. "What renders in the clear"
-  means **painted**: an attribute, an input's `value`, and anything CSS hides
-  by any mechanism do not count, because a value that is only in one of those
-  was in no frame either. Matching is exact modulo whitespace in either
-  direction, HTML entities and JSON escaping — a stated list, not an open
-  promise. It is **not committed**; `SKILL.md` explains every one of those
-  decisions and where they stop.
+  demo reads what the app said instead of inferring it from pixels. The
+  serializer drops what was never **painted** — inline `<script>` text, a
+  `srcdoc` document, an attribute nothing renders, an input's `value` — because
+  a string that reached none of the frames should not have evidence as the one
+  place it exists. It clears what a previous take left behind. It is **not
+  committed**; `SKILL.md` explains those decisions and where they stop.
 - **A statement about the frames, not only the storyboard** — `content` in
   `timeline.json`, plus a line on stderr, saying whether the recording shows
   anything at all: how much picture there is where the app sits, and the
@@ -134,7 +129,6 @@ win over env vars.
 demo-video/
 ├── SKILL.md                       # the process — agents read this, in full, every time
 ├── reference/                     # the argued detail — read at the point of use
-│   ├── secrets.md                 #   redact(), register_secret(), and what they miss
 │   ├── determinism.md             #   the frozen clock, and why it is opt-in
 │   ├── timeline.md                #   the beat log, and whether the picture showed anything
 │   ├── review.md                  #   frames, per-beat evidence, acceptance criteria
