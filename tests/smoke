@@ -2099,6 +2099,15 @@ def record_web(
         out_dir, base_url=base_url, speech=False, strict=True, deterministic=True
     ) as rec:
         rec.goto("/")
+        # #142's carve-out, graded. `framenavigated` was written for the paint
+        # gate, and the gate went with the masking — but it is the recorder's
+        # only reaction to a document being replaced, and #134 (a mid-take
+        # goto() leaving `self._caption` stale, so every later beat logs a
+        # caption that is not on screen into a committed file) cannot be fixed
+        # without it. Deleting the listener along with everything else it was
+        # written for is the mistake this watches for, and nothing else here
+        # would notice: no artifact records a navigation today.
+        b.expect("goto('/') is noticed as a navigation", rec._navigated, True)
         rec.wait_for("#kpi-rev")
         start_ticker(b, rec.page)
         opening = check_determinism(b, rec.page, "on landing")
@@ -2224,6 +2233,18 @@ def record_web(
             f"compositor is not painting and issue #18 is back",
         )
         rec.caption("")
+
+        # ...and again for a navigation the *storyboard did not make*, which is
+        # the harder half and the reason this is a page listener rather than a
+        # line inside goto(). A link click, a form submit, `location.href` and
+        # a meta refresh all replace the document with no verb involved, and
+        # #134 is about exactly that case leaving `self._caption` stale.
+        # `page.reload()` stands in for all of them: a real navigation, driven
+        # past the verb layer, recording no beat of its own — so this asserts
+        # the listener rather than the verb, and adds nothing to WEB_BEATS.
+        rec._navigated = False
+        rec.page.reload()
+        b.expect("a navigation no verb made is noticed too", rec._navigated, True)
 
         # Where the app lands in each medium, read off the live recorder rather
         # than re-derived here, so a change to the window geometry carries this

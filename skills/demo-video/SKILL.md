@@ -87,7 +87,6 @@ read them all up front, and do not skip one the text tells you to open.
 
 | File | Read it when |
 |---|---|
-| [reference/secrets.md](reference/secrets.md) | Before the first `redact()` or `register_secret()`, and before any take against data you would not publish. Half of it is what redaction does **not** cover |
 | [reference/determinism.md](reference/determinism.md) | Before `deterministic=True`. A frozen clock changes what an app does, and usually does it silently |
 | [reference/timeline.md](reference/timeline.md) | When reading `timeline.json`/`timeline.md`, when a take warns about its `content`, or when consuming the beat log as a contract |
 | [reference/review.md](reference/review.md) | At Process step 6 — handing a take to a reviewing agent, reading `evidence/`, or recording against a ticket with `criteria=` |
@@ -299,9 +298,7 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 carries the full verb table (`run`, `send`, `key`, `wait_for_prompt`,
 `wait_for_text`), how to open a segment on a title card, the four patterns a
 terminal demo takes, and the gotchas — pagers, echo, prompts that never
-return. A terminal take that handles a secret needs
-[reference/secrets.md](reference/secrets.md) too: `TerminalRecorder` has no
-`redact()`, and what it has instead works differently.
+return.
 
 ## Process
 
@@ -496,10 +493,10 @@ return. A terminal take that handles a secret needs
 - **Layout shifts strand the cursor.** When the app inserts rows/cards
   mid-recording, elements move but the cursor doesn't — re-`move_to` the
   target after any wait that can reflow the page.
-- **Recording real data and planning to blur it later.** There is no later: the
-  frame is captured the moment it paints, and a published video leaks forever.
-  Decide what must not appear *before* the first `goto()` — see
-  [reference/secrets.md](reference/secrets.md), and read what it does not cover.
+- **Recording real data and planning to blur it later.** There is no later,
+  and there is no blur: the frame is captured the moment it paints, nothing
+  here hides anything, and a published video leaks forever. Decide what must
+  not appear *before* the first `goto()` — see the top of this file.
 - **Reading the beat table as proof the demo showed something.** It is proof
   the storyboard *ran*. A card left up, a modal that never closed or an app
   that stopped painting produces a complete, correct, entirely successful
