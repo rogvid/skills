@@ -672,32 +672,19 @@ class Recorder(_DemoBase):
     def terminal(self, command: str) -> None:
         """Type a command in an on-screen terminal card, then perform the
         real action it describes right after this returns."""
-        # Same rule as a caption: this text is authored, and it is drawn large
-        # in the middle of the frame. A token in a curl line is an authoring
-        # bug, so fail rather than blur.
-        self._no_secrets(command, "terminal()")
         self.page.evaluate("cmd => window.__demoTerminal(cmd)", command)
 
     @_beat_verb("terminal_output")
     def terminal_output(self, text: str) -> None:
         """Reveal real command output inside the terminal card, line by
         line — run the command first, pass its actual (trimmed) output."""
-        # Scrubbed, not fatal: unlike a caption or a command line, this text
-        # is a program's output, which the storyboard author did not write and
-        # cannot be asked to reword. Same reasoning as the terminal recorder's
-        # PTY path (issue #5).
-        self.page.evaluate("t => window.__demoTerminalOutput(t)", self.scrub(text))
+        self.page.evaluate("t => window.__demoTerminalOutput(t)", text)
 
     @_beat_verb("terminal_close")
     def terminal_close(self, stamp: str | None = None) -> None:
         """Stamp a closing line ('✓ delivered' by default, "" for none)
         on the terminal card and fade it out."""
         if stamp != "":
-            # The stamp is drawn on the card exactly as terminal()'s command
-            # is, and it is authored the same way — a caller pasting a request
-            # id or a response line into it is the same leak. terminal() got
-            # this guard and the stamp did not; both are authored text.
-            self._no_secrets(stamp or "", "terminal_close()")
             self.page.evaluate("s => window.__demoTerminalDone(s)", stamp)
             self.pause(1.2)
         self.page.evaluate("() => window.__demoTerminalHide()")

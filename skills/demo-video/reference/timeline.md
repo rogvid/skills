@@ -180,7 +180,7 @@ inside the stretch?**
 | beats inside the held stretch | verdict |
 |---|---|
 | `caption`, `interlude`, `bridge`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
-| `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to`, `redact` | worth looking at — warns |
+| `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to` | worth looking at — warns |
 
 A `run()` that printed nothing visible, a `click()` that moved nothing: those
 are the shapes worth a human's two minutes. A caption change over a screen

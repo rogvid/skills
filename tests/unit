@@ -68,7 +68,6 @@ from demo_recording.coverage import (  # noqa: E402
     _merged_coverage,
     coverage_report,
 )
-from demo_recording.secrets import SECRET_MASK, Secret  # noqa: E402
 from demo_recording.timeline import (  # noqa: E402
     _coverage_md,
     _fmt_t,
@@ -557,40 +556,6 @@ class MergeContent(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# secrets.py
-# --------------------------------------------------------------------------
-
-
-class SecretType(unittest.TestCase):
-    def test_a_secret_is_not_a_str(self):
-        # Deliberately not a str subclass: `_verb_target` picks the first
-        # string argument of a verb as that beat's `selector`, so a
-        # str-subclassed Secret handed to any verb would be written into
-        # timeline.json verbatim — a file this skill tells people to commit.
-        self.assertNotIsInstance(Secret("sk-live-abcdef123456"), str)
-
-    def test_printing_a_secret_yields_the_mask_not_the_value(self):
-        self.assertEqual(str(Secret("sk-live-abcdef123456")), SECRET_MASK)
-        self.assertEqual(f"{Secret('sk-live-abcdef123456')}", SECRET_MASK)
-
-    def test_repr_names_the_length_and_not_the_value(self):
-        # A repr lands in tracebacks, CI logs and bug reports — the set of
-        # places this type exists to keep the value out of.
-        text = repr(Secret("sk-live-abcdef123456"))
-        self.assertNotIn("sk-live", text)
-        self.assertIn("20", text)
-
-    def test_reveal_is_the_only_way_to_the_plaintext(self):
-        self.assertEqual(
-            Secret("sk-live-abcdef123456").reveal(), "sk-live-abcdef123456"
-        )
-
-    def test_an_empty_secret_is_refused(self):
-        with self.assertRaises(ValueError):
-            Secret("")
-
-
-# --------------------------------------------------------------------------
 # SKILL.md and its reference/ files (issue #140)
 # --------------------------------------------------------------------------
 #
@@ -854,20 +819,6 @@ INJECTIONS = [
         "| [reference/narration.md](reference/narration.md) | When",
         "| reference/narration.md | When",
         ["SkillDocs.test_every_reference_file_is_linked_from_skill_md"],
-    ),
-    (
-        "Secret becomes a str subclass, so a verb can log one as its target",
-        "secrets.py",
-        "class Secret:",
-        "class Secret(str):",
-        ["SecretType.test_a_secret_is_not_a_str"],
-    ),
-    (
-        "a Secret's repr discloses the value",
-        "secrets.py",
-        '        return f"Secret(<{len(self._value)} chars>)"',
-        '        return f"Secret({self._value!r})"',
-        ["SecretType.test_repr_names_the_length_and_not_the_value"],
     ),
 ]
 
