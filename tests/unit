@@ -624,6 +624,12 @@ SKILL_DIR = Path(os.environ.get("UNIT_SKILL_DIR", REPO / "skills" / "demo-video"
 # not block.
 SKILL_LINE_BUDGET = 600
 
+# `reference/` holding fewer than this is `reference/` being emptied, which
+# would make both assertions below hold trivially. Not a count of the files
+# that happen to exist — that is read off the directory, so retiring one
+# (secrets.md, #142) is a documentation change and not a test edit.
+REFERENCE_FLOOR = 5
+
 
 def budget_report() -> int:
     """Say what SKILL.md costs a caller. Non-zero when it is over budget."""
@@ -661,8 +667,15 @@ class SkillDocs(unittest.TestCase):
     def test_every_reference_link_in_skill_md_resolves(self):
         links = sorted(set(re.findall(r"\]\((reference/[^)#]+)", self.skill)))
         # The catalogue's "vacuous sweep": a link check over a file with no
-        # links passes trivially. Assert the haystack first.
-        self.assertGreaterEqual(len(links), 8, "SKILL.md links almost nothing")
+        # links passes trivially. Assert the haystack first — but against the
+        # directory rather than a literal, so adding or retiring a reference
+        # file is not a test edit. `REFERENCE_FLOOR` is the only number, and it
+        # exists to catch `reference/` being emptied, not to count its files.
+        on_disk = {p.name for p in (SKILL_DIR / "reference").glob("*.md")}
+        self.assertGreaterEqual(len(on_disk), REFERENCE_FLOOR)
+        self.assertEqual(
+            len(links), len(on_disk), f"SKILL.md links {len(links)} of {len(on_disk)}"
+        )
         missing = [ln for ln in links if not (SKILL_DIR / ln).is_file()]
         self.assertEqual(missing, [], f"dead reference links: {missing}")
 
@@ -671,7 +684,7 @@ class SkillDocs(unittest.TestCase):
         # not progressive disclosure, it is material that was removed.
         on_disk = {p.name for p in (SKILL_DIR / "reference").glob("*.md")}
         linked = set(re.findall(r"\]\(reference/([^)#]+)", self.skill))
-        self.assertGreaterEqual(len(on_disk), 8)
+        self.assertGreaterEqual(len(on_disk), REFERENCE_FLOOR)
         self.assertEqual(on_disk - linked, set(), "reference files nothing links")
 
 
@@ -827,8 +840,8 @@ INJECTIONS = [
     (
         "a reference link in SKILL.md points at a file that is not there",
         "SKILL.md",
-        "| [reference/secrets.md](reference/secrets.md) | Before the first",
-        "| [reference/secrets.md](reference/redaction.md) | Before the first",
+        "| [reference/determinism.md](reference/determinism.md) | Before",
+        "| [reference/determinism.md](reference/frozen-clock.md) | Before",
         ["SkillDocs.test_every_reference_link_in_skill_md_resolves"],
     ),
     (
