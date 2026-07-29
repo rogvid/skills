@@ -642,27 +642,6 @@ class _DemoBase:
         # Offset from _t0 at which Playwright was last known to be delivering
         # page events. Attribution is only as good as this is fresh.
         self._pumped_at = 0.0
-        # Redaction registries (see "secrets" above). `_secrets` is the shared
-        # one — every medium's text path checks it; `_redacted` is filled in by
-        # whatever the medium's own redact() means (CSS selectors for the web).
-        self._secrets: list[str] = []
-        self._redacted: list[str] = []
-        # Selectors that have matched at least one element at some point. Used
-        # only to tell "this selector never named anything" from "it named
-        # something that is not on screen right now" — *not* as evidence that
-        # anything is currently masked. Whether the mask is on, and big enough,
-        # is re-decided from scratch at every checkpoint against the elements
-        # that exist then; remembering a past success would let a re-render
-        # drop the marker and still count as covered.
-        self._mask_seen: set[str] = set()
-        # Withhold the first paint of a navigation until the mask is verified.
-        # The gate itself is per *document* and lives in the page; what is
-        # tracked here is only whether a navigation is waiting to be checked.
-        self._nav_pending = False
-        self._last_sync = 0.0
-        # "erase" paints an opaque cover over what the element renders;
-        # "blur" is the aesthetic opt-out. See Recorder.redact().
-        self._redact_style = "erase"
         # Did *this* take encode an mp4? Not "is there an mp4 in the folder" —
         # that question has a stale answer, and every consumer of it was
         # reading the previous run's file: `duration` in timeline.json (issue
@@ -680,9 +659,8 @@ class _DemoBase:
         # different answers here — "never claimed to" against "had nothing to
         # cover" — and `opening_warning` reads the difference.
         self._opening_held: float | None = None
-        # The medium's screen, read once on the failure path *before* the final
-        # redaction check vouches for it, and turned into a file only if that
-        # check passes. See the "failure artifacts" section.
+        # The medium's screen, read once on the failure path after `_stop()`
+        # has flushed. See the "failure artifacts" section.
         self._failure_screen_text: str | None = None
         self._failure_json: dict | None = None
         self._failure_docs: list[tuple[Path, str]] = []
@@ -1238,19 +1216,6 @@ class _DemoBase:
             yield None
             return
         self._in_beat = True
-        # Every string on a beat is scrubbed, not just the obvious one.
-        # timeline.json and timeline.md are files this skill tells people to
-        # commit, and a partially-cleaned record is worse than a dirty one:
-        # a `[redacted]` selector sitting next to a plaintext `still` path
-        # reads as evidence the log was cleaned.
-        #
-        #   selector  whatever string the verb was called with
-        #   still     built from shot()'s name, which shot() scrubs before it
-        #             names the file, so path and log agree
-        #   caption   `self._caption` is sticky: a register_secret() that
-        #             lands after the caption naming the value would
-        #             otherwise stamp plaintext onto every later beat
-        #
         # Scrubbed rather than fatal, because none of these is text a viewer
         # reads off the screen. Caption text reaches the screen through
         # caption(), which refuses it outright.
@@ -1320,7 +1285,7 @@ class _DemoBase:
     def _write_beat_frames(self, doc: dict) -> None:
         """Extract this take's review frames (a no-op for a segment).
 
-        The frames inherit the recording's redaction rather than re-deriving
+        The frames come out of the recording rather than being re-derived
         it: every one of them is a frame of `demo.mp4`, which is masked in the
         page before it is ever captured. `tests/smoke` measures that on the
         frames themselves instead of taking this paragraph's word for it.
@@ -1434,11 +1399,11 @@ class _DemoBase:
 
         Re-recording into the same folder is how this skill is *meant* to be
         used — `record.py` is committed precisely so it can be re-run — and a
-        take that adds `redact()` (or simply has fewer beats than the last one)
-        would otherwise leave the previous take's files sitting beside its own,
-        holding the very value the new take was written to hide. Nothing else
-        here has that shape: the mp4 is overwritten, and a still is only kept
-        because it might be a committed guide. Evidence is never committed, so
+take with fewer beats than the last one would otherwise leave the
+        previous take's files sitting beside its own, named for beats this
+        take never recorded. Nothing else here has that shape: the mp4 is
+        overwritten, and a still is only kept because it might be a committed
+        guide. Evidence is never committed, so
         there is no such thing as one worth keeping.
         """
         for path in self._stale_evidence(keep):
@@ -1447,8 +1412,8 @@ class _DemoBase:
             except OSError:
                 print(
                     f"demo-video: WARNING — could not delete {path}, which is "
-                    f"a previous take's evidence and may hold a value this "
-                    f"take redacts",
+                    f"a previous take's evidence and describes a beat this "
+                    f"take did not record",
                     file=sys.stderr,
                 )
 
@@ -1483,7 +1448,7 @@ class _DemoBase:
         """The medium's page text, for a failure dump. None if it has none.
 
         Called on the failure path only, **after `_stop()` and before
-        `_verify_redaction_final()`** — that slot is the whole design. After
+        the medium has been stopped** — that slot is the whole design. After
         `_stop()` because a medium can be sitting on output (the terminal
         scrubber withholds a trailing fragment and flushes it there), so an
         earlier reading is not the screen the recording ends on. Before the
@@ -1679,7 +1644,7 @@ class _DemoBase:
         """Put the built dump on disk, plus the last frame of the recording.
 
         The frame comes out of the mp4 with ffmpeg rather than off the page:
-        it is a frame of the recording `_verify_redaction_final()` already
+        it is a frame of the recording the take already
         vouched for, so it inherits that guarantee whole and reads nothing
         after the verifier ran. Gated on `self._converted`, not on the file
         existing — a previous run's demo.mp4 is not a picture of this crash
@@ -1819,8 +1784,8 @@ class _DemoBase:
             except OSError:  # noqa: PERF203 - report what could not be removed
                 print(
                     f"demo-video: WARNING — could not delete {path}, which is "
-                    f"a previous take's failure dump and may hold a value this "
-                    f"take redacts",
+                    f"a previous take's failure dump and describes a run "
+                    f"this one is not",
                     file=sys.stderr,
                 )
         try:
@@ -1962,23 +1927,6 @@ class _DemoBase:
                 ),
                 file=sys.stderr,
             )
-        # Scrubbed again on the way out, over the whole log. `_beat` scrubs
-        # what is registered *at the time the beat runs*, which is nothing at
-        # all for a value registered later in the take — and registering late
-        # is the ordering a hurried author actually produces. The frames from
-        # before the registration keep the value (no recorder can un-paint a
-        # caption), but the files this skill tells people to commit do not
-        # have to.
-        #
-        # ...and against what redact() turned out to be covering, which
-        # `scrub()` alone does not know about. The harvest exists for the
-        # evidence files, but timeline.json and timeline.md are the files this
-        # skill tells people to *commit* — a caption or a selector holding a
-        # redacted element's text coming back `[redacted]` in evidence and in
-        # the clear in the committed log is the worse half of that pair.
-        #
-        # Note the coupling this creates: with `evidence=False` nothing
-        # harvests *on the clean path*, so this falls back to `scrub()` alone
         beats = [dict(beat) for beat in self._beats]
         issues = [dict(issue) for issue in self._issues]
         doc: dict = {
@@ -2005,9 +1953,9 @@ class _DemoBase:
             # take's — and a dict with `measured: false` and a `note` whenever
             # it could not be measured. Never silently absent.
             #
-            # Scrubbed like everything else in this document. It carries no
-            # selector today and deliberately so (see `_content_report`), but
-            # this file is committed and a field that grows a quoted string
+            # It carries no selector today and deliberately so (see
+            # `_content_report`): this file is committed, and a field that
+            # grows a quoted string
             # later must not be the one place the mask does not reach.
             "content": self._content,
             # Built from the *scrubbed* beats, not from `self._beats`, so a

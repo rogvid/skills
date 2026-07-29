@@ -321,13 +321,7 @@ class TerminalRecorder(_DemoBase):
         self._pending_runs: deque[dict] = deque()
         self._exit_seq: int | None = None
         self._exit_tail = ""
-        # Nothing reaches xterm.js without passing through this. Reads the
-        # live registry, so a register_secret() call halfway through a
-        # storyboard masks the output that follows it.
-        # When the PTY last produced a byte, and whether the operator has been
-        # told that output is being withheld. The redactor's holds are timed
-        # off this clock rather than off read boundaries — a program writing a
-        # token one character at a time goes idle between every character.
+        # When the PTY last produced a byte.
         self._last_data_at = time.monotonic()
         # The card this segment opens on, if it opens on one. See
         # _OPENING_CARD_JS.
@@ -563,8 +557,7 @@ class TerminalRecorder(_DemoBase):
     def _failure_screen(self) -> str | None:
         """The rendered terminal buffer, for `failure/screen.txt` (issue #11).
 
-        The same string `_verify_redaction_final` is about to read and the same
-        one `wait_for_text` matches against — visible rows and scrollback, ANSI
+        The same string `wait_for_text` matches against — visible rows and scrollback, ANSI
         already resolved by xterm.js. For a TUI that is the entire account of
         what went wrong, and a reviewer cannot get it out of a frame.
 

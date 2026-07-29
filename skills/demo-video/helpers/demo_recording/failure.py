@@ -36,27 +36,21 @@ from __future__ import annotations
 #   demo-video-FAILED.md  the marker (#46), written whether or not anything
 #                         else was, and deleted by the next take that succeeds
 #
-# **The redaction ordering is the constraint that shapes all of it.** A crash
-# dump of a page mid-secret is the worst leak path this package has, and
-# `_verify_redaction_final()` — the thing that decides whether *any* of it may
-# be kept — runs after `_stop()` and vouches for the page as it then is.
-# So nothing here reads the page after that point:
+# **Where each piece comes from, and why none of it re-reads the page.**
 #
-#   * the last frame is extracted from `demo.mp4` with ffmpeg. It is a frame of
-#     the recording the verifier already vouched for, so it inherits the whole
-#     guarantee and costs no page access at all;
-#   * the DOM / terminal screen is read **once, before** the verifier runs
-#     (`_failure_screen()`), buffered in memory, and only masked and written
-#     after the verifier has passed;
+#   * the last frame is extracted from `demo.mp4` with ffmpeg, so it is a frame
+#     of the recording rather than a second capture of a page that has since
+#     moved on;
+#   * the DOM / terminal screen is read **once** (`_failure_screen()`), after
+#     `_stop()` has flushed whatever the medium was holding back — so it is the
+#     screen the recording ends on — and buffered in memory;
 #   * the console log and the failing beat were in memory the whole time.
 #
-# Everything textual then goes through `_evidence_forbidden()` — the registered
-# secrets *and* the harvested rendered text of everything `redact()` covers —
-# is masked with it, and is checked with `_evidence_holds()` over the serialized
-# bytes. A document that still holds a forbidden literal raises `SecretLeak`,
-# and it raises it while the dump is still in memory, so the failure cannot
-# leave half a directory behind. That is the same shape `_build_evidence()` /
-# `_write_evidence()` already have, for the same reason.
+# The build/write split (`_build_failure` / `_write_failure`) survives from
+# when a document could be *refused*. What it still carries is the `_convert`
+# ordering: building runs before the encode, so the two facts that depend on
+# whether an mp4 was written — `media_written_by_this_take` and the last frame
+# — are filled in by the writer instead.
 FAILURE_DIR = "failure"
 FAILURE_SCHEMA = 1
 
