@@ -43,6 +43,7 @@ from .content import (
     opening_gap,
     opening_report,
     opening_warning,
+    overlay_warning,
     print_content_summary,
 )
 from .coverage import _ac_field, _checked_criteria, coverage_report
@@ -135,12 +136,13 @@ window.__demoInterlude = (text) => {
 # Lightweight bridge: a centered label over a soft scrim, with the scene
 # still visible behind it. For short segment transitions where a full-screen
 # interlude card would feel heavy.
+BRIDGE_ID = "__demo_bridge"
 _BRIDGE_JS = """
 window.__demoBridge = (text) => {
-  let el = document.getElementById('__demo_bridge');
+  let el = document.getElementById('__ID__');
   if (!el) {
     el = document.createElement('div');
-    el.id = '__demo_bridge';
+    el.id = '__ID__';
     el.style.cssText = `
       position: fixed; inset: 0; display: flex; align-items: center;
       justify-content: center; z-index: 2147483647; opacity: 0;
@@ -160,6 +162,38 @@ window.__demoBridge = (text) => {
   document.getElementById('__demo_bridge_t').textContent = text;
   el.style.opacity = text ? '1' : '0';
 };
+"""
+
+# The two overlays this module puts on the page, by element id.
+#
+# One tuple because three separate things now need the same answer: the scripts
+# above create these elements, `interlude("")` takes **both** down whatever
+# style raised them (issue #162), and `_note_overlays_up()` asks the page at the
+# end of a take whether either is still showing (issue #163). Written here rather
+# than duplicated at each site, because a fourth id that only two of the three
+# knew about is exactly how the clear came to be style-dependent in the first
+# place.
+OVERLAY_IDS = (INTERLUDE_ID, BRIDGE_ID)
+
+# Which of `OVERLAY_IDS` is still *visible*, not merely present in the tree.
+#
+# Visibility, because a cleared overlay is not removed — both scripts above
+# toggle `opacity`, and `terminal.py`'s opening card leaves a fully faded
+# element behind on every healthy terminal take. Asking "does the element
+# exist" would warn on all of them.
+#
+# `getComputedStyle` rather than the inline style, so an in-flight fade reads
+# as the number it is actually painting at. Both callers of the clear pause
+# well past the 0.4-0.45 s transition before the take ends, so a cleared
+# overlay reads 0 rather than an interpolated value.
+_OVERLAY_PROBE_JS = """
+(ids) => ids.filter((id) => {
+  const el = document.getElementById(id);
+  if (!el) return false;
+  const style = getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  return parseFloat(style.opacity || '1') > 0.01;
+})
 """
 
 
@@ -607,6 +641,11 @@ class _DemoBase:
         # rather than the storyboard. See the "did the recording show
         # anything?" section.
         self._content: dict | None = None
+        # Whether the recorder's own overlays were still on screen when the
+        # take ended (issue #163), read off the page in `__exit__` and folded
+        # into `content.warnings` by `_measure_content`. None means "nothing
+        # was up", which is what a healthy take reads.
+        self._overlay_note: str | None = None
         # Seconds of blank opening this take's encode covered over, or None for
         # a recorder that does not do that at all (issue #119). Null and 0.0 are
         # different answers here — "never claimed to" against "had nothing to
@@ -742,7 +781,7 @@ class _DemoBase:
                 _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID)
                 .replace("__CSS__", INTERLUDE_CSS)
             )
-            self._context.add_init_script(_BRIDGE_JS)
+            self._context.add_init_script(_BRIDGE_JS.replace("__ID__", BRIDGE_ID))
             # Medium-specific init scripts (cursor, spotlight, ...).
             self._init_context(self._context)
             self.page = self._context.new_page()
@@ -796,6 +835,15 @@ class _DemoBase:
         #     the `with` that carries an exception, for exactly that reason.
         if exc_type is None:
             self._finish_line(tail=0.5)  # don't end mid-sentence
+        # The last thing asked of the live page, and it has to be here rather
+        # than beside the rest of the picture check: `_measure_content` runs
+        # after the browser is gone, off a file, and the one occlusion nothing
+        # in a file can be asked about is the recorder's *own* (issue #163).
+        # Before `_stop()` so a medium that kills its child process cannot take
+        # the page with it, and outside the `exc_type is None` guard because a
+        # storyboard that raised under an overlay is still a take somebody has
+        # to be told about.
+        self._note_overlays_up()
         self._stop()
         # Buffered in memory here and turned into a file by `_build_failure`
         # below — see that split, which survives #144 for a reason unrelated
@@ -1654,6 +1702,38 @@ take with fewer beats than the last one would otherwise leave the
         name = f"{self.segment}.seg.mp4" if self.segment else "demo.mp4"
         return self.out_dir / name
 
+    def _note_overlays_up(self) -> None:
+        """Ask the page whether this recorder's own overlays are still showing.
+
+        **Exact, not heuristic, and that is the whole scope.** The recorder
+        created these elements and knows their ids, so "is the interlude card
+        still up" is a question with an answer rather than something to infer
+        from luma. It says nothing about an app's own modal, a `<dialog>` the
+        page opened, or anything else covering the app — that is unbounded and
+        is declared in `reference/limits.md`, not attempted here.
+
+        It exists because the measurement that should have caught this scored
+        it backwards. On three takes of one storyboard, one clean and two with
+        a `light` scrim over the app for the last 17 s of 48, `content.score`
+        read 26.74 for the clean take and 32.94/32.95 for the covered ones: the
+        scrim is a gradient, gradient inside the measured rect is variance, and
+        variance is what the score arm measures. No threshold separates those
+        numbers in the right direction, so this asks a different question.
+
+        Lives in the base rather than in either recorder: the overlays are
+        `_DemoBase`'s own init scripts, and both media record the same page.
+
+        Never raises. A page that is already gone is the ordinary state of a
+        failing take, and losing the take over a diagnostic would be worse than
+        the diagnostic being absent.
+        """
+        try:
+            up = self.page.evaluate(_OVERLAY_PROBE_JS, list(OVERLAY_IDS))
+        except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
+            return
+        if isinstance(up, list):
+            self._overlay_note = overlay_warning([str(i) for i in up])
+
     def _measure_content(self) -> None:
         """Fill in `self._content` off the mp4 this take just encoded.
 
@@ -1674,20 +1754,31 @@ take with fewer beats than the last one would otherwise leave the
                 f"frame ({type(exc).__name__}: {exc}), so nothing about the "
                 f"picture was measured"
             )
-            return
-        # The beat log goes in, and it is what makes the held-picture arm mean
-        # anything: without it a demo narrating over a rendered screen and a
-        # demo nobody can see are the same number. See CONTENT_ACTING_VERBS.
-        self._content = content_report(self._media_path(), rect, self._beats)
-        # What the take opened on, measured off the **encoded** mp4 — the file
-        # a reviewer watches, and the one the opening hold has already been
-        # applied to. That ordering is the whole check: a hold that silently
-        # did nothing leaves a non-zero gap right here (issue #119).
-        gap, note = opening_gap(self._media_path(), rect)
-        self._content["opening"] = opening_report(gap, note, self._opening_held)
-        warning = opening_warning(self._content["opening"])
-        if warning:
-            self._content["warnings"].append(warning)
+        else:
+            # The beat log goes in, and it is what makes the held-picture arm
+            # mean anything: without it a demo narrating over a rendered screen
+            # and a demo nobody can see are the same number. See
+            # CONTENT_ACTING_VERBS.
+            self._content = content_report(self._media_path(), rect, self._beats)
+            # What the take opened on, measured off the **encoded** mp4 — the
+            # file a reviewer watches, and the one the opening hold has already
+            # been applied to. That ordering is the whole check: a hold that
+            # silently did nothing leaves a non-zero gap right here (#119).
+            gap, note = opening_gap(self._media_path(), rect)
+            self._content["opening"] = opening_report(gap, note, self._opening_held)
+            warning = opening_warning(self._content["opening"])
+            if warning:
+                self._content["warnings"].append(warning)
+        # On **both** paths above, and last. An overlay this recorder left up is
+        # a fact about the picture whether or not the rect could be worked out,
+        # and it is a `content` warning rather than an issue on purpose: it
+        # answers the question `content` exists to answer, `stitch()` already
+        # carries a segment's content warnings into the merged demo tagged with
+        # the segment they came from, and `print_content_summary` suppresses
+        # "shows a picture" when the list is non-empty — which is exactly the
+        # line issue #163 measured being printed over an occluded take.
+        if self._overlay_note:
+            self._content["warnings"].append(self._overlay_note)
 
     def _timeline_doc(self, failure: dict | None = None) -> dict:
         """This take's beat log as a timeline document (see TIMELINE_SCHEMA).
@@ -1885,17 +1976,36 @@ take with fewer beats than the last one would otherwise leave the
         return min(6.0, max(1.4, 0.6 + words * 0.34))
 
     def interlude(self, text: str, hold: float = 2.8, style: str = "card") -> None:
-        """Bridge a jump in the demo; "" fades it out. With speech enabled the
-        line is spoken too.
+        """Bridge a jump in the demo; "" takes it down, whichever style is up.
+
+        With speech enabled the line is spoken too, and `hold` is how long the
+        card stays before the storyboard moves on (a clear always takes 0.6 s,
+        long enough for the fade).
 
         style="card" (default) is a full-screen title card — right for real
         time-skips (minutes of background work) between segments. style="light"
         is a centered label over a soft scrim with the scene still visible —
-        lighter, for short transitions where a full takeover feels heavy."""
+        lighter, for short transitions where a full takeover feels heavy.
+
+        **Raising dispatches on `style`; clearing does not** (issue #162).
+        `style` describes how a label *appears*, and making it load-bearing on
+        the way out gave `interlude("")` — the call this docstring and SKILL.md
+        both document — a silent no-op against a `light` scrim, because the
+        default `style="card"` sent the clear at the other element. Measured
+        cost of that: a scrim and a stale label over the app for the last 17 s
+        of a 48 s demo, with `warnings: []`, `issues: []` and
+        "demo.mp4 shows a picture" on stderr. So a clear takes down whatever is
+        up: both overlays, unconditionally, and it is cheap because taking down
+        an overlay that was never raised does nothing visible either way."""
         clip = self._prepare_line(text)
-        fn = "__demoBridge" if style == "light" else "__demoInterlude"
         with self._beat("interlude", selector=style, caption=text):
-            self.page.evaluate(f"t => window.{fn}(t)", text)
+            if text:
+                fn = "__demoBridge" if style == "light" else "__demoInterlude"
+                self.page.evaluate(f"t => window.{fn}(t)", text)
+            else:
+                self.page.evaluate(
+                    "() => { window.__demoInterlude(''); window.__demoBridge(''); }"
+                )
             self._start_line(clip)
             self.pause(hold if text else 0.6)
 

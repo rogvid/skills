@@ -249,7 +249,7 @@ exception, or a non-zero exit. Both are
 | `wait_for(selector)` | Wait for something the app does on its own |
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition) |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
-| `interlude(text, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. `""` fades it out. |
+| `interlude(text, hold=2.8, style=…)` | Bridge a jump; `hold` is how long the card stays before the storyboard moves on. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. **`interlude("")` fades out whatever is up, whichever style raised it** — the clear takes no `style` and ignores the one it is given. Leave one up and the take says so on stderr and in `content.warnings`; nothing else will notice (see [reference/limits.md](reference/limits.md)). |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
 | `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
 
@@ -541,6 +541,13 @@ return.
   timeline over a recording nobody can watch. Check `content` in the same file
   — that is the field that describes the frames
   ([reference/timeline.md](reference/timeline.md)).
+- **Reading `content.score` as "the app was visible".** It is luma variance
+  over the app rect, so a translucent overlay *adds* to it: a scrim left over
+  the app measured **32.94** against a clean take's **26.74**, and both printed
+  `demo.mp4 shows a picture`. `warnings` is the field that answers the
+  question. An interlude *this recorder* raised and you did not clear is named
+  there by element id; an app's own modal is named by nothing
+  ([reference/limits.md](reference/limits.md)).
 - **Reading `content.static_for` as a score.** It is not one. A healthy demo
   that narrates a rendered screen holds it for 20s or more, which is what a
   covering card also measures. Read `warnings`; the number alone means nothing

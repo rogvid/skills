@@ -499,6 +499,58 @@ def opening_warning(opening: dict | None) -> str | None:
     )
 
 
+# -- the recorder's own overlay, still up (issue #163) ------------------------
+#
+# Everything above measures the *picture*, and on a full-viewport overlay with
+# internal variance the picture measurement runs backwards. Three takes of one
+# storyboard against one app, from a clean install:
+#
+#   scrim over the app for the last ~17 s of 48 s        score 32.94
+#   "cleared" per the docs, still covered (issue #162)   score 32.95
+#   clean, nothing covering the app                      score 26.74
+#
+# The two broken takes scored 23% *higher*, and stderr printed "demo.mp4 shows
+# a picture" for all three. The scrim is a soft gradient; a gradient across the
+# measured rect adds luma variance, and luma variance is what the score arm is.
+# No floor separates 26.74 from 32.94 in the right direction, so this is not a
+# threshold to retune — it needs a different question.
+#
+# The question this asks is deliberately the narrow one: **was the recorder's
+# own overlay still up when the take ended?** The recorder created those
+# elements and knows their ids, so that is exact rather than heuristic, and it
+# is the case an author is most likely to hit because the recorder's own API
+# put the occluder there. It is *not* occlusion detection — an app's own modal
+# is still invisible to this, and to everything else here (see
+# reference/limits.md).
+#
+# The probe itself lives in `core`, because it is the only part that needs a
+# page. What is here is the sentence it produces, which is the part that ends
+# up in `timeline.json` and on stderr — and the part that can be graded without
+# a browser.
+
+
+def overlay_warning(ids: list[str]) -> str | None:
+    """The warning for overlays still showing at the end of a take, or None.
+
+    `ids` are the element ids the page reported as visible. An empty list is
+    the healthy answer and must stay silent: a warning that fires on every take
+    is a warning nobody reads, which is the whole reason `opening_warning` and
+    the held-picture arm are as narrow as they are.
+    """
+    if not ids:
+        return None
+    names = ", ".join(f"#{i}" for i in ids)
+    return (
+        f"the recorder's own overlay ({names}) was still on screen when this "
+        f"take ended, so from the moment it went up the frames are that "
+        f"overlay and not the app. Read off the page by element id at the end "
+        f"of the take, not from the frames: the score above cannot see this — "
+        f"a scrim has internal variance and reads as picture, so an occluded "
+        f"take can score higher than a clean one. `interlude(\"\")` takes down "
+        f"whichever overlay is up."
+    )
+
+
 def _beats_within(beats: list[dict], start: float, end: float) -> list[dict]:
     """The beats that **began** inside [start, end], classified.
 

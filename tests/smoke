@@ -328,6 +328,65 @@ CONTENT_COVERED_FRACTION = 0.75
 # 8 dB is a sixfold difference in mean squared error and sits under both.
 CONTENT_PSNR_GAP_DB = 8.0
 
+# -- the recorder's own overlay (issues #162 and #163) ------------------------
+#
+# The pair above records the *card* style and grades the held-picture arm. This
+# pair records the **light** style and grades two things that arm cannot see.
+#
+# `interlude("")` used to dispatch its clear on `style`, which defaults to
+# "card" — so the documented call took down the card overlay while a `light`
+# scrim stayed up (#162). Found from a clean standalone install: a scrim and a
+# stale label over the app for the last ~17 s of a 48 s demo, with
+# `warnings: []`, `issues: []` and "demo.mp4 shows a picture" on stderr.
+#
+# And the check that exists to catch that scored it backwards (#163). Three
+# takes of that storyboard: 32.94 and 32.95 for the two covered ones against
+# **26.74** for the clean one — the covered takes scored 23% *higher*, because
+# the scrim is a gradient and gradient inside the measured rect is exactly what
+# the score arm measures. This pair reproduces it against the fixture app,
+# harder: **28.07** with the scrim up against **17.02** without, 65% the wrong
+# way. So nothing here is asserted against `content.score`: that number is the
+# thing that was broken, and an assertion witnessed only by it would be grading
+# the defect with the defect. The two takes' scores are printed, not gated.
+#
+#   overlay-cleared   raise a `light` interlude, take it down with the
+#                     documented `interlude("")`. The scrim must be gone from
+#                     the recording, and the recorder must say nothing.
+#   overlay-left-up   the same storyboard without that one line. The scrim must
+#                     be visible in the recording, and the recorder must report
+#                     its own overlay by id, in timeline.json and on stderr.
+#
+# Each direction is the other's control. "The scrim is gone" is satisfied by a
+# recorder that never draws one; "the recorder warns" by one that warns on
+# everything; and the frame comparison by a measurement pointed somewhere the
+# scrim never covers. One storyboard, one line apart, both graded.
+OVERLAY_TAKES = ("overlay-cleared", "overlay-left-up")
+OVERLAY_LABEL = "Ten minutes later…"
+
+# How long the scrim is held, and how long the quiet stretches either side of
+# it are. Both are sized against the beat/video clock skew this file already
+# measures (MAX_CAPTURE_LOSS_S = 0.75): each sampled frame is taken from the
+# middle of a beat at least 3 s long, so a three-quarter-second slide in either
+# direction still lands inside the beat, and past the overlay's own 0.4-0.45 s
+# fade. A shorter hold would make these readings a measurement of luck.
+OVERLAY_HOLD_S = 3.2
+OVERLAY_QUIET_S = 3.0
+
+# How much of the frame the scrim has to move before "the scrim is gone" is a
+# claim worth making, in mean absolute luma over the app rect. This is the
+# **control**: it is asserted on the take that leaves the scrim up, and without
+# it a harness sampling the wrong rect would report "no scrim" for both takes
+# and call that a pass. Measured on this box: **63.90** for the left-up take
+# against **0.13** for the cleared one, so the bar sits an order of magnitude
+# under the first and well over an order above the second.
+OVERLAY_SCRIM_MIN_DIFF = 6.0
+
+# ...and how much of that the cleared take is allowed to keep. A ratio rather
+# than an absolute, for the reason CONTENT_PSNR_GAP_DB is one: the two takes
+# are recorded in the same run on the same encoder against the same app, so
+# comparing them claims nothing about either number on its own.
+OVERLAY_CLEARED_MAX_RATIO = 0.2
+
 # Duration windows, in seconds. Wide on purpose: the lower bound catches a
 # take that died early, the upper one catches a hang, and everything in
 # between is legitimate variation between a laptop and a cold CI runner.
@@ -2708,6 +2767,53 @@ def record_content_toured(out_dir: Path) -> tuple[list[str], dict]:
     return b.problems, {"app": app, "size": size}
 
 
+def record_overlay(
+    out_dir: Path, base_url: str, cleared: bool
+) -> tuple[list[str], dict]:
+    """A `light` interlude, taken down with the documented call — or left up.
+
+    The A/B of issues #162 and #163, and the only difference between the two
+    takes is the `interlude("")` on the line below.
+
+    **Web rather than terminal, and `light` rather than `card`.** The pair
+    above already records a card over a terminal; what neither of them reaches
+    is the style whose clear was broken, over an app with enough painted colour
+    for a translucent scrim to be measurable at all. A card is opaque, so "the
+    card is gone" and "the card is a different picture" are the same reading; a
+    scrim is not, which is the case the picture check scores backwards.
+
+    Quiet stretches either side of the scrim rather than beats that act on the
+    app: the frames compared below are of *the same screen*, once with the
+    scrim over it and once without, so nothing but the scrim can explain a
+    difference between them.
+    """
+    from demo_recording import Recorder
+
+    label = OVERLAY_TAKES[0] if cleared else OVERLAY_TAKES[1]
+    b = Beats(label)
+
+    with Recorder(
+        out_dir, base_url=base_url, speech=False, strict=True, deterministic=True
+    ) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        # Without it the page goes idle behind the scrim, the screencast stops
+        # emitting frames, and every timestamp below drifts (issue #18).
+        start_ticker(b, rec.page)
+        rec.pause(OVERLAY_QUIET_S)
+        rec.interlude(OVERLAY_LABEL, hold=OVERLAY_HOLD_S, style="light")
+        if cleared:
+            # The call SKILL.md documents, with the default style. Before the
+            # fix this cleared the *card* overlay and left the scrim standing.
+            rec.interlude("")
+        rec.pause(OVERLAY_QUIET_S)
+
+        g = rec._geom
+        app: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
+
+    return b.problems, {"app": app}
+
+
 class EntropyTake(NamedTuple):
     """One recording of the entropy storyboard, and what it rendered."""
 
@@ -3937,6 +4043,31 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
 
     # 6. The anti-correlated metric (issue #17), as a standing regression test.
     failures += _check_scored_region(shown, shown_c)
+
+    # 7. The card is this recorder's own element, and it is still up when the
+    #    take ends — so the recorder can report it by id rather than inferring
+    #    it from luma (#163). `check_overlay_pair` grades the same reading on
+    #    `#__demo_bridge`; this is the other overlay, on the other medium, and
+    #    it is free because this take already exists. The *silent* direction is
+    #    assertion 1 above: the shown take must carry no warning at all.
+    if "#__demo_interlude" not in still:
+        failures.append(
+            f"{CONTENT_TAKES[1]}: this take ends with the recorder's own "
+            f"interlude card on screen and `content.warnings` does not name it. "
+            f"The held-picture arm reports a stretch and cannot say what caused "
+            f"it; the element id is the one thing here that is exact (#163). "
+            f"warnings: {covered_c.get('warnings')!r}"
+        )
+    if "__demo_interlude" not in err:
+        failures.append(
+            f"{CONTENT_TAKES[1]}: nothing on stderr named the overlay left up. "
+            f"Captured stderr: {err[-400:]!r}"
+        )
+    if "__demo_" in shown["stderr"]:
+        failures.append(
+            f"{CONTENT_TAKES[0]}: stderr reported an overlay still up on the "
+            f"take that took its card down: {shown['stderr'][-400:]!r}"
+        )
     return failures
 
 
@@ -4012,6 +4143,195 @@ def check_content_toured(out_dir: Path, stderr: str) -> list[str]:
                 f"{[b.get('verb') for b in spanned]} — and the recorder said "
                 f"nothing, which is correct"
             )
+    return failures
+
+
+def _overlay_frame(mp4: Path, at: float, rect: Rect) -> bytes | None:
+    """One reduced frame of `rect` at `at` seconds, or None."""
+    try:
+        frames = gray_frames(mp4, rect, sample_fps=2, start=at, duration=0.6)
+    except RuntimeError:
+        return None
+    return frames[0] if frames else None
+
+
+def _overlay_scrim_delta(
+    out_dir: Path, label: str, rect: Rect
+) -> tuple[list[str], float | None]:
+    """How much the app rect moved between the two quiet stretches of a take.
+
+    The take pauses before the scrim goes up and again after it would have come
+    down, on a screen nothing else touches. So the difference between those two
+    moments **is** the scrim, and nothing else: no command ran, no caption was
+    set, the clock is frozen and the only other moving thing in the frame is
+    the 8x8 ticker in a corner the app rect includes and the gradient barely
+    reaches.
+
+    Sampled from `demo.mp4`, not from a still: a `shot()` is a screenshot of
+    the page and would be true of a DOM nobody recorded. Issue #162's
+    acceptance is about the frame.
+    """
+    pauses = beat_midpoints(out_dir, "pause")
+    if len(pauses) != 2:
+        return (
+            [
+                f"{label}: the take recorded {len(pauses)} pause beats, expected "
+                f"2 — the two quiet stretches this reading is taken from"
+            ],
+            None,
+        )
+    mp4 = out_dir / "demo.mp4"
+    before = _overlay_frame(mp4, pauses[0][1], rect)
+    after = _overlay_frame(mp4, pauses[1][1], rect)
+    if before is None or after is None:
+        return ([f"{label}: could not sample {mp4.name} at the two pause beats"], None)
+    # A control on the control: two frames of a black recording differ by 0 and
+    # would read as "the scrim is gone" for the cleared take. Both frames have
+    # to show something first.
+    for when, frame in (("before", before), ("after", after)):
+        score = contrast(frame)
+        if score < MIN_CONTENT_STDDEV["web"]:
+            return (
+                [
+                    f"{label}: the frame sampled {when} the scrim scores "
+                    f"{score:.1f} luma stddev over {rect}, under the "
+                    f"{MIN_CONTENT_STDDEV['web']} floor — there is no picture "
+                    f"there to have been covered, so comparing the two says "
+                    f"nothing"
+                ],
+                None,
+            )
+    return [], frame_difference(before, after)
+
+
+def check_overlay_pair(takes: dict[str, dict]) -> list[str]:
+    """The two `light`-interlude takes, against each other (#162 and #163).
+
+    Two claims, each with the other take as its control:
+
+    1. **The documented clear works.** `interlude("")` takes down a `light`
+       scrim, so the cleared take's two quiet stretches are the same picture
+       while the left-up take's are not. Neither reading means anything alone —
+       "no difference" is also what a harness measuring the wrong rect reports,
+       and "a difference" is also what a recorder that never cleared anything
+       produces — so the bar is the ratio between them, with an absolute floor
+       under the left-up take so the pair cannot both go quiet.
+    2. **The recorder notices its own overlay.** The left-up take must name
+       `#__demo_bridge` in `content.warnings` and on stderr, and must *not*
+       print that the recording shows a picture; the cleared take must say
+       nothing about any overlay. `content.score` is not consulted: it is the
+       measurement #163 is about, and it runs the wrong way here.
+    """
+    failures: list[str] = []
+    cleared, left_up = takes[OVERLAY_TAKES[0]], takes[OVERLAY_TAKES[1]]
+
+    # 1. The frames.
+    deltas: dict[str, float | None] = {}
+    for name, take in takes.items():
+        found, deltas[name] = _overlay_scrim_delta(
+            take["out_dir"], name, keep_top(take["info"]["app"])
+        )
+        failures += found
+    up_delta, clear_delta = deltas[OVERLAY_TAKES[1]], deltas[OVERLAY_TAKES[0]]
+    if up_delta is None or clear_delta is None:
+        failures.append("overlay: one of the two takes yielded no scrim reading")
+    elif up_delta < OVERLAY_SCRIM_MIN_DIFF:
+        failures.append(
+            f"{OVERLAY_TAKES[1]}: leaving the scrim up moved the app rect by "
+            f"only {up_delta:.2f} mean luma between the two quiet stretches, "
+            f"under the {OVERLAY_SCRIM_MIN_DIFF} floor. This harness cannot see "
+            f"the scrim at all, so the cleared take reading small proves "
+            f"nothing about the clear"
+        )
+    elif clear_delta > up_delta * OVERLAY_CLEARED_MAX_RATIO:
+        failures.append(
+            f'{OVERLAY_TAKES[0]}: after the documented `interlude("")` the app '
+            f"rect is still {clear_delta:.2f} mean luma from where it was "
+            f"before the scrim went up — {clear_delta / up_delta:.0%} of the "
+            f"{up_delta:.2f} the take that never cleared it keeps, over the "
+            f"{OVERLAY_CLEARED_MAX_RATIO:.0%} bar. The scrim is still in the "
+            f"recording, which is issue #162: the clear dispatched on `style`, "
+            f'so the default `style="card"` took down the other overlay'
+        )
+    else:
+        print(
+            f"smoke: {OVERLAY_TAKES[0]} scrim cleared — the app rect moved "
+            f"{clear_delta:.2f} mean luma across the clear against "
+            f"{up_delta:.2f} for {OVERLAY_TAKES[1]}"
+        )
+
+    # 2. What the recorder said about it.
+    reports = {}
+    for name, take in takes.items():
+        content = content_of(take["out_dir"])
+        if content is None or not content.get("measured"):
+            failures.append(
+                f"{name}: no measured `content` in timeline.json "
+                f"({None if content is None else content.get('note')})"
+            )
+        else:
+            reports[name] = content
+    if len(reports) != 2:
+        return failures
+    up_warnings = " ".join(
+        str(w) for w in reports[OVERLAY_TAKES[1]].get("warnings") or []
+    )
+    clear_warnings = " ".join(
+        str(w) for w in reports[OVERLAY_TAKES[0]].get("warnings") or []
+    )
+    if "#__demo_bridge" not in up_warnings:
+        failures.append(
+            f"{OVERLAY_TAKES[1]}: this take ended with the recorder's own scrim "
+            f"on screen and `content.warnings` does not name it. The recorder "
+            f"built that element and knows its id, so this is the one occlusion "
+            f"it can report exactly (#163). warnings: "
+            f"{reports[OVERLAY_TAKES[1]].get('warnings')!r}"
+        )
+    if "__demo_" in clear_warnings:
+        failures.append(
+            f"{OVERLAY_TAKES[0]}: the recorder reported an overlay still up on "
+            f"the take that took its scrim down: {clear_warnings!r}"
+        )
+    if "__demo_bridge" not in left_up["stderr"]:
+        failures.append(
+            f"{OVERLAY_TAKES[1]}: nothing on stderr said the scrim was still up. "
+            f"An author who never opens timeline.json gets no signal at all, "
+            f"which is half of #163's acceptance. Captured stderr: "
+            f"{left_up['stderr'][-400:]!r}"
+        )
+    # The line #163 measured being printed over three occluded takes, on the
+    # stream `print_content_summary` prints it to. Both directions, because
+    # "the covered take does not say it" is satisfied by a recorder that stopped
+    # saying it about anything — which would cost every healthy take its only
+    # unasked account of its own picture.
+    if "shows a picture" not in cleared["stdout"]:
+        failures.append(
+            f"{OVERLAY_TAKES[0]}: the take that cleared its scrim never said "
+            f"the recording shows a picture, so the covered take not saying it "
+            f"proves nothing. Captured stdout: {cleared['stdout'][-400:]!r}"
+        )
+    if "shows a picture" in left_up["stdout"]:
+        failures.append(
+            f"{OVERLAY_TAKES[1]}: the recorder still says the recording shows a "
+            f"picture, over a take whose last frames are its own scrim: "
+            f"{left_up['stdout'][-400:]!r}"
+        )
+    if "__demo_" in cleared["stderr"]:
+        failures.append(
+            f"{OVERLAY_TAKES[0]}: stderr warned about an overlay on the take "
+            f"that cleared it: {cleared['stderr'][-400:]!r}"
+        )
+
+    if not failures:
+        # Printed, never asserted: this is the anti-correlation of #163, and a
+        # bar in this direction would be the defect written down as a check.
+        print(
+            f"smoke: content.score reads "
+            f"{reports[OVERLAY_TAKES[1]].get('score')} for the covered take "
+            f"against {reports[OVERLAY_TAKES[0]].get('score')} for the clear "
+            f"one — the picture score does not separate these, which is why "
+            f"the overlay is reported by element id instead (#163)"
+        )
     return failures
 
 
@@ -6236,29 +6556,46 @@ def run_terminal_opening(out_root: Path) -> list[str]:
 
 
 def _record_content_take(out_root: Path, name: str, record) -> tuple[list[str], dict]:
-    """Record one content take, capturing its stderr.
+    """Record one content take, capturing what it printed.
 
-    stderr is captured rather than merely inspected afterwards, because half
-    the acceptance criterion is that the verdict arrives *unasked*: an author
-    who never opens timeline.json still has to be told, and — for the healthy
-    takes — must not be told something untrue. `print` resolves `sys.stderr` at
-    call time, so redirecting here catches the recorder's own output and
-    nothing else's.
+    The streams are captured rather than merely inspected afterwards, because
+    half the acceptance criterion is that the verdict arrives *unasked*: an
+    author who never opens timeline.json still has to be told, and — for the
+    healthy takes — must not be told something untrue. `print` resolves
+    `sys.stderr`/`sys.stdout` at call time, so redirecting here catches the
+    recorder's own output and nothing else's.
+
+    **Both streams, and the split is the recorder's, not this file's.**
+    `print_content_summary` puts a *warning* on stderr and the healthy
+    "demo.mp4 shows a picture" line on stdout. Issue #163's acceptance is that
+    an occluded take reports the overlay *rather than* printing that line, so
+    grading it needs the stream that line goes to; capturing only stderr made
+    "it no longer says it shows a picture" an assertion that could never fail.
+
+    Shared with the overlay pair (#162/#163), which grades the same "it has to
+    arrive unasked" half against the other overlay style.
     """
     out_dir = fresh_take_dir(out_root, name)
-    captured = io.StringIO()
+    err, out = io.StringIO(), io.StringIO()
     try:
-        with contextlib.redirect_stderr(captured):
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
             found, info = record(out_dir)
     except Exception as exc:  # noqa: BLE001 - a raising take is a failure
-        sys.stderr.write(captured.getvalue())
-        return [f"{name}: TerminalRecorder raised {type(exc).__name__}: {exc}"], {}
-    # Put it back on the real stderr: a run that fails later should not also
+        sys.stdout.write(out.getvalue())
+        sys.stderr.write(err.getvalue())
+        return [f"{name}: the recorder raised {type(exc).__name__}: {exc}"], {}
+    # Put them back on the real streams: a run that fails later should not also
     # have swallowed the recorder's own account of itself.
-    sys.stderr.write(captured.getvalue())
+    sys.stdout.write(out.getvalue())
+    sys.stderr.write(err.getvalue())
     if not (out_dir / "demo.mp4").is_file():
         found = [*found, f"{name}: demo.mp4 was never written"]
-    return found, {"out_dir": out_dir, "info": info, "stderr": captured.getvalue()}
+    return found, {
+        "out_dir": out_dir,
+        "info": info,
+        "stderr": err.getvalue(),
+        "stdout": out.getvalue(),
+    }
 
 
 def run_content(out_root: Path) -> list[str]:
@@ -6305,6 +6642,28 @@ def run_content(out_root: Path) -> list[str]:
         + check_content_pair(takes)
         + check_content_toured(toured["out_dir"], toured["stderr"])
     )
+
+
+def run_overlay(out_root: Path) -> list[str]:
+    """Two takes: a `light` scrim taken down with the documented call, and one
+    left up (issues #162 and #163)."""
+    problems: list[str] = []
+    takes: dict[str, dict] = {}
+    with fixture_server() as base_url:
+        for name, cleared in zip(OVERLAY_TAKES, (True, False), strict=True):
+            found, take = _record_content_take(
+                out_root,
+                name,
+                lambda out_dir, cleared=cleared: record_overlay(
+                    out_dir, base_url, cleared=cleared
+                ),
+            )
+            problems += found
+            if take:
+                takes[name] = take
+    if problems:
+        return problems
+    return check_overlay_pair(takes)
 
 
 def run_coverage(out_root: Path) -> list[str]:
@@ -8664,6 +9023,12 @@ def main() -> int:
         "recording showing nothing (issue #97)",
     )
     parser.add_argument(
+        "--overlay-only",
+        action="store_true",
+        help="record only the pair that grades clearing a light interlude and "
+        "reporting one left up (issues #162 and #163)",
+    )
+    parser.add_argument(
         "--coverage-only",
         action="store_true",
         help="record only the take that grades acceptance-criterion coverage "
@@ -8702,6 +9067,7 @@ def main() -> int:
             ("--failure-only", args.failure_only),
             ("--polish-only", args.polish_only),
             ("--content-only", args.content_only),
+            ("--overlay-only", args.overlay_only),
             ("--coverage-only", args.coverage_only),
         )
         if on
@@ -8780,6 +9146,11 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # take, and the card it leaves up is the terminal recorder's card.
     if only in (None, "--terminal-only", "--content-only"):
         failures += run_content(out_root)
+    # Clearing a `light` interlude, and noticing one left up (#162/#163). A web
+    # take, and reachable from --content-only as well as its own flag: it
+    # grades the other half of the same question the pair above does.
+    if only in (None, "--web-only", "--content-only", "--overlay-only"):
+        failures += run_overlay(out_root)
     # Acceptance-criterion coverage (issue #12). Reachable from --web-only as
     # well as its own flag: it is a web take, and whoever is changing the
     # recorder's beat record is running --web-only.
