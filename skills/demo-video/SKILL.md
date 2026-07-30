@@ -180,7 +180,7 @@ from pathlib import Path
 
 # Filled in by the writing agent with the skill's real location;
 # DEMO_VIDEO_SKILL_DIR takes precedence.
-_DEFAULT_SKILL_DIR = <the demo-video skill folder, as known when writing this file>
+_DEFAULT_SKILL_DIR = "<fill in: the demo-video skill folder>"
 SKILL_DIR = Path(os.environ.get("DEMO_VIDEO_SKILL_DIR") or _DEFAULT_SKILL_DIR)
 if not (SKILL_DIR / "helpers" / "demo_recording" / "__init__.py").exists():
     sys.exit(f"demo-video skill not found at {SKILL_DIR} — set DEMO_VIDEO_SKILL_DIR")
@@ -201,37 +201,42 @@ call — see **Terminal demos** below.
 Every `Recorder` parameter resolves **explicit parameter → `DEMO_VIDEO_*`
 env var → built-in default**, so projects can put defaults in their
 `.env` (load with `set -a; source .env; set +a`) and storyboards stay
-clean:
+clean. **The Sets column names the parameter behind each variable** — for
+three it is not the variable lowercased, so do not infer it:
 
-| Variable | Sets | Default |
+| Variable | Sets (parameter — what it does) | Default |
 |---|---|---|
-| `DEMO_VIDEO_OUT_DIR` | where demo files land (`out_dir`) | — (required one way or the other) |
-| `DEMO_VIDEO_BASE_URL` | app under demo | `http://localhost:8000` |
-| `DEMO_VIDEO_ACCENT_RGB` | cursor/spotlight color, `"235,110,20"` | orange |
-| `DEMO_VIDEO_TERMINAL_TITLE` | web `terminal()` card title | `terminal` |
-| `DEMO_VIDEO_TERMINAL_PROMPT` | prompt string — web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
-| `DEMO_VIDEO_TERMINAL_SHELL` | shell `TerminalRecorder` launches | `/bin/bash` |
-| `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `TerminalRecorder` font px | `15` |
-| `DEMO_VIDEO_VIEWPORT` | recording size, `"1280x720"` | 1280×720 |
-| `DEMO_VIDEO_DETERMINISTIC` | freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
-| `DEMO_VIDEO_CLOCK` | the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
-| `DEMO_VIDEO_TIMEZONE` | browser timezone (`timezone_id`), always applied | `UTC` |
-| `DEMO_VIDEO_LOCALE` | browser locale (`locale`), always applied | `en-US` |
-| `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
-| `DEMO_VIDEO_STRICT` | fail the take on console errors / non-zero exits (`1`/`0`) | off |
-| `DEMO_VIDEO_EVIDENCE` | write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
-| `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
-| `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
-| `DEMO_VIDEO_SKILL_DIR` | where storyboards find this skill | the constant baked into each storyboard |
-| `ELEVENLABS_API_KEY` | enables speech narration | off |
+| `DEMO_VIDEO_OUT_DIR` | `out_dir` — where demo files land | — (required one way or the other) |
+| `DEMO_VIDEO_BASE_URL` | `base_url` — app under demo | `http://localhost:8000` |
+| `DEMO_VIDEO_ACCENT_RGB` | `accent_rgb` — cursor/spotlight color, `"235,110,20"` | orange |
+| `DEMO_VIDEO_TERMINAL_TITLE` | `terminal_title` — web `terminal()` card title | `terminal` |
+| `DEMO_VIDEO_TERMINAL_PROMPT` | `terminal_prompt` — prompt string: web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
+| `DEMO_VIDEO_TERMINAL_SHELL` | `shell` — shell `TerminalRecorder` launches | `/bin/bash` |
+| `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `font_size` — `TerminalRecorder` font px | `15` |
+| `DEMO_VIDEO_VIEWPORT` | `viewport` — recording size, `"1280x720"` | 1280×720 |
+| `DEMO_VIDEO_DETERMINISTIC` | `deterministic` — freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
+| `DEMO_VIDEO_CLOCK` | `clock` — the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
+| `DEMO_VIDEO_TIMEZONE` | `timezone_id` — browser timezone, always applied | `UTC` |
+| `DEMO_VIDEO_LOCALE` | `locale` — browser locale, always applied | `en-US` |
+| `DEMO_VIDEO_SPEECH` | `speech` — force narration on/off (`1`/`0`). **`speech=False` records silently even with a key set**; with no key it is off already, and forcing it *on* without one refuses the take | auto by API key |
+| `DEMO_VIDEO_STRICT` | `strict` — fail the take on console errors / non-zero exits (`1`/`0`) | off |
+| `DEMO_VIDEO_EVIDENCE` | `evidence` — write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
+| `DEMO_VIDEO_VOICE_ID` | `voice_id` — ElevenLabs voice | Sarah (premade) |
+| `DEMO_VIDEO_SPEECH_MODEL` | `speech_model` — ElevenLabs model | `eleven_multilingual_v2` |
+| `DEMO_VIDEO_SKILL_DIR` | *no parameter* — where storyboards find this skill | the constant baked into each storyboard |
+| `ELEVENLABS_API_KEY` | *no parameter* — enables speech narration | off |
 
 `DEMO_VIDEO_BASE_URL` applies to the web `Recorder` only; the terminal
-`*` variables to `TerminalRecorder`. All the rest apply to both.
+`*` variables to `TerminalRecorder`. All the rest apply to both. The
+parameters with **no** env var are per-storyboard by nature: `segment`
+and `criteria` on both recorders, plus `TerminalRecorder`'s `interlude`,
+`interlude_hold` and `type_delay_ms`.
 
 ## Recorder API (storyboard verbs)
 
 `Recorder(out_dir, base_url=..., segment=None, strict=False, ...)` as a context
-manager; exiting the `with` converts the recording to mp4 and writes the beat
+manager — the `...` is the Configuration table above, which names every
+parameter. Exiting the `with` converts the recording to mp4 and writes the beat
 log. A storyboard that *raises* gets the same treatment plus a `failure/` dump.
 `strict=True` refuses a take that recorded a console error, an uncaught
 exception, or a non-zero exit. Both are
@@ -392,7 +397,9 @@ return.
    `timeline.md` too — it is the take's own account of what ran and when, so
    a beat that fired at the wrong moment or a caption that never changed
    shows up there without decoding a frame. **Read the problem summary the
-   recorder prints on stderr**, and the Issues section of `timeline.md`: a
+   recorder prints on stderr**, and the Issues section of `timeline.md` if it
+   has one — both appear only when there was something to report, so a take
+   with neither is the all-clear, not a malformed file. A
    demo of an app throwing on every render looks exactly like a demo of a
    working one, and this is the only place it shows
    ([reference/failures.md](reference/failures.md)). To check what a *specific*
