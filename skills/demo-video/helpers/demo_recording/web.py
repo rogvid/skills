@@ -542,7 +542,7 @@ class Recorder(_DemoBase):
             # In a finally because `.hold.png` is a frame of the *app*, not of
             # the recorder's chrome: if ffmpeg raises, leaving it on disk leaves
             # a full-size picture of whatever the app was showing sitting beside
-            # the demo. `_discard_artifacts` names it too, for the same reason.
+            # the demo.
             self._frame_png.unlink(missing_ok=True)
             if hold is not None:
                 hold.unlink(missing_ok=True)

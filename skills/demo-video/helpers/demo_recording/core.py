@@ -1251,9 +1251,11 @@ class _DemoBase:
         """What this medium can say about the screen right now.
 
         Overridden per medium (`Recorder` -> ARIA + outerHTML, `TerminalRecorder`
-        -> the rendered screen). A payload of `{"omitted": reason}` is the
-        medium refusing to hand over page text it cannot vouch for; the file is
-        still written, and says so.
+        -> the rendered screen). Every medium answers with the text it read;
+        there is no refusal path here any more — the one that existed, an
+        `{"omitted": reason}` payload for text the mask could not vouch for,
+        went with the mask in #144. A capture that *raises* still gets a file,
+        carrying `error`; see `_capture_evidence`.
         """
         return {}
 
@@ -1283,8 +1285,18 @@ class _DemoBase:
 
 
     def _evidence_doc(self, beat: dict, payload: dict) -> dict:
-        """One evidence document: masked, then capped, then checked.
+        """One evidence document: the envelope, the payload, then the caps.
 
+        The envelope names the take — schema, recorder, segment, media — and
+        copies the beat this evidence belongs to, so a file read on its own
+        says which moment of which recording it is of. The medium's payload
+        (ARIA and the spotlight's markup, or the rendered screen) is merged in
+        as it came back: nothing is removed from it here, because there is no
+        masking anywhere in this recorder.
+
+        Only the caps act. Each field named in `EVIDENCE_LIMITS` is cut to its
+        budget and listed in `truncated`, so a field that was shortened is
+        never read as a page that was short.
         """
         doc: dict = {
             "schema": EVIDENCE_SCHEMA,
@@ -1536,19 +1548,19 @@ take with fewer beats than the last one would otherwise leave the
     def _write_failure_marker(self, failure: dict) -> None:
         """Say, in the demo folder itself, that this take failed (issue #46).
 
-        The one artifact that is written on **every** abnormal exit, including
-        the one where nothing else is: a take that could not verify its mask
-        writes no mp4 and no timeline, and what it does not touch is what a
-        *previous* run left in the same directory. A folder holding a watchable
-        `demo.mp4`, an empty `images/`, and a `timeline.json` from the run
-        before reads as a successful take with missing stills — and the video
-        is a recording of different code. In a review gate that produces a
-        confident approval of something that was never recorded.
+        Written on **every** abnormal exit, and the case it exists for is the
+        one where the artifacts left behind disagree with each other: ffmpeg
+        failing to convert writes this take's `timeline.json` beside whatever
+        `demo.mp4` a *previous* run left in the same directory. That reads as a
+        successful take, and the video is a recording of different code — in a
+        review gate, a confident approval of something that was never recorded.
+        `stale` below is exactly that condition, and the marker names it rather
+        than leaving a reader to notice.
 
         Never raises, and that is deliberate: the absence of this file means
         "the last take succeeded", so failing to write it is itself the lie it
-        exists to prevent. Text that cannot be masked is dropped from it rather
-        than allowed to stop it.
+        exists to prevent. The exception's message is trimmed to fit rather
+        than allowed to stop the write.
         """
         marker = self.out_dir / FAILURE_MARKER
         mp4 = self._media_path()
@@ -1907,7 +1919,6 @@ take with fewer beats than the last one would otherwise leave the
         reviewer — a committed picture of the moment, at a known timestamp.
         """
         claims = self._checked_ac(ac, "shot()")
-        # Scrubbed here rather than only in the beat record, so the file on
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()
         with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):

@@ -33,7 +33,7 @@ and a real terminal session (voice on):
   storyboard did rather than at a stopwatch, so nothing is missed and a held
   frame is photographed once. A stitched demo gets them too, off the merged
   timeline. Deliberately uncaptioned, and aimed to within a beat or so rather
-  than exactly — SKILL.md says how far and why.
+  than exactly — `reference/review.md` says how far and why.
 - **`record.py`** — the storyboard that produced the media, and the thing
   that actually gets committed: re-runnable after the UI changes, so the
   video stays out of git history and is regenerated rather than archived.
@@ -45,7 +45,8 @@ and a real terminal session (voice on):
   `srcdoc` document, an attribute nothing renders, an input's `value` — because
   a string that reached none of the frames should not have evidence as the one
   place it exists. It clears what a previous take left behind. It is **not
-  committed**; `SKILL.md` explains those decisions and where they stop.
+  committed**; `reference/review.md` explains those decisions and where they
+  stop.
 - **A statement about the frames, not only the storyboard** — `content` in
   `timeline.json`, plus a line on stderr, saying whether the recording shows
   anything at all: how much picture there is where the app sits, and the
@@ -59,8 +60,8 @@ and a real terminal session (voice on):
   additionally freezes the page's clock and flattens animations, so the same
   storyboard gives you the same stills rather than a new set of timestamps.
   Opt-in because a stopped clock changes what a debounce, a token check or an
-  elapsed-time bar does, usually without saying so; `SKILL.md` shows the five
-  shapes that break and what the recorder cannot pin at all.
+  elapsed-time bar does, usually without saying so; `reference/determinism.md`
+  shows the five shapes that break and what the recorder cannot pin at all.
 - **Spoken narration (optional)** — with `ELEVENLABS_API_KEY` set, every
   caption line is synthesized via ElevenLabs and mixed onto the mp4 at the
   moment it appears. Clips are cached; pacing self-adjusts so speech is
@@ -117,6 +118,7 @@ win over env vars.
 | `DEMO_VIDEO_TIMEZONE` | browser timezone (always applied) | `UTC` |
 | `DEMO_VIDEO_LOCALE` | browser locale (always applied) | `en-US` |
 | `DEMO_VIDEO_SPEECH` | force narration on/off (`1`/`0`) | auto by API key |
+| `DEMO_VIDEO_STRICT` | raise `StrictTakeFailed` if the take recorded a fatal issue (`1`/`0`) | **off** |
 | `DEMO_VIDEO_EVIDENCE` | write `evidence/beat-NN.json` per beat (`1`/`0`) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | ElevenLabs model | `eleven_multilingual_v2` |
@@ -139,24 +141,31 @@ demo-video/
 ├── README.md                      # this file — humans read this
 └── helpers/
     ├── demo_recording/            # package: the recorders, and what reads their output
-    │   ├── __init__.py            #   exports Recorder, TerminalRecorder, stitch
+    │   ├── __init__.py            #   exports Recorder, TerminalRecorder, stitch,
+    │   │                          #   beat_frames, content_report, StrictTakeFailed
     │   ├── core.py                #   _DemoBase: the browser, narration, ffmpeg
     │   ├── web.py                 #   Recorder (Playwright web apps)
     │   ├── terminal.py            #   TerminalRecorder (PTY + xterm.js)
-    │   ├── timeline.py            #   ── everything below this line is
-    │   ├── coverage.py            #      browser-free: no Playwright, no ffmpeg
-    │   ├── content.py             #      import, importable and unit-testable
-    │   ├── frames.py              #      on its own. tests/unit grades it in
-    │   ├── failure.py             #      0.07 s; tests/smoke owns the rest.
-    │   ├── secrets.py             #
-    │   └── stitching.py           #
+    │   │                          #   ── everything below this line is browser-free:
+    │   │                          #      no Playwright, no ffmpeg import, importable
+    │   │                          #      and unit-testable on its own. tests/unit
+    │   │                          #      grades it in 0.07 s; tests/smoke the rest.
+    │   ├── timeline.py            #   the beat log: schema and its two renderings
+    │   ├── coverage.py            #   acceptance criteria, and what claimed them
+    │   ├── content.py             #   whether the picture showed anything
+    │   ├── frames.py              #   review frames, off a demo already recorded
+    │   ├── failure.py             #   the dump a take that did not finish leaves
+    │   ├── narration.py           #   ElevenLabs synthesis and its content cache
+    │   ├── markdown.py            #   escaping a value into a markdown table
+    │   └── stitching.py           #   joining segments into one demo, losslessly
     └── assets/xterm/              # vendored xterm.js (terminal rendering)
 ```
 
 **SKILL.md is loaded whole into an agent's context whenever the skill triggers;
 `reference/` is read on demand.** That is why the split exists and why it is
-worth keeping: the entry point costs ~11k tokens instead of ~40k, and nothing
-was deleted to get there.
+worth keeping: the entry point is 33 kB (~12k tokens) against the 90 kB (~33k)
+of SKILL.md plus `reference/` together, and nothing was deleted to get there.
+`tests/unit --budget` prints the current figure.
 
 The package and every generated storyboard carry PEP 723 metadata, so the
 dependency declaration travels with the files. Each storyboard embeds

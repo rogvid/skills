@@ -115,15 +115,23 @@ The original exception still propagates, unchanged — it is the message that
 says what to fix, and the recorder does not replace it. What the recorder adds
 is a line on stderr naming the beat and pointing at `failure/`.
 
-**`demo-video-FAILED.md` is the one file written on every abnormal exit**,
-including the refusal path that keeps nothing else. That path is the reason it
-exists: a take that cannot verify its mask writes no mp4 and no timeline, and
-what it does *not* touch is what a previous run left in the same folder — so
-the folder ends up holding a watchable `demo.mp4`, an emptied `images/`, and a
-`timeline.json` from the run before. That reads as a successful take with
-missing stills, and the video is a recording of different code. The next take
-that writes its own artifacts deletes the marker, so its presence always
-describes the most recent run.
+**`demo-video-FAILED.md` is written whenever a take did not write its own
+complete set of artifacts**, and there are exactly two ways to get there. One is
+the storyboard raising, above — the mp4 beside the marker is this take's, cut
+short. The other is the reason the marker exists:
+**ffmpeg failing to convert the recording.** The storyboard finished, so the
+beat log is written and is this take's, but nothing was encoded — and what sits
+in the folder under `demo.mp4` is then whatever a *previous* run left there. A
+watchable video next to a current `timeline.json` reads as a take that
+succeeded, and the video is a recording of different code. Three things keep it
+from being believed: `duration` is `null` rather than that file's length, no
+review frames are extracted off it, and the marker says in the folder itself
+which of the two happened. The next take that writes its own artifacts deletes
+the marker, so its presence always describes the most recent run.
+
+A `strict=True` refusal is neither of those. It writes every artifact and all of
+them are current, so its marker is cleared exactly like a success's — the
+`StrictTakeFailed` it raises is the report, not a hole in the folder.
 
 **`failure/screen.txt` is a text dump of the page, and nothing in it is
 hidden.** It is the ARIA tree (or the rendered terminal buffer) exactly as the
