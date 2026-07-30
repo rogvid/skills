@@ -61,6 +61,7 @@ from demo_recording.content import (  # noqa: E402
     merge_content,
     opening_report,
     opening_warning,
+    overlay_warning,
 )
 from demo_recording.coverage import (  # noqa: E402
     _checked_criteria,
@@ -465,6 +466,46 @@ class OpeningWarning(unittest.TestCase):
 
     def test_a_healthy_take_whose_hold_landed_is_silent(self):
         self.assertIsNone(opening_warning(opening_report(0.0, None, 0.42)))
+
+
+class OverlayWarning(unittest.TestCase):
+    """issue #163 — the recorder noticing its own overlay is still up.
+
+    Deliberately *not* graded against `content.score`: the score is the thing
+    that is broken here (26.74 clean against 32.94 covered, the wrong way
+    round), so an assertion whose only witness was that number would be
+    grading the defect with the defect. What these grade is the sentence, and
+    whether it stays silent when nothing is up. That the probe finds the right
+    elements needs a page and is `tests/smoke`'s.
+    """
+
+    def test_a_take_with_nothing_up_says_nothing(self):
+        # The direction that costs the most if it breaks: a warning that fires
+        # on every take stops being read, and every healthy take in the suite
+        # ends with the interlude element present at opacity 0.
+        self.assertIsNone(overlay_warning([]))
+
+    def test_the_overlay_that_was_up_is_named(self):
+        # "An overlay was up" is not actionable; #__demo_bridge against
+        # #__demo_interlude is the difference between a `light` scrim and a
+        # full-screen card, and it is the whole of issue #162's symptom.
+        warning = overlay_warning(["__demo_bridge"])
+        self.assertIsNotNone(warning)
+        self.assertIn("#__demo_bridge", warning)
+        self.assertNotIn("#__demo_interlude", warning)
+
+    def test_both_overlays_up_are_both_named(self):
+        warning = overlay_warning(["__demo_interlude", "__demo_bridge"])
+        self.assertIn("#__demo_interlude", warning)
+        self.assertIn("#__demo_bridge", warning)
+
+    def test_the_warning_says_the_score_cannot_see_this(self):
+        # The reader most likely to see this line is the one reading it beside
+        # a healthy-looking `score`, so it has to say why the two disagree —
+        # otherwise it reads as the check contradicting itself.
+        warning = overlay_warning(["__demo_bridge"])
+        self.assertIn("score", warning)
+        self.assertIn('interlude("")', warning)
 
 
 class BeatsWithin(unittest.TestCase):
@@ -1524,6 +1565,39 @@ INJECTIONS = [
         [
             "OpeningWarning.test_the_warning_bar_is_graded_at_its_boundary",
             "OpeningWarning.test_a_healthy_take_whose_hold_landed_is_silent",
+        ],
+    ),
+    (
+        # The pre-#163 behaviour exactly: nothing is ever said about an
+        # overlay left up, and the take reports that it shows a picture.
+        "the overlay check goes silent whatever the page reported",
+        "content.py",
+        "    if not ids:\n        return None",
+        "    if True:\n        return None",
+        [
+            "OverlayWarning.test_the_overlay_that_was_up_is_named",
+            "OverlayWarning.test_both_overlays_up_are_both_named",
+            "OverlayWarning.test_the_warning_says_the_score_cannot_see_this",
+        ],
+    ),
+    (
+        # The opposite direction, and the more expensive one: every healthy
+        # take in this repo ends with a faded interlude element in the tree,
+        # so a check that warns unconditionally warns on all of them.
+        "the overlay check warns on a take with nothing up",
+        "content.py",
+        "    if not ids:\n        return None",
+        "    if not ids:\n        ids = ['__demo_interlude']",
+        ["OverlayWarning.test_a_take_with_nothing_up_says_nothing"],
+    ),
+    (
+        "the overlay warning stops naming which overlay was up",
+        "content.py",
+        '    names = ", ".join(f"#{i}" for i in ids)',
+        '    names = "an overlay"',
+        [
+            "OverlayWarning.test_the_overlay_that_was_up_is_named",
+            "OverlayWarning.test_both_overlays_up_are_both_named",
         ],
     ),
     (

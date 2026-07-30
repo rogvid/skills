@@ -153,6 +153,10 @@ explains what it measures and lists five limits of the held-picture arm. Three
 of those five can hide a real occlusion; two of the three are worth an author's
 attention before recording, and both are here with their numbers.
 
+The third limit below is the *score* arm's rather than the held-picture arm's,
+and it is the sharpest measured thing in this group: an overlay does not merely
+hide from the score, it can push the score **up**.
+
 ### An occluder that spans only narration is never reported
 
 A held stretch warns only when a verb that *acts on the app* began inside it —
@@ -201,6 +205,57 @@ documented rather than graded
 
 What to do: keep captions to one line if you want `static_for` to mean what it
 says.
+
+### A full-viewport overlay can raise the content score, not lower it
+
+The score arm is the median luma standard deviation over the app rect, so it
+answers "is there variance here" and nothing more. A translucent overlay with
+internal variance — the `style="light"` scrim is a radial gradient — **adds**
+variance across the whole measured region. Three takes of one storyboard
+against one app, from a clean standalone install:
+
+| take | state | `content.score` |
+|---|---|---:|
+| 1 | scrim over the app for the last ~17 s of 48 s | 32.94 |
+| 2 | "cleared" per the docs, still covered ([#162](https://github.com/rogvid/skills/issues/162)) | 32.95 |
+| 3 | clean, nothing covering the app | **26.74** |
+
+The two broken takes scored **23% higher** than the correct one, and stderr
+printed `demo.mp4 shows a picture` for all three. `tests/smoke`'s own overlay
+pair reproduces it harder against the fixture app: **28.07** with the scrim up
+against **17.02** without, 65% the wrong way round. There is no threshold that
+separates those numbers in the right direction, and restricting the rect cannot
+help — the overlay is exactly where the app is. This is the same
+anti-correlation issue #17 found at whole-frame level, one level in.
+
+What was added instead is narrow and exact rather than a better metric: at the
+end of every take, before teardown, the recorder asks the **page** whether
+`#__demo_interlude` or `#__demo_bridge` is still visible. It built those
+elements and knows their ids, so the answer is a fact rather than an inference.
+A take that ends with one up gets a `content.warnings` entry naming it, a
+`WARNING` on stderr, and — because a non-empty warning list suppresses the
+healthy line — no `shows a picture` claim.
+
+**What it does not cover**, and this is the boundary rather than a to-do:
+
+- **Only the recorder's own two overlays.** An app's own modal, a cookie
+  banner, a `<dialog>.showModal()`, a stuck loading veil: all invisible to it,
+  and to everything else here. General occlusion detection is unbounded and is
+  declared out of scope alongside
+  [#123](https://github.com/rogvid/skills/issues/123) and
+  [#124](https://github.com/rogvid/skills/issues/124).
+- **Only the end of the take.** An overlay raised at 10 s and cleared at 40 s of
+  a 45 s take covered two thirds of the recording and reports nothing here. The
+  held-picture arm is what might see that, with the limits above.
+- **Only a take that encoded an mp4.** The finding rides in `content`, which is
+  null when no mp4 was written, so a take whose ffmpeg conversion failed loses
+  it. Such a take already carries `failure/` and `demo-video-FAILED.md`.
+- **The score is left alone.** It still reads high on an occluded take. The two
+  answers sit side by side in `timeline.json` on purpose; the warning says why
+  they disagree ([#163](https://github.com/rogvid/skills/issues/163)).
+
+What to do: nothing, if you use `interlude("")`. If you build your own overlay
+in page script, take it down yourself — no check here will notice it.
 
 ### If your app paints slowly, you are the first to run that path
 

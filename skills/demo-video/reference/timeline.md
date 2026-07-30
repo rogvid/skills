@@ -118,7 +118,8 @@ the encoded frame, and writes down what it found:
   is what decides whether the stretch is worth a warning. See below.
 - `warnings` is empty on a healthy take, and each entry is one sentence saying
   what to go and look at. They are also printed on stderr as the take ends, so
-  an author who never opens this file is still told.
+  an author who never opens this file is still told. One entry does not come
+  from the frames at all — see *An overlay the recorder left up* below.
 - `measured` is `false`, with `note` saying why, when the check could not run.
   `content` itself is `null` only when the take encoded no mp4.
 - `opening` says what the take opened on — and, on a web take, what the
@@ -161,6 +162,27 @@ covering seconds of it would be inventing a demo rather than repairing one.
 inside the page, so it has no equivalent gap; open a terminal segment on a title
 card if you want its first frame to be deliberate (see *Opening a terminal
 segment on a title card*).
+
+### An overlay the recorder left up is reported exactly
+
+Every other number in `content` is measured off the encoded mp4. One warning is
+not: at the end of a take, while the page is still alive, the recorder asks it
+whether `#__demo_interlude` or `#__demo_bridge` — the two elements `interlude()`
+creates — is still visible. It built them, so this is a fact rather than an
+inference, and the warning names the id.
+
+It exists because the score arm gets this case *backwards*. A `style="light"`
+scrim is a radial gradient, and a gradient across the measured rect adds
+variance — which is what `score` is. Measured on three takes of one storyboard:
+**32.94** and **32.95** with the scrim over the app against **26.74** clean.
+The covered takes scored 23% higher, and all three printed
+`demo.mp4 shows a picture`.
+
+A take that ends with an overlay up now gets the warning, on stderr and in this
+file, and no `shows a picture` line. What it does **not** cover: an app's own
+modal (it only knows its own two elements), an overlay raised and cleared in the
+middle of a take (only the end is checked), and a take that encoded no mp4
+(`content` is null there). See [limits.md](limits.md).
 
 ### A long held stretch is not a problem, and this is the part to understand
 
