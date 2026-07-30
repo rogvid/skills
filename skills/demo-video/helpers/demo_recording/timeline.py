@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
 
 from .failure import FAILURE_DIR, FAILURE_MARKER
+from .markdown import _fmt_t, _md_cell
 
 # -- beat timeline -----------------------------------------------------------
 #
@@ -330,29 +330,6 @@ def timeline_paths(out_dir: Path | str, segment: str | None = None) -> tuple[Pat
     stem = f"{segment}.seg.timeline" if segment else "timeline"
     out_dir = Path(out_dir)
     return out_dir / f"{stem}.json", out_dir / f"{stem}.md"
-
-
-def _md_cell(value: object) -> str:
-    """A value made safe to drop into a markdown table cell."""
-    if value is None:
-        return ""
-    return (
-        str(value)
-        .replace("\\", "\\\\")
-        .replace("|", "\\|")
-        .replace("\n", " ")
-    )
-
-
-def _fmt_t(value: object) -> str:
-    # The `cast` is erased at run time, so this is byte-for-byte the behaviour
-    # it had inside core.py — including the TypeError `float()` raises on a
-    # beat whose timestamp is not a number. What changed is only that the
-    # diagnostic is now visible: `[mypy-demo_recording.core]` disables
-    # `arg-type` wholesale for one *stated* reason (a ViewportSize TypedDict),
-    # and it was silencing this second, unrelated one for free. Moving the
-    # function out from under a blanket suppression is how that surfaced.
-    return "" if value is None else f"{float(cast('float', value)):.2f}"
 
 
 def _coverage_md(coverage: object) -> list[str]:

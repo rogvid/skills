@@ -68,6 +68,17 @@ from demo_recording.coverage import (  # noqa: E402
     _merged_coverage,
     coverage_report,
 )
+from demo_recording.failure import (  # noqa: E402
+    FAILURE_DIR,
+    FAILURE_MARKER,
+    FAILURE_MESSAGE_CHARS,
+    clear_failure_dir,
+    clear_failure_marker,
+    failed_beat,
+    failure_summary,
+    render_failure_md,
+)
+from demo_recording.markdown import _fmt_t, _md_cell  # noqa: E402
 from demo_recording.narration import (  # noqa: E402
     TTS_KEY_CHARS,
     TTS_KEY_SEP,
@@ -75,8 +86,6 @@ from demo_recording.narration import (  # noqa: E402
 )
 from demo_recording.timeline import (  # noqa: E402
     _coverage_md,
-    _fmt_t,
-    _md_cell,
     render_timeline_md,
     timeline_paths,
 )
@@ -753,6 +762,260 @@ class SkillDocs(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# failure.py — the dump a take that did not finish leaves behind (issue #147)
+# --------------------------------------------------------------------------
+#
+# `failure.md` is what a person opens when a take crashed, and until #147 it was
+# written by a 76-line method on `_DemoBase` that used no instance state at all —
+# a pure function of one document, unreachable without a browser, and therefore
+# graded only by `tests/smoke`'s four crash takes. Those grade that the file
+# *exists* and holds a marker string. Nothing graded what it says.
+#
+# The distinction that matters for this artifact: **it is read at the moment
+# somebody's demo just broke.** A dump that attributes the crash to the wrong
+# beat, or claims a `demo.mp4` beside it is this take's when it is a previous
+# run's, is worse than no dump — it is the artifact-lies failure this repo
+# treats as blocking, on the one path where a reader has no working recording
+# to check it against.
+
+
+class FailedBeat(unittest.TestCase):
+    def test_the_beat_that_raised_is_named_not_the_last_one(self):
+        # `_beat` stamps `error` on the beat whose verb raised. Blaming the last
+        # beat instead is the confidently-wrong attribution the issue log
+        # already refuses to make; a dump gets the same rule.
+        beats = [
+            beat(0, "goto", 0.1),
+            beat(1, "click", 1.0, error={"type": "TimeoutError", "message": "x"}),
+            beat(2, "caption", 2.0),
+        ]
+        self.assertEqual(failed_beat(beats)["index"], 1)
+
+    def test_a_failure_between_beats_blames_no_beat(self):
+        # A storyboard can raise in its own code between two verbs. `None` here
+        # is what makes `failure.md` say "between beats" instead of picking one.
+        self.assertIsNone(failed_beat([beat(0, "goto", 0.1), beat(1, "click", 1.0)]))
+
+    def test_the_last_raising_beat_wins_when_more_than_one_did(self):
+        beats = [
+            beat(0, "click", 0.1, error={"type": "A", "message": ""}),
+            beat(1, "click", 1.0, error={"type": "B", "message": ""}),
+        ]
+        self.assertEqual(failed_beat(beats)["index"], 1)
+
+
+class FailureSummary(unittest.TestCase):
+    def test_the_summary_carries_the_verb_that_was_running(self):
+        # A beat is appended *after* the failing one on purpose: `_beat` stamps
+        # `error` and the take can go on to record a teardown beat, so "the
+        # last beat" and "the beat that raised" are different rows. With one
+        # beat they coincide, and the injection that returns `beats[-1]` stays
+        # green — measured, which is why this list has three entries.
+        beats = [
+            beat(2, "goto", 1.0),
+            beat(3, "wait_for", 2.0, error={"type": "TimeoutError", "message": "x"}),
+            beat(4, "caption", 3.0),
+        ]
+        summary = failure_summary(TimeoutError, TimeoutError("no such element"), beats)
+        self.assertEqual(
+            summary,
+            {
+                "type": "TimeoutError",
+                "message": "no such element",
+                "beat": 3,
+                "verb": "wait_for",
+            },
+        )
+
+    def test_a_long_message_is_cut_to_the_budget(self):
+        # A `wait_for_text()` timeout quotes a thousand characters of terminal
+        # screen, and a Playwright error quotes a call log and a page snippet.
+        # Graded at the boundary rather than comfortably past it.
+        exc = RuntimeError("y" * (FAILURE_MESSAGE_CHARS + 500))
+        summary = failure_summary(RuntimeError, exc, [])
+        self.assertEqual(len(summary["message"]), FAILURE_MESSAGE_CHARS)
+        exact = RuntimeError("z" * FAILURE_MESSAGE_CHARS)
+        self.assertEqual(
+            len(failure_summary(RuntimeError, exact, [])["message"]),
+            FAILURE_MESSAGE_CHARS,
+        )
+
+    def test_an_exception_with_no_message_still_names_its_type(self):
+        # `KeyboardInterrupt` on a hung demo is exactly the take somebody is
+        # about to go looking at, and it carries no message at all.
+        self.assertEqual(
+            failure_summary(KeyboardInterrupt, KeyboardInterrupt(), []),
+            {"type": "KeyboardInterrupt", "message": "", "beat": None, "verb": None},
+        )
+
+
+class FailureMd(unittest.TestCase):
+    def doc(self, **over) -> dict:
+        base = {
+            "schema": 1,
+            "generated_by": "demo-video",
+            "recorder": "Recorder",
+            "when": "2026-07-29T09:00:00Z",
+            "beats_recorded": 4,
+            "failure": {
+                "type": "TimeoutError",
+                "message": "waiting for #save",
+                "beat": 2,
+                "verb": "click",
+            },
+            "beat": {"index": 2, "verb": "click", "selector": "#save"},
+            "issues": [],
+            "issue_count": 0,
+            "media": "demo.mp4",
+            "media_written_by_this_take": True,
+            "screen_captured": True,
+        }
+        base.update(over)
+        return base
+
+    def test_the_failing_beat_and_its_target_are_named(self):
+        md = render_failure_md(self.doc())
+        self.assertIn("**TimeoutError** at beat 2 (`click`, target `#save`).", md)
+        self.assertIn("> waiting for #save", md)
+
+    def test_a_failure_between_beats_says_so_instead_of_naming_one(self):
+        # The document this renders from has `beat: None`, and the sentence has
+        # to change rather than render "beat None".
+        md = render_failure_md(
+            self.doc(
+                failure={
+                    "type": "ValueError",
+                    "message": "bad",
+                    "beat": None,
+                    "verb": None,
+                },
+                beat=None,
+            )
+        )
+        self.assertIn("between beats — no verb was running", md)
+        self.assertNotIn("beat None", md)
+
+    def test_a_take_that_encoded_nothing_disowns_the_mp4_beside_it(self):
+        # The whole of issue #46 in one sentence: a failed re-record leaves the
+        # previous run's demo.mp4 looking current, and in a review gate that
+        # produces a confident approval of something never recorded.
+        md = render_failure_md(self.doc(media_written_by_this_take=False))
+        self.assertIn("**This take encoded no mp4.**", md)
+        self.assertIn(FAILURE_MARKER, md)
+        self.assertNotIn("last-frame.png", md)
+
+    def test_a_take_that_did_encode_claims_its_own_recording(self):
+        # The other side of the same sentence. Without this the assertion above
+        # passes on a renderer that always disowns the media.
+        md = render_failure_md(self.doc())
+        self.assertIn("is **this** take's", md)
+        self.assertIn("last-frame.png", md)
+        self.assertNotIn("encoded no mp4", md)
+
+    def test_no_issues_says_the_app_did_not_announce_it(self):
+        md = render_failure_md(self.doc())
+        self.assertIn("Nothing. No console errors", md)
+
+    def test_every_issue_is_listed_with_where_it_landed(self):
+        md = render_failure_md(
+            self.doc(
+                issues=[
+                    {
+                        "kind": "console_error",
+                        "beat": 1,
+                        "verb": "goto",
+                        "t": 0.5,
+                        "message": "boom",
+                    },
+                    {
+                        "kind": "failed_request",
+                        "beat": None,
+                        "verb": None,
+                        "t": 0.1,
+                        "message": "404 /x",
+                    },
+                ],
+                issue_count=2,
+            )
+        )
+        self.assertIn("**console_error** — beat 1 (`goto`) at 0.50s: boom", md)
+        self.assertIn("**failed_request** — before the first beat at 0.10s: 404 /x", md)
+
+    def test_issues_past_the_cap_are_counted_not_dropped_silently(self):
+        # `issue_count` is the uncapped total. A dump that listed ten of two
+        # hundred and said nothing would read as a take with ten problems.
+        md = render_failure_md(
+            self.doc(
+                issues=[
+                    {
+                        "kind": "console_error",
+                        "beat": 0,
+                        "verb": "goto",
+                        "t": 0.1,
+                        "message": "one",
+                    }
+                ],
+                issue_count=201,
+            )
+        )
+        self.assertIn("…and 200 more, not recorded.", md)
+
+    def test_a_pipe_in_a_message_does_not_break_the_table(self):
+        # The same `_md_cell` contract the timeline has: this renderer emits a
+        # markdown table, and an unescaped pipe in an exception message adds a
+        # column to it.
+        md = render_failure_md(
+            self.doc(
+                failure={
+                    "type": "RuntimeError",
+                    "message": "a | b",
+                    "beat": 2,
+                    "verb": "click",
+                }
+            )
+        )
+        self.assertIn(r"a \| b", md)
+
+
+class FailureCleanup(unittest.TestCase):
+    def test_only_the_files_the_dump_writes_are_removed(self):
+        # Bounded to known names, never the directory: a reader's own notes in
+        # `failure/` are not this function's to delete.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            directory = out / FAILURE_DIR
+            directory.mkdir()
+            for name in ("failure.json", "failure.md", "screen.txt", "last-frame.png"):
+                (directory / name).write_text("stale")
+            (directory / "my-notes.md").write_text("mine")
+            gone = clear_failure_dir(out)
+            self.assertEqual(len(gone), 4)
+            self.assertTrue((directory / "my-notes.md").is_file())
+
+    def test_an_emptied_directory_is_removed_but_a_used_one_stays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / FAILURE_DIR).mkdir()
+            (out / FAILURE_DIR / "failure.md").write_text("stale")
+            clear_failure_dir(out)
+            self.assertFalse((out / FAILURE_DIR).exists())
+
+    def test_nothing_to_clear_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(clear_failure_dir(Path(tmp)), [])
+
+    def test_a_successful_take_removes_a_previous_runs_marker(self):
+        # The other half of #46: a marker beside a freshly-written demo.mp4 is
+        # the same lie inverted, and it is the one that makes people stop
+        # believing the marker at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / FAILURE_MARKER).write_text("a previous run failed")
+            clear_failure_marker(out)
+            self.assertFalse((out / FAILURE_MARKER).exists())
+
+
+# --------------------------------------------------------------------------
 # The package's front door is the storyboard surface (issue #148)
 # --------------------------------------------------------------------------
 #
@@ -961,9 +1224,9 @@ INJECTIONS = [
     ),
     (
         "the table cell stops escaping pipes",
-        "timeline.py",
-        '        .replace("|", "\\\\|")',
-        '        .replace("|", "|")',
+        "markdown.py",
+        '.replace("|", "\\\\|")',
+        '.replace("|", "|")',
         [
             "Cell.test_a_pipe_in_a_caption_does_not_add_a_column",
             "TimelineMd.test_the_beat_table_survives_a_caption_holding_a_pipe",
@@ -971,7 +1234,7 @@ INJECTIONS = [
     ),
     (
         "a beat with no timestamp renders as time zero",
-        "timeline.py",
+        "markdown.py",
         '    return "" if value is None else f"{float(cast(\'float\', value)):.2f}"',
         "    return f\"{float(cast('float', value or 0)):.2f}\"",
         ["FmtT.test_a_beat_with_no_timestamp_renders_empty_not_zero"],
@@ -1117,6 +1380,46 @@ INJECTIONS = [
         ["TtsKey.test_the_key_is_a_filename_stem_and_not_a_path"],
     ),
     (
+        "the failure dump blames the last beat instead of the one that raised",
+        "failure.py",
+        'for beat in reversed(list(beats)):\n        if "error" in beat:\n            return beat\n    return None',
+        "return list(beats)[-1] if beats else None",
+        [
+            "FailedBeat.test_a_failure_between_beats_blames_no_beat",
+            "FailureSummary.test_the_summary_carries_the_verb_that_was_running",
+        ],
+    ),
+    (
+        "an exception message reaches the dump uncapped",
+        "failure.py",
+        '"message": message[:FAILURE_MESSAGE_CHARS],',
+        '"message": message,',
+        ["FailureSummary.test_a_long_message_is_cut_to_the_budget"],
+    ),
+    (
+        "a take that encoded no mp4 stops disowning the one beside it (#46)",
+        "failure.py",
+        'if doc.get("media_written_by_this_take")\n            else f"**This take encoded no mp4.** Any `{doc.get(\'media\')}` in "',
+        "if True\n            else f\"**This take encoded no mp4.** Any `{doc.get('media')}` in \"",
+        [
+            "FailureMd.test_a_take_that_encoded_nothing_disowns_the_mp4_beside_it",
+        ],
+    ),
+    (
+        "the dump stops saying how many issues it left out",
+        "failure.py",
+        'out.append(f"- …and {total - len(issues)} more, not recorded.")',
+        "pass",
+        ["FailureMd.test_issues_past_the_cap_are_counted_not_dropped_silently"],
+    ),
+    (
+        "clearing a previous run's dump takes the whole directory with it",
+        "failure.py",
+        'for name in ("failure.json", "failure.md", "screen.txt", "last-frame.png"):',
+        "for name in [p.name for p in directory.iterdir()]:",
+        ["FailureCleanup.test_only_the_files_the_dump_writes_are_removed"],
+    ),
+    (
         "an internal threshold drifts back onto the package's front door",
         "__init__.py",
         '__all__ = [\n    "Recorder",',
@@ -1168,6 +1471,8 @@ def fault_inject() -> int:
             shutil.copy(REPO / "tests" / "smoke", smoke)
             if module == "tests/smoke":
                 target = smoke
+            elif module == "__init__.py" or module.endswith(".py"):
+                target = root / "demo_recording" / module
             elif module.endswith(".md"):
                 target = skill / module
             else:
