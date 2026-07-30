@@ -74,9 +74,15 @@ record in parts is a demo nobody wants to review by scrubbing.
 
 `frames/` is a review artifact, not documentation: **gitignore it** along with
 `demo.mp4` — it is in the file table at the top for the same reason. Nothing
-downstream reads it; `beat_frames(out_dir)` from `demo_recording` regenerates
-it from `demo.mp4` and `timeline.json` without re-recording, and clears the
-previous run's frames first.
+downstream reads it; `beat_frames(out_dir)` regenerates it from `demo.mp4` and
+`timeline.json` without re-recording, and clears the previous run's frames
+first:
+
+```python
+from demo_recording import beat_frames
+
+beat_frames(Path("demos/2026-07-26-x"))
+```
 
 ## Per-beat evidence (`evidence/beat-NN.json`)
 
