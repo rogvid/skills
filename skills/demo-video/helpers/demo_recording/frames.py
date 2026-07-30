@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 
 from .content import media_duration
-from .timeline import _fmt_t, _md_cell, timeline_paths
+from .markdown import _fmt_t, _md_cell
+from .timeline import timeline_paths
 
 # -- beat-aligned review frames ----------------------------------------------
 #

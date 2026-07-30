@@ -51,6 +51,11 @@ from .failure import (
     FAILURE_MARKER,
     FAILURE_MESSAGE_CHARS,
     FAILURE_SCHEMA,
+    clear_failure_dir,
+    clear_failure_marker,
+    failed_beat,
+    failure_summary,
+    render_failure_md,
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
 from .narration import tts_clip
@@ -67,8 +72,6 @@ from .timeline import (
     TIMELINE_SCHEMA,
     StrictTakeFailed,
     _cap_text,
-    _fmt_t,
-    _md_cell,
     evidence_name,
     write_timeline,
 )
@@ -809,7 +812,7 @@ class _DemoBase:
         # write carries an `evidence` path, so writing that timeline while
         # skipping this would point every beat at a file that is not there.
         failure: dict | None = (
-            None if exc_type is None else self._failure_summary(exc_type, exc)
+            None if exc_type is None else failure_summary(exc_type, exc, self._beats)
         )
         self._build_evidence()
         if failure is not None:
@@ -919,8 +922,8 @@ class _DemoBase:
                 if failure is not None:
                     self._report_failure(failure, wrote_dump=True)
             else:
-                self._clear_failure_marker()
-                self._clear_failure_dir()
+                clear_failure_marker(self.out_dir)
+                clear_failure_dir(self.out_dir)
             # Always, strict or not, crashed or not: the problems a take
             # recorded are the one thing nobody thinks to go looking for, so
             # they have to arrive unasked.
@@ -1424,35 +1427,6 @@ take with fewer beats than the last one would otherwise leave the
                 f"this take — {type(exc).__name__}: {exc}]"
             )
 
-    def _failed_beat(self) -> dict | None:
-        """The beat whose verb raised, or None if the failure was between beats.
-
-        Reads `error`, which `_beat` stamps (issue #24), rather than assuming
-        the last beat is the culprit — a storyboard can raise in its own code
-        between two verbs, and blaming the last beat that *worked* is exactly
-        the confidently-wrong attribution `_attributed_beat` refuses to make
-        for issues.
-        """
-        for beat in reversed(self._beats):
-            if "error" in beat:
-                return beat
-        return None
-
-    def _failure_summary(self, exc_type: type, exc: BaseException | None) -> dict:
-        """What came out of the `with`, and which beat it came out of.
-
-        Unscrubbed: every consumer (`_timeline_doc`, the dump, the marker)
-        masks it on the way to its own file, and each has a different mask.
-        """
-        beat = self._failed_beat()
-        message = str(exc) if exc is not None else ""
-        return {
-            "type": exc_type.__name__,
-            "message": message[:FAILURE_MESSAGE_CHARS],
-            "beat": None if beat is None else beat.get("index"),
-            "verb": None if beat is None else beat.get("verb"),
-        }
-
     def _failure_doc(self, failure: dict) -> dict:
         """The machine-readable half of `failure/`, masked and checked.
 
@@ -1462,7 +1436,7 @@ take with fewer beats than the last one would otherwise leave the
         issues and the beats have been in memory since they happened, and the
         media is named rather than opened.
         """
-        beat = self._failed_beat()
+        beat = failed_beat(self._beats)
         doc: dict = {
             "schema": FAILURE_SCHEMA,
             "generated_by": "demo-video",
@@ -1486,83 +1460,6 @@ take with fewer beats than the last one would otherwise leave the
             "screen_captured": self._failure_screen_text is not None,
         }
         return doc
-
-    def _failure_md(self, doc: dict) -> str:
-        """The human half. Pure function of the document above, so it inherits
-        its masking rather than re-deriving it."""
-        failure = doc.get("failure") or {}
-        beat = doc.get("beat") or {}
-        where = (
-            f"beat {failure.get('beat')} (`{_md_cell(failure.get('verb'))}`"
-            + (f", target `{_md_cell(beat.get('selector'))}`" if beat.get("selector") else "")
-            + ")"
-            if failure.get("beat") is not None
-            else "between beats — no verb was running when it happened"
-        )
-        out = [
-            "# This take did not finish",
-            "",
-            f"`{doc.get('recorder')}` · {doc.get('when')} · "
-            f"{doc.get('beats_recorded')} beats recorded",
-            "",
-            f"**{_md_cell(failure.get('type'))}** at {where}.",
-            "",
-            f"> {_md_cell(failure.get('message')) or '(no message)'}",
-            "",
-            "## What is here",
-            "",
-            "| file | what it is |",
-            "|---|---|",
-            "| `failure.json` | this, machine-readable: the failing beat in "
-            "full, every issue the take recorded, and what was written |",
-        ]
-        if doc.get("media_written_by_this_take"):
-            out.append(
-                f"| `last-frame.png` | the final frame of "
-                f"`{doc.get('media')}` — what was on screen when it stopped |"
-            )
-        if doc.get("screen_captured"):
-            out.append(
-                "| `screen.txt` | the page's accessibility tree (web) or the "
-                "rendered terminal buffer, read at the end of the take |"
-            )
-        out += ["", "## What the app said", ""]
-        issues = doc.get("issues") or []
-        if not issues:
-            out.append(
-                "Nothing. No console errors, failed requests or non-zero exits "
-                "were recorded, so the app did not announce this."
-            )
-        else:
-            for issue in issues:
-                seat = (
-                    "before the first beat"
-                    if issue.get("beat") is None
-                    else f"beat {issue['beat']} (`{_md_cell(issue.get('verb'))}`)"
-                )
-                out.append(
-                    f"- **{_md_cell(issue.get('kind'))}** — {seat} at "
-                    f"{_fmt_t(issue.get('t'))}s: {_md_cell(issue.get('message'))}"
-                )
-            total = doc.get("issue_count", len(issues))
-            if total > len(issues):
-                out.append(f"- …and {total - len(issues)} more, not recorded.")
-        out += [
-            "",
-            "## The recording",
-            "",
-            (
-                f"`{doc.get('media')}` beside this folder is **this** take's "
-                f"partial recording — the webm the browser had in hand when the "
-                f"storyboard gave up, converted rather than discarded."
-                if doc.get("media_written_by_this_take")
-                else f"**This take encoded no mp4.** Any `{doc.get('media')}` in "
-                f"the folder above is a *previous* run's and is not a recording "
-                f"of this failure — see `{FAILURE_MARKER}`."
-            ),
-            "",
-        ]
-        return "\n".join(out).rstrip() + "\n"
 
     def _build_failure(self, failure: dict) -> None:
         """Turn the crash into documents. Writes nothing.
@@ -1611,7 +1508,7 @@ take with fewer beats than the last one would otherwise leave the
         written = 0
         for path, text in [
             (out / "failure.json", json.dumps(doc, indent=2, ensure_ascii=False) + "\n"),
-            (out / "failure.md", self._failure_md(doc)),
+            (out / "failure.md", render_failure_md(doc)),
             *self._failure_docs,
         ]:
             path.write_text(text)
@@ -1708,64 +1605,6 @@ take with fewer beats than the last one would otherwise leave the
             print(
                 f"demo-video: WARNING — could not write {marker} ({exc}), so "
                 f"nothing in this folder says the take failed",
-                file=sys.stderr,
-            )
-
-    def _clear_failure_dir(self) -> list[str]:
-        """Take a previous run's `failure/` off disk. Returns what went.
-
-        Same reasoning as `_clear_stale_evidence`, and the same hazard: this
-        directory holds a text dump of the page — an ARIA tree or a terminal
-        buffer — so a stale one sitting beside a *fresh* take is both a lie
-        about which run failed and a file that may hold the very value this
-        take was rewritten to hide. Bounded to the names `_write_failure`
-        writes, never the directory, so nothing anybody put here is touched.
-        """
-        directory = self.out_dir / FAILURE_DIR
-        gone: list[str] = []
-        if not directory.is_dir():
-            return gone
-        for name in ("failure.json", "failure.md", "screen.txt", "last-frame.png"):
-            path = directory / name
-            try:
-                if path.is_file():
-                    path.unlink()
-                    gone.append(f"{FAILURE_DIR}/{name}")
-            except OSError:  # noqa: PERF203 - report what could not be removed
-                print(
-                    f"demo-video: WARNING — could not delete {path}, which is "
-                    f"a previous take's failure dump and describes a run "
-                    f"this one is not",
-                    file=sys.stderr,
-                )
-        try:
-            next(directory.iterdir())
-        except StopIteration:
-            directory.rmdir()
-        except OSError:
-            pass
-        return gone
-
-    def _clear_failure_marker(self) -> None:
-        """Take a previous run's marker off disk once a take succeeds.
-
-        The other half of #46 and not an optional one: a marker left beside a
-        freshly-written demo.mp4 is the same lie inverted, and it is the one
-        that makes people stop believing the marker at all.
-        """
-        marker = self.out_dir / FAILURE_MARKER
-        try:
-            if marker.is_file():
-                marker.unlink()
-                print(
-                    f"demo-video: this take wrote its own artifacts, so the "
-                    f"{FAILURE_MARKER} a previous run left here is gone",
-                    file=sys.stderr,
-                )
-        except OSError as exc:
-            print(
-                f"demo-video: WARNING — could not delete {marker} ({exc}). It "
-                f"describes a previous run, not this one.",
                 file=sys.stderr,
             )
 
