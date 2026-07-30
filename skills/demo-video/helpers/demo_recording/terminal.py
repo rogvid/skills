@@ -739,10 +739,11 @@ class TerminalRecorder(_DemoBase):
 
     @_beat_verb("wait_for_text")
     def wait_for_text(self, pattern: str, timeout_s: float = 60) -> None:
-        """Wait until the rendered screen (visible text + scrollback,
-        ANSI-stripped) matches `pattern` (a regex, searched). `^` and `$`
-        anchor to individual screen lines (re.MULTILINE). Robust for TUIs,
-        which repaint continuously and emit no clean 'done' line."""
+        """Wait until the rendered screen (visible text + scrollback, ANSI
+        resolved by xterm.js rather than stripped by a regex) matches `pattern`
+        (a regex, searched). `^` and `$` anchor to individual screen lines
+        (re.MULTILINE). Robust for TUIs, which repaint continuously and emit no
+        clean 'done' line."""
         rx = re.compile(pattern, re.MULTILINE)
         deadline = time.monotonic() + timeout_s
         while True:

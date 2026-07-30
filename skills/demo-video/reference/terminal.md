@@ -14,7 +14,7 @@
 | `send(text, enter=True)` | Type a response to the running program (answer a prompt, a REPL expression). The PTY echoes it, so it is on camera; a program that turns echo off shows nothing either way. |
 | `key(*names)` | Send keys: `"Up" "Down" "Left" "Right" "Enter" "Tab" "Escape" "Home" "End" "PageUp" "PageDown" "Backspace" "Delete" "Space"`, `"C-<letter>"` (e.g. `"C-c"`), or any single literal char (`"q"`, `"/"`). |
 | `wait_for_prompt(timeout_s=60)` | Wait until the shell prompt returns — i.e. the command finished. |
-| `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI-stripped) matches `pattern`; `^`/`$` anchor to screen lines. |
+| `wait_for_text(pattern, timeout_s=60)` | **The universal sync.** Wait until the rendered screen (visible text + scrollback, ANSI resolved by xterm.js rather than stripped by a regex) matches `pattern`; `^`/`$` anchor to screen lines. |
 | `rec.page` | The live Playwright page (escape hatch). `rec._write(str)` sends raw bytes to the PTY. |
 
 ### Opening a terminal segment on a title card
@@ -70,11 +70,12 @@ painted before that first `goto()` would be destroyed by it.
   echoes each key, so it appears typed. Programs that turn echo off
   (password prompts, raw-mode TUIs) correctly show nothing.
 - **A secret a command prints is on screen, and nothing here hides it.**
-  There is no scrubber on the output path and no `redact()` for a terminal —
-  what a program writes to the PTY is what the recording shows, and what
-  `evidence/` dumps. Demo against example data; see "What this records, and
-  what it does not defend against" at the top of
-  [SKILL.md](../SKILL.md).
+  Not "not yet for terminals" — the skill has **no masking, no scrubbing and no
+  redaction at all**, on either recorder or on any artifact either one writes.
+  There is no verb, no flag and no setting that changes that. What a program
+  writes to the PTY is what the recording shows, and what `evidence/` dumps.
+  Demo against example data; see "What this records, and what it does not
+  defend against" at the top of [SKILL.md](../SKILL.md).
 - **Keep the prompt distinctive.** The default `❯ ` rarely collides with
   output. If you theme it via `terminal_prompt`, keep it a string unlikely
   to appear as the last line of a command's output.

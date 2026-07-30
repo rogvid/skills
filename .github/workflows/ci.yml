@@ -188,7 +188,7 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       # Writes outside the checkout, at a path the upload step below knows.
-      - name: Record web, redaction and terminal demos
+      - name: Record the web and terminal demo takes
         run: tests/smoke --out-dir "$RUNNER_TEMP/smoke-out"
 
       # Only on failure: a green run's recordings are noise, a red run's are

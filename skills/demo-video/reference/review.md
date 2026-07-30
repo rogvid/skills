@@ -24,12 +24,13 @@ static one twice. Each frame is taken at its beat's **midpoint** — `t_start` i
 is whatever Chromium's screencast managed to record, and it drops wall time
 during idle stretches ([#18](https://github.com/rogvid/skills/issues/18)). So a
 frame cut at a beat's midpoint shows a moment slightly *ahead* of that beat in
-the demo's own story — measured at **40–120 ms** on instrumented takes, and up
-to **~600 ms** on a take that loses the browser's start-up window whole (about
-1 in 12). The practical consequence: for a beat comfortably longer than that,
-the frame is of that beat; **for a beat shorter than the drift — a bare
-`shot()`, a `wait_for()` that returned immediately — the frame can be of the
-beat after it.** `tests/smoke` measures exactly this and shows it: with the
+the demo's own story — measured at **80–200 ms** on instrumented takes, and up
+to the **~0.7 s** of browser start-up no test code can cover, on a take that
+loses that window whole (about 1 in 12, which is why `tests/smoke` bounds this
+direction at 750 ms). The practical consequence: for a beat comfortably longer
+than that, the frame is of that beat; **for a beat shorter than the drift — a
+bare `shot()`, a `wait_for()` that returned immediately — the frame can be of
+the beat after it.** `tests/smoke` measures exactly this and shows it: with the
 drift allowance removed, the frame for a 50 ms `shot()` beat that sits against
 a caption change is already showing the next beat's screen.
 
@@ -115,18 +116,7 @@ off.
 | `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML` with every value-bearing attribute stripped. All three are null when no spotlight is up |
 | `screen` | **`TerminalRecorder`**: the rendered screen, ANSI resolved by xterm.js, scrollback included — the same text `wait_for_text()` matches against |
 | `truncated` / `limits` | which fields were cut, and at what budget. A cut field also says so inline where it stops |
-| `omitted` | present *instead of* the page text when the recorder would have had to guess — see below. `timeline.json` is unaffected |
-
-**`outerHTML` is only ever the spotlight target's, never the page's.** A whole
-document's markup is an order of magnitude bigger than its ARIA tree and
-carries two things nobody put on screen: the text of every inline `<script>`,
-and `srcdoc` attributes — i.e. source code and whole embedded documents. The
-clone that gets serialized drops both, along with `<style>`, the recorder's own
-overlays.
-
-Fields are capped (12 000 characters of ARIA or screen text, 8 000 of markup)
-and truncation is **marked, never silent** — a TUI's scrollback is 5 000 lines,
-and an uncapped `evidence/` outgrows the mp4 it describes.
+| `error` | present *instead of* the page text when reading the screen raised. Capturing evidence is a diagnostic and must not cost an otherwise fine take, so the file is written anyway, saying what went wrong — which keeps every beat's `evidence` pointer resolving. `timeline.json` is unaffected |
 
 ### What evidence does and does not carry
 

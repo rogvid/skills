@@ -181,8 +181,11 @@ inside the stretch?**
 
 | beats inside the held stretch | verdict |
 |---|---|
-| `caption`, `interlude`, `bridge`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
+| `caption`, `interlude`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
 | `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to` | worth looking at — warns |
+
+Both interlude styles log as the verb `interlude`, with `selector` carrying the
+style (`"card"` or `"light"`) — there is no separate verb for the light one.
 
 A `run()` that printed nothing visible, a `click()` that moved nothing: those
 are the shapes worth a human's two minutes. A caption change over a screen

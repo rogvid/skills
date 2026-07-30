@@ -762,6 +762,252 @@ class SkillDocs(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# No shipped document names a symbol the package does not have
+# --------------------------------------------------------------------------
+#
+# Every defect a documentation audit of this skill turned up was one shape: a
+# document naming something the code does not have. `secrets.py` sat in
+# README's layout tree as a module of the package — there has never been such a
+# module. `redact()` was in reference/terminal.md as a function this recorder
+# does not offer "for a terminal", which reads as one it offers elsewhere. An
+# `omitted` evidence key was documented that no code path emits. Three of the
+# four were about **secret handling**, which is the subject where a reader
+# believing the document is worst: SKILL.md's first section says there is no
+# masking, no scrubbing and no redaction, and the layout tree said otherwise.
+#
+# Prose cannot be graded. A backticked identifier can: it is the author saying
+# "this is a name in the code", and whether the code has that name is a
+# decidable question. Two sweeps, because the two claims have different
+# strengths of answer:
+#
+#   * **A `module.py`** is a claim about a file, and it is checked against the
+#     directory listing. Swept out of the whole document rather than out of
+#     backticks, because the place these appear is the README's layout tree —
+#     ASCII art inside a fence, where nothing is backticked. `secrets.py` was
+#     there, unquoted, for as long as the tree was.
+#   * **A backticked symbol-shaped span** — a `foo()` call, a `CONSTANT_NAME`,
+#     a CapWords or snake_case identifier — has to appear somewhere in the
+#     package's source text.
+#
+# **What this does not check**, stated plainly because it is the difference
+# between a check and a reassurance:
+#
+#   * The second sweep's haystack is the *text* of the package's modules,
+#     comments and docstrings included. A document kept alive by a stale
+#     docstring passes, which is exactly how `omitted` survived — it was in a
+#     `core.py` docstring describing a path deleted in #144. This catches the
+#     name that was never there or is now entirely gone, not the one that
+#     rotted in two places at once.
+#
+#     How much slack that is, measured rather than assumed: of the 89 symbols
+#     graded today, 85 occur in the modules' *code* tokens with comments and
+#     docstrings stripped. The four that do not are `http_error`,
+#     `request_failed`, `warn` and `DEMO_VIDEO_SPEECH_MODEL` — issue kinds and
+#     an env suffix that reach the code as pieces of an f-string.
+#   * Only symbol-shaped spans are taken. A bare lowercase word in backticks is
+#     indistinguishable from ordinary prose — `caption`, `screen`, `card` and
+#     `hold` are all legitimate — so the `omitted` and `bridge` defects would
+#     not have been caught here even in a fresh package. Widening to bare words
+#     was tried and rejected: it moves ~90 further spans into the sweep and
+#     almost all of them are English.
+#   * `helpers/assets/` is not searched. It is vendored, minified xterm.js, and
+#     a haystack that size finds anything — `expect`, `random` and `showModal`
+#     all occur in it. Searching it would make this check pass for reasons that
+#     have nothing to do with the recorder.
+
+DOC_SPAN_RE = re.compile(r"`([^`\n]+)`")
+DOC_MODULE_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.py\b")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Below this many symbol-shaped spans, the docs were not read — an extraction
+# that matches nothing makes "every name exists" hold over an empty set, the
+# catalogue's vacuous sweep. It is 95 today across SKILL.md, README.md and
+# reference/. This is a floor on "the documents were parsed", not a bar on how
+# many names they may carry, so it does not move when a document is added.
+DOC_SYMBOL_FLOOR = 70
+
+# The same floor for the module sweep, which is much smaller: 13 distinct
+# filenames today, twelve package modules plus `record.py`.
+DOC_MODULE_FLOOR = 8
+
+# `.py` filenames the docs name that are not modules of this package.
+DOC_MODULE_ALLOWED = {
+    "record.py": "the storyboard the skill writes into the user's project",
+}
+
+# Symbol-shaped spans that are legitimately not names in this package. Each
+# entry carries why, because an allowlist without reasons is how a check stops
+# grading anything — eleven entries against the 95 spans swept, and six of them
+# are what the 95 actually contains. The other five (the two GitHub Actions
+# triggers, `showModal`, and the two `tests/smoke` functions) are named by
+# reference/limits.md, which is landing alongside this and is the one document
+# here that talks about CI and the browser rather than about the recorder.
+DOC_SYMBOL_ALLOWED = {
+    # Read by the *generated storyboard*, not by the package: the storyboard
+    # resolves the skill's location before it can import anything from it.
+    "DEMO_VIDEO_SKILL_DIR": "env var the generated storyboard reads, not the package",
+    "_DEFAULT_SKILL_DIR": "constant SKILL.md's storyboard template defines",
+    # Shells, not Python.
+    "PROMPT_SUBST": "a zsh shell option",
+    # Third-party and browser APIs, named in prose to say what they are.
+    "expect": "Playwright's assertion API (expect(...).toMatchAriaSnapshot)",
+    "random": "the browser's Math.random()",
+    "randomUUID": "the browser's crypto.randomUUID()",
+    "showModal": "the DOM's <dialog>.showModal()",
+    # GitHub Actions vocabulary.
+    "pull_request": "a GitHub Actions workflow trigger",
+    "pull_request_target": "a GitHub Actions workflow trigger",
+    # Test harness functions. `tests/smoke` is a sibling of the package, not
+    # part of it, and reference/ names its checks when explaining what is
+    # graded where.
+    "check_coverage": "a function in tests/smoke",
+    "check_coverage_merge": "a function in tests/smoke",
+}
+
+
+def doc_symbol(span: str) -> str | None:
+    """The code symbol a backticked span claims, or None if it claims none.
+
+    Deliberately narrow. Everything it returns is a shape an author only writes
+    when they mean a name in the code:
+
+        `redact()`          a call            -> redact
+        `rec.wait_for_text` an attribute      -> wait_for_text
+        `TTS_KEY_CHARS`     a constant        -> TTS_KEY_CHARS
+        `TerminalRecorder`  CapWords/camel    -> TerminalRecorder
+
+    A bare lowercase word (`caption`, `bridge`) is not one of them, and neither
+    is a bare acronym (`ARIA`, `UTC`) — both are ordinary prose in backticks.
+    A `module.py` is not one either: filenames are the other sweep's, which
+    answers a stronger question than "does this string occur".
+    """
+    text = span.strip()
+    called = "(" in text
+    head = text.split("(", 1)[0].strip() if called else text
+    if DOC_MODULE_RE.fullmatch(head):
+        return None
+    if "." in head:  # rec.page, demo_recording.timeline, Path.exists
+        head = head.rsplit(".", 1)[-1]
+    if not _IDENT_RE.fullmatch(head):
+        return None
+    if called or "_" in head:
+        return head
+    if head.isupper():  # a bare acronym; a constant has an underscore
+        return None
+    return None if head.islower() else head
+
+
+def doc_files() -> list[Path]:
+    """The documents this skill ships. README.md is one: it is what a human
+    reads on the repository page, and the layout tree that named a module the
+    package never had lived in it, not in SKILL.md."""
+    return [
+        SKILL_DIR / "SKILL.md",
+        SKILL_DIR / "README.md",
+        *sorted((SKILL_DIR / "reference").glob("*.md")),
+    ]
+
+
+def doc_symbols() -> dict[str, set[str]]:
+    """Every symbol-shaped backticked span in the shipped docs -> where.
+
+    Fenced blocks are swept too. Measured: including them changes neither the
+    count nor the result today, because Python and shell samples carry no
+    backticks of their own — so there is no exclusion rule here to go stale.
+    """
+    found: dict[str, set[str]] = {}
+    for doc in doc_files():
+        for match in DOC_SPAN_RE.finditer(doc.read_text(encoding="utf-8")):
+            name = doc_symbol(match.group(1))
+            if name:
+                found.setdefault(name, set()).add(doc.name)
+    return found
+
+
+def doc_modules() -> dict[str, set[str]]:
+    """Every `<name>.py` the shipped docs mention -> where.
+
+    Backticks are not required, and that is the point: the README's layout tree
+    is ASCII art inside a fence, where `secrets.py` sat unquoted next to eleven
+    real modules for as long as the tree existed.
+    """
+    found: dict[str, set[str]] = {}
+    for doc in doc_files():
+        for match in DOC_MODULE_RE.finditer(doc.read_text(encoding="utf-8")):
+            found.setdefault(match.group(0), set()).add(doc.name)
+    return found
+
+
+class DocSymbols(unittest.TestCase):
+    def test_every_module_the_docs_name_is_a_file_in_the_package(self):
+        found = doc_modules()
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(found),
+            DOC_MODULE_FLOOR,
+            f"only {len(found)} .py filenames found in the docs — the "
+            f"extraction is broken, and 'they all exist' would hold trivially",
+        )
+        package = _PKG_PARENT / "demo_recording"
+        missing = sorted(
+            f"{name} (in {', '.join(sorted(where))})"
+            for name, where in found.items()
+            if name not in DOC_MODULE_ALLOWED and not (package / name).is_file()
+        )
+        self.assertEqual(
+            missing,
+            [],
+            f"{len(missing)} module(s) the documentation names that "
+            f"helpers/demo_recording/ does not contain: {missing}",
+        )
+
+    def test_every_symbol_the_docs_name_exists_in_the_package(self):
+        found = doc_symbols()
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(found),
+            DOC_SYMBOL_FLOOR,
+            f"only {len(found)} symbol-shaped spans found in the docs — the "
+            f"extraction is broken, and 'they all exist' would hold trivially",
+        )
+
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((_PKG_PARENT / "demo_recording").glob("*.py"))
+        )
+        missing = []
+        for name in sorted(found):
+            if name in DOC_SYMBOL_ALLOWED:
+                continue
+            # `DEMO_VIDEO_*` names are assembled at runtime from a prefix and a
+            # suffix (`_env("BASE_URL")`), so the full name never appears
+            # literally. Searching for the suffix still grades the claim: an
+            # env var the recorder does not read has no `_env` call either.
+            needle = name.removeprefix("DEMO_VIDEO_")
+            # Word-bounded, not a substring: `redact` must not be satisfied by
+            # the word "redaction" in a comment about the feature's removal,
+            # which is precisely what sits in core.py today.
+            if not re.search(rf"\b{re.escape(needle)}\b", source):
+                missing.append(f"{name} (in {', '.join(sorted(found[name]))})")
+        self.assertEqual(
+            missing,
+            [],
+            f"{len(missing)} symbol(s) the documentation names that no module "
+            f"under helpers/demo_recording/ has: {missing}. Either the name is "
+            f"wrong, or the document is describing something that was removed. "
+            f"If it is genuinely not a package symbol — a shell command, an "
+            f"env var, a browser API — add it to DOC_SYMBOL_ALLOWED with the "
+            f"reason.",
+        )
+
+    def test_no_allowlist_entry_is_unexplained(self):
+        # An allowlist is how this check stops grading anything. The reason is
+        # what a reviewer weighs, so an empty one is a defect in itself.
+        entries = {**DOC_MODULE_ALLOWED, **DOC_SYMBOL_ALLOWED}
+        self.assertEqual(sorted(k for k, v in entries.items() if not v.strip()), [])
+
+
+# --------------------------------------------------------------------------
 # failure.py — the dump a take that did not finish leaves behind (issue #147)
 # --------------------------------------------------------------------------
 #
@@ -1441,6 +1687,47 @@ INJECTIONS = [
         ["PublicSurface.test_every_exported_name_resolves"],
     ),
     (
+        # The defect verbatim: `secrets.py` sat in this tree for as long as the
+        # tree did, and it was the only place in the docs implying the recorder
+        # has a secret-handling module at all.
+        "a shipped document names a module of the package that does not exist",
+        "README.md",
+        "    │   ├── markdown.py            #   escaping a value into a markdown table",
+        "    │   ├── markdown.py            #   escaping a value into a markdown table\n"
+        "    │   ├── secrets.py             #   masking, before a take writes anything",
+        ["DocSymbols.test_every_module_the_docs_name_is_a_file_in_the_package"],
+    ),
+    (
+        # The other defect, in the other sweep: prose naming a function that
+        # exists nowhere. `redact()` was in reference/terminal.md phrased as a
+        # scope limit — "no `redact()` for a terminal" — which reads as a
+        # promise that the web recorder has one.
+        "a shipped document names a function that exists nowhere",
+        "reference/terminal.md",
+        "  redaction at all**, on either recorder or on any artifact either one writes.",
+        "  redaction at all** — there is no `redact()` on either recorder.",
+        ["DocSymbols.test_every_symbol_the_docs_name_exists_in_the_package"],
+    ),
+    (
+        # The half the catalogue is about: each sweep above is worth something
+        # only while its extraction still extracts. Matching nothing makes
+        # "every name the docs use exists" true over an empty set, and the
+        # suite goes green *because* the check stopped working. Two entries,
+        # because the two sweeps have two extractions and one floor each.
+        "the doc-symbol extraction matches nothing, so that sweep goes vacuous",
+        "tests/unit",
+        'DOC_SPAN_RE = re.compile(r"`([^`\\n]+)`")',
+        'DOC_SPAN_RE = re.compile(r"`([^`\\n]{400,})`")',
+        ["DocSymbols.test_every_symbol_the_docs_name_exists_in_the_package"],
+    ),
+    (
+        "the doc-module extraction matches nothing, so that sweep goes vacuous",
+        "tests/unit",
+        'DOC_MODULE_RE = re.compile(r"\\b[A-Za-z_][A-Za-z0-9_]*\\.py\\b")',
+        'DOC_MODULE_RE = re.compile(r"\\b[A-Za-z_][A-Za-z0-9_]{80,}\\.py\\b")',
+        ["DocSymbols.test_every_module_the_docs_name_is_a_file_in_the_package"],
+    ),
+    (
         "a deletion leaves a constant in tests/smoke that nothing reads",
         "tests/smoke",
         # Modelled on what #138 actually left behind: a name defined beside a
@@ -1459,18 +1746,31 @@ def fault_inject() -> int:
     failures = 0
     for name, module, old, new, must_fail in INJECTIONS:
         with tempfile.TemporaryDirectory() as tmp:
-            # The whole skill, not just the package: two injections break
-            # SKILL.md, and the documentation assertions are as much a check
-            # as the behavioural ones. `tests/smoke` is copied alongside it
-            # because one assertion reads that file rather than the package —
+            # The whole skill, not just the package: several injections break a
+            # shipped document, and the documentation assertions are as much a
+            # check as the behavioural ones. `tests/smoke` is copied alongside
+            # it because one assertion reads that file rather than the package —
             # residue in the *harness* is the defect it grades.
+            #
+            # This file is copied too, and the copy is what runs. One assertion
+            # — the doc-symbol sweep — has an *extraction step* of its own, and
+            # an extraction that quietly matches nothing is the vacuous sweep
+            # the floor exists to catch. Proving that floor fires means breaking
+            # code that lives here, so the inner run cannot be this file. It
+            # reads nothing from `REPO`: every path it uses comes from the three
+            # environment variables below, so a copy under /tmp behaves exactly
+            # as the original does.
             skill = Path(tmp) / "demo-video"
             shutil.copytree(REPO / "skills" / "demo-video", skill)
             root = skill / "helpers"
             smoke = Path(tmp) / "smoke"
             shutil.copy(REPO / "tests" / "smoke", smoke)
+            unit = Path(tmp) / "unit"
+            shutil.copy(Path(__file__).resolve(), unit)
             if module == "tests/smoke":
                 target = smoke
+            elif module == "tests/unit":
+                target = unit
             elif module == "__init__.py" or module.endswith(".py"):
                 target = root / "demo_recording" / module
             elif module.endswith(".md"):
@@ -1491,7 +1791,7 @@ def fault_inject() -> int:
             target.write_text(text.replace(old, new), encoding="utf-8")
 
             done = subprocess.run(
-                [sys.executable, str(Path(__file__).resolve()), "--_inner"],
+                [sys.executable, str(unit), "--_inner"],
                 capture_output=True,
                 text=True,
                 env={
