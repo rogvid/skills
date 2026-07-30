@@ -26,9 +26,19 @@ injection under a lock nobody maintains a manifest. `unit` carries a real
 `INJECTIONS` table for the half of the recorder that can afford one. It does
 not reduce what `smoke` has to run.
 
+`smoke-inject` is the other half of that answer, for the assertions that
+genuinely need a browser, a PTY and ffmpeg. It is **not a fourth suite**: it
+runs `smoke` itself, one arm at a time, against a copy of the recorder it has
+broken on purpose, and requires the *named* assertion to be the one that
+fires. Per-arm flags are what made it affordable — an injection aimed at
+`--coverage-only` costs 8 s, not the ten minutes the whole suite does. It runs
+nightly, and its own guards run on every push. See **The injection manifest**
+below for what it covers and what it does not.
+
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
+├── smoke-inject       # proves smoke's assertions can still fail (~14 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 └── fixture/
@@ -67,8 +77,21 @@ tests/smoke --failure-only        # just the takes that do not finish
 tests/smoke --polish-only         # just the two takes that grade how it looks
 tests/smoke --content-only        # just the pair that grades whether a
                                   #   recording shows anything (issue #97)
+tests/smoke --overlay-only        # just the light-interlude pair (#162/#163)
+tests/smoke --coverage-only       # just the acceptance-criterion take (#12)
+tests/smoke --strict-only         # just the two takes strict=True must refuse
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
+```
+
+Then, when you have changed an assertion in `smoke` or the measurement it
+grades, the manifest that proves it can still fail:
+
+```sh
+tests/smoke-inject --self-test    # the harness's own guards (instant)
+tests/smoke-inject --list         # every entry, its arm and what it costs
+tests/smoke-inject --arm coverage # one arm's entries (~48 s)
+tests/smoke-inject                # all 15, ~14 min
 ```
 
 **One suite at a time, per machine.** The script takes an exclusive `flock` on
@@ -1265,6 +1288,142 @@ Three things about how these are built are worth knowing before trusting them:
   deviation against the same 6.0 floor the web stills use — which transitively
   says `demo.mp4` has a picture where it stopped.
 
+## The injection manifest — proving `smoke` can still fail
+
+Everything above is an assertion. `tests/smoke-inject` is what says those
+assertions still grade something: a table of named breaks, each with the arm
+that must go red and the **specific message** that must be the one to appear in
+the failure list. `tests/smoke-inject --list` prints it; `--self-test` proves
+the harness's own guards hold and records nothing.
+
+**Why this is a file and not a habit.** The habit was real — the tables above
+were performed by hand, honestly, once — but nothing re-ran them, so an
+assertion that stopped being able to fail would stay green forever
+([#136](https://github.com/rogvid/skills/issues/136)). The cost was the reason:
+one injection meant a ten-minute suite under an exclusive lock. Per-arm flags
+are what changed that, and they are now load-bearing rather than a convenience.
+
+| arm | clean, measured on one box |
+|---|---|
+| `--evidence-only` | 7 s |
+| `--coverage-only` | 8 s |
+| `--narration-only` | 8 s |
+| `--strict-only` | 13 s |
+| `--determinism-only` | 19 s |
+| `--polish-only` | 26 s |
+| `--segments-only` | 29 s |
+| `--overlay-only` | 31 s |
+| `--failure-only` | 48 s |
+| `--web-only` | 123 s |
+| `--content-only` | 148 s |
+| `--terminal-only` | 186 s |
+| the whole suite | 622 s |
+
+`--strict-only` was added *for* this file. The two takes `strict=True` must
+refuse record in thirteen seconds between them, and were reachable only from
+`--web-only` and `--terminal-only` — 123 s and 186 s. **An assertion is only as
+gradeable as its cheapest arm**, and that is the first thing this manifest
+turned into a number.
+
+### What an entry has to satisfy
+
+1. `old` matches **exactly once** in the file it targets, or the whole run
+   aborts. This is `tests/unit`'s guard and it is not weakened here: an
+   injection that silently does nothing would otherwise "prove" a hollow
+   assertion is sound.
+2. `sites` names the check function(s) whose assertions must fire, and each
+   `must_contain` string must be a **literal in one of them** — verified
+   statically, before anything records, one level into the helpers a check
+   delegates its wording to. A reworded message is a refusal at the start of
+   the run rather than a puzzling FAIL twelve minutes in.
+3. `must_contain` must then appear in that arm's **failure list**, not merely
+   somewhere on stderr and not merely in the exit code.
+   [#135](https://github.com/rogvid/skills/issues/135) is why: an injected
+   suite went red while every assertion naming that fault passed, and the red
+   came from an unrelated premise guard whose stated remedy would have
+   re-greened the bug.
+4. The same arm is run **clean** first and must pass. Without that, an arm red
+   for any other reason would certify every injection aimed at it.
+
+Nothing is patched in the working tree — each entry stages its own copy of the
+skill, the fixture and `tests/smoke` under a temp directory — and a run that
+finds another suite holding the machine lock aborts rather than reporting the
+refusal as an assertion that failed.
+
+### What it covers
+
+Sixteen entries, chosen by *what a silent failure would cost* rather than by
+what is easy to break. Measured end to end, twice, on the box the arm table
+above was measured on: **16.3 and 16.4 minutes**, five clean baselines
+included.
+
+| arm | entries | what a miss would mean |
+|---|---|---|
+| `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
+| `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
+| `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
+| `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
+| `--content-only` | 3 | the recorder stops noticing a recording nobody can watch, starts warning about honest demos that hold still, or goes back to scoring the whole frame (issue #17's anti-correlated metric) |
+
+### What it does **not** cover
+
+- **23 of `tests/smoke`'s 32 check functions have no entry**, and the harness
+  prints every one of them as `ungraded` at the end of a run rather than
+  leaving the boundary to somebody's memory. The large ones are there for cost:
+  `check_take`, `check_timeline`, `check_beat_frames`, `check_issues`,
+  `check_evidence` and `check_caption` live on `--web-only`/`--terminal-only`
+  (123 s and 186 s an injection), and `check_determinism`, `check_merge_offset`
+  and the narration pair each carry their own arm nobody has aimed an entry at
+  yet. Adding one is cheap in effort and expensive in wall clock; that trade is
+  the thing to think about, not the count, and
+  [#173](https://github.com/rogvid/skills/issues/173) is where it is written
+  down with the numbers.
+- **It does not find assertions nobody wrote.** Every entry names a message
+  that already exists. A behaviour with no check at all is invisible here —
+  that is [#103](https://github.com/rogvid/skills/issues/103)'s shape and still
+  needs a person.
+- **It is not mutation testing**, and that was considered and rejected in #136
+  with the numbers: ~2,340 naive sites against a suite this expensive is 52-139
+  hours serial, and half of `web.py` is JavaScript inside string literals no
+  Python mutation operator can reach.
+- **An entry proves an assertion can fail for *that* break**, not for every
+  break of the same subject. Three entries aim at the overlay probe because one
+  would only have shown the probe is wired up, not that it is wired up in both
+  directions.
+- **It cannot tell a right reason from a coincidental one.** The check is that
+  the named message appears; a message that appeared for an unrelated reason
+  with the same wording would pass. The narrower the `must_contain`, the less
+  room that leaves, which is why the 20-character floor exists.
+- **The baseline is one clean run per arm, not one per entry.** An arm that
+  fails intermittently can still be green for its baseline and red for an
+  injection for the wrong reason. What protects against that is the *named*
+  message rather than the exit code, which is the same protection #135 asked
+  for.
+
+### When it runs
+
+- **Every push** — `tests/smoke-inject --self-test`, in ci.yml's `unit` job. It
+  records nothing and costs nothing, and it is what stops the harness itself
+  from reporting PASS on no evidence: each guard is handed the input it exists
+  to refuse and has to refuse it.
+- **Nightly, and on demand** — the whole manifest, in
+  `.github/workflows/smoke-inject.yml`. Not per-push: CI already pays ~10
+  minutes for `smoke` on every commit, and what rots here is an *assertion*,
+  which rots over weeks rather than commits.
+- **On a pull request labelled `fault-inject`** — for the diffs where an
+  assertion can quietly stop grading: `tests/smoke`, `content.py`,
+  `coverage.py`, or anything that changes what the recorder measures.
+
+### Registering an entry
+
+Add an `Injection(...)` to `INJECTIONS` in `tests/smoke-inject` naming the
+break, the arm, the check function and the message. Run
+`tests/smoke-inject --only <part of its name>` and watch it go from FAIL to
+PASS as you get the message right. If the only arm that reaches your assertion
+costs three minutes, that is worth saying out loud in the pull request — the
+cheap arm that would fix it is usually twenty lines of `run_phases`, which is
+exactly where `--strict-only` came from.
+
 ## Known gaps
 
 Things a pass does **not** prove. They are listed because an assertion nobody
@@ -1569,3 +1728,9 @@ like coverage for a whole review round and could not fail at all: a whole-frame
 contrast score that a blank recording *beat*, and a cursor-position check that
 was measuring Playwright's `click()` rather than the recorder's `move_to()`. An
 assertion nobody has watched fail is a comment.
+
+**Then register it**, if the assertion is one whose silent failure would cost
+something: an `Injection(...)` in `tests/smoke-inject` turns the break you just
+performed by hand into one that re-runs nightly. See **The injection manifest**
+above for the contract. The hand-injection stays the first step — the entry is
+how it stays proven after you have moved on, which is the half that was missing.
