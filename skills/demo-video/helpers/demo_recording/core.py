@@ -693,7 +693,8 @@ class _DemoBase:
                 f"plausible wrong screen rather than failing loudly — check the "
                 f"stills against the app by hand this once, and pass "
                 f"deterministic=False (or DEMO_VIDEO_DETERMINISTIC=0) if "
-                f"anything looks off. See SKILL.md, 'Determinism'.",
+                f"anything looks off. See the skill's "
+                f"reference/determinism.md.",
                 file=sys.stderr,
             )
         else:
@@ -703,8 +704,8 @@ class _DemoBase:
                 f"are still pinned, but the page's clock runs, so anything the "
                 f"app renders from it differs between takes and two recordings "
                 f"of this storyboard will not match. Recorder("
-                f"deterministic=True) freezes it; read SKILL.md's 'Determinism' "
-                f"section first, it changes what some apps do.",
+                f"deterministic=True) freezes it; read the skill's "
+                f"reference/determinism.md first, it changes what some apps do.",
                 file=sys.stderr,
             )
 

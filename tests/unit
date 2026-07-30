@@ -35,6 +35,8 @@ before treating a green run as coverage of the recorder.
 from __future__ import annotations
 
 import argparse
+import ast
+import io
 import os
 import re
 import shutil
@@ -42,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tokenize
 import unittest
 from pathlib import Path
 
@@ -1049,6 +1052,224 @@ class DocSymbols(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# No shipped file points at a place in the documentation that is not there
+# --------------------------------------------------------------------------
+#
+# The sibling defect of the sweep above, and the one this repo keeps re-making:
+# not a document naming a symbol the code lacks, but **code naming a place in
+# the documentation that a move deleted**. `core.py` told every take with
+# determinism off to "read SKILL.md's 'Determinism' section first" for the four
+# releases after #146 moved that section to `reference/determinism.md`. It was
+# on stderr, on the ordinary successful path, and a fresh agent did exactly what
+# it said and found nothing (issue #164). Same shape as the four stale comments
+# #155 repaired and the module name #166 removed — a move that left a pointer.
+#
+# Two kinds of pointer, because a pointer names a place two ways:
+#
+#   * **A quoted SKILL.md section name** — `SKILL.md's 'Determinism'`, or
+#     `"What this records…" in SKILL.md` — has to be a heading in SKILL.md.
+#   * **A `reference/<name>.md` path** has to be a file.
+#
+# Swept out of the package's *prose* — comments, docstrings and the strings it
+# prints — and out of the shipped documents, because the same pointer rots in
+# both and the reader cannot tell which file it came from.
+#
+# **What this does not check**, so nobody reads it as more than it is:
+#
+#   * Unquoted pointers. `reference/determinism.md` says "the Process section of
+#     [SKILL.md](../SKILL.md), step 2" and README's layout tree annotates
+#     `reference/` in prose; neither is quoted, and a rule loose enough to catch
+#     them matches ordinary English. Quoting is the author saying "this is a
+#     name in that document", which is the decidable half.
+#   * Anchors and step numbers. "step 2 of Process" resolving to the right step
+#     is not decidable from the heading list.
+#   * That a section still *says* what the pointer claims. A heading that
+#     survived a rewrite of everything under it passes here.
+#   * SKILL.md's own `](reference/…)` links are graded twice, here and by
+#     `SkillDocs`. That overlap is deliberate and not the point of this sweep:
+#     of the 59 path sites today, 52 are SKILL.md's links and 7 are what
+#     `SkillDocs` cannot see — README's three bare prose mentions, and the four
+#     the *package* prints or comments (`core.py` ×3, `content.py` ×1). #164
+#     was in that second group, and until #170 it had no members at all.
+#
+# The section sweep's haystack is small and stated rather than implied: **3
+# sites naming 1 heading**, all of them pointing at the secret-boundary section
+# at the top of SKILL.md. That is worth guarding — it is the section a reader
+# is sent to before pointing the recorder at anything, from two docstrings and
+# a reference file — but it is not a broad check, and the floor below is at
+# today's exact count so that thinning it further is somebody's explicit
+# decision rather than a drift.
+
+# A quoted span. No quote characters inside, so it stops at the first closer;
+# newlines are allowed because a docstring wraps its section names across lines.
+POINTER_QUOTED = r"['\"]([^'\"]{3,120}?)['\"]"
+# `SKILL.md's 'Determinism'` / `SKILL.md, 'Determinism'` — name after the file.
+# Nothing in the skill is phrased this way *today*, because the two sites that
+# were are what #164 fixed. It stays because that is the phrasing the defect
+# took, and the injection that reproduces #164 verbatim is what exercises it.
+POINTER_AFTER_RE = re.compile(r"SKILL\.md(?:'s)?[^\n]{0,24}?" + POINTER_QUOTED)
+# `"What this records…" in SKILL.md` / `… at the top of [SKILL.md]` — before it.
+POINTER_BEFORE_RE = re.compile(POINTER_QUOTED + r"[^\n]{0,30}?\[?SKILL\.md")
+POINTER_PATH_RE = re.compile(r"\breference/[A-Za-z0-9_-]+\.md\b")
+
+# Below these many *sites*, the extraction stopped extracting and "every
+# pointer resolves" holds over an empty set — the catalogue's vacuous sweep.
+# Today: 3 section sites (`web.py`, `terminal.py`, `reference/terminal.md`) and
+# 59 path sites. The path floor is a floor and has room; the section floor is
+# at today's count for the reason above.
+POINTER_SECTION_FLOOR = 3
+POINTER_PATH_FLOOR = 40
+
+
+def _py_prose(path: Path) -> list[str]:
+    """A module's human-readable text: comments, docstrings, printed strings.
+
+    Read through `ast` and `tokenize` rather than off the raw file, because
+    Python's own quoting is in the way of the question. A message the recorder
+    prints is four adjacent f-string literals in the source and one sentence on
+    the user's terminal, and the section name inside it is single-quoted only
+    because the literal around it is double-quoted. The parser joins the pieces
+    and strips the delimiters, so what is searched is what the user reads.
+    """
+    src = path.read_text(encoding="utf-8")
+    units = [
+        tok.string.lstrip("#")
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+        if tok.type == tokenize.COMMENT
+    ]
+    tree = ast.parse(src)
+    # An f-string's literal pieces are Constants *inside* the JoinedStr, so
+    # walking naively yields every message twice — once whole, once in pieces.
+    in_fstring = {
+        id(part)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        for part in node.values
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            units.append(
+                "".join(
+                    part.value
+                    if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                    else "{}"
+                    for part in node.values
+                )
+            )
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in in_fstring
+        ):
+            units.append(node.value)
+    return units
+
+
+def pointer_sources() -> dict[str, list[str]]:
+    """Every shipped file that can carry a pointer -> its prose, by unit."""
+    sources = {
+        f"helpers/demo_recording/{py.name}": _py_prose(py)
+        for py in sorted((_PKG_PARENT / "demo_recording").glob("*.py"))
+    }
+    for doc in doc_files():
+        sources[doc.name] = [doc.read_text(encoding="utf-8")]
+    return sources
+
+
+def skill_headings() -> set[str]:
+    """SKILL.md's headings, whitespace-normalised.
+
+    Fenced blocks are skipped: the storyboard template is Python whose comments
+    and PEP 723 metadata start with `#`, and counting `# /// script` as a
+    heading would let a pointer at a section that does not exist pass by
+    matching a line of sample code.
+    """
+    headings, fenced = set(), False
+    for line in (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("#"):
+            headings.add(" ".join(line.lstrip("#").split()))
+    return headings
+
+
+def section_pointers() -> list[tuple[str, str]]:
+    """(section name, file) for every quoted SKILL.md section name shipped."""
+    sites = []
+    for where, units in pointer_sources().items():
+        for unit in units:
+            seen: set[tuple[int, int]] = set()
+            for pattern in (POINTER_AFTER_RE, POINTER_BEFORE_RE):
+                for match in pattern.finditer(unit):
+                    if match.span(1) in seen:  # both patterns hit one pointer
+                        continue
+                    seen.add(match.span(1))
+                    sites.append((" ".join(match.group(1).split()), where))
+    return sites
+
+
+def path_pointers() -> list[tuple[str, str]]:
+    """(reference path, file) for every `reference/*.md` the skill names."""
+    return [
+        (match.group(0), where)
+        for where, units in pointer_sources().items()
+        for unit in units
+        for match in POINTER_PATH_RE.finditer(unit)
+    ]
+
+
+class DocPointers(unittest.TestCase):
+    def test_every_skill_md_section_the_skill_quotes_is_a_heading(self):
+        sites = section_pointers()
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(sites),
+            POINTER_SECTION_FLOOR,
+            f"only {len(sites)} quoted SKILL.md section names found — the "
+            f"extraction is broken, and 'they all resolve' would hold trivially",
+        )
+        # No floor on the heading set: a scan returning too few makes pointers
+        # look dead, which the assertion below already catches, and one
+        # returning too many is what skipping fenced blocks prevents. A count
+        # here would be the catalogue's dominated assertion.
+        headings = skill_headings()
+        dead = sorted(
+            {f"{name!r} (in {where})" for name, where in sites if name not in headings}
+        )
+        self.assertEqual(
+            dead,
+            [],
+            f"{len(dead)} pointer(s) at a SKILL.md section that does not "
+            f"exist: {dead}. The section was renamed or moved out to "
+            f"reference/, and the pointer stayed. Point at wherever the "
+            f"material went — a reader who is told to look in SKILL.md and "
+            f"finds nothing concludes the skill is wrong about itself.",
+        )
+
+    def test_every_reference_document_the_skill_names_exists(self):
+        sites = path_pointers()
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(sites),
+            POINTER_PATH_FLOOR,
+            f"only {len(sites)} reference/*.md paths found — the extraction "
+            f"is broken, and 'they all resolve' would hold trivially",
+        )
+        dead = sorted(
+            {
+                f"{path} (in {where})"
+                for path, where in sites
+                if not (SKILL_DIR / path).is_file()
+            }
+        )
+        self.assertEqual(
+            dead,
+            [],
+            f"{len(dead)} pointer(s) at a reference document that is not there: {dead}",
+        )
+
+
+# --------------------------------------------------------------------------
 # failure.py — the dump a take that did not finish leaves behind (issue #147)
 # --------------------------------------------------------------------------
 #
@@ -1800,6 +2021,46 @@ INJECTIONS = [
         'DOC_MODULE_RE = re.compile(r"\\b[A-Za-z_][A-Za-z0-9_]*\\.py\\b")',
         'DOC_MODULE_RE = re.compile(r"\\b[A-Za-z_][A-Za-z0-9_]{80,}\\.py\\b")',
         ["DocSymbols.test_every_module_the_docs_name_is_a_file_in_the_package"],
+    ),
+    (
+        # Issue #164 verbatim: this is the string the recorder printed on every
+        # take with determinism off for the four releases after #146 moved that
+        # section out to reference/determinism.md.
+        "the recorder's stderr points at a SKILL.md section that was moved out",
+        "core.py",
+        '                f"deterministic=True) freezes it; read the skill\'s "\n'
+        '                f"reference/determinism.md first, it changes what some apps do.",',
+        '                f"deterministic=True) freezes it; read SKILL.md\'s "\n'
+        "                f\"'Determinism' section first, it changes what some apps do.\",",
+        ["DocPointers.test_every_skill_md_section_the_skill_quotes_is_a_heading"],
+    ),
+    (
+        # The other half of the same defect, in the sweep that grades a path
+        # rather than a heading — and in README's *prose*, which is one of the
+        # seven sites `SkillDocs`'s link check structurally cannot see.
+        "a shipped document names a reference file that is not there",
+        "README.md",
+        "than exactly — `reference/review.md` says how far and why.",
+        "than exactly — `reference/reviews.md` says how far and why.",
+        ["DocPointers.test_every_reference_document_the_skill_names_exists"],
+    ),
+    (
+        # Both sweeps above are worth something only while their extraction
+        # still extracts, and each has an extraction of its own. Matching
+        # nothing makes "every pointer resolves" true over an empty set and the
+        # suite goes green *because* the check stopped working.
+        "the section-pointer extraction matches nothing, so that sweep goes vacuous",
+        "tests/unit",
+        'POINTER_BEFORE_RE = re.compile(POINTER_QUOTED + r"[^\\n]{0,30}?\\[?SKILL\\.md")',
+        'POINTER_BEFORE_RE = re.compile(POINTER_QUOTED + r"[^\\n]{300,}?\\[?SKILL\\.md")',
+        ["DocPointers.test_every_skill_md_section_the_skill_quotes_is_a_heading"],
+    ),
+    (
+        "the reference-path extraction matches nothing, so that sweep goes vacuous",
+        "tests/unit",
+        'POINTER_PATH_RE = re.compile(r"\\breference/[A-Za-z0-9_-]+\\.md\\b")',
+        'POINTER_PATH_RE = re.compile(r"\\breference/[A-Za-z0-9_-]{80,}\\.md\\b")',
+        ["DocPointers.test_every_reference_document_the_skill_names_exists"],
     ),
     (
         "a deletion leaves a constant in tests/smoke that nothing reads",
