@@ -78,6 +78,42 @@ that is itself not committed, and all four are in this repo's `.gitignore`
 ([#50](https://github.com/rogvid/skills/issues/50)). See **Commit the
 storyboard, not the media** in the Process section.
 
+## What this does not do
+
+The section at the top of this file is about what you must not point the
+recorder at. This one is about what it will not notice once you have — stated
+so you can write a storyboard around the boundary instead of discovering it in
+review. Each limit below is measured, and the measurements, with the issue
+behind every one, are in [reference/limits.md](reference/limits.md).
+
+- **It will not tell you a card was left up.** A held picture is reported only
+  when a verb that *acts on the app* ran while it was held, so a demo that
+  raises an `interlude()` and then only captions, holds and takes stills behind
+  it passes in silence — measured at 31.5 s of a 34 s take. Take cards down
+  explicitly. A caption long enough to wrap can also silence the same warning
+  on an app's own modal, so keep captions to one line.
+- **A frame is aimed at a beat, not stamped with one.** Chromium's screencast
+  loses wall time during idle stretches, so an event can land up to 0.75 s
+  earlier in `demo.mp4` than `timeline.json` puts it. Read a review frame as
+  *around* its beat, and do not build anything that needs a beat timestamp to
+  be exact to the frame.
+- **Sixty seconds buys about twenty screens.** At the pacing floors below, a
+  demo shows roughly one new screen every 3 s — 69% of a real 61.2 s take was
+  a picture already shown. A feature spanning two surfaces does not fit the
+  30–60 s target, and the honest answers are a longer video or two demos, not
+  faster captions.
+- **A demo of an error path records a problem.** A non-zero exit is logged as
+  an issue and is fatal under `strict=True`, with no way to say it was the
+  point — so leave strict off for that demo, and say in the pull request which
+  recorded issue is the demo's subject.
+- **A stitched demo's attribution is unproven.** An issue recorded in segment
+  two can name a beat of segment one, and a coverage row can lose the segment
+  it belongs to. Check both against the parts before handing them to a
+  reviewer.
+- **CI does less for a fork.** A pull request from a fork gets no demo comment;
+  its beat table and artifact link are on the workflow run's summary page
+  instead.
+
 ## Reference — read these when you reach them, not before
 
 This file is what you need to write and run a storyboard. Everything below is
@@ -87,6 +123,7 @@ read them all up front, and do not skip one the text tells you to open.
 
 | File | Read it when |
 |---|---|
+| [reference/limits.md](reference/limits.md) | Before planning a demo, when two of a take's artifacts seem to contradict each other, or before reading a green run as coverage — every limit above, with its measurement |
 | [reference/determinism.md](reference/determinism.md) | Before `deterministic=True`. A frozen clock changes what an app does, and usually does it silently |
 | [reference/timeline.md](reference/timeline.md) | When reading `timeline.json`/`timeline.md`, when a take warns about its `content`, or when consuming the beat log as a contract |
 | [reference/review.md](reference/review.md) | At Process step 6 — handing a take to a reviewing agent, reading `evidence/`, or recording against a ticket with `criteria=` |

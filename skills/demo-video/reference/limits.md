@@ -1,0 +1,332 @@
+<!-- Part of the demo-video skill. SKILL.md is the entry point and
+     links here at the point of use; this file is not meant to be read cover
+     to cover before writing a storyboard. -->
+
+# The boundary: what this does not do
+
+> Read when planning a demo the 60-second budget will not hold, when a take's artifacts seem to disagree with each other, or before reading a green suite as coverage. SKILL.md's **What this does not do** is the summary; this is each limit with the measurement behind it.
+
+Everything here was measured and then left in place. That is a decision, not a
+backlog: recording a real application faithfully is an asymptotic property, and
+a project that tracks every gap in one as an open defect implies a swarm of
+latent bugs and converges on nothing. Declaring the boundary instead means a
+newly found gap outside it is a line in this file, and an author who knows the
+boundary can work around it. Each section names the issue it supersedes, and
+carries that issue's numbers, so the evidence outlives the issue.
+
+Two limits live elsewhere and are not repeated. The recorder hides nothing that
+reaches the screen — the top of [SKILL.md](../SKILL.md), and the reason there
+is no masking verb. A frozen clock changes what an app does and usually does it
+silently — [determinism.md](determinism.md).
+
+## What the recorder will not notice about your app
+
+### A demo of an error path always records a problem, and `strict=True` cannot be told it was wanted
+
+Demonstrating that a program rejects bad input is an ordinary thing to demo,
+and the recorder logs it as a fault. Measured on `examples/ticket-queue`, a
+48-beat take on 2026-07-26:
+
+```
+demo-video: 1 problem(s) recorded during this take (nonzero_exit x1)
+  [19.01s] nonzero_exit in beat 13 (run): './tickets list --status frozen' exited 2
+```
+
+`timeline.md` gets an Issues section saying the same. Two consequences. First,
+`strict=True` is unusable for such a demo — `nonzero_exit` is fatal under
+strict, and there is no per-call way to say "this exit is the point", so the
+choice is between checking the app and demoing the error. Second, and worse, an
+Issues section carrying an expected entry teaches its reader to skim, and **a
+real regression would arrive in the same slot**. Both reviewers of that demo
+remarked on it unprompted.
+
+What to do: record error-path demos with strict off, and say in the pull
+request which recorded issue is the demo's subject, so a reader knows which
+line is not supposed to be there. There is no `expect_exit=` today
+([#93](https://github.com/rogvid/skills/issues/93)).
+
+### The evidence file and the beat log describe the same element differently
+
+`evidence/beat-NN.json`'s `html` strips every value-bearing attribute —
+`data-*`, `title`, `alt`, `placeholder`, `aria-label`, `href`, `src` — from
+every element, deliberately: an attribute nothing renders was in no frame, no
+still, no caption and no narration clip, and treating it as evidence of
+rendering is how a demo comes to claim something it never showed. But
+`timeline.json` records the beat's `selector` verbatim, so a reviewer handed
+both sees `button[data-status='open']` in one file and, in the other, that same
+button carrying only `type` and `aria-pressed`.
+
+Measured from a reviewing agent's own words on the 48-beat
+`examples/ticket-queue` take: it spent a paragraph on the discrepancy, called
+it an "unresolved inconsistency in the artifacts themselves", and could not
+settle it — the three resolutions available to it were "the app is wrong", "the
+log is wrong", "the dump is wrong", and all three are false. Nothing in the
+file says the attributes were removed; only this skill's documentation does
+([review.md](review.md) states it).
+
+What to do: when handing `evidence/` to a conformance reviewer, tell it the
+attributes are stripped, in the same message that hands it the files
+([#92](https://github.com/rogvid/skills/issues/92)).
+
+## What the timing guarantees are worth
+
+### A frame is aimed at a beat; it is not stamped with one
+
+Chromium's screencast emits a frame when the page paints and pads nothing when
+it does not, so an idle stretch costs the recording wall time that never
+reaches the webm — and every frame after it sits that much earlier in
+`demo.mp4` than `timeline.json` says. It is a discrete step, not a rate error:
+one 32-second take was measured flat at −30 ms for its first five probes and
+flat at −580 ms for its last five.
+
+The suite's bars are asymmetric because the two directions have different
+causes: `MAX_LOG_EARLY_S = 0.25` for the log running ahead of the frame
+(nothing about capture can move an event later, so that direction is the log's
+own error) and `MAX_CAPTURE_LOSS_S = 0.75` for the video running ahead of the
+log (`tests/smoke:680-681`). Both storyboards inject a small animated element
+for their whole length to keep the compositor busy, which removes the confound
+and lets the bar grade the beat log. **A real demo has no such ticker.** What
+the ticker cannot cover is the ~0.7 s between the page being created and the
+first line of storyboard running — the recorder's own setup, which no test code
+can reach — and roughly **1 web take in 12** loses that window whole.
+
+What to do: read a review frame as *around* its beat. Do not build anything
+that needs a beat timestamp to be exact to the frame, and when a frame and its
+caption disagree by a fraction of a second, suspect the capture before the
+storyboard ([#18](https://github.com/rogvid/skills/issues/18)).
+
+### Sixty seconds buys about twenty screens
+
+SKILL.md says to aim for 30–60 s. That holds for a feature on one surface and
+does not hold for one that spans two, and the difference is arithmetic rather
+than discipline. Measured on the first real feature this skill was pointed at
+(`examples/ticket-queue`, PR #94, four acceptance criteria across a web UI and
+a CLI): **61.2 s**, with every caption already shortened once; the first-pass
+storyboard was 60.2 s. Neither is padded — they are one beat per criterion plus
+the two the skill's own pacing rules require around each.
+
+| | seconds | share |
+|---|---:|---:|
+| web segment | 37.8 | 62% |
+| terminal segment | 23.4 | 38% |
+| a picture already shown | 41.9 | 69% |
+| a picture not shown before | 19.3 | 31% |
+
+20 of 48 review frames are a new picture; 28 are the previous picture with a
+different line under it. That is not waste — it is the ~1.5 s a change needs to
+register and the `0.6 + 0.34·words` a caption needs to be read. It is also the
+ceiling: **about one new screen every 3 seconds**, so a minute buys roughly
+twenty screens, and both fresh-eyes reviewers of that demo still asked for
+more.
+
+What to do: budget by the rate before writing the storyboard. A two-surface
+feature does not fit, and the honest answers are a longer video or two demos —
+not faster captions, which only makes the reviewers unable to read
+([#96](https://github.com/rogvid/skills/issues/96)).
+
+### A terminal segment's opening card can still miss the first frame
+
+`TerminalRecorder(interlude="…")` raises the card before capture starts, which
+is why SKILL.md tells you to open a terminal segment that way. Two residues.
+
+Nothing stops the old shape. `interlude()` as a take's **first statement** is
+~290 ms too late, so the segment opens on an empty terminal with a lone prompt
+and no warning is printed — the guidance is documented in two places and
+enforced in none ([#114](https://github.com/rogvid/skills/issues/114)).
+
+And the constructor argument is not proof against a loaded runner. The smoke
+check reads the mean luma of a corner strip outside the terminal window on the
+recording's first frame: 26 with the card up, 226 bare. Across three `main` CI
+runs and six local runs it read **26**, with the card covering 2.65–2.85 s. One
+CI run read **128** and 0.00 s of cover — neither state, which is what a card
+still becoming opaque looks like. One failure in four observed CI runs, none in
+six local ones ([#128](https://github.com/rogvid/skills/issues/128)).
+
+What to do: use the constructor argument, and look at `frames/beat-00.png` of a
+terminal segment before shipping it.
+
+## Where the picture measurement goes quiet
+
+The `content` report exists so that a take whose beats all succeeded over a
+recording nobody can watch does not read as healthy. [timeline.md](timeline.md)
+explains what it measures and lists five limits of the held-picture arm. Three
+of those five can hide a real occlusion; two of the three are worth an author's
+attention before recording, and both are here with their numbers.
+
+### An occluder that spans only narration is never reported
+
+A held stretch warns only when a verb that *acts on the app* began inside it —
+without that correlation a healthy touring demo (22.0 s held) is
+indistinguishable from a card over the app (23.0 s held), and the check warned
+on both. So a card raised and never taken down, with only captions, holds and
+stills behind it, is silent however long it stays up.
+
+Measured, by adding one line to a healthy fixture storyboard: an `interlude()`
+raised after the command and never cleared covered **31.5 s of a 34 s take**.
+`static_for: 31.5` against `static_limit: 15.0`, every entry in `static_beats`
+marked `"acting": false`, `warnings: []`. The still captured during it is the
+card. There is no third answer available from the frames — the measured region
+excludes the caption bar on purpose, so an honest narrated tour and a card left
+up are byte-identical, and warning on the pair reinstates the false positive.
+
+Note one rough edge that follows from it: the stderr line for a non-warning
+over-limit stretch still ends "…which is what a still screen is supposed to
+look like". On this shape it is not. Read the clause as a statement of which
+beats were inside the stretch, not as a certificate.
+
+What to do: take cards down explicitly. Do not rely on this check to notice one
+you forgot ([#123](https://github.com/rogvid/skills/issues/123)).
+
+### A wrapping caption can split a real occlusion into short stretches
+
+The measured rect drops its bottom fifth so the recorder's own caption bar
+cannot supply the contrast — `CONTENT_CAPTION_TRIM = 0.2`, a fixed fraction. A
+caption long enough to wrap grows *upward*, past the trim and into the measured
+region: **266 changed pixels per wrap**, against a `CONTENT_MOVED_PIXELS`
+threshold of 4. Every caption swap then reads as the picture moving.
+
+Against the recorder's own `interlude()` card this cannot matter: the card is
+opaque at `z-index: 2147483647` and the caption bar sits at 2147483646, so with
+the card up no caption is drawn at all. Browser top-layer content — a
+`<dialog>.showModal()`, a popover — behaves the same way. But an **app-level**
+overlay or modal is ordinary app DOM, and the caption bar paints over it, so
+the swaps keep registering and a genuinely occluded stretch is split into
+pieces that each sit under the limit. Measured: 25 s becoming 11 s + 8 s + 6 s,
+and the warning goes silent.
+
+The trim is still a fixed fraction rather than the caption's measured box, and
+no fixture records a wrapping caption over a covered take, so this shape is
+documented rather than graded
+([#124](https://github.com/rogvid/skills/issues/124)).
+
+What to do: keep captions to one line if you want `static_for` to mean what it
+says.
+
+### If your app paints slowly, you are the first to run that path
+
+A web take's recording begins while the page is still `about:blank`, so the
+recorder covers the blank opening with the first frame that painted — unless
+the gap is longer than `OPENING_HOLD_LIMIT_S = 1.5`, past which it holds
+nothing and warns instead, on the argument that an app taking that long to
+paint is telling the viewer something true about itself.
+
+**Nothing exercises the declining branch.** The fixture app paints in
+0.30–0.50 s on this machine, so every recorded take in the suite takes the
+cover path; set the constant to 100 and the whole suite still passes. It is a
+config-hidden path in the exact sense the reviewer's catalogue means — the
+fixture cannot reach it, so the constant guarding it is graded by nothing.
+
+The branch is warn-only and fails safe: over the limit the recorder does
+*nothing* to the picture, says so on stderr, and the `gap` measured afterwards
+off the encoded file warns on its own. So the failure mode is a demo that opens
+blank, which is the state that existed before the hold was added
+([#126](https://github.com/rogvid/skills/issues/126)).
+
+What to do: if your app's first paint is slower than 1.5 s, watch the opening
+seconds of the first take rather than assuming they were repaired.
+
+## What a stitched demo's artifacts promise
+
+### A problem recorded in segment two can be attributed to segment one's beat
+
+`stitch()` merges each segment's `issues` as well as its beats: every issue's
+`t` is offset by the cumulative duration of the parts before it, and its `beat`
+is re-pointed from that segment's own beat list at the merged one. Neither line
+is exercised. The suite's segmented take records the healthy fixture under
+`strict=True` — deliberately, since that is the only assertion that can fail on
+*over*-reporting — so it records no issues at all.
+
+What that leaves open is a confidently wrong attribution in the one file a
+reviewer opens to find out what broke: an issue from segment two named against
+whatever beat of segment one happens to sit at that index
+([#51](https://github.com/rogvid/skills/issues/51)).
+
+What to do: on a stitched demo, check a reported issue against its own
+segment's `.seg.timeline.json` before believing the beat it names — pass
+`keep_parts=True` to `stitch()` if you need those files to survive.
+
+### A coverage row can lose the segment it belongs to
+
+`coverage_report` copies each claimed beat's `segment` into the coverage table
+(`coverage.py:117`), and `timeline.md` renders a claim as ``beat 5 (`part2`)``.
+Nothing pins it. `check_coverage` grades `index`, `t_start` and `still` against
+the beat list; `check_coverage_merge` *constructs* beats carrying `part1` and
+`part2` and then asserts only on `index`. Replace that line with
+`"segment": None` and `tests/smoke --coverage-only` stays green — one of six
+injections against that arm, and the only survivor.
+
+Beat indices are per-segment before merging, so a reviewer of a stitched demo
+handed "beat 5" with no segment has no way to know which beat 5. Pointing a
+conformance reviewer at the right frame is the coverage table's whole job
+([#137](https://github.com/rogvid/skills/issues/137)).
+
+What to do: on a stitched demo, check that the coverage table names a segment
+per row before handing it over.
+
+## What CI will and will not do for you
+
+### A pull request from a fork gets no comment
+
+The workflow posts its comment with `github.token` on a `pull_request` event.
+For a pull request from a fork that token is read-only whatever the
+`permissions:` block says, so the `POST /issues/{n}/comments` call fails and
+the contributor gets no beat table and no artifact link where an internal
+contributor gets both.
+
+The information is not lost: `demo-comment` also writes the body to
+`$GITHUB_STEP_SUMMARY`, which does work on a fork run. It is one click deeper
+than the pull request and invisible to anyone reading the conversation.
+
+The obvious fix is the one that must not be taken. `pull_request_target` runs
+the workflow from the base branch with a writable token and the fork's code
+checked out — and this workflow's job is precisely to run arbitrary code from
+the branch (`uv run record.py`, plus the caller's `app-command`). That would
+hand a fork a writable token and the repository's secrets, which is worse than
+no comment ([#118](https://github.com/rogvid/skills/issues/118)).
+
+What to do: for a fork's pull request, point the reviewer at the workflow run's
+summary page.
+
+### How much a green suite is worth on a third encoder
+
+The suite's content axis compares a take with a moving picture against a take
+with a covered one by PSNR, and asserts the **gap** — a relative form that
+replaced an absolute `>= 40 dB` bar which went red on CI at 39.8 dB after
+measuring 47.5 dB locally. Only one of the two readings is stable:
+
+| | this box | CI runner |
+|---|---:|---:|
+| moved | 25.5 dB | 25.9 dB |
+| held | 47.5 dB | 39.8 dB |
+| **gap** | **22.0 dB** | **13.9 dB** |
+
+The moved reading is content-determined and barely travels. The held one is a
+still frame, so it is entirely at the mercy of how a given x264 build
+re-quantises — 7.7 dB of spread across two machines. `CONTENT_PSNR_GAP_DB = 8.0`
+(`tests/smoke:329`) therefore has 5.9 dB of margin on the worse of the two
+encoders anyone has run it on, which is fine today and is not obviously fine on
+a third ([#122](https://github.com/rogvid/skills/issues/122)).
+
+## Paths that only your recording takes
+
+Two branches of the recorder run nowhere in the test suite, so the first
+program to exercise either is yours. Both are listed in `tests/README.md`'s
+Known gaps, and both are stated here because they are reached by an ordinary
+storyboard rather than by a maintainer.
+
+**Nothing has ever called the ElevenLabs API.** The narration take grades
+everything a cache *hit* reaches — the key, the pacing, whether the mix carries
+audio — and by construction never takes the miss path, which is what makes it
+fast and offline. So `tts_clip`'s HTTP request, its 429/5xx retry ladder with
+backoff, the `.part`-then-rename that keeps a truncated download out of the
+cache, and every error message it raises are unexercised. A regression there
+costs a take at record time with a legible exception, which is the mildest
+failure shape available — but it is your take that pays it.
+
+**A narration-enabled segment that speaks no lines is ungraded.** Conversion
+gives such a segment a track of `anullsrc` silence so that `stitch()`'s
+`-c copy` concat sees uniform streams across the parts. Every take in the suite
+either narrates or disables speech, so that branch runs nowhere. If you record
+a segmented demo with narration on and one segment carries no captions, listen
+to the stitched audio before shipping it: a mismatched stream is what makes
+`concat` drop every later part's narration, and it does that silently.
