@@ -1,0 +1,436 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright>=1.49"]
+# ///
+"""What the ticket-queue's search does, read off the rendered queue.
+
+    examples/ticket-queue/test                 # run the suite
+    examples/ticket-queue/test --fault-inject  # prove the suite can fail
+
+Every assertion here is written from the **viewer's** side. It starts the real
+`serve`, drives a real browser, and reads the rows the queue painted — their
+`data-id`, and the text a person could read off them. Nothing in this file
+imports, re-implements or re-uses the app's own filter, because a check built
+out of the code under test is blind wherever that code is blind: an assertion
+that asked `visibleTickets()` whether the requester matched would have agreed
+with the bug in issue #132 and reported green.
+
+That independence is not claimed structurally ("it lives in another file"), it
+is demonstrated: `INJECTIONS` breaks the app five different ways — the filter,
+the row's markup, the case fold, the row's identity and the heading count — and
+each break must make a *named* test fire.
+
+The fixture controls matter as much as the assertions. `test_the_search_term_
+appears_in_no_title_and_no_id` is what stops the requester tests from being
+satisfied by a title match; without it, `mira` finding TQ-103 would prove
+nothing about which field was searched.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# The app under test, overridable so --fault-inject can point the suite at a
+# deliberately broken copy without touching the working tree.
+ROOT = Path(os.environ.get("TICKET_QUEUE_ROOT") or Path(__file__).resolve().parent)
+
+_server: subprocess.Popen | None = None
+_playwright = None
+_browser = None
+BASE_URL = ""
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def setUpModule() -> None:  # noqa: N802  (unittest naming)
+    global _server, _playwright, _browser, BASE_URL
+    from playwright.sync_api import sync_playwright
+
+    port = _free_port()
+    BASE_URL = f"http://127.0.0.1:{port}"
+    _server = subprocess.Popen(
+        [sys.executable, str(ROOT / "serve"), "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 20
+    while True:
+        if _server.poll() is not None:
+            raise RuntimeError(f"serve exited with {_server.returncode}")
+        try:
+            with urllib.request.urlopen(f"{BASE_URL}/api/tickets", timeout=1):
+                break
+        except (urllib.error.URLError, ConnectionError, OSError):
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"serve never answered on {BASE_URL}")
+            time.sleep(0.05)
+    _playwright = sync_playwright().start()
+    _browser = _playwright.chromium.launch()
+
+
+def tearDownModule() -> None:  # noqa: N802  (unittest naming)
+    if _browser is not None:
+        _browser.close()
+    if _playwright is not None:
+        _playwright.stop()
+    if _server is not None:
+        _server.terminate()
+        _server.wait(timeout=10)
+
+
+class QueuePage(unittest.TestCase):
+    """One page per test, loaded fresh, read the way a viewer reads it."""
+
+    # The seeded data, restated here rather than imported. A test that derives
+    # its expectations from data/tickets.json cannot notice the app and the
+    # fixture drifting together.
+    ALL_IDS = [f"TQ-10{n}" for n in range(1, 8)]
+
+    def setUp(self) -> None:
+        self.page = _browser.new_page(viewport={"width": 1120, "height": 620})
+        self.page.goto(f"{BASE_URL}/")
+        self.page.wait_for_selector(".ticket")
+
+    def tearDown(self) -> None:
+        self.page.close()
+
+    # -- reading the queue, never asking the app -----------------------------
+
+    def rows(self) -> list[str]:
+        """The ticket ids the queue is currently showing, in order."""
+        return self.page.locator("#ticket-list .ticket").evaluate_all(
+            "els => els.map(e => e.dataset.id)"
+        )
+
+    def row_text(self, ticket_id: str) -> str:
+        """Everything a person can read on one row (hidden text excluded)."""
+        return self.page.locator(f'#ticket-list .ticket[data-id="{ticket_id}"]').inner_text()
+
+    def search(self, term: str) -> None:
+        box = self.page.locator("#queue-search")
+        box.fill("")
+        box.type(term, delay=1)
+        # The list re-renders synchronously on `input`; this only orders the
+        # read after the last keystroke's handler.
+        self.page.wait_for_timeout(50)
+
+    def tickets_json(self) -> list[dict]:
+        return json.loads(
+            urllib.request.urlopen(f"{BASE_URL}/api/tickets", timeout=5)
+            .read()
+            .decode("utf-8")
+        )
+
+    # -- controls ------------------------------------------------------------
+
+    def test_the_queue_lists_every_seeded_ticket_before_any_search(self):
+        # The haystack is non-trivial. Every narrowing assertion below is
+        # meaningless if the queue was already showing one row or none.
+        self.assertEqual(self.rows(), self.ALL_IDS)
+
+    def test_the_search_term_appears_in_no_title_and_no_id(self):
+        # This is the control that gives the requester tests their meaning: if
+        # `mira` or `petrova` ever appears in a title, a match proves nothing
+        # about which field the search compared.
+        for term in ("mira", "petrova", "olsen"):
+            for t in self.tickets_json():
+                self.assertNotIn(term, t["title"].lower(), f"{term} is in a title")
+                self.assertNotIn(term, t["id"].lower(), f"{term} is in an id")
+
+    def test_at_least_one_seeded_address_is_not_already_lower_case(self):
+        # Without this the fixture grades itself: with every address stored in
+        # lower case, dropping the fold on the *requester* side of the
+        # comparison changes no outcome, and the case-fold test above would
+        # pass against a search that had stopped folding it. Fault injection
+        # found exactly that, which is why TQ-103 is "Mira.Haas@…".
+        addresses = [t["requester"] for t in self.tickets_json()]
+        self.assertTrue(
+            [a for a in addresses if a != a.lower()],
+            f"every seeded address is lower case, so nothing tests the fold: {addresses}",
+        )
+
+    # -- AC-3: the requester is searchable ----------------------------------
+
+    def test_a_requester_name_finds_the_ticket_whose_title_lacks_it(self):
+        self.search("mira")
+        self.assertEqual(self.rows(), ["TQ-103"])
+
+    def test_part_of_an_address_finds_that_persons_tickets(self):
+        self.search("petrova@north")
+        self.assertEqual(self.rows(), ["TQ-105"])
+
+    def test_a_shared_address_domain_finds_everyone_on_it(self):
+        # The other half of "part of an address": a fragment several people
+        # share must return all of them, not the first one.
+        self.search("@northwind.example")
+        self.assertEqual(self.rows(), self.ALL_IDS)
+
+    # -- AC-3: and visible, so the viewer can see why the row matched --------
+
+    def test_the_requester_is_legible_on_the_matching_row(self):
+        self.search("mira")
+        text = self.row_text("TQ-103")
+        self.assertIn("mira.haas@northwind.example", text.lower())
+        box = self.page.locator(
+            '#ticket-list .ticket[data-id="TQ-103"] .ticket-requester'
+        ).bounding_box()
+        self.assertIsNotNone(box, "the requester has no box on screen")
+        self.assertGreater(box["width"], 40)
+        self.assertGreater(box["height"], 6)
+
+    def test_every_listed_row_shows_its_own_requester(self):
+        # Correspondence, not a count: row K carries K's address, so a row that
+        # rendered someone else's cannot pass by arithmetic.
+        by_id = {t["id"]: t["requester"] for t in self.tickets_json()}
+        for ticket_id in self.rows():
+            self.assertIn(by_id[ticket_id].lower(), self.row_text(ticket_id).lower())
+
+    def test_the_placeholder_no_longer_says_title_or_ticket_id(self):
+        placeholder = self.page.locator("#queue-search").get_attribute("placeholder")
+        self.assertNotEqual(placeholder, "Title or ticket id")
+        self.assertIn("requester", (placeholder or "").lower())
+
+    # -- the criteria #132 must not regress ---------------------------------
+
+    def test_search_folds_case_in_both_directions(self):
+        # AC-1. Typing `invoice` against a title reading "Invoice PDF …" only
+        # grades the fold applied to the *data*; a search that stopped folding
+        # the typed term would still pass it. So type the term in the case the
+        # data does not use, on a title match and on a requester match.
+        for term in ("invoice", "Invoice", "INVOICE"):
+            with self.subTest(term=term):
+                self.search(term)
+                self.assertEqual(self.rows(), ["TQ-101"])
+        for term in ("MIRA", "Mira"):
+            with self.subTest(term=term):
+                self.search(term)
+                self.assertEqual(self.rows(), ["TQ-103"])
+
+    def test_search_and_the_status_filter_combine_and_the_heading_agrees(self):
+        self.page.click("button[data-status='open']")
+        self.search("re")
+        shown = self.rows()
+        # Every row listed is open, and the heading counts exactly those rows.
+        open_ids = {t["id"] for t in self.tickets_json() if t["status"] == "open"}
+        self.assertTrue(shown, "the combined filter listed nothing")
+        self.assertTrue(set(shown) <= open_ids, f"{shown} is not a subset of open")
+        self.assertLess(len(shown), len(open_ids), "the term narrowed nothing")
+        heading = self.page.locator("#queue-heading").inner_text()
+        self.assertEqual(heading, f"Support queue ({len(shown)})")
+
+    def test_a_search_matching_nothing_says_so_and_clearing_restores(self):
+        self.search("refund")
+        self.assertEqual(self.rows(), [])
+        self.assertIn(
+            "No tickets match this filter.",
+            self.page.locator("#ticket-list .queue-empty").inner_text(),
+        )
+        self.page.locator("#queue-search").fill("")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.rows(), self.ALL_IDS)
+
+
+# ---------------------------------------------------------------------------
+# Fault injection
+# ---------------------------------------------------------------------------
+#
+# (name, file relative to the app root, exact string, replacement, tests that
+# must fail). The driver aborts unless the exact string matches once.
+
+INJECTIONS = [
+    (
+        "the search stops comparing the requester (the bug in #132)",
+        "web/app.js",
+        "        t.requester.toLowerCase().includes(term))",
+        "        false)",
+        [
+            "QueuePage.test_a_requester_name_finds_the_ticket_whose_title_lacks_it",
+            "QueuePage.test_part_of_an_address_finds_that_persons_tickets",
+            "QueuePage.test_a_shared_address_domain_finds_everyone_on_it",
+        ],
+    ),
+    (
+        "the row stops rendering the requester, so a match has nothing to show",
+        "web/app.js",
+        '            <span class="ticket-requester">${t.requester}</span>\n',
+        "",
+        [
+            "QueuePage.test_the_requester_is_legible_on_the_matching_row",
+            "QueuePage.test_every_listed_row_shows_its_own_requester",
+        ],
+    ),
+    (
+        "the requester is rendered but not legible on screen",
+        "web/styles.css",
+        ".ticket-requester {\n  color: var(--muted);",
+        ".ticket-requester {\n  display: none;\n  color: var(--muted);",
+        ["QueuePage.test_the_requester_is_legible_on_the_matching_row"],
+    ),
+    (
+        "every row renders the same person's address",
+        "web/app.js",
+        '<span class="ticket-requester">${t.requester}</span>',
+        '<span class="ticket-requester">${tickets[0].requester}</span>',
+        ["QueuePage.test_every_listed_row_shows_its_own_requester"],
+    ),
+    (
+        "the search stops folding the typed term",
+        "web/app.js",
+        "  const term = searchTerm.trim().toLowerCase();",
+        "  const term = searchTerm.trim();",
+        ["QueuePage.test_search_folds_case_in_both_directions"],
+    ),
+    (
+        "the search stops folding the title it compares against",
+        "web/app.js",
+        "        t.title.toLowerCase().includes(term) ||",
+        "        t.title.includes(term) ||",
+        ["QueuePage.test_search_folds_case_in_both_directions"],
+    ),
+    (
+        "the search stops folding the requester it compares against",
+        "web/app.js",
+        "        t.requester.toLowerCase().includes(term))",
+        "        t.requester.includes(term))",
+        ["QueuePage.test_search_folds_case_in_both_directions"],
+    ),
+    (
+        "the heading counts the whole queue instead of what is listed",
+        "web/app.js",
+        "headingEl.textContent = `Support queue (${shown.length})`;",
+        "headingEl.textContent = `Support queue (${tickets.length})`;",
+        [
+            "QueuePage.test_search_and_the_status_filter_combine_and_the_heading_agrees"
+        ],
+    ),
+    (
+        "the placeholder goes back to naming only the title and the id",
+        "web/index.html",
+        'placeholder="Title, requester, or ticket id"',
+        'placeholder="Title or ticket id"',
+        ["QueuePage.test_the_placeholder_no_longer_says_title_or_ticket_id"],
+    ),
+    (
+        "the fixture stores every address in lower case, so the fold grades nothing",
+        "data/tickets.json",
+        '"requester": "Mira.Haas@northwind.example",',
+        '"requester": "mira.haas@northwind.example",',
+        ["QueuePage.test_at_least_one_seeded_address_is_not_already_lower_case"],
+    ),
+    (
+        "the fixture puts the search term in a title, hollowing out the control",
+        "data/tickets.json",
+        '"title": "Cannot remove a seat from the team page",',
+        '"title": "Cannot remove mira from the team page",',
+        ["QueuePage.test_the_search_term_appears_in_no_title_and_no_id"],
+    ),
+]
+
+
+def fault_inject() -> int:
+    """Break one thing at a time and require the named tests to notice."""
+    failures = 0
+    for name, rel, old, new, must_fail in INJECTIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "ticket-queue"
+            shutil.copytree(ROOT, app, ignore=shutil.ignore_patterns("demos"))
+            target = app / rel
+            text = target.read_text(encoding="utf-8")
+            hits = text.count(old)
+            if hits != 1:
+                print(
+                    f"ABORT: injection {name!r} matched {hits} times in {rel}, "
+                    f"expected exactly 1. The injection did not land, so "
+                    f"nothing it would have proven is proven.",
+                    file=sys.stderr,
+                )
+                print(f"       looked for: {old!r}", file=sys.stderr)
+                return 3
+            target.write_text(text.replace(old, new), encoding="utf-8")
+
+            done = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--_inner"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "TICKET_QUEUE_ROOT": str(app)},
+            )
+            noticed = {t for t in must_fail if t in done.stderr}
+            missed = set(must_fail) - noticed
+            ok = done.returncode != 0 and not missed
+            print(f"{'PASS' if ok else 'FAIL'}  break: {name}")
+            print(f"      in {rel}: {old.strip().splitlines()[0][:66]}…")
+            if ok:
+                for line in [
+                    ln
+                    for ln in done.stderr.splitlines()
+                    if ln.startswith(("FAIL:", "ERROR:"))
+                ][:4]:
+                    print(f"      {line}")
+            else:
+                failures += 1
+                if missed:
+                    print(f"      these tests did NOT fail: {sorted(missed)}")
+                if done.returncode == 0:
+                    print("      the suite passed against broken code")
+                print(textwrap.indent(done.stderr[-1500:], "      | "))
+            print()
+    if failures:
+        print(
+            f"{failures} injection(s) went unnoticed — those assertions grade nothing."
+        )
+        return 1
+    print(f"All {len(INJECTIONS)} injections were caught.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fault-inject",
+        action="store_true",
+        help="break each thing an assertion watches and require it to notice",
+    )
+    parser.add_argument("--_inner", action="store_true", help=argparse.SUPPRESS)
+    args, rest = parser.parse_known_args()
+    if args.fault_inject:
+        return fault_inject()
+    result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=1)
+    return 0 if result.result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# What this suite does NOT cover
+# ---------------------------------------------------------------------------
+#
+# - **The CLI.** `tickets list --status` is untouched by #129 and #132 and has
+#   no search; nothing here runs it.
+# - **The detail panel, the assign modal and the copy button.** They are on the
+#   page the suite loads but no assertion reads them.
+# - **How the queue looks.** `test_the_requester_is_legible_on_the_matching_row`
+#   asks only whether the requester occupies a box a person could read; it does
+#   not grade contrast, truncation or layout at other viewport sizes. The demo
+#   video is where that is reviewed, by a human.
+# - **Searching the ticket body, and highlighting the matched substring.** Both
+#   are out of scope in #129 and stay out.

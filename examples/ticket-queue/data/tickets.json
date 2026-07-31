@@ -19,7 +19,7 @@
     "id": "TQ-103",
     "title": "Cannot remove a seat from the team page",
     "status": "waiting",
-    "requester": "mira.haas@northwind.example",
+    "requester": "Mira.Haas@northwind.example",
     "opened": "2025-11-04",
     "body": "The remove button is greyed out for one member. Asked the customer for a screenshot."
   },

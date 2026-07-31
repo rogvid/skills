@@ -4,18 +4,39 @@
   "recorder": "mixed",
   "segment": null,
   "media": "demo.mp4",
-  "duration": 61.4,
+  "duration": 62.76,
   "determinism": {
     "deterministic": false,
     "clock": null,
     "timezone_id": "UTC",
     "locale": "en-US"
   },
+  "content": {
+    "measured": true,
+    "note": null,
+    "rect": null,
+    "sample_fps": 2,
+    "frames": 125,
+    "score": 14.13,
+    "floor": 1.0,
+    "static_for": 4.5,
+    "static_from": null,
+    "static_beats": null,
+    "static_limit": 15.0,
+    "opening": {
+      "gap": 0.0,
+      "held": 0.35,
+      "limit": 1.5,
+      "note": null
+    },
+    "warnings": []
+  },
+  "coverage": null,
   "segments": [
     {
       "segment": "part1",
       "media": "part1.seg.mp4",
-      "duration": 37.24,
+      "duration": 38.56,
       "offset": 0.0,
       "beats": 30,
       "recorder": "Recorder",
@@ -24,13 +45,49 @@
         "clock": null,
         "timezone_id": "UTC",
         "locale": "en-US"
+      },
+      "content": {
+        "measured": true,
+        "note": null,
+        "rect": [
+          128,
+          90,
+          1024,
+          460
+        ],
+        "sample_fps": 2,
+        "frames": 77,
+        "score": 15.87,
+        "floor": 1.0,
+        "static_for": 4.5,
+        "static_from": 1.0,
+        "static_beats": [
+          {
+            "index": 2,
+            "verb": "caption",
+            "acting": false
+          },
+          {
+            "index": 3,
+            "verb": "hold",
+            "acting": false
+          }
+        ],
+        "static_limit": 15.0,
+        "opening": {
+          "gap": 0.0,
+          "held": 0.35,
+          "limit": 1.5,
+          "note": null
+        },
+        "warnings": []
       }
     },
     {
       "segment": "part2",
       "media": "part2.seg.mp4",
-      "duration": 24.16,
-      "offset": 37.24,
+      "duration": 24.2,
+      "offset": 38.56,
       "beats": 18,
       "recorder": "TerminalRecorder",
       "determinism": {
@@ -38,14 +95,60 @@
         "clock": null,
         "timezone_id": "UTC",
         "locale": "en-US"
+      },
+      "content": {
+        "measured": true,
+        "note": null,
+        "rect": [
+          74,
+          110,
+          1132,
+          432
+        ],
+        "sample_fps": 2,
+        "frames": 48,
+        "score": 14.13,
+        "floor": 1.0,
+        "static_for": 4.5,
+        "static_from": 7.0,
+        "static_beats": [
+          {
+            "index": 4,
+            "verb": "wait_for_prompt",
+            "acting": false
+          },
+          {
+            "index": 5,
+            "verb": "hold",
+            "acting": false
+          },
+          {
+            "index": 6,
+            "verb": "shot",
+            "acting": false
+          },
+          {
+            "index": 7,
+            "verb": "caption",
+            "acting": false
+          }
+        ],
+        "static_limit": 15.0,
+        "opening": {
+          "gap": 0.1,
+          "held": null,
+          "limit": 1.5,
+          "note": null
+        },
+        "warnings": []
       }
     }
   ],
   "beats": [
     {
       "index": 0,
-      "t_start": 0.429,
-      "t_end": 0.992,
+      "t_start": 0.438,
+      "t_end": 0.99,
       "caption": "",
       "verb": "goto",
       "selector": "/",
@@ -56,7 +159,7 @@
     },
     {
       "index": 1,
-      "t_start": 0.992,
+      "t_start": 0.99,
       "t_end": 1.016,
       "caption": "",
       "verb": "wait_for",
@@ -69,7 +172,7 @@
     {
       "index": 2,
       "t_start": 1.016,
-      "t_end": 4.373,
+      "t_end": 4.348,
       "caption": "The support queue, every ticket the team holds.",
       "verb": "caption",
       "selector": null,
@@ -80,8 +183,8 @@
     },
     {
       "index": 3,
-      "t_start": 4.373,
-      "t_end": 5.901,
+      "t_start": 4.348,
+      "t_end": 5.858,
       "caption": "The support queue, every ticket the team holds.",
       "verb": "hold",
       "selector": null,
@@ -92,8 +195,8 @@
     },
     {
       "index": 4,
-      "t_start": 5.901,
-      "t_end": 5.947,
+      "t_start": 5.858,
+      "t_end": 5.915,
       "caption": "The support queue, every ticket the team holds.",
       "verb": "shot",
       "selector": "01-queue",
@@ -104,8 +207,8 @@
     },
     {
       "index": 5,
-      "t_start": 5.947,
-      "t_end": 8.957,
+      "t_start": 5.915,
+      "t_end": 8.906,
       "caption": "A status filter sits above the list.",
       "verb": "caption",
       "selector": null,
@@ -116,8 +219,8 @@
     },
     {
       "index": 6,
-      "t_start": 8.957,
-      "t_end": 9.294,
+      "t_start": 8.906,
+      "t_end": 9.24,
       "caption": "A status filter sits above the list.",
       "verb": "spotlight",
       "selector": "#status-filter",
@@ -128,8 +231,8 @@
     },
     {
       "index": 7,
-      "t_start": 9.295,
-      "t_end": 10.816,
+      "t_start": 9.24,
+      "t_end": 10.762,
       "caption": "A status filter sits above the list.",
       "verb": "hold",
       "selector": null,
@@ -140,8 +243,8 @@
     },
     {
       "index": 8,
-      "t_start": 10.816,
-      "t_end": 11.406,
+      "t_start": 10.762,
+      "t_end": 11.325,
       "caption": "A status filter sits above the list.",
       "verb": "spotlight",
       "selector": null,
@@ -152,8 +255,8 @@
     },
     {
       "index": 9,
-      "t_start": 11.406,
-      "t_end": 14.067,
+      "t_start": 11.325,
+      "t_end": 13.976,
       "caption": "Open lists only the open tickets.",
       "verb": "caption",
       "selector": null,
@@ -164,8 +267,8 @@
     },
     {
       "index": 10,
-      "t_start": 14.067,
-      "t_end": 15.014,
+      "t_start": 13.976,
+      "t_end": 14.898,
       "caption": "Open lists only the open tickets.",
       "verb": "click",
       "selector": "button[data-status='open']",
@@ -176,8 +279,8 @@
     },
     {
       "index": 11,
-      "t_start": 15.014,
-      "t_end": 16.542,
+      "t_start": 14.898,
+      "t_end": 16.407,
       "caption": "Open lists only the open tickets.",
       "verb": "hold",
       "selector": null,
@@ -188,8 +291,8 @@
     },
     {
       "index": 12,
-      "t_start": 16.542,
-      "t_end": 16.587,
+      "t_start": 16.407,
+      "t_end": 16.458,
       "caption": "Open lists only the open tickets.",
       "verb": "shot",
       "selector": "02-open",
@@ -200,8 +303,8 @@
     },
     {
       "index": 13,
-      "t_start": 16.587,
-      "t_end": 19.597,
+      "t_start": 16.458,
+      "t_end": 19.452,
       "caption": "The heading counts what the filter left.",
       "verb": "caption",
       "selector": null,
@@ -212,8 +315,8 @@
     },
     {
       "index": 14,
-      "t_start": 19.597,
-      "t_end": 19.93,
+      "t_start": 19.452,
+      "t_end": 19.784,
       "caption": "The heading counts what the filter left.",
       "verb": "spotlight",
       "selector": "#queue-heading",
@@ -224,8 +327,8 @@
     },
     {
       "index": 15,
-      "t_start": 19.93,
-      "t_end": 21.451,
+      "t_start": 19.784,
+      "t_end": 21.303,
       "caption": "The heading counts what the filter left.",
       "verb": "hold",
       "selector": null,
@@ -236,8 +339,8 @@
     },
     {
       "index": 16,
-      "t_start": 21.451,
-      "t_end": 22.028,
+      "t_start": 21.303,
+      "t_end": 21.88,
       "caption": "The heading counts what the filter left.",
       "verb": "spotlight",
       "selector": null,
@@ -248,8 +351,8 @@
     },
     {
       "index": 17,
-      "t_start": 22.028,
-      "t_end": 24.017,
+      "t_start": 21.88,
+      "t_end": 23.859,
       "caption": "Waiting lists the rest.",
       "verb": "caption",
       "selector": null,
@@ -260,8 +363,8 @@
     },
     {
       "index": 18,
-      "t_start": 24.017,
-      "t_end": 24.931,
+      "t_start": 23.859,
+      "t_end": 24.805,
       "caption": "Waiting lists the rest.",
       "verb": "click",
       "selector": "button[data-status='waiting']",
@@ -272,8 +375,8 @@
     },
     {
       "index": 19,
-      "t_start": 24.931,
-      "t_end": 26.463,
+      "t_start": 24.805,
+      "t_end": 26.314,
       "caption": "Waiting lists the rest.",
       "verb": "hold",
       "selector": null,
@@ -284,8 +387,8 @@
     },
     {
       "index": 20,
-      "t_start": 26.463,
-      "t_end": 26.503,
+      "t_start": 26.314,
+      "t_end": 26.374,
       "caption": "Waiting lists the rest.",
       "verb": "shot",
       "selector": "03-waiting",
@@ -296,8 +399,8 @@
     },
     {
       "index": 21,
-      "t_start": 26.503,
-      "t_end": 29.842,
+      "t_start": 26.374,
+      "t_end": 29.719,
       "caption": "Escalated matches nothing, and the queue says so.",
       "verb": "caption",
       "selector": null,
@@ -308,8 +411,8 @@
     },
     {
       "index": 22,
-      "t_start": 29.842,
-      "t_end": 30.763,
+      "t_start": 29.719,
+      "t_end": 30.644,
       "caption": "Escalated matches nothing, and the queue says so.",
       "verb": "click",
       "selector": "button[data-status='escalated']",
@@ -320,8 +423,8 @@
     },
     {
       "index": 23,
-      "t_start": 30.763,
-      "t_end": 32.29,
+      "t_start": 30.644,
+      "t_end": 32.161,
       "caption": "Escalated matches nothing, and the queue says so.",
       "verb": "hold",
       "selector": null,
@@ -332,8 +435,8 @@
     },
     {
       "index": 24,
-      "t_start": 32.29,
-      "t_end": 32.334,
+      "t_start": 32.161,
+      "t_end": 32.214,
       "caption": "Escalated matches nothing, and the queue says so.",
       "verb": "shot",
       "selector": "04-escalated",
@@ -344,8 +447,8 @@
     },
     {
       "index": 25,
-      "t_start": 32.334,
-      "t_end": 35.005,
+      "t_start": 32.214,
+      "t_end": 34.864,
       "caption": "All brings the whole queue back.",
       "verb": "caption",
       "selector": null,
@@ -356,8 +459,8 @@
     },
     {
       "index": 26,
-      "t_start": 35.005,
-      "t_end": 35.961,
+      "t_start": 34.864,
+      "t_end": 35.796,
       "caption": "All brings the whole queue back.",
       "verb": "click",
       "selector": "button[data-status='all']",
@@ -368,8 +471,8 @@
     },
     {
       "index": 27,
-      "t_start": 35.961,
-      "t_end": 37.485,
+      "t_start": 35.796,
+      "t_end": 37.318,
       "caption": "All brings the whole queue back.",
       "verb": "hold",
       "selector": null,
@@ -380,8 +483,8 @@
     },
     {
       "index": 28,
-      "t_start": 37.485,
-      "t_end": 37.525,
+      "t_start": 37.318,
+      "t_end": 37.376,
       "caption": "All brings the whole queue back.",
       "verb": "shot",
       "selector": "05-all",
@@ -392,8 +495,8 @@
     },
     {
       "index": 29,
-      "t_start": 37.525,
-      "t_end": 37.837,
+      "t_start": 37.376,
+      "t_end": 37.688,
       "caption": "",
       "verb": "caption",
       "selector": null,
@@ -404,8 +507,8 @@
     },
     {
       "index": 30,
-      "t_start": 37.533,
-      "t_end": 40.347,
+      "t_start": 38.881,
+      "t_end": 41.695,
       "caption": "The same filter, on the command line.",
       "verb": "interlude",
       "selector": "card",
@@ -416,8 +519,8 @@
     },
     {
       "index": 31,
-      "t_start": 40.347,
-      "t_end": 40.954,
+      "t_start": 41.695,
+      "t_end": 42.306,
       "caption": "",
       "verb": "interlude",
       "selector": "card",
@@ -428,8 +531,8 @@
     },
     {
       "index": 32,
-      "t_start": 40.954,
-      "t_end": 43.599,
+      "t_start": 42.306,
+      "t_end": 44.953,
       "caption": "The CLI reads the same queue.",
       "verb": "caption",
       "selector": null,
@@ -440,8 +543,8 @@
     },
     {
       "index": 33,
-      "t_start": 43.599,
-      "t_end": 44.44,
+      "t_start": 44.953,
+      "t_end": 45.791,
       "caption": "The CLI reads the same queue.",
       "verb": "run",
       "selector": "./tickets list",
@@ -453,8 +556,8 @@
     },
     {
       "index": 34,
-      "t_start": 44.441,
-      "t_end": 44.651,
+      "t_start": 45.791,
+      "t_end": 45.995,
       "caption": "The CLI reads the same queue.",
       "verb": "wait_for_prompt",
       "selector": null,
@@ -465,8 +568,8 @@
     },
     {
       "index": 35,
-      "t_start": 44.651,
-      "t_end": 46.156,
+      "t_start": 45.995,
+      "t_end": 47.504,
       "caption": "The CLI reads the same queue.",
       "verb": "hold",
       "selector": null,
@@ -477,8 +580,8 @@
     },
     {
       "index": 36,
-      "t_start": 46.156,
-      "t_end": 46.233,
+      "t_start": 47.504,
+      "t_end": 47.584,
       "caption": "The CLI reads the same queue.",
       "verb": "shot",
       "selector": "06-cli-list",
@@ -489,8 +592,8 @@
     },
     {
       "index": 37,
-      "t_start": 46.234,
-      "t_end": 49.224,
+      "t_start": 47.584,
+      "t_end": 50.569,
       "caption": "--status open narrows it the same way.",
       "verb": "caption",
       "selector": null,
@@ -501,8 +604,8 @@
     },
     {
       "index": 38,
-      "t_start": 49.224,
-      "t_end": 50.716,
+      "t_start": 50.569,
+      "t_end": 52.06,
       "caption": "--status open narrows it the same way.",
       "verb": "run",
       "selector": "./tickets list --status open",
@@ -514,8 +617,8 @@
     },
     {
       "index": 39,
-      "t_start": 50.716,
-      "t_end": 50.927,
+      "t_start": 52.06,
+      "t_end": 52.272,
       "caption": "--status open narrows it the same way.",
       "verb": "wait_for_prompt",
       "selector": null,
@@ -526,8 +629,8 @@
     },
     {
       "index": 40,
-      "t_start": 50.927,
-      "t_end": 52.43,
+      "t_start": 52.272,
+      "t_end": 53.776,
       "caption": "--status open narrows it the same way.",
       "verb": "hold",
       "selector": null,
@@ -538,8 +641,8 @@
     },
     {
       "index": 41,
-      "t_start": 52.43,
-      "t_end": 52.504,
+      "t_start": 53.776,
+      "t_end": 53.857,
       "caption": "--status open narrows it the same way.",
       "verb": "shot",
       "selector": "07-cli-open",
@@ -550,8 +653,8 @@
     },
     {
       "index": 42,
-      "t_start": 52.504,
-      "t_end": 54.809,
+      "t_start": 53.857,
+      "t_end": 56.163,
       "caption": "An unknown status is refused.",
       "verb": "caption",
       "selector": null,
@@ -562,8 +665,8 @@
     },
     {
       "index": 43,
-      "t_start": 54.809,
-      "t_end": 56.4,
+      "t_start": 56.163,
+      "t_end": 57.745,
       "caption": "An unknown status is refused.",
       "verb": "run",
       "selector": "./tickets list --status frozen",
@@ -575,8 +678,8 @@
     },
     {
       "index": 44,
-      "t_start": 56.4,
-      "t_end": 56.606,
+      "t_start": 57.745,
+      "t_end": 57.951,
       "caption": "An unknown status is refused.",
       "verb": "wait_for_prompt",
       "selector": null,
@@ -587,8 +690,8 @@
     },
     {
       "index": 45,
-      "t_start": 56.606,
-      "t_end": 58.11,
+      "t_start": 57.951,
+      "t_end": 59.455,
       "caption": "An unknown status is refused.",
       "verb": "hold",
       "selector": null,
@@ -599,8 +702,8 @@
     },
     {
       "index": 46,
-      "t_start": 58.11,
-      "t_end": 58.19,
+      "t_start": 59.455,
+      "t_end": 59.535,
       "caption": "An unknown status is refused.",
       "verb": "shot",
       "selector": "08-cli-unknown",
@@ -611,8 +714,8 @@
     },
     {
       "index": 47,
-      "t_start": 58.19,
-      "t_end": 58.495,
+      "t_start": 59.535,
+      "t_end": 59.839,
       "caption": "",
       "verb": "caption",
       "selector": null,
@@ -626,7 +729,7 @@
   "issues": [
     {
       "kind": "nonzero_exit",
-      "t": 56.238,
+      "t": 57.582,
       "beat": 43,
       "verb": "run",
       "caption": "An unknown status is refused.",

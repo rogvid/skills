@@ -20,12 +20,27 @@ holds no `SKILL.md`, so the CLI's one-level-deep root walk does not see it.
 ./tickets show TQ-104
 ```
 
+## Checking it
+
+```sh
+./test                             # ~3 s, needs Chromium for Playwright
+./test --fault-inject              # break each thing an assertion watches
+```
+
+`test` starts `serve` on an ephemeral port, drives a real browser and reads the
+rows the queue painted. It never imports the app's own filter: a check built
+out of the code under test is blind wherever that code is blind, and
+[#132](https://github.com/rogvid/skills/issues/132) is what that looks like.
+`--fault-inject` is the evidence — eleven breaks to `web/`, `data/` and the
+fixture, each of which must make a named test fire.
+
 ## What is in it
 
 | Path | What |
 |---|---|
 | `serve` | stdlib HTTP server: static `web/`, plus `GET /api/tickets` |
 | `tickets` | the CLI over the same data |
+| `test` | what the queue's search does, read off the rendered page |
 | `web/` | one page — queue on the left, ticket detail on the right |
 | `data/tickets.json` | seven seeded tickets, `open` or `waiting` |
 | `demos/` | recorded demos: a `record.py` storyboard and its beat log per feature |

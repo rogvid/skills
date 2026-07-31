@@ -162,8 +162,29 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
+/* The requester sits on the same line as the title on purpose. A second line
+   per row makes the seven-ticket queue tall enough to run under the caption
+   band a recording draws along the bottom, which costs the demo two rows. */
+.ticket-text {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
 .ticket-title {
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-requester {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pill {

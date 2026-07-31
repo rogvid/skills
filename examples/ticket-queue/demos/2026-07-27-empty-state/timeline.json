@@ -4,18 +4,60 @@
   "recorder": "Recorder",
   "segment": null,
   "media": "demo.mp4",
-  "duration": 32.44,
+  "duration": 33.4,
   "determinism": {
     "deterministic": false,
     "clock": null,
     "timezone_id": "UTC",
     "locale": "en-US"
   },
+  "content": {
+    "measured": true,
+    "note": null,
+    "rect": [
+      128,
+      90,
+      1024,
+      460
+    ],
+    "sample_fps": 2,
+    "frames": 67,
+    "score": 22.55,
+    "floor": 1.0,
+    "static_for": 7.0,
+    "static_from": 1.0,
+    "static_beats": [
+      {
+        "index": 3,
+        "verb": "hold",
+        "acting": false
+      },
+      {
+        "index": 4,
+        "verb": "shot",
+        "acting": false
+      },
+      {
+        "index": 5,
+        "verb": "caption",
+        "acting": false
+      }
+    ],
+    "static_limit": 15.0,
+    "opening": {
+      "gap": 0.0,
+      "held": 0.35,
+      "limit": 1.5,
+      "note": null
+    },
+    "warnings": []
+  },
+  "coverage": null,
   "beats": [
     {
       "index": 0,
-      "t_start": 0.448,
-      "t_end": 1.017,
+      "t_start": 0.416,
+      "t_end": 0.976,
       "caption": "",
       "verb": "goto",
       "selector": "/",
@@ -26,8 +68,8 @@
     },
     {
       "index": 1,
-      "t_start": 1.017,
-      "t_end": 1.041,
+      "t_start": 0.976,
+      "t_end": 0.999,
       "caption": "",
       "verb": "wait_for",
       "selector": ".ticket",
@@ -38,8 +80,8 @@
     },
     {
       "index": 2,
-      "t_start": 1.041,
-      "t_end": 3.693,
+      "t_start": 0.999,
+      "t_end": 3.652,
       "caption": "The support queue, filtered by status.",
       "verb": "caption",
       "selector": null,
@@ -50,8 +92,8 @@
     },
     {
       "index": 3,
-      "t_start": 3.693,
-      "t_end": 5.224,
+      "t_start": 3.652,
+      "t_end": 5.171,
       "caption": "The support queue, filtered by status.",
       "verb": "hold",
       "selector": null,
@@ -62,8 +104,8 @@
     },
     {
       "index": 4,
-      "t_start": 5.224,
-      "t_end": 5.27,
+      "t_start": 5.171,
+      "t_end": 5.234,
       "caption": "The support queue, filtered by status.",
       "verb": "shot",
       "selector": "01-queue",
@@ -74,8 +116,8 @@
     },
     {
       "index": 5,
-      "t_start": 5.27,
-      "t_end": 8.603,
+      "t_start": 5.234,
+      "t_end": 8.566,
       "caption": "No ticket in the queue is escalated today.",
       "verb": "caption",
       "selector": null,
@@ -86,8 +128,8 @@
     },
     {
       "index": 6,
-      "t_start": 8.603,
-      "t_end": 8.941,
+      "t_start": 8.566,
+      "t_end": 8.902,
       "caption": "No ticket in the queue is escalated today.",
       "verb": "spotlight",
       "selector": "#status-filter",
@@ -98,8 +140,8 @@
     },
     {
       "index": 7,
-      "t_start": 8.941,
-      "t_end": 10.472,
+      "t_start": 8.902,
+      "t_end": 10.437,
       "caption": "No ticket in the queue is escalated today.",
       "verb": "hold",
       "selector": null,
@@ -110,8 +152,8 @@
     },
     {
       "index": 8,
-      "t_start": 10.473,
-      "t_end": 11.063,
+      "t_start": 10.437,
+      "t_end": 11.011,
       "caption": "No ticket in the queue is escalated today.",
       "verb": "spotlight",
       "selector": null,
@@ -122,8 +164,8 @@
     },
     {
       "index": 9,
-      "t_start": 11.063,
-      "t_end": 14.077,
+      "t_start": 11.011,
+      "t_end": 14.008,
       "caption": "Choosing Escalated used to leave blank space.",
       "verb": "caption",
       "selector": null,
@@ -134,8 +176,8 @@
     },
     {
       "index": 10,
-      "t_start": 14.077,
-      "t_end": 14.995,
+      "t_start": 14.008,
+      "t_end": 14.927,
       "caption": "Choosing Escalated used to leave blank space.",
       "verb": "click",
       "selector": "button[data-status='escalated']",
@@ -146,8 +188,8 @@
     },
     {
       "index": 11,
-      "t_start": 14.995,
-      "t_end": 15.009,
+      "t_start": 14.927,
+      "t_end": 14.941,
       "caption": "Choosing Escalated used to leave blank space.",
       "verb": "wait_for",
       "selector": ".queue-empty",
@@ -158,8 +200,8 @@
     },
     {
       "index": 12,
-      "t_start": 15.009,
-      "t_end": 16.521,
+      "t_start": 14.941,
+      "t_end": 16.467,
       "caption": "Choosing Escalated used to leave blank space.",
       "verb": "hold",
       "selector": null,
@@ -170,8 +212,8 @@
     },
     {
       "index": 13,
-      "t_start": 16.521,
-      "t_end": 19.859,
+      "t_start": 16.467,
+      "t_end": 19.807,
       "caption": "Now the queue says why it is empty.",
       "verb": "caption",
       "selector": null,
@@ -182,8 +224,8 @@
     },
     {
       "index": 14,
-      "t_start": 19.859,
-      "t_end": 20.192,
+      "t_start": 19.807,
+      "t_end": 20.142,
       "caption": "Now the queue says why it is empty.",
       "verb": "spotlight",
       "selector": ".queue-empty",
@@ -194,8 +236,8 @@
     },
     {
       "index": 15,
-      "t_start": 20.192,
-      "t_end": 21.743,
+      "t_start": 20.142,
+      "t_end": 21.661,
       "caption": "Now the queue says why it is empty.",
       "verb": "hold",
       "selector": null,
@@ -206,8 +248,8 @@
     },
     {
       "index": 16,
-      "t_start": 21.743,
-      "t_end": 21.793,
+      "t_start": 21.661,
+      "t_end": 21.722,
       "caption": "Now the queue says why it is empty.",
       "verb": "shot",
       "selector": "02-empty",
@@ -218,8 +260,8 @@
     },
     {
       "index": 17,
-      "t_start": 21.793,
-      "t_end": 22.373,
+      "t_start": 21.722,
+      "t_end": 22.284,
       "caption": "Now the queue says why it is empty.",
       "verb": "spotlight",
       "selector": null,
@@ -230,8 +272,8 @@
     },
     {
       "index": 18,
-      "t_start": 22.373,
-      "t_end": 24.703,
+      "t_start": 22.284,
+      "t_end": 24.597,
       "caption": "The heading agrees: nothing matched.",
       "verb": "caption",
       "selector": null,
@@ -242,8 +284,8 @@
     },
     {
       "index": 19,
-      "t_start": 24.703,
-      "t_end": 25.041,
+      "t_start": 24.597,
+      "t_end": 24.936,
       "caption": "The heading agrees: nothing matched.",
       "verb": "spotlight",
       "selector": "#queue-heading",
@@ -254,8 +296,8 @@
     },
     {
       "index": 20,
-      "t_start": 25.041,
-      "t_end": 26.56,
+      "t_start": 24.936,
+      "t_end": 26.477,
       "caption": "The heading agrees: nothing matched.",
       "verb": "hold",
       "selector": null,
@@ -266,8 +308,8 @@
     },
     {
       "index": 21,
-      "t_start": 26.56,
-      "t_end": 27.149,
+      "t_start": 26.477,
+      "t_end": 27.039,
       "caption": "The heading agrees: nothing matched.",
       "verb": "spotlight",
       "selector": null,
@@ -278,8 +320,8 @@
     },
     {
       "index": 22,
-      "t_start": 27.149,
-      "t_end": 29.81,
+      "t_start": 27.039,
+      "t_end": 29.69,
       "caption": "All brings the whole queue back.",
       "verb": "caption",
       "selector": null,
@@ -290,8 +332,8 @@
     },
     {
       "index": 23,
-      "t_start": 29.81,
-      "t_end": 30.723,
+      "t_start": 29.69,
+      "t_end": 30.606,
       "caption": "All brings the whole queue back.",
       "verb": "click",
       "selector": "button[data-status='all']",
@@ -302,8 +344,8 @@
     },
     {
       "index": 24,
-      "t_start": 30.723,
-      "t_end": 30.735,
+      "t_start": 30.606,
+      "t_end": 30.621,
       "caption": "All brings the whole queue back.",
       "verb": "wait_for",
       "selector": ".ticket",
@@ -314,8 +356,8 @@
     },
     {
       "index": 25,
-      "t_start": 30.735,
-      "t_end": 32.251,
+      "t_start": 30.621,
+      "t_end": 32.131,
       "caption": "All brings the whole queue back.",
       "verb": "hold",
       "selector": null,
@@ -326,8 +368,8 @@
     },
     {
       "index": 26,
-      "t_start": 32.251,
-      "t_end": 32.295,
+      "t_start": 32.131,
+      "t_end": 32.189,
       "caption": "All brings the whole queue back.",
       "verb": "shot",
       "selector": "03-all",
@@ -338,8 +380,8 @@
     },
     {
       "index": 27,
-      "t_start": 32.295,
-      "t_end": 32.606,
+      "t_start": 32.189,
+      "t_end": 32.502,
       "caption": "",
       "verb": "caption",
       "selector": null,
