@@ -5,7 +5,7 @@
 # ///
 """An executed injection manifest for `tests/smoke` (issue #136).
 
-    tests/smoke-inject               # the whole manifest, ~31 minutes
+    tests/smoke-inject               # the whole manifest, ~35 minutes
     tests/smoke-inject --list        # what it covers, and what each entry costs
     tests/smoke-inject --self-test   # prove the harness refuses a bad entry (0s)
     tests/smoke-inject --arm coverage      # one arm's entries
@@ -22,9 +22,11 @@ this file is what notices.
 ~10 minutes behind a machine-wide lock, so an injection per assertion was never
 going to be maintained. But smoke has per-arm flags, and an injection aimed at
 one arm costs that arm: measured on this box, `--coverage-only` is 8 s,
-`--strict-only` 13 s, `--overlay-only` 31 s, `--failure-only` 48 s,
-`--web-only` 123 s, `--content-only` 148 s. Every entry below names the arm it
-needs, and nothing else runs.
+`--strict-only` 13 s, `--pointer-only` 15 s, `--issues-only` 26 s,
+`--overlay-only` 31 s, `--failure-only` 48 s, `--web-only` 123 s,
+`--content-only` 148 s. Every entry below names the arm it needs, and nothing
+else runs. Splitting a cheap take out of an expensive arm is what makes an
+assertion gradeable at all — see issue #197 and `--issues-only`.
 
 **The contract, per entry** — the same one `tests/unit`'s `INJECTIONS` uses,
 with the arm added:
@@ -51,10 +53,12 @@ an aborted run cannot leave a broken recorder behind.
 
 **What this does not do** is in `tests/README.md`, under "What the injection
 manifest covers". Read it before treating a green run here as coverage of
-`tests/smoke`: 25 entries against 13 of smoke's 35 check functions is a floor
+`tests/smoke`: 31 entries against 17 of smoke's 36 check functions is a floor
 under the assertions that would be worst to lose, not a statement about the
 rest. Every check function with no entry is printed as `ungraded` at the end of
-a run, so the gap is in the output rather than in somebody's memory.
+a run, so the gap is in the output rather than in somebody's memory — and the
+README's roster says, per name, whether `tests/unit` grades its browser-free
+half or whether nothing does (issue #196).
 """
 
 from __future__ import annotations
@@ -84,6 +88,8 @@ ARM_TIMEOUT_S = 1_200
 ARM_SECONDS = {
     "--evidence-only": 7,
     "--coverage-only": 8,
+    "--pointer-only": 15,
+    "--issues-only": 26,
     "--narration-only": 8,
     "--strict-only": 13,
     "--determinism-only": 19,
@@ -252,6 +258,147 @@ INJECTIONS = [
         must_contain=(
             "differ within one take, ",
             "largest channel delta ",
+        ),
+    ),
+    # -- a take that never places the pointer (issue #193), ~20 s an entry ----
+    #
+    # The arm-level half of #186. `tests/unit` grades the *rule* — the guard is
+    # read out of the shipped overlay and evaluated against event shapes
+    # measured off Chromium — and cannot see a browser that started reporting
+    # movement for its hover-recompute event; the determinism arm cannot see it
+    # either, because `PARKED_POINTER` decides where the dot is there before
+    # anything is photographed. `--pointer-only` records the case neither can.
+    Injection(
+        # Aimed at the *position* check and deliberately not at the byte
+        # comparison beside it. With the guard gone the dot lands at the origin
+        # in about seven takes in eight and stays parked in the rest, both
+        # stable within a take — so the still hashes only disagree when two
+        # takes of the three happened to differ, while the position check fires
+        # on any one of them that moved. An intermittent assertion is what #185
+        # cost three CI runs, and #193 asks for this entry by name.
+        name="the cursor dot follows a mousemove that reports no movement",
+        module="web.py",
+        old="      if (e.movementX === 0 && e.movementY === 0) return;\n",
+        new="",
+        arm="--pointer-only",
+        sites=("check_resting_pointer",),
+        must_contain=(
+            "stylesheet parks it at — something other than the storyboard is ",
+        ),
+    ),
+    # -- what the recorder saw behind the pixels (check_issues), ~30 s an entry
+    #
+    # Both were reachable only from `--web-only` (123 s) and `--terminal-only`
+    # (186 s) until #197 split `--issues-only` out of them, for two takes that
+    # record in well under a minute between them.
+    Injection(
+        # A beat claims an event that fired before it opened. The whole
+        # storyboard still records, every deliberate problem is still logged,
+        # and the only thing that changed is that one of them now carries a
+        # confident beat index and a quoted caption — the failure mode
+        # `_attributed_beat` exists for and the one a reviewer would believe.
+        #
+        # The whole body, replaced by the naive answer `self._beats[-1]` — the
+        # "most recently started beat" the function's own docstring says is a
+        # different question from "the beat that may honestly be blamed".
+        #
+        # Both of its guards, and not one of them, because taking either alone
+        # is a no-op and this file is how that was found out rather than
+        # reasoned about. Instrumented on the real take: the console error the
+        # storyboard fires between beats is delivered *inside the
+        # `page.evaluate` that raises it*, with `_in_beat` False, the last beat
+        # `wait_for` (t_start 0.934) and `_pumped_at` 0.383. So the open-beat
+        # guard refuses it — and with that guard deleted the 0.5 s slack guard
+        # refuses it too, on the same event, for a different reason. Two
+        # entries were written, each naming one line, and each passed against a
+        # broken recorder before this one replaced them.
+        name="an event is blamed on the most recently started beat",
+        module="core.py",
+        old=(
+            "        if not self._in_beat or not self._beats:\n"
+            "            return None\n"
+            "        beat = self._beats[-1]\n"
+            '        t_start = beat.get("t_start")\n'
+            "        if not isinstance(t_start, (int, float)):\n"
+            "            return None\n"
+            "        if t_start > self._pumped_at + ATTRIBUTION_SLACK_S:\n"
+            "            return None\n"
+            "        return beat\n"
+        ),
+        new="        return self._beats[-1] if self._beats else None\n",
+        arm="--issues-only",
+        sites=("check_issues",),
+        must_contain=(" — the attribution is invented",),
+    ),
+    Injection(
+        # The oldest run() still waiting becomes the newest. The storyboard
+        # types two commands without waiting between them — `run_terminal_
+        # problems`' "This pair is the regression, not decoration" — so their
+        # two statuses arrive in order and land on each other's beats. Every
+        # beat still carries an exit code and the take still succeeds; what is
+        # left is a command that exited 9 recorded as exiting 0.
+        name="a command's exit status lands on the newest run() rather than the oldest",
+        module="terminal.py",
+        old="        beat = self._pending_runs.popleft()",
+        new="        beat = self._pending_runs.pop()",
+        arm="--issues-only",
+        sites=("check_issues",),
+        must_contain=("failed is indistinguishable from one that worked",),
+    ),
+    # -- the beat log and the review sheet (issues #8/#22), 29 s an entry ------
+    #
+    # `check_timeline` and `check_beat_frames` grade *a* take, not specifically
+    # the 123 s web one, and `--segments-only` already records one and stitches
+    # it. #197's second bullet: reuse of an existing cheap take rather than a
+    # new arm.
+    Injection(
+        # Issue #22 exactly. `index` is the position in the merged file and is
+        # renumbered on purpose; `segment_index` is the beat's position in the
+        # segment that recorded it and must survive, or the pair (segment,
+        # segment_index) stops naming the same beat before and after a stitch —
+        # and per-beat evidence is keyed on it. Only a segmented take can see
+        # this at all, which is why it is registered against this arm.
+        name="the merge renumbers each beat's position within its own segment",
+        module="stitching.py",
+        old='            merged["segment_index"] = beat.get("segment_index", beat.get("index"))',
+        new='            merged["segment_index"] = len(beats)',
+        arm="--segments-only",
+        sites=("check_timeline",),
+        must_contain=("within its own segment, and unlike `index` a merge must not ",),
+    ),
+    Injection(
+        # Every review frame is cut at its beat's *start* instead of its
+        # midpoint. frames.json still lists one frame per beat, each frame is
+        # still faithfully the second it claims, and the sheet still embeds all
+        # of them — so the pairing and the byte comparison both pass. What is
+        # left is a sheet of caption fade-ins and pre-click screens: the
+        # instant `frames.py`'s own header says is the wrong one.
+        name="every review frame is cut at the start of its beat, not its midpoint",
+        module="frames.py",
+        old="        middle = min(max((float(t_start) + float(t_end)) / 2, 0.0), last)",
+        new="        middle = min(max(float(t_start), 0.0), last)",
+        arm="--segments-only",
+        sites=("check_beat_frames",),
+        must_contain=("moment the sheet numbers it for",),
+    ),
+    # -- what a beat's evidence says was on screen (issue #9), 7 s an entry ----
+    Injection(
+        # A capture reused across beats — the "stale dump" `check_evidence`'s
+        # per-beat claim exists to refuse. Every beat still points at its own
+        # file, every file still exists and is still stamped with its own beat
+        # record, so the pairing half of the check is untouched; what is gone
+        # is that the page each file describes is the page that beat showed.
+        # The storyboard injects `#smoke-source` and `#smoke-bloat` mid-take,
+        # so the facts they put on screen are missing from exactly the beats
+        # that showed them.
+        name="every beat's evidence describes the first beat's page",
+        module="core.py",
+        old="             self._evidence_doc(beat, payload))",
+        new="             self._evidence_doc(beat, self._evidence[0][1]))",
+        arm="--evidence-only",
+        sites=("check_evidence",),
+        must_contain=(
+            " was on screen. A reviewer holding only this file cannot state ",
         ),
     ),
     # -- the recorder's own overlay (issues #162/#163), 31 s an entry ---------
@@ -839,9 +986,12 @@ def inject(entries: list[Injection]) -> int:
     for name in blind:
         print(f"  {name}")
     print(
-        "\nThat list is the manifest's boundary, not a to-do list: see "
-        "tests/README.md for which of them are covered by tests/unit at "
-        "sub-second cost and which are genuinely ungraded.\n"
+        "\nThat list is the manifest's boundary, not a to-do list, and it is "
+        "not a list of what nothing grades: tests/README.md, under 'What it "
+        "does not cover', has a row for every name above naming either the "
+        "tests/unit class that carries its browser-free claims or 'genuinely "
+        "ungraded'. That roster is checked against this list, both ways, by "
+        "--self-test on every push.\n"
     )
     if missed:
         print(
@@ -978,6 +1128,16 @@ def self_test() -> int:
             "a README naming a covered check function as a gap",
             r"check functions have no entry\*\*",
             "check functions have no entry**\n  `check_overlay_pair` has none.",
+        ),
+        (
+            "a README whose ungraded roster lost a row",
+            r"^ *\| `_check_video` \| .*\n",
+            "",
+        ),
+        (
+            "a README whose roster answers a gap with nothing in particular",
+            r"^( *\| `check_determinism` \| )[^|]*\|",
+            r"\1still being thought about |",
         ),
     ):
         broken, hits = re.subn(
@@ -1130,6 +1290,67 @@ def readme_named_gaps(text: str) -> list[str]:
     ]
 
 
+def readme_ungraded_roster(text: str) -> list[str]:
+    """The per-function roster of issue #196, checked both ways.
+
+    `ungraded` means *this manifest aims nothing at it*. It does not mean
+    "graded by nothing", and after #195 that difference is most of the list:
+    the browser-free claims of several check functions are certified in
+    `tests/unit` at 0.2 s an injection. The closing line of a run points a
+    reader at `tests/README.md` to find out which — so that document has to
+    answer, per function, and the answer has to stay true.
+
+    Both directions, because each fails differently. A roster missing a row is
+    a reader sent to a table their function is not in; a roster with a row for
+    a function that has an entry is the older mistake — `check_evidence` was
+    written up as uncovered for as long as it had six.
+
+    Read as text. The left-hand side is prose in `tests/README.md`; the
+    right-hand side is `ungraded()`, which is `INJECTIONS` against the AST of
+    `tests/smoke`. Nothing here takes a name from the README and checks the
+    README against it.
+    """
+    # The roster sits inside the bullet that introduces it, so its rows carry
+    # the list's indentation. Anchored to the line start all the same: a row
+    # that has drifted out of the table into a paragraph is not a row.
+    rows = re.findall(r"^ *\| `(_?check_[a-z_]+)` \| (.*?) \|$", text, re.MULTILINE)
+    if not rows:
+        return [
+            "the ungraded roster: no row matched, so the per-function answer "
+            "issue #196 asks for is not in this file at all"
+        ]
+    problems = []
+    stated: dict[str, str] = {}
+    for name, answer in rows:
+        if name in stated:
+            problems.append(f"the ungraded roster: two rows for {name}")
+        stated[name] = answer.strip()
+    blind = set(ungraded())
+    for name in sorted(blind - set(stated)):
+        problems.append(
+            f"the ungraded roster: no row for {name}, which this manifest "
+            f"aims nothing at — the run's closing line sends its reader here"
+        )
+    for name in sorted(set(stated) - blind):
+        problems.append(
+            f"the ungraded roster: a row for {name}, which has an entry — it "
+            f"is graded by this manifest and does not belong in a list of what "
+            f"is not"
+        )
+    # And the answer itself. A row whose right-hand cell says nothing is a row
+    # that resolves to the same "somebody's memory" the roster replaced, so it
+    # has to name a `tests/unit` class or say plainly that there is none.
+    for name in sorted(set(stated) & blind):
+        answer = stated[name]
+        if "genuinely ungraded" in answer or re.search(r"`[A-Z]\w+`", answer):
+            continue
+        problems.append(
+            f"the ungraded roster: {name}'s row answers {answer!r}, which "
+            f"names no tests/unit class and does not say 'genuinely ungraded'"
+        )
+    return problems
+
+
 def readme_problems(text: str) -> list[str]:
     """Everything `tests/README.md` states about this manifest that is untrue."""
     problems = []
@@ -1147,7 +1368,12 @@ def readme_problems(text: str) -> list[str]:
                 f"{what}: the README says {'/'.join(found[0])}, "
                 f"`--list` says {'/'.join(truth)}"
             )
-    return problems + readme_tables(text) + readme_named_gaps(text)
+    return (
+        problems
+        + readme_tables(text)
+        + readme_named_gaps(text)
+        + readme_ungraded_roster(text)
+    )
 
 
 def listing(entries: list[Injection]) -> int:
