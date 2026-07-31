@@ -453,17 +453,27 @@ class Recorder(_DemoBase):
         )
 
     def _watch_page(self, page) -> None:
-        """Subscribe to the page events this recorder reacts to.
+        """Everything `_DemoBase` watches, plus what a *document* being
+        replaced means to a web take.
 
-        Its own method so the subscription is reachable without a browser:
-        `tests/unit` hands this a page that records what was subscribed and
-        then fires it, which is the only way to grade the handlers below
-        without ten minutes of Chromium.
+        **`super()` first, and it is load-bearing.** The base subscribes
+        `console`, `pageerror`, `requestfailed` and `response` — every problem
+        this recorder exists to write down, and what `strict=True` refuses a
+        take over. An override that forgot the call would silently unsubscribe
+        all four for web takes only, which is the one shape of bug that leaves
+        `timeline.json` looking healthy because the problems never reach it.
+        `tests/unit` holds that shut behaviourally, and it is registered as an
+        injection because it is a mistake this file has already made once.
 
-        Both callbacks only set an attribute. Playwright delivers page events
-        on the same thread that is blocked in a Playwright call, so calling
-        back into the API from one of them is a way to deadlock a take.
+        `__enter__` calls this before `_start()`, so the first navigation is
+        watched too. Do not call it again from `_start`: two subscriptions
+        record every console error twice.
+
+        Both callbacks below only set an attribute. Playwright delivers page
+        events on the same thread that is blocked in a Playwright call, so
+        calling back into the API from one of them is a way to deadlock a take.
         """
+        super()._watch_page(page)
         # **Kept deliberately when the masking went** — #142's carve-out.
         # Written for the paint gate, which is gone; nothing reads the flag.
         #
@@ -481,7 +491,6 @@ class Recorder(_DemoBase):
         page.on("domcontentloaded", self._note_document_replaced)
 
     def _start(self) -> None:
-        self._watch_page(self.page)
         # Render the window+background frame once (on a throwaway page, so the
         # app page stays clean for goto). ffmpeg composites the recording into
         # it in _postprocess.

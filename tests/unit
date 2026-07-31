@@ -140,7 +140,7 @@ _pw.sync_api = _pw_sync  # type: ignore[attr-defined]
 sys.modules["playwright"] = _pw
 sys.modules["playwright.sync_api"] = _pw_sync
 
-from demo_recording.core import _beat_verb  # noqa: E402
+from demo_recording.core import _beat_verb, _DemoBase  # noqa: E402
 from demo_recording.terminal import TerminalRecorder  # noqa: E402
 from demo_recording.web import Recorder  # noqa: E402
 
@@ -2249,12 +2249,65 @@ class CaptionTruth(unittest.TestCase):
         rec.pause(0)
         self.assertEqual(rec._beats[-1]["caption"], "The order was accepted.")
 
-    def test_the_take_subscribes_its_page_when_the_recording_starts(self):
-        # `_start` needs Chromium, so what is graded is that it delegates to
-        # the seam every test above exercises. Without this, the handlers
-        # could be perfect and subscribed by nothing on a real take.
-        source = inspect.getsource(Recorder._start)
+    def test_a_take_watches_its_page_before_the_medium_starts(self):
+        # `__enter__` needs Chromium, so what is graded is that it reaches the
+        # seam every test above exercises, and reaches it *before* `_start` —
+        # a page that throws on load is the whole point of watching it.
+        source = inspect.getsource(_DemoBase.__enter__)
         self.assertIn("self._watch_page(self.page)", source)
+        self.assertLess(
+            source.index("self._watch_page(self.page)"),
+            source.index("self._start()"),
+            "the medium starts before its page is watched, so the first "
+            "navigation's problems are recorded by nobody",
+        )
+
+
+class WatchedEvents(unittest.TestCase):
+    """What subscribing a recorder's page subscribes.
+
+    Written after the first version of #134's fix shipped `Recorder`'s two
+    handlers as a **new** `_watch_page`, when `_DemoBase._watch_page` — the
+    subscription for `console`, `pageerror`, `requestfailed` and `response` —
+    already existed under exactly that name. Python resolved the override, the
+    base's four listeners were never attached on a web take, and every problem
+    the recorder exists to record went unrecorded: `timeline.json` was
+    well-formed and empty of issues, and `strict=True` stopped refusing
+    anything. `tests/unit` could not see it, because no test here enters the
+    context manager that calls the shadowed method — the catalogue's
+    config-hidden path, in the suite rather than in the code.
+    """
+
+    def subscribed(self, cls) -> dict[str, int]:
+        """{event: how many handlers} after one subscription pass."""
+        rec = recorder(self, cls=cls)
+        rec._watch_page(rec.page)
+        return {event: len(h) for event, h in rec.page.subscribed.items()}
+
+    def test_a_web_take_watches_the_problems_every_take_watches(self):
+        # Spelled out rather than derived from the base class: a list read out
+        # of the code under test agrees with that code by construction, and
+        # these four names are what `timeline.json`'s issue log is made of.
+        self.assertLessEqual(
+            {"console", "pageerror", "requestfailed", "response"},
+            set(self.subscribed(WebRec)),
+        )
+
+    def test_the_web_recorder_only_adds_to_what_the_base_watches(self):
+        # The same claim from the other side, and the one that survives a
+        # listener being renamed: the terminal recorder does not override
+        # `_watch_page`, so what it subscribes *is* the base's set.
+        base = set(self.subscribed(TermRec))
+        self.assertEqual(
+            set(self.subscribed(WebRec)),
+            base | {"framenavigated", "domcontentloaded"},
+        )
+
+    def test_no_page_event_is_subscribed_twice(self):
+        # `__enter__` already calls `_watch_page`; a medium calling it again
+        # from `_start` would log every console error the page emits twice.
+        doubled = {e: n for e, n in self.subscribed(WebRec).items() if n != 1}
+        self.assertEqual(doubled, {})
 
 
 class VerbTarget(unittest.TestCase):
@@ -2906,13 +2959,37 @@ INJECTIONS = [
         ["CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption"],
     ),
     (
-        # …and the subscription can be right and never made, because `_start`
-        # needs Chromium and no test here runs it.
-        "a take starts without subscribing to its page's events",
+        # …and the subscription can be right and never made, because
+        # `__enter__` needs Chromium and no test here runs it.
+        "a take starts the medium before it watches the page",
+        "core.py",
+        "            self._watch_page(self.page)\n            self._start()",
+        "            self._start()\n            self._watch_page(self.page)",
+        ["CaptionTruth.test_a_take_watches_its_page_before_the_medium_starts"],
+    ),
+    (
+        # The regression the first version of this change shipped, and the one
+        # `tests/smoke` caught after `tests/unit` went green: `Recorder`
+        # declaring `_watch_page` without delegating shadows the base's four
+        # problem listeners, so a web take records no console error, no
+        # pageerror, no failed request — and `strict=True` refuses nothing.
+        "the web recorder's page subscription shadows the base's",
         "web.py",
-        "        self._watch_page(self.page)",
-        "        pass  # the page is watched by nobody",
-        ["CaptionTruth.test_the_take_subscribes_its_page_when_the_recording_starts"],
+        "        super()._watch_page(page)",
+        "        pass  # the base's problem listeners are on their own",
+        [
+            "WatchedEvents.test_a_web_take_watches_the_problems_every_take_watches",
+            "WatchedEvents.test_the_web_recorder_only_adds_to_what_the_base_watches",
+        ],
+    ),
+    (
+        # And the mirror: subscribing twice logs every problem the page emits
+        # twice, which is the shape the fix for the above invites.
+        "a medium subscribes its page a second time",
+        "web.py",
+        "        super()._watch_page(page)",
+        "        super()._watch_page(page)\n        super()._watch_page(page)",
+        ["WatchedEvents.test_no_page_event_is_subscribed_twice"],
     ),
     (
         # The naive fix, and the reason the clear is not on `framenavigated`:
