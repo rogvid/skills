@@ -2240,9 +2240,7 @@ class CaptionTruth(unittest.TestCase):
         before = len(rec._beats)
         self.assertGreaterEqual(rec.page.fire("framenavigated", None), 1)
         rec.pause(0)
-        self.assertEqual(
-            [b["caption"] for b in rec._beats[before:]], [STALE_CAPTION]
-        )
+        self.assertEqual([b["caption"] for b in rec._beats[before:]], [STALE_CAPTION])
 
     def test_a_caption_set_after_the_load_is_reported_again(self):
         rec = self.prepared()
@@ -2269,8 +2267,9 @@ class VerbTarget(unittest.TestCase):
 
     def target_of(self, cls, name, *args, **kwargs):
         """The `selector` the beat log records for one call of one verb."""
-        rec = recorder(self, cls=WebRec if cls is Recorder else TermRec,
-                       page=DeadPage())
+        rec = recorder(
+            self, cls=WebRec if cls is Recorder else TermRec, page=DeadPage()
+        )
         with contextlib.suppress(Exception):
             getattr(rec, name)(*args, **kwargs)
         self.assertTrue(
@@ -2291,8 +2290,7 @@ class VerbTarget(unittest.TestCase):
             self.assertEqual(
                 positional,
                 VERB_SENTINEL,
-                f"{cls.__name__}.{name}({VERB_SENTINEL!r}) logged "
-                f"{positional!r}",
+                f"{cls.__name__}.{name}({VERB_SENTINEL!r}) logged {positional!r}",
             )
             self.assertEqual(
                 keyword,
