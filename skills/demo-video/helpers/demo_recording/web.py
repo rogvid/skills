@@ -155,6 +155,31 @@ window.__demoTerminalHide = () => {
 };
 """
 
+# How long `press()` holds the frame after the key goes down (issue #130).
+#
+# A key press is instantaneous in a way typing is not: the list refilters, the
+# dialog closes, the focus ring jumps, and it is over inside one frame. A verb
+# that returned the moment Playwright did would put the change and the *next*
+# verb's action in the same frame of video, which is the jump cut `type_into`'s
+# per-character delay exists to avoid — the whole reason the storyboard is not
+# just driving Playwright.
+#
+# 0.5 s is a floor with a reason rather than a round number: SKILL.md's
+# "Pacing and perception" puts a saccade at ~200 ms and says a change needs a
+# fixation after it to be recognised rather than merely noticed. It is
+# deliberately *below* the 1.5 s emphasis floor, because a press is a beat in
+# the middle of an interaction and not the emphasis itself — a storyboard that
+# wants the result dwelt on says `hold()` after it, as it does after a click.
+PRESS_HOLD_S = 0.5
+
+# How long `clear()` leaves the selection highlight up before deleting it.
+#
+# The highlight is the only thing on screen that explains where the text went.
+# Without the pause the field goes from a value to nothing between two frames
+# with no cursor, no keystroke and no selection visible — exactly the "jump
+# cut" reading issue #130 filed against `page.keyboard.press("Backspace")`.
+CLEAR_SELECT_HOLD_S = 0.4
+
 # How long the spotlight's enter and exit take. One constant, used as the
 # element's `transition` and as the shape of the timer that backs the exit up,
 # so the two cannot drift apart.
@@ -771,11 +796,73 @@ class Recorder(_DemoBase):
         demos (checkout, login, search). For anything the verbs don't
         cover, `self.page` is the live Playwright page.
 
+        **Types at the caret; it does not empty the field first.** A second
+        term typed into a box that already holds one appends to it. `clear()`
+        is the verb for emptying it, and it is a separate beat on purpose —
+        see its docstring.
+
         Type example values. Nothing here hides what it types — see "What this
         records, and what it does not defend against" in SKILL.md.
         """
         self.click(selector)
         self.page.keyboard.type(text, delay=delay_ms)
+
+    @_beat_verb("clear")
+    def clear(self, selector: str) -> None:
+        """Empty a field, visibly — click it, select what is in it, delete.
+
+        The counterpart to `type_into`, which appends (issue #130). A search
+        demo empties the box between terms as a matter of course, and before
+        this verb existed the only way to do it was `rec.page.keyboard`, which
+        records no beat at all: `timeline.json` showed the click and then the
+        next caption, and the two keystrokes that actually emptied the field
+        happened in the gap between them.
+
+        **A verb rather than an argument on `type_into`.** Emptying a field is
+        something the viewer watches happen, so it is a thing with its own
+        beat, its own frame and its own evidence file; folding it into
+        `type_into` would give one beat that did two visible things and named
+        only the second. And the case that settles it takes no text at all —
+        the demo that clears the search box to show the unfiltered list
+        restored has no `type_into` call for the argument to hang on.
+
+        **Selects and deletes rather than animating one backspace per
+        character.** The selection highlight is a frame a viewer can read, it
+        costs the same whether the field holds four characters or forty, and it
+        is what a person actually does. The delete is a real `Backspace`, so an
+        app listening on `keydown` sees what a keyboard would send —
+        `fill("")` sends no key events at all.
+        """
+        self.click(selector)
+        self.page.locator(selector).first.select_text()
+        self.pause(CLEAR_SELECT_HOLD_S)
+        self.page.keyboard.press("Backspace")
+        self.pause(0.3)
+
+    @_beat_verb("press", lambda args, kwargs: args[0] if args else kwargs.get("key"))
+    def press(self, key: str, hold_s: float = PRESS_HOLD_S) -> None:
+        """Press one named key wherever the focus already is — `"Enter"` to
+        submit, `"Escape"` to dismiss, `"Tab"` to move on, `"Control+A"`.
+
+        Playwright's key names (`Enter`, `Escape`, `Tab`, `ArrowDown`,
+        `Control+A`, `Shift+Tab`); an unknown one raises rather than typing its
+        letters. One key per call, so each press is its own beat with its own
+        frame — the beat records the key by name, which is the whole of what
+        `rec.page.keyboard.press` could not do (issue #130).
+
+        **Cursor-free and selector-free, deliberately.** The keys a form demo
+        needs are about the thing that already has focus: `Tab` is a demo *of*
+        the focus order and clicking a target first would destroy it, and
+        `Escape` dismisses whatever is up rather than acting on an element.
+        `type_into()` and `clear()` leave the caret in the field they drove, so
+        a press straight after either one lands where the viewer is looking.
+
+        Holds `hold_s` afterwards so the effect is on screen long enough to
+        read — see PRESS_HOLD_S. Shorten it when touring several fields with
+        `Tab`; lengthen it, or say `hold()`, when the press is the point.
+        """
+        self.page.keyboard.press(key)
+        self.pause(hold_s)
 
     @_beat_verb("scroll_to")
     def scroll_to(self, selector: str) -> None:

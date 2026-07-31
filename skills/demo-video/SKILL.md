@@ -251,13 +251,15 @@ exception, or a non-zero exit. Both are
 | `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See [reference/review.md](reference/review.md). |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
-| `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search) |
+| `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search). Types at the caret: it appends to what is already there, so `clear()` first to replace it |
+| `clear(selector)` | Empty a field, visibly — click, select what is in it, delete. Its own beat, because emptying a field is something the viewer watches happen |
+| `press(key, hold_s=0.5)` | Press one named key wherever the focus already is — `"Enter"` to submit, `"Escape"` to dismiss, `"Tab"` to move on, `"Control+A"`. Playwright's key names; an unknown one raises. Selector-free on purpose: `Tab` *is* the focus demo and `Escape` acts on whatever is up, and `type_into`/`clear` leave the caret where they put it. Holds `hold_s` so the change is on screen long enough to read |
 | `wait_for(selector)` | Wait for something the app does on its own |
 | `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition) |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
 | `interlude(text, hold=2.8, style=…)` | Bridge a jump; `hold` is how long the card stays before the storyboard moves on. `style="card"` (default) is a full-screen title card, for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. **`interlude("")` fades out whatever is up, whichever style raised it** — the clear takes no `style` and ignores the one it is given. Leave one up and the take says so on stderr and in `content.warnings`; nothing else will notice (see [reference/limits.md](reference/limits.md)). |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
-| `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, keyboard shortcuts, drag) |
+| `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, drag, hover-only menus) |
 
 ## Pacing and perception
 
