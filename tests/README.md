@@ -38,9 +38,10 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~14 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~32 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
+├── lint               # ruff, at exactly the version ci.yml pins (~0.3 s)
 └── fixture/
     └── index.html     # the app smoke records: static, dependency-free, deterministic
 ```
@@ -62,7 +63,19 @@ tests/unit                        # the browser-free half of the recorder
 tests/unit --fault-inject         # break each thing an assertion watches
 tests/ci-unit                     # the CI workflow's three helper scripts
 tests/ci-unit --fault-inject
+tests/lint                        # ruff check + ruff format --check, as CI runs them
 ```
+
+**Lint with `tests/lint`, not with `uvx ruff`.** They are not the same command.
+`uvx ruff` resolves to whatever ruff is current, which on this tree sees a
+different set of files and disagrees about them — in the direction where you
+reformat files CI was happy with and land an unrelated diff. `tests/lint` reads
+the `RUFF_VERSION:` line out of `.github/workflows/ci.yml` and runs *that*
+ruff, and CI's `lint` job runs `tests/lint --github`, so there is one command
+and one pin. Change the pin and the local command changes with it;
+`tests/lint --self-test` is what keeps that true, and refuses a workflow that
+reaches ruff any other way.
+[#189](https://github.com/rogvid/skills/issues/189) is what this cost before.
 
 Then the recorder itself:
 
@@ -91,8 +104,12 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 15, ~14 min
+tests/smoke-inject                # all 25 entries, ~32 min
 ```
+
+Those three figures, and every number in **The injection manifest** below, are
+checked against the manifest by `tests/smoke-inject --self-test` on every push.
+Editing one by hand turns a run red; see that section for why.
 
 **One suite at a time, per machine.** The script takes an exclusive `flock` on
 `$TMPDIR/demo-video-smoke.lock` and refuses to start while another run holds
@@ -1352,26 +1369,49 @@ refusal as an assertion that failed.
 
 ### What it covers
 
-Sixteen entries, chosen by *what a silent failure would cost* rather than by
-what is easy to break. Measured end to end, twice, on the box the arm table
-above was measured on: **16.3 and 16.4 minutes**, five clean baselines
-included.
+Entries are chosen by *what a silent failure would cost* rather than by what is
+easy to break. This is what `tests/smoke-inject --list` reports today, quoted
+rather than remembered:
+
+```
+25 entries, 7 arms, ~31.9 min of takes
+```
+
+That figure is `--list`'s **estimate** — each entry's arm from the table above,
+plus one clean baseline per arm — not a stopwatch reading. The last measured
+end-to-end pair, 16.3 and 16.4 minutes, was taken when the manifest held
+sixteen entries and is not comparable; nobody has sat through the current one,
+and the nightly job's budget is set from the estimate.
+
+Every number in this section is read back out of this file and compared against
+the manifest by `tests/smoke-inject --self-test`, which runs on every push. It
+is checked rather than maintained because it was maintained: by
+[#184](https://github.com/rogvid/skills/issues/184) this section claimed sixteen
+entries over five arms and "23 of 32 check functions have no entry" against a
+real 22 of 35 — a coverage claim reading *better* than the truth, in the one
+paragraph whose job is to say what this manifest does not cover.
 
 | arm | entries | what a miss would mean |
 |---|---|---|
 | `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
+| `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
+| `--web-only` | 6 | the form verbs lie about what they did: `press` logging a key it never sent or returning before the page saw it, `clear` selecting without deleting or emptying the field between two frames, either of them driving the page and writing no beat |
 | `--content-only` | 3 | the recorder stops noticing a recording nobody can watch, starts warning about honest demos that hold still, or goes back to scoring the whole frame (issue #17's anti-correlated metric) |
 
 ### What it does **not** cover
 
-- **23 of `tests/smoke`'s 32 check functions have no entry**, and the harness
+- **22 of `tests/smoke`'s 35 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
-  leaving the boundary to somebody's memory. The large ones are there for cost:
-  `check_take`, `check_timeline`, `check_beat_frames`, `check_issues`,
-  `check_evidence` and `check_caption` live on `--web-only`/`--terminal-only`
+  leaving the boundary to somebody's memory. Every check function this bullet
+  names in backticks is checked against that list too, not just the count —
+  one of them stayed written here as uncovered for as long as it had six
+  entries aimed at it, and a count would never have said so. The large ones
+  are there for cost:
+  `check_take`, `check_timeline`, `check_beat_frames`, `check_issues`
+  and `check_caption` live on `--web-only`/`--terminal-only`
   (123 s and 186 s an injection), and `check_determinism`, `check_merge_offset`
   and the narration pair each carry their own arm nobody has aimed an entry at
   yet. Adding one is cheap in effort and expensive in wall clock; that trade is
@@ -1405,7 +1445,9 @@ included.
 - **Every push** — `tests/smoke-inject --self-test`, in ci.yml's `unit` job. It
   records nothing and costs nothing, and it is what stops the harness itself
   from reporting PASS on no evidence: each guard is handed the input it exists
-  to refuse and has to refuse it.
+  to refuse and has to refuse it. It also reads the figures above back out of
+  this file and compares them with the manifest, so a stale count here is a red
+  run and not a discovery.
 - **Nightly, and on demand** — the whole manifest, in
   `.github/workflows/smoke-inject.yml`. Not per-push: CI already pays ~10
   minutes for `smoke` on every commit, and what rots here is an *assertion*,
