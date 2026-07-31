@@ -549,9 +549,9 @@ return.
 - **Scripting oversized asks to in-app agents.** If the app has chat or
   agent turns with a budget, one big scripted message can exhaust it and
   waste the take — script 1–2 steps per message.
-- **Layout shifts strand the cursor.** When the app inserts rows/cards
-  mid-recording, elements move but the cursor doesn't — re-`move_to` the
-  target after any wait that can reflow the page.
+- **Layout shifts strand the cursor.** Elements the app inserts mid-recording
+  move, the cursor does not — re-`move_to` after any wait that can reflow.
+  The dot stays undrawn until the pointer first moves, and after each `goto()`.
 - **Recording real data and planning to blur it later.** There is no later,
   and there is no blur: the frame is captured the moment it paints, nothing
   here hides anything, and a published video leaks forever. Decide what must
