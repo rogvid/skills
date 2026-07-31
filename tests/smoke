@@ -391,10 +391,16 @@ OVERLAY_CLEARED_MAX_RATIO = 0.2
 # Duration windows, in seconds. Wide on purpose: the lower bound catches a
 # take that died early, the upper one catches a hang, and everything in
 # between is legitimate variation between a laptop and a cold CI runner.
-WEB_DURATION_S = (6.0, 32.0)
+#
+# The web ceiling went 32 -> 45 when the form verbs' eight beats joined this
+# storyboard (issue #130): the take measured 20.6 s before them and 27.6 s
+# after, so 32 was no longer a bound on a hang, it was a bound on a loaded
+# machine. A hang is minutes, not seconds, and the lower bound is what catches
+# the failure this suite actually sees.
+WEB_DURATION_S = (6.0, 45.0)
 TERMINAL_DURATION_S = (4.0, 32.0)
 
-WEB_SHOTS = ["01-dashboard", "02-filtered", "03-refreshed"]
+WEB_SHOTS = ["01-dashboard", "02-filtered", "03-refreshed", "04-cleared"]
 TERMINAL_SHOTS = ["01-echo", "02-listing"]
 
 # Two stills every take ends with: the same frame with the caption cleared and
@@ -629,6 +635,18 @@ WEB_BEATS = [
     ("click", "#refresh"),
     ("pause", None),
     ("shot", "03-refreshed"),
+    # The form verbs (issue #130). `press` records the key it pressed in the
+    # beat's target field, which is the issue's acceptance criterion: before
+    # this, the keystrokes that emptied a field happened in the gap between two
+    # beats and appeared in no artifact at all.
+    ("caption", None),
+    ("clear", "#search"),
+    ("shot", "04-cleared"),
+    ("press", "Enter"),
+    ("press", "Tab"),
+    ("type_into", "#search"),
+    ("pause", None),
+    ("press", "Escape"),
     ("caption", None),
     ("shot", "90-caption-off"),
     ("pause", None),
@@ -636,6 +654,13 @@ WEB_BEATS = [
     ("shot", "91-caption-on"),
     ("caption", None),
 ]
+
+# The keys the web storyboard presses, in order. Written out separately from
+# WEB_BEATS because it answers a different question: WEB_BEATS asks whether the
+# beat is there, this asks whether the beat *names the key*, which is issue
+# #130's acceptance criterion and the one thing `rec.page.keyboard.press` could
+# never do. check_form_pacing() reads it.
+WEB_PRESS_KEYS = ["Enter", "Tab", "Escape"]
 
 TERMINAL_BEATS = [
     ("pause", None),
@@ -665,6 +690,7 @@ WEB_CAPTIONS = [
     "A small dashboard.",
     "Filter by city.",
     "Refresh reloads it.",
+    "Keys, not just clicks.",
     "",
     PROBE_CAPTION,
     "",
@@ -1242,6 +1268,32 @@ WEB_EVIDENCE = [
         "03-refreshed",
         ["$134,950", "snapshot 2 of 3", "Refresh reloads it."],
         ["$128,400", "snapshot 1 of 3"],
+    ),
+    # The two form verbs, graded in the artifact issue #130 is actually about.
+    # `find()` above locates these by (verb, target), so each entry asserts
+    # three things at once: the beat exists, its target is the selector the
+    # storyboard cleared or the key it pressed by name, and the evidence file
+    # written for *that beat* describes the screen the verb produced. A verb
+    # that drove the page through `rec.page.keyboard` would fail at the first.
+    (
+        "clear",
+        "#search",
+        # The filter came off: the three rows "harbor" had hidden are back in
+        # the account of the screen, not merely on it.
+        [
+            "Harbor Supply Co.",
+            "Ferrari Logistics",
+            "Redwood Kitchens",
+            "Blue Ridge Foods",
+            "Keys, not just clicks.",
+        ],
+        ["Pine & Poplar", "Cascade Outfitters"],
+    ),
+    (
+        "press",
+        "Enter",
+        ["snapshot 3 of 3", "$119,180", "Pine & Poplar", "Cascade Outfitters"],
+        ["snapshot 2 of 3", "$134,950"],
     ),
 ]
 
@@ -2131,6 +2183,17 @@ def check_determinism(b: Beats, page, when: str, on: bool = True) -> dict:
     return state
 
 
+# What has the focus, as a name a failure message can print: the element's id
+# when it has one, and its tag when it does not — `blur()` hands focus back to
+# `<body>`, which has no id and would otherwise read as the empty string beside
+# every other unfocusable answer.
+_FOCUSED_JS = """() => {
+  const el = document.activeElement;
+  if (!el) return '(none)';
+  return el.id || el.tagName.toLowerCase();
+}"""
+
+
 # Records every mousemove the page sees, so move_to()'s 30-step glide can be
 # told apart from the single move Playwright's own click() dispatches.
 _TRAIL_JS = """() => {
@@ -2272,6 +2335,102 @@ def record_web(
             "$134,950",
         )
         rec.shot("03-refreshed")
+
+        # -- the form verbs (issue #130) --------------------------------------
+        #
+        # Every assertion here reads the *app*, not the beat log: a verb that
+        # logged a beautiful beat and pressed nothing fails each one. The beat
+        # log is graded separately, by WEB_BEATS and by the two WEB_EVIDENCE
+        # entries keyed on ("clear", "#search") and ("press", "Enter") — which
+        # is the half of the issue no post-condition can see, since
+        # `rec.page.keyboard` would satisfy everything below and write nothing.
+        rec.caption("Keys, not just clicks.")
+        check_caption(b, rec.page, "Keys, not just clicks.")
+
+        # The pre-condition is asserted, not assumed: "the field is empty" is
+        # not news about a field that was already empty, which is the vacuous
+        # sweep in wip/verified-review with a different haystack.
+        b.expect(
+            "before clear('#search'), #search value",
+            rec.page.input_value("#search"),
+            "seattle",
+        )
+        rec.clear("#search")
+        b.expect(
+            "clear('#search'), field value",
+            rec.page.input_value("#search"),
+            "",
+        )
+        b.expect(
+            "clear('#search'), #rows row count (all four rows are back)",
+            rec.page.locator("#rows tr").count(),
+            4,
+        )
+        # The caret stays where the viewer last saw it, which is what lets the
+        # press() below be selector-free rather than careless — and it is the
+        # post-condition Escape does *not* produce, so neither verb can pass an
+        # assertion meant for the other.
+        b.expect(
+            "clear('#search'), the focused element (the caret stays in the box)",
+            rec.page.evaluate(_FOCUSED_JS),
+            "search",
+        )
+        rec.shot("04-cleared")
+
+        # Enter submits from inside the field clear() left the caret in.
+        rec.press("Enter")
+        b.expect(
+            "press('Enter'), #status text",
+            rec.page.locator("#status").inner_text(),
+            "snapshot 3 of 3",
+        )
+        b.expect(
+            "press('Enter'), #kpi-rev text",
+            rec.page.locator("#kpi-rev").inner_text(),
+            "$119,180",
+        )
+
+        rec.press("Tab")
+        b.expect(
+            "press('Tab'), the focused element",
+            rec.page.evaluate(_FOCUSED_JS),
+            "refresh",
+        )
+        # ...and the half of Tab a viewer can see. `:focus-visible` in the
+        # fixture draws this ring for keyboard focus only, so the mouse click
+        # on #refresh above leaves it 'none' and this cannot pass on that.
+        b.expect(
+            "press('Tab'), #refresh computed outline-style (the ring)",
+            rec.page.eval_on_selector("#refresh", outline),
+            "solid",
+        )
+
+        # Escape last, with a term in the box for it to dismiss — and a row
+        # count that says the box really holds one, because an Escape that
+        # emptied nothing would satisfy the value check below on its own.
+        rec.type_into("#search", "harbor")
+        rec.pause(0.6)
+        b.expect(
+            "type_into('#search', 'harbor'), #rows row count",
+            rec.page.locator("#rows tr").count(),
+            1,
+        )
+        rec.press("Escape")
+        b.expect(
+            "press('Escape'), #search value",
+            rec.page.input_value("#search"),
+            "",
+        )
+        b.expect(
+            "press('Escape'), #rows row count (all six rows are back)",
+            rec.page.locator("#rows tr").count(),
+            6,
+        )
+        b.expect(
+            "press('Escape'), the focused element (the dismiss let the box go)",
+            rec.page.evaluate(_FOCUSED_JS),
+            "body",
+        )
 
         # Two stills back to back with the page frozen and only the caption
         # changing. Their difference in the caption band is pixel proof that
@@ -5144,6 +5303,124 @@ def _same_frame(mp4: Path, at: float, png: Path) -> bool:
         )
 
 
+# -- how long the form verbs hold the frame (issue #130) ----------------------
+#
+# The post-conditions in `record_web` grade *that* the key was pressed and the
+# field emptied. Nothing in them grades the pacing, and pacing is half of why
+# these are verbs at all: `rec.page.keyboard.press("Backspace")` also emptied
+# the field, in about ten milliseconds, and the complaint in the issue is that
+# a viewer could not see it happen. So both holds get a bar, and both bars are
+# **hand-written here rather than imported from the recorder** — a bound read
+# off the code it grades agrees with that code whatever the code says, which is
+# the same reason WEB_BEATS is written out by hand.
+#
+# Measured on this box, over the web take: the three press beats span 0.514,
+# 0.518 and 0.515 s against the recorder's 0.5 s hold, and the same three with
+# the hold injected out span 0.013, 0.013 and 0.012 s. The bar sits at 0.35 —
+# 32% under the healthy reading and 27x over the broken one. A lower bound on a
+# deliberate wait is the one timing bar contention cannot turn red: a loaded
+# machine only ever makes it larger.
+MIN_PRESS_BEAT_SPAN_S = 0.35
+
+# `clear()`'s own pacing, measured as what it costs **over** a plain `click()`
+# in the same take. Its beat starts with a click — the same 30-step glide, the
+# same 0.4 s settle — so an absolute bar on its span would be satisfied by the
+# glide alone and would say nothing about the selection hold. The difference
+# is: 0.4 s for the highlight to be readable, plus the 0.3 s tail after the
+# delete, plus `select_text`.
+#
+# Measured on this box: the clear beat spans 0.70-0.71 s more than the click
+# beat, and a clear stripped of both pauses spans 0.009 s more (1.665 s against
+# 0.956 s healthy; 0.965 s against 0.956 s injected). Both glides inflate
+# together under load, so the difference is stable rather than merely large;
+# the bar is at 0.40, leaving 0.30 s of noise room against the healthy reading
+# and sitting 78x over the broken one.
+MIN_CLEAR_OVER_CLICK_S = 0.40
+
+
+def _beat_span(beats: list[dict], verb: str, target: str | None) -> float | None:
+    """How long the single (verb, target) beat took, or None if there is not
+    exactly one of them."""
+    hits = [
+        b
+        for b in beats
+        if b.get("verb") == verb
+        and b.get("selector") == target
+        and isinstance(b.get("t_start"), (int, float))
+        and isinstance(b.get("t_end"), (int, float))
+    ]
+    if len(hits) != 1:
+        return None
+    return float(hits[0]["t_end"]) - float(hits[0]["t_start"])
+
+
+def check_form_pacing(label: str, out_dir: Path) -> list[str]:
+    """The form verbs hold the frame long enough to be watched (issue #130).
+
+    Reads `timeline.json`, which is also the artifact the issue is about: a
+    storyboard that drove the page through `rec.page.keyboard` writes no beat
+    here at all, so the first thing this fails on is the beat being missing.
+    """
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    beats = doc.get("beats") or []
+    failures: list[str] = []
+
+    presses = [b for b in beats if b.get("verb") == "press"]
+    if len(presses) != len(WEB_PRESS_KEYS):
+        failures.append(
+            f"{label}: timeline.json holds {len(presses)} `press` beat(s), "
+            f"expected {len(WEB_PRESS_KEYS)} — either the storyboard changed "
+            f"or press() stopped recording a beat, which is the whole of what "
+            f"issue #130 asked for"
+        )
+    for beat, key in zip(presses, WEB_PRESS_KEYS, strict=False):
+        # The key by name, in the log. `rec.page.keyboard.press` could not do
+        # this, and it is the issue's acceptance criterion word for word.
+        if beat.get("selector") != key:
+            failures.append(
+                f"{label}: beat {beat.get('index')} is a `press` whose target "
+                f"is {beat.get('selector')!r}, expected {key!r} — the beat does "
+                f"not name the key it pressed"
+            )
+        # `or 0.0` rather than a default: a beat whose verb raised carries a
+        # null `t_end`, and reading that as zero is the honest answer here —
+        # a press that did not finish did not hold anything.
+        span = float(beat.get("t_end") or 0.0) - float(beat.get("t_start") or 0.0)
+        if span < MIN_PRESS_BEAT_SPAN_S:
+            failures.append(
+                f"{label}: the `press` beat for {key!r} spans {span:.3f}s, "
+                f"under the {MIN_PRESS_BEAT_SPAN_S}s bar — the key went down "
+                f"and the verb returned in the same frame, so the change it "
+                f"caused is on screen for less time than a saccade takes"
+            )
+
+    cleared = _beat_span(beats, "clear", "#search")
+    clicked = _beat_span(beats, "click", "#refresh")
+    if cleared is None or clicked is None:
+        failures.append(
+            f"{label}: timeline.json does not hold exactly one "
+            f"clear('#search') beat and one click('#refresh') beat "
+            f"(spans {cleared!r} and {clicked!r}), so what clear() costs over "
+            f"a plain click cannot be measured"
+        )
+    elif cleared - clicked < MIN_CLEAR_OVER_CLICK_S:
+        failures.append(
+            f"{label}: the clear('#search') beat spans {cleared:.3f}s against "
+            f"{clicked:.3f}s for click('#refresh'), a difference of "
+            f"{cleared - clicked:.3f}s under the {MIN_CLEAR_OVER_CLICK_S}s bar "
+            f"— clear() is doing no more than a click and a delete, so the "
+            f"field empties between two frames with no selection on screen to "
+            f"say where the text went"
+        )
+    if not failures:
+        print(
+            f"smoke: {label} form verbs hold the frame "
+            f"({len(presses)} press beats, "
+            f"clear costs {cleared - clicked:+.2f}s over a click)"
+        )
+    return failures
+
+
 def check_beat_frames(
     label: str,
     out_dir: Path,
@@ -6516,6 +6793,9 @@ def run_web(out_root: Path) -> list[str]:
         + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
         + check_evidence("web", out_dir, WEB_EVIDENCE, WEB_EVIDENCE_SCOPE)
+        # The form verbs' pacing (issue #130), read off the same beat log the
+        # two checks above read for their contents.
+        + check_form_pacing("web", out_dir)
         # Here rather than in its own phase: the opening hold has to leave every
         # beat where it was, and this is the take whose beat/frame alignment is
         # already graded above (issue #119).

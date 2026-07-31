@@ -65,6 +65,13 @@
     background: var(--accent); border: 0; border-radius: 10px; cursor: pointer;
   }
   #refresh:hover { filter: brightness(1.06); }
+  /* Keyboard focus, made unmistakable. Chromium draws its own ring on a
+     Tab-focused button, but its colour and width are the UA's to change; this
+     is the fixture stating what `press("Tab")` is supposed to look like.
+     `:focus-visible`, not `:focus`, so a mouse click on Refresh — which the
+     web take does, and photographs — still draws no ring at all. `outline`
+     takes no space, so nothing on the page moves. */
+  #refresh:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
 
   /* Table ------------------------------------------------------------ */
   .card {
@@ -173,6 +180,16 @@
  * screen, no animations. Every element the smoke test (and the queued
  * feature work) drives has a stable id.
  *
+ * Keyboard behaviour, always on (issue #130 — the recorder's `press()` and
+ * `clear()` verbs need something to drive that a mouse cannot reach):
+ *   Enter in #search   submits the toolbar, which here means what the Refresh
+ *                      button means — advance to the next snapshot
+ *   Escape anywhere    empties #search and takes focus off it, the way a
+ *                      search field's dismiss key does
+ *   Tab from #search   moves focus to #refresh, which draws a ring (CSS above)
+ * None of them is a query-string hook: a form demo is the ordinary case, not
+ * a broken-app case.
+ *
  * Query-string hooks, inert unless asked for:
  *   ?console-error=1  page logs a console error and throws on load (issue #3)
  *   ?bad-fetch=<url>  page fetches a missing path and <url>, both on load,
@@ -273,10 +290,32 @@ function render() {
   renderRows();
 }
 
-el("search").addEventListener("input", renderRows);
-el("refresh").addEventListener("click", function () {
+function advance() {
   snapshotIndex = (snapshotIndex + 1) % SNAPSHOTS.length;
   render();
+}
+
+el("search").addEventListener("input", renderRows);
+el("refresh").addEventListener("click", advance);
+
+// Enter in the search box does what the toolbar's button does. Deliberately
+// the same code path, so a demo that submits with the keyboard and one that
+// clicks are demonstrably the same action and not two things that agree.
+el("search").addEventListener("keydown", function (e) {
+  if (e.key !== "Enter") { return; }
+  e.preventDefault();
+  advance();
+});
+
+// Escape dismisses the search, from wherever the focus happens to be — which
+// is the point of a dismiss key, and the reason the recorder's press() takes
+// no selector. Blurring as well as emptying is what separates this from what
+// clear() does, so neither can pass an assertion meant for the other.
+document.addEventListener("keydown", function (e) {
+  if (e.key !== "Escape") { return; }
+  el("search").value = "";
+  el("search").blur();
+  renderRows();
 });
 
 render();

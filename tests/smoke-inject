@@ -5,7 +5,7 @@
 # ///
 """An executed injection manifest for `tests/smoke` (issue #136).
 
-    tests/smoke-inject               # the whole manifest, ~14 minutes
+    tests/smoke-inject               # the whole manifest, ~31 minutes
     tests/smoke-inject --list        # what it covers, and what each entry costs
     tests/smoke-inject --self-test   # prove the harness refuses a bad entry (0s)
     tests/smoke-inject --arm coverage      # one arm's entries
@@ -23,8 +23,8 @@ this file is what notices.
 going to be maintained. But smoke has per-arm flags, and an injection aimed at
 one arm costs that arm: measured on this box, `--coverage-only` is 8 s,
 `--strict-only` 13 s, `--overlay-only` 31 s, `--failure-only` 48 s,
-`--content-only` 148 s. Every entry below names the arm it needs, and nothing
-else runs.
+`--web-only` 123 s, `--content-only` 148 s. Every entry below names the arm it
+needs, and nothing else runs.
 
 **The contract, per entry** — the same one `tests/unit`'s `INJECTIONS` uses,
 with the arm added:
@@ -51,7 +51,7 @@ an aborted run cannot leave a broken recorder behind.
 
 **What this does not do** is in `tests/README.md`, under "What the injection
 manifest covers". Read it before treating a green run here as coverage of
-`tests/smoke`: 16 entries against 9 of smoke's 32 check functions is a floor
+`tests/smoke`: 22 entries against 11 of smoke's 33 check functions is a floor
 under the assertions that would be worst to lose, not a statement about the
 rest. Every check function with no entry is printed as `ungraded` at the end of
 a run, so the gap is in the output rather than in somebody's memory.
@@ -271,6 +271,141 @@ INJECTIONS = [
         arm="--failure-only",
         sites=("check_crash_take",),
         must_contain=(" does not name the ", " does not say whether demo.mp4 is"),
+    ),
+    # -- the form verbs clear() and press() (issue #130), 123 s an entry ------
+    #
+    # The six breaks PR #178 measured by hand. Its driver no longer exists, so
+    # until these entries their whole record was a table in a pull request
+    # body — the shape this file was built to stop.
+    #
+    # Two checks grade the pair, and neither can cover for the other.
+    # `check_form_pacing` reads `timeline.json`: it sees a verb that stopped
+    # recording a beat or stopped holding the frame, and is blind to a verb
+    # that logged a beautiful beat and touched nothing. `check_evidence` reads
+    # what the page said when the verb returned: it sees exactly the opposite.
+    # Every entry below names whichever of the two can actually notice its
+    # break, which is why the three `press` entries do not all name the same
+    # site.
+    Injection(
+        # The one line that presses the key, and nothing else. press() still
+        # logs its beat, still names 'Enter' as its target and still holds the
+        # frame for 0.5 s, so every assertion that reads the log passes — the
+        # only thing left that disagrees is the account of the screen the
+        # recorder wrote when the verb returned.
+        #
+        # Both halves of `check_evidence`'s per-beat claim have to fire: the
+        # facts Enter should have produced are missing *and* the ones the
+        # previous screen showed are still there. Either alone is a weaker
+        # statement than "this beat's screen never changed". Neither names the
+        # beat, because the beat is interpolated into the message rather than
+        # written in it — the arm passing clean is what makes these failures
+        # attributable to the break.
+        name="press logs the key it names and never presses it",
+        module="web.py",
+        old="        self.page.keyboard.press(key)\n",
+        new="",
+        arm="--web-only",
+        sites=("check_evidence",),
+        must_contain=(
+            " was on screen. A reviewer holding only this file cannot state ",
+            " was on screen, which belongs to an earlier state of the page ",
+        ),
+    ),
+    Injection(
+        # The pause *after* the key, which is the whole of press()'s pacing.
+        # The key still goes down, the app still changes and the beat still
+        # names the key, so nothing about the effect is disturbed: three beats
+        # spanning 0.013 s where they spanned 0.515 s is the only trace left,
+        # and the 0.35 s bar is the only assertion that reads it. Targeted as
+        # the two lines together rather than `self.pause(hold_s)` alone so the
+        # search string cannot drift onto another verb's hold.
+        name="press returns in the same frame the key went down in",
+        module="web.py",
+        old="        self.page.keyboard.press(key)\n        self.pause(hold_s)\n",
+        new="        self.page.keyboard.press(key)\n",
+        arm="--web-only",
+        sites=("check_form_pacing",),
+        must_contain=(
+            "s bar — the key went down and the verb returned in the same frame",
+        ),
+    ),
+    Injection(
+        # The decorator, not the body: the page is driven exactly as before, so
+        # every post-condition in the storyboard still passes and only the log
+        # is poorer. That is issue #130 reproduced — `rec.page.keyboard.press`
+        # also pressed the key and also wrote nothing to `timeline.json` — and
+        # it is why WEB_EVIDENCE grew an entry keyed on ('press', 'Enter').
+        # Both logs must notice: the pacing check counts the press beats, the
+        # evidence check cannot find the one it is keyed to.
+        name="press drives the page and writes no beat",
+        module="web.py",
+        old=(
+            '    @_beat_verb("press", lambda args, kwargs: args[0] if args '
+            'else kwargs.get("key"))\n'
+        ),
+        new="",
+        arm="--web-only",
+        sites=("check_form_pacing", "check_evidence"),
+        must_contain=(
+            " — either the storyboard changed or press() stopped recording a beat",
+            "), so the evidence facts written for it cannot be checked against one",
+        ),
+    ),
+    Injection(
+        # The delete. `select_text()` still runs and both pauses still run, so
+        # the beat is logged, the highlight is on screen for its full 0.4 s and
+        # the pacing bar below is satisfied — the field simply still holds
+        # "seattle" when the verb returns. Aimed at `check_evidence` for the
+        # same reason as the first entry, and with the same limit: the message
+        # says a beat's facts went missing without naming which beat, so what
+        # rules out an unrelated red is the clean baseline, not the wording.
+        name="clear selects the text and never deletes it",
+        module="web.py",
+        old='        self.page.keyboard.press("Backspace")\n',
+        new="",
+        arm="--web-only",
+        sites=("check_evidence",),
+        must_contain=(
+            " was on screen. A reviewer holding only this file cannot state ",
+        ),
+    ),
+    Injection(
+        # Both pauses, which are all clear() has to make the selection
+        # readable. The field still empties and the beat is still logged; what
+        # is left is a highlight that appears and is gone inside one frame.
+        # Graded as what the beat costs *over* the click('#refresh') beat in
+        # the same take: clear() opens with the same 30-step glide a click
+        # does, so an absolute bar would be satisfied by the glide alone and
+        # would grade nothing.
+        name="clear empties the field between two frames",
+        module="web.py",
+        old=(
+            "        self.pause(CLEAR_SELECT_HOLD_S)\n"
+            '        self.page.keyboard.press("Backspace")\n'
+            "        self.pause(0.3)\n"
+        ),
+        new='        self.page.keyboard.press("Backspace")\n',
+        arm="--web-only",
+        sites=("check_form_pacing",),
+        must_contain=("s bar — clear() is doing no more than a click and a delete",),
+    ),
+    Injection(
+        # clear()'s half of the decorator pair, and the one the issue was
+        # actually filed about: the search box empties on screen exactly as
+        # before and `timeline.json` shows the click and then the next caption,
+        # with the emptying in the gap between them. The pacing check loses the
+        # beat it measures the click against; the evidence check loses the beat
+        # keyed ('clear', '#search').
+        name="clear empties the field and writes no beat",
+        module="web.py",
+        old='    @_beat_verb("clear")\n',
+        new="",
+        arm="--web-only",
+        sites=("check_form_pacing", "check_evidence"),
+        must_contain=(
+            ": timeline.json does not hold exactly one clear('#search') beat",
+            "), so the evidence facts written for it cannot be checked against one",
+        ),
     ),
     # -- whether the recorder notices a recording nobody can watch (#97), 148 s
     Injection(

@@ -259,11 +259,13 @@ CONTENT_STATIC_WARN_S = 15.0
 # copied it out of here into a shipped table of beat verbs.
 CONTENT_ACTING_VERBS = frozenset(
     {
+        "clear",
         "click",
         "click_fast",
         "goto",
         "key",
         "move_to",
+        "press",
         "run",
         "scroll_to",
         "send",
