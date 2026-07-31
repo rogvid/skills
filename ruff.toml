@@ -16,6 +16,7 @@ exclude = [
 # Without these patterns the scripts that matter most would go unlinted.
 extend-include = [
     "tests/smoke",
+    "tests/smoke-inject",
     "tests/ci-unit",
     "tests/unit",
     ".github/scripts/*",   # the CI workflow's PEP 723 executables

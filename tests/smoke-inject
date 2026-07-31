@@ -1,0 +1,815 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""An executed injection manifest for `tests/smoke` (issue #136).
+
+    tests/smoke-inject               # the whole manifest, ~14 minutes
+    tests/smoke-inject --list        # what it covers, and what each entry costs
+    tests/smoke-inject --self-test   # prove the harness refuses a bad entry (0s)
+    tests/smoke-inject --arm coverage      # one arm's entries
+    tests/smoke-inject --only unclaimed    # entries whose name matches
+
+**The rule this executes.** An assertion nobody has watched fail is a claim,
+not a check. `tests/ci-unit` and `tests/unit` execute that rule against their
+own suites; for `tests/smoke` it was prose in `tests/README.md` — a table of
+injections somebody performed once, by hand, which nothing re-runs. An
+assertion that stops being able to fail therefore goes unnoticed forever, and
+this file is what notices.
+
+**Why it is affordable now and was not before.** A full `tests/smoke` run is
+~10 minutes behind a machine-wide lock, so an injection per assertion was never
+going to be maintained. But smoke has per-arm flags, and an injection aimed at
+one arm costs that arm: measured on this box, `--coverage-only` is 8 s,
+`--strict-only` 13 s, `--overlay-only` 31 s, `--failure-only` 48 s,
+`--content-only` 148 s. Every entry below names the arm it needs, and nothing
+else runs.
+
+**The contract, per entry** — the same one `tests/unit`'s `INJECTIONS` uses,
+with the arm added:
+
+* `old` must match **exactly once** in the file it targets. Anything else
+  aborts the whole run: an injection that silently did nothing would otherwise
+  "prove" a hollow assertion is sound, which is worse than never running it.
+* `sites` names the function(s) in `tests/smoke` whose assertions must fire,
+  and every `must_contain` string has to be a literal in one of them. That is
+  checked **statically, before anything records**, so a typo in an expected
+  message is a refusal rather than a failure a month later.
+* `must_contain` must then appear in the arm's **failure list** — the lines
+  smoke prints after `smoke: FAILED`. A non-zero exit is not evidence: issue
+  #135 is the proof, where an injected suite went red while every assertion
+  naming that fault passed and the red came from an unrelated premise guard.
+* the same arm is run **clean** first, and must pass. Without that baseline an
+  arm that is red for any other reason would certify every injection aimed at
+  it.
+
+Nothing is patched in the working tree. Each entry stages its own copy of
+`skills/demo-video`, `tests/fixture` and `tests/smoke` under a temporary
+directory — `tests/smoke` resolves everything it needs from its own path — so
+an aborted run cannot leave a broken recorder behind.
+
+**What this does not do** is in `tests/README.md`, under "What the injection
+manifest covers". Read it before treating a green run here as coverage of
+`tests/smoke`: 16 entries against 9 of smoke's 32 check functions is a floor
+under the assertions that would be worst to lose, not a statement about the
+rest. Every check function with no entry is printed as `ungraded` at the end of
+a run, so the gap is in the output rather than in somebody's memory.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import NamedTuple
+
+REPO = Path(__file__).resolve().parent.parent
+SMOKE = REPO / "tests" / "smoke"
+HELPERS = REPO / "skills" / "demo-video" / "helpers" / "demo_recording"
+
+# Generous: an arm that normally takes 148 s can take longer under an injection
+# that makes a take hang, and a timeout is reported as a failure of that entry
+# rather than of the run.
+ARM_TIMEOUT_S = 1_200
+
+# Measured on this box, clean, one arm at a time (see tests/README.md).
+ARM_SECONDS = {
+    "--evidence-only": 7,
+    "--coverage-only": 8,
+    "--narration-only": 8,
+    "--strict-only": 13,
+    "--determinism-only": 19,
+    "--polish-only": 26,
+    "--segments-only": 29,
+    "--overlay-only": 31,
+    "--failure-only": 48,
+    "--web-only": 123,
+    "--content-only": 148,
+    "--terminal-only": 186,
+}
+
+
+class Injection(NamedTuple):
+    """One break, the arm that must go red, and the assertions that must fire."""
+
+    name: str
+    module: str  # a file under demo_recording/, or "tests/smoke"
+    old: str  # must occur exactly once
+    new: str
+    arm: str
+    sites: tuple[str, ...]  # functions in tests/smoke that must complain
+    must_contain: tuple[str, ...]  # literals of those functions, in the failures
+
+
+# The order is the order they run in: cheapest arm first, so a manifest that is
+# going to abort on a stale search string does it in eight seconds.
+INJECTIONS = [
+    # -- the coverage report (issue #12), 8 s an entry ------------------------
+    Injection(
+        name="nothing is ever reported unclaimed",
+        module="coverage.py",
+        old='        "unclaimed": [key for key, beats_ in claimed.items() if not beats_],',
+        new='        "unclaimed": [],',
+        arm="--coverage-only",
+        sites=("check_coverage", "check_coverage_merge"),
+        must_contain=(
+            "The storyboard demonstrates two of",
+            "the criterion neither segment claimed",
+        ),
+    ),
+    Injection(
+        name="a claim points one beat past the beat that made it",
+        module="coverage.py",
+        old='                        "index": beat.get("index"),',
+        new='                        "index": (beat.get("index") or 0) + 1,',
+        arm="--coverage-only",
+        sites=("check_coverage", "check_coverage_merge"),
+        must_contain=(
+            "a reviewer scrubbing to that timestamp would land",
+            "expected [5] — the merged",
+        ),
+    ),
+    Injection(
+        # Issue #137: the field is in the fixture, in the output, and pinned by
+        # nothing. `check_coverage_merge` now asserts it; this is what keeps it
+        # asserted.
+        name="a claimed beat forgets which segment it came from",
+        module="coverage.py",
+        old='                        "segment": beat.get("segment"),',
+        new='                        "segment": None,',
+        arm="--coverage-only",
+        sites=("check_coverage_merge",),
+        must_contain=("a reviewer handed a bare 'beat 5'",),
+    ),
+    Injection(
+        name="a tag naming an undeclared criterion is accepted at the call",
+        module="core.py",
+        old="        unknown = [key for key in ids if key not in self._criteria]",
+        new="        unknown = []",
+        arm="--coverage-only",
+        sites=("check_coverage_refusals",),
+        must_contain=("a tag naming an undeclared criterion", " was accepted"),
+    ),
+    Injection(
+        # The arm that a weaker assertion slept through: "AC-3 in timeline.md"
+        # passed on a document that had dropped the finding, because AC-3 has
+        # its own table row whatever the report concludes.
+        name="timeline.md states the finding without naming the criterion",
+        module="timeline.py",
+        old="            f\"claiming them: {', '.join(f'`{_md_cell(k)}`' for k in unclaimed)}.** \"",
+        new='            f"claiming them.** "',
+        arm="--coverage-only",
+        sites=("check_coverage",),
+        must_contain=("states a finding about unclaimed criteria",),
+    ),
+    # -- what strict=True refuses (issue #3), 21 s an entry -------------------
+    #
+    # These two are why `--strict-only` exists. The assertions were reachable
+    # only from `--web-only` and `--terminal-only`, 186 s and up, for two short
+    # storyboards that record in twenty seconds between them — an assertion is
+    # only as gradeable as its cheapest arm, and this is the first place that
+    # cost showed up as a number.
+    Injection(
+        name="strict=True counts the fatal issues and refuses nothing",
+        module="core.py",
+        old="        if exc_type is None and self._strict and self._fatal_count:",
+        new="        if False:",
+        arm="--strict-only",
+        sites=("check_strict_failure",),
+        must_contain=("and the take succeeded — strict ",),
+    ),
+    Injection(
+        # Issue #3's acceptance verbatim: "the take broke" is not a bug report.
+        name="the refusal never says which beat the problem fired during",
+        module="core.py",
+        old="            f\"  {i['kind']} in {self._issue_where(i)}: {i['message']}\"",
+        new="            f\"  {i['kind']}: {i['message']}\"",
+        arm="--strict-only",
+        sites=("check_strict_failure",),
+        must_contain=("the strict failure never names the beat the problem ",),
+    ),
+    # -- the recorder's own overlay (issues #162/#163), 31 s an entry ---------
+    #
+    # These four are the breaks PR #170 performed by hand and wrote down. They
+    # are the reason this file exists: that pull request is three days old and
+    # nothing re-runs its table.
+    Injection(
+        name='the documented interlude("") clear takes down only the card (#162)',
+        module="core.py",
+        old="                    \"() => { window.__demoInterlude(''); window.__demoBridge(''); }\"",
+        new="                    \"() => { window.__demoInterlude(''); }\"",
+        arm="--overlay-only",
+        sites=("check_overlay_pair",),
+        must_contain=(
+            'after the documented `interlude("")` the app rect is still',
+            "the recorder reported an overlay still up on ",
+        ),
+    ),
+    Injection(
+        name="the end-of-take overlay probe reports nothing",
+        module="core.py",
+        old="            self._overlay_note = overlay_warning([str(i) for i in up])",
+        new="            self._overlay_note = overlay_warning([])",
+        arm="--overlay-only",
+        sites=("check_overlay_pair",),
+        must_contain=(
+            "this take ended with the recorder's own scrim ",
+            "nothing on stderr said the scrim was still up",
+            "the recorder still says the recording shows a ",
+        ),
+    ),
+    Injection(
+        name="the overlay probe reports an overlay on every take",
+        module="core.py",
+        old="            self._overlay_note = overlay_warning([str(i) for i in up])",
+        new='            self._overlay_note = overlay_warning(["__demo_bridge"])',
+        arm="--overlay-only",
+        sites=("check_overlay_pair",),
+        must_contain=("the recorder reported an overlay still up on ",),
+    ),
+    Injection(
+        # The control, and the one that is easy to lose: "the covered take does
+        # not say it shows a picture" is satisfied by a recorder that stopped
+        # saying it about anything.
+        name="no take says its recording shows a picture",
+        module="content.py",
+        old="        f\"{media} shows a picture (content {content.get('score')} over the \"",
+        new="        f\"{media} (content {content.get('score')} over the \"",
+        arm="--overlay-only",
+        sites=("check_overlay_pair",),
+        must_contain=("the take that cleared its scrim never said ",),
+    ),
+    # -- what a take that did not finish leaves behind (#11/#20/#24/#46), 48 s -
+    Injection(
+        # Graded on content, not existence: an empty screen.txt passes a
+        # file-exists check and says nothing about the app.
+        name="the crash dump's page text is written empty",
+        module="core.py",
+        old='            docs.append((out / "screen.txt", capped))',
+        new='            docs.append((out / "screen.txt", ""))',
+        arm="--failure-only",
+        sites=("check_crash_take",),
+        must_contain=("failure/screen.txt does not contain ",),
+    ),
+    Injection(
+        name="the FAILED marker stops naming the exception and the recording",
+        module="core.py",
+        old='            marker.write_text("\\n".join(lines))',
+        new='            marker.write_text("\\n".join(lines[:2]))',
+        arm="--failure-only",
+        sites=("check_crash_take",),
+        must_contain=(" does not name the ", " does not say whether demo.mp4 is"),
+    ),
+    # -- whether the recorder notices a recording nobody can watch (#97), 148 s
+    Injection(
+        name="the held-picture arm never warns",
+        module="content.py",
+        old="    if held >= static_limit and acting:",
+        new="    if False:",
+        arm="--content-only",
+        sites=("check_content_pair",),
+        must_contain=("the recorder did not report a held picture ",),
+    ),
+    Injection(
+        # Issue #17, the catalogue's *anti-correlated metric*: a blank recording
+        # outscored a healthy one because a third of every frame is the
+        # recorder's own chrome. The rect is the fix, and this is the standing
+        # regression test for a future "simplification" back to a whole-frame
+        # score — which is what the injection does.
+        name="the recorder scores the whole frame instead of the app rect",
+        module="terminal.py",
+        old="        return content_rect(self._host_box)",
+        new='        return (0, 0, self._size["width"], self._size["height"])',
+        arm="--content-only",
+        sites=("_check_scored_region",),
+        must_contain=("already ranks below the healthy one ",),
+    ),
+    Injection(
+        # The false positive the axis was blind to: a demo narrating a rendered
+        # screen holds one picture for longer than the limit, honestly.
+        name="the held-picture arm warns without a verb that acted on the app",
+        module="content.py",
+        old="    if held >= static_limit and acting:",
+        new="    if held >= static_limit:",
+        arm="--content-only",
+        sites=("check_content_toured",),
+        must_contain=(
+            "the recorder warned about a healthy demo that ",
+            "stderr carried a held-picture warning for a ",
+        ),
+    ),
+]
+
+
+# --------------------------------------------------------------------------
+# Reading tests/smoke: which functions assert, and in what words
+# --------------------------------------------------------------------------
+
+
+def smoke_tree() -> ast.Module:
+    return ast.parse(SMOKE.read_text(encoding="utf-8"), filename=str(SMOKE))
+
+
+def check_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
+    """Every top-level `check_*`/`_check_*` function — smoke's assertion sites."""
+    return {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and (node.name.startswith("check_") or node.name.startswith("_check_"))
+    }
+
+
+def literals(node: ast.AST) -> list[str]:
+    """Every string constant under `node`, f-string chunks included.
+
+    An f-string is stored as its literal pieces plus its interpolations, so
+    `f"{name}: the report and the beat disagree about ..."` contributes the
+    text without the value — which is exactly the part an expected message can
+    be pinned to.
+    """
+    return [
+        n.value
+        for n in ast.walk(node)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+
+
+def literal_pool(tree: ast.Module, site: ast.FunctionDef) -> list[str]:
+    """A site's own literals, plus those of the helpers it calls by name.
+
+    One level deep and no further. Several check functions hand the actual
+    wording to a private helper — `check_content_pair` to `_check_occlusion`,
+    `_check_scored_region` to `_scored_region_failures` — and an entry that
+    named the helper instead of the check would be naming something a reader
+    does not think of as an assertion site.
+    """
+    top = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    pool = literals(site)
+    for node in ast.walk(site):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called = top.get(node.func.id)
+            if called is not None and called is not site:
+                pool += literals(called)
+    return pool
+
+
+def target_path(root: Path, module: str) -> Path:
+    if module == "tests/smoke":
+        return root / "tests" / "smoke"
+    return root / "skills" / "demo-video" / "helpers" / "demo_recording" / module
+
+
+# --------------------------------------------------------------------------
+# The guards
+# --------------------------------------------------------------------------
+
+
+class Refused(Exception):
+    """The manifest cannot be run as written. Never a failing assertion."""
+
+
+# What `only_one_suite` prints when another smoke run holds the machine lock.
+# A contended arm records nothing, so its failure list is that refusal and not
+# a verdict — reporting it as "the assertion did not fire" would be a lie in
+# the one direction this file exists to prevent.
+CONTENDED = "refusing to run a second smoke suite"
+
+
+def verify_manifest(entries: list[Injection]) -> None:
+    """Everything checkable without recording anything. Raises `Refused`.
+
+    This is the half of the contract that catches a manifest rotting against
+    the code it points at: a renamed check function, a reworded message, an
+    injection whose search string no longer occurs. All three are silent when
+    the only check is "did the suite go red".
+    """
+    tree = smoke_tree()
+    sites = check_functions(tree)
+    named = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    for entry in entries:
+        if entry.arm not in ARM_SECONDS:
+            raise Refused(f"{entry.name!r}: {entry.arm} is not a measured smoke arm")
+        if not entry.must_contain:
+            raise Refused(f"{entry.name!r}: names no assertion that must fire")
+        path = target_path(REPO, entry.module)
+        if not path.is_file():
+            raise Refused(f"{entry.name!r}: {entry.module} does not exist")
+        hits = path.read_text(encoding="utf-8").count(entry.old)
+        if hits != 1:
+            raise Refused(
+                f"{entry.name!r}: its search string occurs {hits} times in "
+                f"{entry.module}, expected exactly 1 — the injection would not "
+                f"land, so nothing it claims to prove would be proven.\n"
+                f"       looked for: {entry.old!r}"
+            )
+        pool: list[str] = []
+        for site in entry.sites:
+            if site not in named:
+                raise Refused(
+                    f"{entry.name!r}: names site {site!r}, which is not a "
+                    f"function in tests/smoke"
+                )
+            if site not in sites:
+                raise Refused(
+                    f"{entry.name!r}: site {site!r} is not a top-level "
+                    f"check function of tests/smoke"
+                )
+            pool += literal_pool(tree, sites[site])
+        for wanted in entry.must_contain:
+            if not any(wanted in text for text in pool):
+                raise Refused(
+                    f"{entry.name!r}: expects the failure {wanted!r}, which is "
+                    f"not a literal in {', '.join(entry.sites)} — the entry and "
+                    f"the assertion have drifted apart"
+                )
+        if not any(len(wanted) >= 20 for wanted in entry.must_contain):
+            raise Refused(
+                f"{entry.name!r}: every expected failure is under 20 "
+                f"characters, which is too short to identify an assertion"
+            )
+
+
+def verdict(returncode: int, failures: str, must_contain: tuple[str, ...]) -> list[str]:
+    """What the named assertions did **not** say. Empty means caught.
+
+    Exit code is deliberately not sufficient and not ignored: a run that passed
+    is a miss whatever it printed, and a run that went red for another reason
+    is a miss too — that is issue #135, where the red came from a premise guard
+    whose stated remedy would have re-greened the bug.
+    """
+    if returncode == 0:
+        return ["the arm passed against a broken recorder"]
+    missed = [wanted for wanted in must_contain if wanted not in failures]
+    if missed:
+        return [f"no failure said {wanted!r}" for wanted in missed]
+    return []
+
+
+def failure_report(stderr: str) -> tuple[str, list[str]]:
+    """Smoke's failure list: everything it prints after `smoke: FAILED`.
+
+    Returned as (blob, lines). The blob is what `must_contain` is searched in —
+    the *failure list*, not the whole stream, so a message the recorder itself
+    printed on stderr can never stand in for an assertion that fired.
+    """
+    lines = stderr.splitlines()
+    if "smoke: FAILED" not in lines:
+        return "", []
+    start = lines.index("smoke: FAILED") + 1
+    body = []
+    for line in lines[start:]:
+        if line.startswith("smoke: recordings left in"):
+            break
+        body.append(line)
+    return "\n".join(body), [ln[4:] for ln in body if ln.startswith("  - ")]
+
+
+# --------------------------------------------------------------------------
+# Running an arm
+# --------------------------------------------------------------------------
+
+
+def stage(tmp: Path) -> Path:
+    """A private copy of everything `tests/smoke` reads, under `tmp`.
+
+    `tests/smoke` resolves the helpers and the fixture app from its own path,
+    so a copy behaves exactly as the original — and the working tree is never
+    patched, which matters because a run that aborts partway through would
+    otherwise leave a deliberately broken recorder in the repository.
+    """
+    root = tmp / "repo"
+    (root / "tests").mkdir(parents=True)
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(
+        REPO / "skills" / "demo-video", root / "skills" / "demo-video", ignore=ignore
+    )
+    shutil.copytree(
+        REPO / "tests" / "fixture", root / "tests" / "fixture", ignore=ignore
+    )
+    smoke = root / "tests" / "smoke"
+    shutil.copy2(SMOKE, smoke)
+    smoke.chmod(0o755)
+    return root
+
+
+def run_arm(root: Path, arm: str, out_dir: Path) -> tuple[int, str, str]:
+    """One arm of the staged `tests/smoke`, through its own shebang."""
+    try:
+        done = subprocess.run(
+            [str(root / "tests" / "smoke"), arm, "--out-dir", str(out_dir)],
+            capture_output=True,
+            text=True,
+            timeout=ARM_TIMEOUT_S,
+            env={**os.environ},
+        )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            124,
+            exc.stdout or "",
+            (exc.stderr or "")
+            + (f"\nsmoke: FAILED\n  - the arm did not finish in {ARM_TIMEOUT_S}s\n"),
+        )
+    return done.returncode, done.stdout, done.stderr
+
+
+def baseline(arm: str) -> float:
+    """The arm, clean, on a staged copy. Raises `Refused` unless it passes."""
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="smoke-inject-") as tmp:
+        root = stage(Path(tmp))
+        code, _, err = run_arm(root, arm, Path(tmp) / "out")
+    spent = time.monotonic() - started
+    if code != 0:
+        blob, lines = failure_report(err)
+        if CONTENDED in blob:
+            raise Refused(
+                f"another smoke run holds the machine lock, so {arm} recorded "
+                f"nothing. Wait for it — a contended arm is not a verdict."
+            )
+        raise Refused(
+            f"the clean {arm} run failed, so nothing aimed at that arm can be "
+            f"graded — an assertion firing under injection would prove nothing "
+            f"if it fires without one.\n"
+            + "\n".join(f"       - {ln}" for ln in lines[:6])
+            + ("\n       " + err[-600:] if not lines else "")
+        )
+    print(f"BASE  {arm} passes clean ({spent:.0f}s)")
+    return spent
+
+
+# --------------------------------------------------------------------------
+# The run
+# --------------------------------------------------------------------------
+
+
+def ungraded() -> list[str]:
+    """Smoke's check functions with no entry aimed at them.
+
+    Always the whole manifest, never the filtered subset: the boundary is a
+    property of what is registered, and a `--only` run reporting thirty
+    ungraded functions would overstate the gap by the size of its own filter.
+    """
+    graded = {site for entry in INJECTIONS for site in entry.sites}
+    return sorted(name for name in check_functions(smoke_tree()) if name not in graded)
+
+
+def inject(entries: list[Injection]) -> int:
+    """Break each thing in turn and require the named assertions to notice."""
+    try:
+        verify_manifest(entries)
+    except Refused as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
+        return 3
+
+    arms = list(dict.fromkeys(entry.arm for entry in entries))
+    print(
+        f"smoke-inject: {len(entries)} injection(s) over {len(arms)} arm(s), "
+        f"plus {len(arms)} clean baseline(s)\n"
+    )
+    started = time.monotonic()
+    try:
+        for arm in arms:
+            baseline(arm)
+    except Refused as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
+        return 3
+    print()
+
+    missed = 0
+    for entry in entries:
+        entry_started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="smoke-inject-") as tmp:
+            root = stage(Path(tmp))
+            path = target_path(root, entry.module)
+            text = path.read_text(encoding="utf-8")
+            hits = text.count(entry.old)
+            if hits != 1:
+                # Already checked against the working tree; checked again here
+                # because it is the staged copy that runs.
+                print(
+                    f"ABORT: {entry.name!r} matched {hits} times in the staged "
+                    f"{entry.module}, expected 1.",
+                    file=sys.stderr,
+                )
+                return 3
+            path.write_text(text.replace(entry.old, entry.new), encoding="utf-8")
+            code, _, err = run_arm(root, entry.arm, Path(tmp) / "out")
+        blob, lines = failure_report(err)
+        if CONTENDED in blob:
+            print(
+                f"ABORT: another smoke run took the machine lock partway "
+                f"through, so {entry.arm} recorded nothing for "
+                f"{entry.name!r}. Nothing after this point would be a verdict.",
+                file=sys.stderr,
+            )
+            return 3
+        gaps = verdict(code, blob, entry.must_contain)
+        spent = time.monotonic() - entry_started
+        print(f"{'PASS' if not gaps else 'FAIL'}  break: {entry.name}  [{spent:.0f}s]")
+        print(f"      {entry.arm}, in {entry.module}: {entry.old.strip()[:64]}…")
+        if gaps:
+            missed += 1
+            for gap in gaps:
+                print(f"      {gap}")
+            print(f"      the {len(lines)} failure(s) the arm did report:")
+            for line in lines[:6]:
+                print(f"      | {line[:160]}")
+            if not lines:
+                print(f"      | (none — stderr tail) {err[-400:]!r}")
+        else:
+            for line in [
+                ln for ln in lines if any(w in ln for w in entry.must_contain)
+            ][:3]:
+                print(f"      caught: {line[:150]}")
+        print()
+
+    spent = time.monotonic() - started
+    blind = ungraded()
+    print(
+        f"ungraded — {len(blind)} check function(s) in tests/smoke have no "
+        f"registered injection:"
+    )
+    for name in blind:
+        print(f"  {name}")
+    print(
+        "\nThat list is the manifest's boundary, not a to-do list: see "
+        "tests/README.md for which of them are covered by tests/unit at "
+        "sub-second cost and which are genuinely ungraded.\n"
+    )
+    if missed:
+        print(
+            f"{missed} injection(s) went unnoticed — those assertions grade "
+            f"nothing. [{spent / 60:.1f} min]"
+        )
+        return 1
+    print(f"All {len(entries)} injections were caught. [{spent / 60:.1f} min]")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Proving the harness itself can refuse
+# --------------------------------------------------------------------------
+
+
+def self_test() -> int:
+    """The harness's own guards, exercised. Costs nothing — no arm is run.
+
+    A harness that reports PASS for an injection that did not land is worse
+    than no harness: it certifies a whole suite as verified on no evidence. So
+    each guard is given the input it exists to refuse, and has to refuse it.
+    """
+    good = INJECTIONS[0]
+    cases: list[tuple[str, Injection]] = [
+        (
+            "a search string that does not occur",
+            good._replace(old="# this line is not in coverage.py"),
+        ),
+        (
+            "a search string that occurs more than once",
+            good._replace(module="core.py", old="        return None"),
+        ),
+        (
+            "an expected failure no named site can print",
+            good._replace(must_contain=("the coverage report is a bit disappointing",)),
+        ),
+        ("a site tests/smoke does not define", good._replace(sites=("check_nothing",))),
+        (
+            "a site that is not a check function",
+            good._replace(sites=("record_coverage",)),
+        ),
+        ("an entry naming no assertion", good._replace(must_contain=())),
+        (
+            # A real literal of a named site, and still too short to identify
+            # which of its assertions fired.
+            "an entry whose expected failures are all too short",
+            good._replace(must_contain=("coverage: ",)),
+        ),
+        ("an arm nobody has measured", good._replace(arm="--everything-only")),
+    ]
+    bad = 0
+    for what, entry in cases:
+        try:
+            verify_manifest([entry])
+        except Refused as exc:
+            print(f"REFUSED  {what}")
+            print(f"         {str(exc).splitlines()[0][:150]}")
+            continue
+        bad += 1
+        print(f"ACCEPTED {what} — the guard is not guarding")
+
+    # And the verdict, which is where "the suite went red" gets separated from
+    # "the assertion fired". Both directions, because a verdict that always
+    # reports a miss would pass this half of the test on its own.
+    verdicts: list[tuple[str, tuple[int, str, tuple[str, ...]], bool]] = [
+        ("a suite that passed against broken code", (0, "", ("anything",)), False),
+        (
+            "a suite that went red without the named assertion (#135)",
+            (1, "  - some unrelated premise guard tripped", ("the named one",)),
+            False,
+        ),
+        (
+            "a suite that went red naming only one of two assertions",
+            (1, "  - the first one fired", ("the first one", "the second one")),
+            False,
+        ),
+        (
+            "a suite that went red naming the assertion",
+            (1, "  - the named one fired", ("the named one",)),
+            True,
+        ),
+    ]
+    for what, (code, blob, wanted), want_ok in verdicts:
+        got = not verdict(code, blob, wanted)
+        if got == want_ok:
+            print(f"{'CAUGHT  ' if not want_ok else 'PASSED  '} {what}")
+        else:
+            bad += 1
+            print(f"WRONG    {what}: verdict said {'caught' if got else 'missed'}")
+
+    # The real manifest, against the real tree.
+    try:
+        verify_manifest(INJECTIONS)
+        print(f"OK       all {len(INJECTIONS)} registered entries still match")
+    except Refused as exc:
+        bad += 1
+        print(f"STALE    {exc}")
+
+    if bad:
+        print(f"\n{bad} guard(s) did not hold. This harness cannot be trusted.")
+        return 1
+    print("\nEvery guard refused what it exists to refuse.")
+    return 0
+
+
+def listing(entries: list[Injection]) -> int:
+    try:
+        verify_manifest(entries)
+        note = "every entry still matches the tree"
+    except Refused as exc:
+        note = f"STALE: {exc}"
+    arms = list(dict.fromkeys(entry.arm for entry in entries))
+    cost = sum(ARM_SECONDS[entry.arm] for entry in entries) + sum(
+        ARM_SECONDS[arm] for arm in arms
+    )
+    for arm in arms:
+        print(f"{arm}  ({ARM_SECONDS[arm]}s an entry, plus one clean baseline)")
+        for entry in entries:
+            if entry.arm == arm:
+                print(f"  {entry.name}")
+                print(f"      {entry.module} -> {', '.join(entry.sites)}")
+    print(f"\n{len(entries)} entries, {len(arms)} arms, ~{cost / 60:.1f} min of takes")
+    print(f"{note}")
+    blind = ungraded()
+    print(f"\n{len(blind)} ungraded check function(s): {', '.join(blind)}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--list", action="store_true", help="what the manifest covers, and its cost"
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="prove the harness refuses an injection that would not land",
+    )
+    parser.add_argument(
+        "--arm", help="only entries aimed at this smoke arm, named or abbreviated"
+    )
+    parser.add_argument("--only", help="only entries whose name contains this text")
+    args = parser.parse_args()
+
+    # A run takes a quarter of an hour and prints a line every few minutes.
+    # Redirected to a file or a CI log, the default block buffering would hold
+    # all of it until the end, and a job that shows nothing for fifteen minutes
+    # is a job somebody cancels.
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+
+    if args.self_test:
+        return self_test()
+
+    entries = [
+        entry
+        for entry in INJECTIONS
+        if (args.arm is None or args.arm.strip("-") in entry.arm)
+        and (args.only is None or args.only.lower() in entry.name.lower())
+    ]
+    if not entries:
+        print("no entries match", file=sys.stderr)
+        return 3
+    if args.list:
+        return listing(entries)
+    return inject(entries)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

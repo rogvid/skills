@@ -63,6 +63,7 @@ Playwright 1.49 or newer: evidence uses `locator.aria_snapshot()`, and the
     tests/smoke --determinism-only
     tests/smoke --polish-only
     tests/smoke --content-only
+    tests/smoke --strict-only
     tests/smoke --out-dir /tmp/smoke
 
 Narration is forced off (`speech=False`) in every take but one: CI has no
@@ -3651,6 +3652,18 @@ def check_coverage_merge() -> list[str]:
             f"{[r.get('index') for r in got]}, expected [5] — the merged "
             f"index. Segment two numbers that beat 0 in its own log, and a "
             f"reviewer handed 'beat 0' would open the wrong one."
+        )
+    # ...and which segment that beat came from (issue #137). The index alone
+    # was asserted here while `_coverage_md` renders ``beat 5 (`part2`)``, so
+    # dropping the segment from the report changed nothing any check could see.
+    if [row.get("segment") for row in got] != ["part2"]:
+        failures.append(
+            f"coverage-merge: AC-2's claim names segment "
+            f"{[r.get('segment') for r in got]!r}, expected ['part2']. Beat "
+            f"numbers are per-segment until the merge renumbers them, and the "
+            f"coverage table is what points a conformance reviewer at a frame — "
+            f"a reviewer handed a bare 'beat 5' cannot tell which segment's "
+            f"recording to open (issue #137)"
         )
 
     # Two segments recorded against different wording for one id is a
@@ -9035,6 +9048,11 @@ def main() -> int:
         "(issue #12)",
     )
     parser.add_argument(
+        "--strict-only",
+        action="store_true",
+        help="record only the two short takes that strict=True must refuse (issue #3)",
+    )
+    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -9069,6 +9087,7 @@ def main() -> int:
             ("--content-only", args.content_only),
             ("--overlay-only", args.overlay_only),
             ("--coverage-only", args.coverage_only),
+            ("--strict-only", args.strict_only),
         )
         if on
     ]
@@ -9158,6 +9177,13 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
         failures += run_coverage(out_root)
     if only in (None, "--web-only"):
         failures += run_web_problems(out_root)
+    # The two takes strict=True must refuse. Reachable on their own as well as
+    # from the medium flags, because they are the cheapest graded takes in this
+    # file — two short storyboards, no stitch, no second recording to compare
+    # against — and the arm that reaches them otherwise costs 186 s. That
+    # matters for `tests/smoke-inject`, where an assertion is only as gradeable
+    # as its cheapest arm.
+    if only in (None, "--web-only", "--strict-only"):
         failures += run_strict_web(out_root)
     if only in (None, "--web-only", "--evidence-only"):
         failures += run_evidence(out_root)
@@ -9169,6 +9195,7 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     if only in (None, "--terminal-only"):
         failures += run_terminal_problems(out_root)
         failures += run_terminal_race(out_root)
+    if only in (None, "--terminal-only", "--strict-only"):
         failures += run_strict_terminal(out_root)
     if only in (None, "--determinism-only"):
         failures += run_determinism(out_root)

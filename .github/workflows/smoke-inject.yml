@@ -1,0 +1,70 @@
+name: smoke-inject
+
+# The executed half of the fault-injection rule for `tests/smoke` (issue #136).
+#
+# **Why this is not a job in ci.yml.** Every entry in the manifest records a
+# real take, and the manifest measures ~14 minutes on a developer box against
+# ~10 for `tests/smoke` itself — CI already pays that once per push, and paying
+# it twice more would make every pull request wait on a check that answers a
+# question nobody asked in that pull request: "can the smoke suite still fail?"
+# That question needs an answer regularly, not per-commit, because what rots is
+# the *assertion*, and assertions rot on the timescale of weeks.
+#
+# So: nightly, on demand, and on a pull request that asks for it by label —
+# which is what you want when the diff is inside `tests/smoke` or the
+# recorder's measurement code, where an assertion can quietly stop grading.
+#
+# The free half runs on every push, in ci.yml's `unit` job:
+# `tests/smoke-inject --self-test` records nothing and proves the harness still
+# refuses an injection that would not land.
+
+on:
+  schedule:
+    # 04:20 UTC, after nothing and before anybody. No `push:` on purpose.
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-inject-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest:
+    name: fault-inject tests/smoke
+    # On a pull request only when it is labelled `fault-inject`. Scheduled and
+    # manual runs always go.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'fault-inject')
+    runs-on: ubuntu-latest
+    # ~14 min measured on a 16-core developer box; CI's smoke job runs about
+    # twice as slow as the same box, so this is that doubled with room for the
+    # ffmpeg and Chromium installs.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install Chromium for Playwright
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      # Free, and first: if the harness's own guards no longer hold, everything
+      # below it would report on no evidence.
+      - name: tests/smoke-inject --self-test
+        run: tests/smoke-inject --self-test
+
+      - name: tests/smoke-inject
+        run: tests/smoke-inject

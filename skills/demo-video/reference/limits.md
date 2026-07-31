@@ -300,23 +300,24 @@ What to do: on a stitched demo, check a reported issue against its own
 segment's `.seg.timeline.json` before believing the beat it names — pass
 `keep_parts=True` to `stitch()` if you need those files to survive.
 
-### A coverage row can lose the segment it belongs to
+### A coverage row losing its segment — closed, and now graded
 
 `coverage_report` copies each claimed beat's `segment` into the coverage table
 (`coverage.py:117`), and `timeline.md` renders a claim as ``beat 5 (`part2`)``.
-Nothing pins it. `check_coverage` grades `index`, `t_start` and `still` against
-the beat list; `check_coverage_merge` *constructs* beats carrying `part1` and
-`part2` and then asserts only on `index`. Replace that line with
-`"segment": None` and `tests/smoke --coverage-only` stays green — one of six
-injections against that arm, and the only survivor.
+Nothing used to pin it: `check_coverage` graded `index`, `t_start` and `still`
+against the beat list, and `check_coverage_merge` *constructed* beats carrying
+`part1` and `part2` and then asserted only on `index`. Replacing that line with
+`"segment": None` left `tests/smoke --coverage-only` green — one of six
+injections against that arm, and the only survivor
+([#137](https://github.com/rogvid/skills/issues/137)).
 
 Beat indices are per-segment before merging, so a reviewer of a stitched demo
 handed "beat 5" with no segment has no way to know which beat 5. Pointing a
-conformance reviewer at the right frame is the coverage table's whole job
-([#137](https://github.com/rogvid/skills/issues/137)).
+conformance reviewer at the right frame is the coverage table's whole job.
 
-What to do: on a stitched demo, check that the coverage table names a segment
-per row before handing it over.
+`check_coverage_merge` now asserts the segment of each claimed beat as well as
+its index, and that exact injection is registered in `tests/smoke-inject`, so
+it runs nightly rather than having been performed once.
 
 ## What CI will and will not do for you
 

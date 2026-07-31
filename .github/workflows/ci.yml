@@ -116,6 +116,17 @@ jobs:
       - name: tests/unit --fault-inject
         run: tests/unit --fault-inject
 
+      # `tests/smoke`'s injection manifest costs ~14 minutes of recording and
+      # runs nightly (.github/workflows/smoke-inject.yml). Its *guards* cost
+      # nothing and belong on every push: this proves the harness still aborts
+      # on an injection that would not land, still refuses an expected failure
+      # no named assertion can print, and still reads a red suite that never
+      # named the assertion as a miss. A harness that reports PASS on no
+      # evidence would certify the whole smoke suite, so it is checked here
+      # rather than only where it runs.
+      - name: tests/smoke-inject --self-test
+        run: tests/smoke-inject --self-test
+
       # A warning, not a gate — hence `continue-on-error`. SKILL.md's length is
       # a cost every caller pays on every invocation, so it is worth saying out
       # loud; but whether a paragraph earns its place in the always-loaded file
