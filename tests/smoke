@@ -4152,6 +4152,64 @@ def screens_differ(out_dir: Path) -> tuple[int, str]:
     return len(seen), (seen[-1] if seen else "")
 
 
+# How far the rect the recorder reports may sit from the rect this file
+# expects, per component, in pixels. Both are read off `#__term_host` with the
+# same `int()` and nothing resizes it, so the honest answer is zero; the slack
+# is here so a one-pixel layout difference cannot fail a run. It is two orders
+# of magnitude under the 108 px the caption-bar trim removes from a content
+# take, which is the difference this exists to see.
+CONTENT_RECT_SLACK_PX = 1
+
+
+def scored_region_failures(label: str, app: Rect, content: dict) -> list[str]:
+    """`content.rect` against the region this file independently expects.
+
+    The assertion issue #135 found missing, and why it went missing is worth
+    stating. Every other reading of the scored rect in this suite came out of
+    the report it was grading: `_check_scored_region` re-derived its own
+    premise from `content["rect"]`, and `check_content_pair` graded the trim by
+    asking the recorder's *warning* to contain the words "caption bar" — a
+    literal in `content.py`, present whatever the rect turned out to be. With
+    `CONTENT_CAPTION_TRIM` set to 0.0 the recorder printed
+
+        the app rect (74, 110, 1132, 540), which excludes the recorder's own
+        caption bar
+
+    where 540 is the untrimmed height and 432 is the trimmed one. The sentence
+    was false, the artifact said it anyway, and every check above passed.
+
+    So the expectation is built here: from the app box this harness read off
+    the live element at record time, trimmed with this file's own
+    `CONTENT_KEEP`. Nothing is imported from `content.py` — a check that
+    recomputed the trim with the recorder's own constant would agree with
+    whatever that constant was set to, which is the catalogue's "check that
+    shares the bug's blind spot" wearing a geometry assertion as a disguise.
+    """
+    rect = content.get("rect")
+    if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+        return [
+            f"{label}: content.rect is {rect!r}, so nothing says which part of "
+            f"the frame `score` and `static_for` describe"
+        ]
+    try:
+        got = tuple(int(v) for v in rect)
+    except (TypeError, ValueError):
+        return [f"{label}: content.rect is {rect!r}, which is not four numbers"]
+    want = keep_top(app)
+    off = tuple(abs(a - b) for a, b in zip(got, want, strict=True))
+    if max(off) <= CONTENT_RECT_SLACK_PX:
+        return []
+    return [
+        f"{label}: the recorder scored the region {got}, this run expected "
+        f"{want} (off by {off} px). The app box is {app} and the bottom "
+        f"{1 - CONTENT_KEEP:.0%} of it is the recorder's own caption bar, "
+        f"burned into the recording. Scoring that as if it were the app lets a "
+        f"caption supply the contrast for a blank take on the score arm, and "
+        f"lets a caption *change* count as the picture changing on the static "
+        f"arm — either one turns a broken take green (issues #17 and #135)."
+    ]
+
+
 def check_content_pair(takes: dict[str, dict]) -> list[str]:
     """The two content takes, against each other and against the recorder.
 
@@ -4178,6 +4236,14 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
         return failures
     shown_c, covered_c = reports[CONTENT_TAKES[0]], reports[CONTENT_TAKES[1]]
 
+    # 0. The region every assertion below is *about*, before any of them uses
+    #    it. Both takes, because the rect is read once per take and a change
+    #    that moved it would move it on both.
+    for name in CONTENT_TAKES:
+        failures += scored_region_failures(
+            name, takes[name]["info"]["app"], reports[name]
+        )
+
     # 1. The verdicts, opposite ways round.
     if shown_c.get("warnings"):
         failures.append(
@@ -4202,6 +4268,13 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
                 f"the frames cannot establish — a held stretch has honest "
                 f"explanations too (see {CONTENT_TOURED})"
             )
+    # A claim about the *message*, and only about the message, now that
+    # assertion 0 above grades the region itself. Before #135 this line was
+    # the only thing in the suite that mentioned the trim, and it graded a
+    # literal in `content.py` rather than the geometry that literal describes:
+    # the phrase survived `CONTENT_CAPTION_TRIM = 0.0` intact, on a warning
+    # whose quoted rect was the untrimmed one. Keep it — a reader still needs
+    # to be told what was measured — but do not mistake it for the check.
     if "caption bar" not in still:
         failures.append(
             f"{CONTENT_TAKES[1]}: the warning does not say what region was "
@@ -4297,6 +4370,9 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
         )
 
     # 6. The anti-correlated metric (issue #17), as a standing regression test.
+    #    Scores the rect the recorder reported, which assertion 0 has already
+    #    graded against this file's own expectation — read that function's
+    #    docstring before moving either of them apart (issue #135).
     failures += _check_scored_region(shown, shown_c)
 
     # 7. The card is this recorder's own element, and it is still up when the
@@ -4326,14 +4402,16 @@ def check_content_pair(takes: dict[str, dict]) -> list[str]:
     return failures
 
 
-def check_content_toured(out_dir: Path, stderr: str) -> list[str]:
+def check_content_toured(out_dir: Path, stderr: str, app: Rect) -> list[str]:
     """A healthy demo that holds still past the limit must be met with silence.
 
     The false positive this axis was blind to. `content-toured` narrates a
     rendered screen the way SKILL.md tells authors to, so the measured region
     holds one picture for longer than `static_limit` with nothing occluded.
-    Three assertions, and the first is the premise the other two need:
+    Four assertions, and the first two are premises the other two need:
 
+    0. the region really is the app with its caption bar cut off, which is
+       what makes "swapping captions is invisible here" true (issue #135);
     1. it really does hold past the limit — otherwise this take proves nothing
        and would keep passing after the check regressed;
     2. `content.warnings` is empty and nothing reached stderr;
@@ -4353,13 +4431,37 @@ def check_content_toured(out_dir: Path, stderr: str) -> list[str]:
         return [f"{CONTENT_TOURED}: static_for is {held!r}, limit {limit!r}"]
 
     failures: list[str] = []
+    # Before the premise guard below, because it is the thing most likely to
+    # have broken it. This take holds still *because* the caption bar is
+    # outside the scored region; a rect that stopped excluding it turns every
+    # caption swap into motion and cuts the stretch short (issue #135, hole 3).
+    region = scored_region_failures(CONTENT_TOURED, app, content)
+    failures += region
     if held < limit:
+        # Two very different causes, and the remedy order matters. This guard
+        # used to say only "Lengthen the touring captions", which is a remedy
+        # for the fixture — a maintainer following it under a broken trim edits
+        # the storyboard until the control holds again and ships a recorder
+        # that counts its own caption bar as app motion. A red that names the
+        # fixture for a fault in the code is worse than a red that names
+        # nothing.
+        cause = (
+            "The scored region is wrong (see the failure above), which is the "
+            "likely cause: a rect that includes the caption bar turns every "
+            "caption swap into motion and chops the stretch. Fix that first "
+            "and do not touch this storyboard."
+            if region
+            else "The scored region checks out, so this really is about the "
+            "fixture: lengthen the touring captions. Check first that a "
+            "caption did not wrap — a wrapped bar grows upward into the "
+            "measured region and shortens the stretch the same way."
+        )
         failures.append(
             f"{CONTENT_TOURED}: this take was written to hold one picture past "
             f"the recorder's {limit}s limit and only held it for {held}s, so "
-            f"it does not reach the false-positive path at all. Lengthen the "
-            f"touring captions — as written, this take would keep passing "
-            f"after the thing it grades regressed"
+            f"it does not reach the false-positive path at all — as written, "
+            f"it would keep passing after the thing it grades regressed. "
+            f"{cause}"
         )
     if content.get("warnings"):
         failures.append(
@@ -4750,6 +4852,20 @@ def _check_scored_region(take: dict, content: dict) -> list[str]:
     must fail to — that is the measured anti-correlation this check exists to
     keep fixed, and asserting it here means a future "simplification" back to a
     whole-frame score turns red instead of quietly scoring chrome.
+
+    **This scores the rect the recorder reported, and that is deliberate** —
+    the whole-frame arm below is only a comparison if the blanked control was
+    built by blanking the region the recorder actually scores. What it costs is
+    stated by issue #135: on its own, this control re-derives its own premise
+    from the code under test, so a change that *abandoned* the rect for the
+    whole frame is caught (the anti-correlation collapses) while a change that
+    **moved or grew** it is invisible — the mutated rect is compared against
+    the whole frame and the comparison still holds.
+
+    The premise is therefore asserted before this runs, by
+    `scored_region_failures` at the top of `check_content_pair`, against a rect
+    this file computes from the app box it read off the live element. Do not
+    call this without that check in front of it.
     """
     from demo_recording import content_report
 
@@ -7016,7 +7132,9 @@ def run_content(out_root: Path) -> list[str]:
     return (
         check_verb_classification()
         + check_content_pair(takes)
-        + check_content_toured(toured["out_dir"], toured["stderr"])
+        + check_content_toured(
+            toured["out_dir"], toured["stderr"], toured["info"]["app"]
+        )
     )
 
 
