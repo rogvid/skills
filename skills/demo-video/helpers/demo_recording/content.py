@@ -49,7 +49,21 @@ def media_duration(path: Path) -> float:
 # at the pictures.
 #
 # So the recorder measures the picture too, and writes the answer where the
-# text tier is read: `content` in the timeline envelope, plus a line on stderr.
+# text tier is read: `content` in the timeline envelope, plus a line the take
+# prints as it ends.
+#
+# **Which stream that line goes to depends on what it says, and the split is
+# deliberate (#169).** A warning — a held picture, an overlay still up, an
+# opening gap, a take that could not be measured at all — goes to **stderr**,
+# with the rest of the recorder's diagnostics. The healthy
+# `demo.mp4 shows a picture (…)` line goes to **stdout**, with `wrote <path>`
+# and the other statements about what this take produced. So a caller piping
+# stdout to a build log still gets every warning on the terminal, and a caller
+# reading stdout gets the take's own account of what it made. Both halves are
+# printed unasked on every take, and `tests/unit` pins each to its stream:
+# capturing only stderr is what made "it no longer says it shows a picture" an
+# assertion that could not fail.
+#
 # Two independent arms, because the failure above defeats one of them:
 #
 #   score       median luma standard deviation over the content rect. Catches
@@ -236,7 +250,13 @@ CONTENT_STATIC_WARN_S = 15.0
 # one that really waited. Guessing would put the false positive straight back.
 #
 # tests/smoke asserts this covers **every** verb the recorders define, so a verb
-# added later cannot quietly default into either bucket.
+# added later cannot quietly default into either bucket. tests/unit asserts the
+# other direction — that every name in these two sets is a verb some recorder
+# actually logs — because the first check computes `declared - classified` and
+# is therefore blind to a member nothing emits. `"bridge"` sat in the passive
+# set until #165: both interlude styles log the verb `interlude` with the style
+# in `selector`, so no timeline has ever carried it, and the documentation
+# copied it out of here into a shipped table of beat verbs.
 CONTENT_ACTING_VERBS = frozenset(
     {
         "click",
@@ -256,7 +276,6 @@ CONTENT_ACTING_VERBS = frozenset(
 )
 CONTENT_PASSIVE_VERBS = frozenset(
     {
-        "bridge",
         "caption",
         "hold",
         "interlude",
@@ -832,12 +851,21 @@ def merge_content(records: list[dict]) -> dict:
 
 
 def print_content_summary(content: dict | None, media: str) -> None:
-    """Say what the picture check found, on stderr, unasked.
+    """Say what the picture check found, unasked.
 
     The whole point of issue #97 is that nobody was going to open the video, so
     this is printed on every take rather than only when something is wrong: a
     reviewer who has never seen the healthy line has no baseline for the
     unhealthy one.
+
+    **Two streams, on purpose (#169).** Anything wrong — an unmeasurable take,
+    or one warning per entry in `content.warnings` — goes to `stderr` with the
+    recorder's other diagnostics. The healthy `… shows a picture (…)` line goes
+    to `stdout`, where `wrote <path>` and the take's other statements about its
+    own output already are. Every path out of here takes one of those two
+    branches and never both, so a caller redirecting one stream loses no part
+    of the summary — only the branch this take did not take. The section header
+    above says the same, and `tests/unit` pins each line to its stream.
     """
     if not isinstance(content, dict):
         return

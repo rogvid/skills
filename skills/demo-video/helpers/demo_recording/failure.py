@@ -41,16 +41,25 @@ from .markdown import _fmt_t, _md_cell
 #     folder looking current (#46), which in a review gate produces a confident
 #     approval of something that was never recorded.
 #
-# What is written now, on any abnormal exit the recorder is allowed to keep
-# artifacts from:
+# What is written now, on an exit the recorder is allowed to keep artifacts
+# from:
 #
 #   demo.mp4              the partial recording, converted from the webm that
 #                         was already in hand
 #   timeline.json/.md     the beats, with `error` on the one that raised (#24)
 #                         and `failure` on the envelope
 #   failure/              this section: a self-contained account of the crash
-#   demo-video-FAILED.md  the marker (#46), written whether or not anything
-#                         else was, and deleted by the next take that succeeds
+#   demo-video-FAILED.md  the marker (#46), written whenever *this* take did
+#                         not write its own complete set of artifacts —
+#                         the storyboard raised, or ffmpeg failed to encode —
+#                         and deleted by the next take that succeeds
+#
+# **"Whenever a take did not write its own artifacts", never "on any abnormal
+# exit" (#115).** A `strict=True` refusal is an abnormal exit, and it gets no
+# marker on purpose: it writes every artifact and all of them are current, so
+# its marker is cleared exactly like a success's. The marker's own body used to
+# claim the wider condition, which made the one file whose job is to say what
+# happened wrong about itself in the one case a reader could not check.
 #
 # **Where each piece comes from, and why none of it re-reads the page.**
 #
@@ -198,6 +207,87 @@ def render_failure_md(doc: dict) -> str:
         "",
     ]
     return "\n".join(out).rstrip() + "\n"
+
+
+# How much of the exception message the marker quotes. Far under the dump's
+# `FAILURE_MESSAGE_CHARS`, because this file is the one somebody reads standing
+# up: it says which take failed and whether the mp4 beside it is that take's,
+# and `failure/failure.md` beside it holds the whole message.
+FAILURE_MARKER_MESSAGE_CHARS = 600
+
+
+def render_failure_marker(
+    failure: dict, media: str, when: str, *, stale: bool, converted: bool
+) -> str:
+    """The marker's body: what happened, and what the mp4 beside it is.
+
+    Pure, and here rather than in `core` for the reason the rest of this module
+    is (#147): the sentence this file makes about *itself* is the one an author
+    cannot check by reading the folder, so it has to be checkable without a
+    browser.
+
+    `stale` is the case the marker exists for — an mp4 in the folder that this
+    take did not encode. `converted` says this take wrote the mp4 beside it,
+    partial. Neither is true when the take encoded nothing and no previous run
+    left anything.
+    """
+    beat = failure.get("beat")
+    where = (
+        f"beat {beat} (`{failure.get('verb')}`)" if beat is not None else "between beats"
+    )
+    message = " ".join(str(failure.get("message") or "").split())
+    lines = [
+        "# This demo folder is not the output of a successful take",
+        "",
+        f"The last take run here failed at {when}, at {where}, with "
+        f"**{failure.get('type')}**:",
+        "",
+        f"> {message[:FAILURE_MARKER_MESSAGE_CHARS] or '(no message)'}",
+        "",
+    ]
+    if stale:
+        lines += [
+            f"**`{media}` in this folder is a *previous* run's.** This "
+            f"take encoded no mp4, so what is here is a recording of "
+            f"different code, and so is anything derived from it — "
+            f"`timeline.json`, `frames/`, `images/`. Do not review them as "
+            f"though they described this take.",
+            "",
+        ]
+    elif converted:
+        lines += [
+            f"`{media}` **is** this take's recording — a partial one, "
+            f"cut off where the storyboard gave up. `{FAILURE_DIR}/` has "
+            f"the last frame, the console log and the failing beat.",
+            "",
+        ]
+    else:
+        lines += [
+            f"There is no `{media}` in this folder: this take wrote "
+            f"none, and no previous run left one.",
+            "",
+        ]
+    # The condition this file is written under, stated in the file itself
+    # (#115). It used to say "on any abnormal exit", which is false in exactly
+    # the case a reader has no way to check: a `strict=True` refusal is an
+    # abnormal exit and correctly gets no marker, so a reader who trusted that
+    # sentence would read the absence of this file as "the take was fine".
+    lines += [
+        "This file is written by the demo-video recorder whenever a take did "
+        "not write its own complete set of artifacts — the storyboard raised, "
+        "or ffmpeg failed to encode the recording — and **deleted by the next "
+        "take that succeeds**, so its presence always describes the most "
+        "recent run.",
+        "",
+        "**Its absence does not mean the take had nothing to report.** A take "
+        "refused by `strict=True` writes every artifact and all of them are "
+        "current, so it is not one of the cases above and its marker is "
+        "cleared like a success's; what it recorded is in `timeline.json` and "
+        "on stderr. Do not commit this file and do not delete it by hand; "
+        "re-record instead.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def clear_failure_dir(out_dir: Path) -> list[str]:

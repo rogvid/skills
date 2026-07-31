@@ -260,9 +260,14 @@ INJECTIONS = [
     ),
     Injection(
         name="the FAILED marker stops naming the exception and the recording",
-        module="core.py",
-        old='            marker.write_text("\\n".join(lines))',
-        new='            marker.write_text("\\n".join(lines[:2]))',
+        # Was `core.py`'s `marker.write_text("\n".join(lines))` until #115 moved
+        # the body out to `failure.render_failure_marker`, so it could be graded
+        # without a browser. `--self-test` refused the stale entry rather than
+        # letting a manifest certify a line that no longer exists — which is the
+        # whole reason it runs on every push.
+        module="failure.py",
+        old='    return "\\n".join(lines)',
+        new='    return "\\n".join(lines[:2])',
         arm="--failure-only",
         sites=("check_crash_take",),
         must_contain=(" does not name the ", " does not say whether demo.mp4 is"),

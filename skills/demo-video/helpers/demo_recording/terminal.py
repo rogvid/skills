@@ -394,9 +394,15 @@ class TerminalRecorder(_DemoBase):
         self.page.add_style_tag(content=(_ASSETS / "xterm.css").read_text())
         self.page.add_script_tag(content=(_ASSETS / "xterm.js").read_text())
         self.page.add_script_tag(content=(_ASSETS / "addon-fit.js").read_text())
-        self.page.add_script_tag(
-            content=(_ASSETS / "addon-serialize.js").read_text()
-        )
+        # `@xterm/addon-serialize` was vendored and injected here too, and
+        # nothing ever instantiated `SerializeAddon` (#54). The one path that
+        # reads screen text back out of xterm.js is `window.__termText()`, over
+        # `term.buffer.active` — what `_screen()`, `wait_for_text()` and
+        # `wait_for_prompt()` all use. Deleted rather than kept against a future
+        # artifact: it cost 16 kB of third-party JS parsed into every terminal
+        # take, and a reader of this method reasonably assumed it did something.
+        # A serialized dump of the buffer beside `timeline.json` is a feature
+        # somebody can propose on its own; it was never this.
         self.page.add_script_tag(content=_TERM_HOST_JS)
         dims = self.page.evaluate(
             "o => window.__demoTermInit(o)",

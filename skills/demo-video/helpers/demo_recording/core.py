@@ -56,6 +56,7 @@ from .failure import (
     clear_failure_marker,
     failed_beat,
     failure_summary,
+    render_failure_marker,
     render_failure_md,
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
@@ -1597,14 +1598,21 @@ take with fewer beats than the last one would otherwise leave the
     def _write_failure_marker(self, failure: dict) -> None:
         """Say, in the demo folder itself, that this take failed (issue #46).
 
-        Written on **every** abnormal exit, and the case it exists for is the
-        one where the artifacts left behind disagree with each other: ffmpeg
-        failing to convert writes this take's `timeline.json` beside whatever
-        `demo.mp4` a *previous* run left in the same directory. That reads as a
-        successful take, and the video is a recording of different code — in a
-        review gate, a confident approval of something that was never recorded.
-        `stale` below is exactly that condition, and the marker names it rather
-        than leaving a reader to notice.
+        Written whenever this take did not write its own complete set of
+        artifacts — the storyboard raised, or ffmpeg failed to convert — and
+        **not** on every abnormal exit: a `strict=True` refusal is an abnormal
+        exit whose artifacts are all current, and its marker is cleared like a
+        success's. `__exit__` holds that condition; `render_failure_marker`
+        states it in the file, which is where a reader can act on it (#115).
+
+        The case it exists for is the one where the artifacts left behind
+        disagree with each other: ffmpeg failing to convert writes this take's
+        `timeline.json` beside whatever `demo.mp4` a *previous* run left in the
+        same directory. That reads as a successful take, and the video is a
+        recording of different code — in a review gate, a confident approval of
+        something that was never recorded. `stale` below is exactly that
+        condition, and the marker names it rather than leaving a reader to
+        notice.
 
         Never raises, and that is deliberate: the absence of this file means
         "the last take succeeded", so failing to write it is itself the lie it
@@ -1613,55 +1621,17 @@ take with fewer beats than the last one would otherwise leave the
         """
         marker = self.out_dir / FAILURE_MARKER
         mp4 = self._media_path()
-        stale = mp4.exists() and not self._converted
-        message = str(failure.get("message") or "")
-        when = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-        beat = failure.get("beat")
-        where = (
-            f"beat {beat} (`{failure.get('verb')}`)"
-            if beat is not None
-            else "between beats"
+        # Rendered before the `try`, as the body always was: the only failure
+        # this is allowed to swallow is the write.
+        body = render_failure_marker(
+            failure,
+            mp4.name,
+            _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+            stale=mp4.exists() and not self._converted,
+            converted=self._converted,
         )
-        lines = [
-            "# This demo folder is not the output of a successful take",
-            "",
-            f"The last take run here failed at {when}, at {where}, with "
-            f"**{failure.get('type')}**:",
-            "",
-            f"> {' '.join(str(message).split())[:600] or '(no message)'}",
-            "",
-        ]
-        if stale:
-            lines += [
-                f"**`{mp4.name}` in this folder is a *previous* run's.** This "
-                f"take encoded no mp4, so what is here is a recording of "
-                f"different code, and so is anything derived from it — "
-                f"`timeline.json`, `frames/`, `images/`. Do not review them as "
-                f"though they described this take.",
-                "",
-            ]
-        elif self._converted:
-            lines += [
-                f"`{mp4.name}` **is** this take's recording — a partial one, "
-                f"cut off where the storyboard gave up. `{FAILURE_DIR}/` has "
-                f"the last frame, the console log and the failing beat.",
-                "",
-            ]
-        else:
-            lines += [
-                f"There is no `{mp4.name}` in this folder: this take wrote "
-                f"none, and no previous run left one.",
-                "",
-            ]
-        lines += [
-            "This file is written by the demo-video recorder on any abnormal "
-            "exit, and **deleted by the next take that succeeds** — so its "
-            "presence always describes the most recent run. Do not commit it "
-            "and do not delete it by hand; re-record instead.",
-            "",
-        ]
         try:
-            marker.write_text("\n".join(lines))
+            marker.write_text(body)
         except OSError as exc:
             print(
                 f"demo-video: WARNING — could not write {marker} ({exc}), so "
