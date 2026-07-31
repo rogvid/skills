@@ -99,6 +99,10 @@ from demo_recording.narration import (  # noqa: E402
     _tts_key,
 )
 from demo_recording.timeline import (  # noqa: E402
+    ISSUE_KINDS,
+    MAX_ISSUES,
+    STRICT_KINDS,
+    TIMELINE_SCHEMA,
     _coverage_md,
     render_timeline_md,
     timeline_paths,
@@ -479,6 +483,92 @@ class TimelineMd(unittest.TestCase):
         widths = {len(split_row(r)) for r in rows}
         self.assertEqual(len(widths), 1, f"ragged table: {widths}")
 
+    # The half of `tests/smoke`'s `check_issues` that is a function of the
+    # document (issue #173). That check reads `timeline.md` off a take
+    # reachable only from `--web-only` (123 s) and `--terminal-only` (186 s),
+    # so it has never been watched fail. Nothing below needs a recorder, let
+    # alone a browser: `render_timeline_md` is documented as a pure function
+    # of the document and this is what that buys.
+
+    def beat_row(self, text: str, index: int) -> list[str]:
+        rows = [
+            split_row(ln)
+            for ln in text.splitlines()
+            if ln.startswith("|") and not ln.startswith("|---")
+        ]
+        made = [r for r in rows[1:] if r and r[0] == str(index)]
+        self.assertEqual(len(made), 1, f"expected one row for beat {index}: {rows!r}")
+        return made[0]
+
+    def test_a_run_beats_exit_status_gets_a_column_and_a_web_take_does_not(self):
+        web = render_timeline_md(envelope(beats=[beat(0, "click", 0.1)]))
+        term = render_timeline_md(
+            envelope(beats=[beat(0, "run", 0.1, selector="false", exit_code=3)])
+        )
+        self.assertNotIn("| exit |", web)
+        self.assertIn("| exit |", term)
+        # The column *and* what is in it. A header nothing fills is the
+        # catalogue's count standing in for the content: `check_issues` looks
+        # for `| exit |` and would be satisfied by an empty cell on every row.
+        self.assertIn("3", self.beat_row(term, 0))
+
+    def test_a_run_whose_status_could_not_be_read_says_so_rather_than_nothing(self):
+        text = render_timeline_md(
+            envelope(beats=[beat(0, "run", 0.1, selector="false", exit_code=None)])
+        )
+        # "?", never "0": a status nobody could read and a command that
+        # succeeded are opposite answers, and a blank cell reads as neither.
+        self.assertEqual(self.beat_row(text, 0)[5], "?")
+
+    def test_every_recorded_problem_is_listed_with_the_beat_it_fired_during(self):
+        text = render_timeline_md(
+            envelope(
+                beats=[beat(0, "goto", 0.1), beat(1, "click", 1.0)],
+                issues=[
+                    {
+                        "kind": "console_error",
+                        "t": 1.25,
+                        "beat": 1,
+                        "verb": "click",
+                        "caption": "The queue is filtered.",
+                        "message": "TypeError: undefined is not a function",
+                    }
+                ],
+                issue_count=1,
+            )
+        )
+        self.assertIn("## Issues", text)
+        self.assertIn("console_error", text)
+        self.assertIn("TypeError: undefined is not a function", text)
+        # Attribution, not just presence: "the take broke" is not a bug report.
+        self.assertIn("beat 1", text)
+        self.assertIn("`click`", text)
+
+    def test_a_take_that_recorded_nothing_has_no_issues_section(self):
+        # The direction that costs the most if it breaks: a heading on every
+        # take is a heading nobody reads.
+        text = render_timeline_md(envelope(beats=[beat(0, "goto", 0.1)]))
+        self.assertNotIn("## Issues", text)
+
+    def test_the_problems_past_the_cap_are_said_to_exist_rather_than_dropped(self):
+        text = render_timeline_md(
+            envelope(
+                beats=[beat(0, "goto", 0.1)],
+                issues=[
+                    {
+                        "kind": "console_error",
+                        "t": 1.0,
+                        "beat": 0,
+                        "verb": "goto",
+                        "caption": "",
+                        "message": "boom",
+                    }
+                ],
+                issue_count=205,
+            )
+        )
+        self.assertIn("204 more", text)
+
 
 class TimelinePaths(unittest.TestCase):
     def test_a_segment_never_collides_with_the_whole_demo(self):
@@ -593,11 +683,108 @@ class BeatsWithin(unittest.TestCase):
         self.assertEqual(_beats_within([{"index": 1, "verb": "run"}], 0.0, 9.0), [])
 
 
+# The trim, transcribed by hand rather than imported — issue #135.
+#
+# The previous version of `ContentRect` below computed its expectation as
+# `int(720 * (1.0 - CONTENT_CAPTION_TRIM))`, which agrees with whatever that
+# constant is set to. That is the catalogue's "check that shares the bug's
+# blind spot" wearing a geometry assertion as a disguise, and it is the same
+# hole #135 found on the smoke side: every reading of the scored rect in this
+# repo came from the code that produced it, so a trim that *moved* was
+# invisible to all of them while the recorder went on printing a sentence
+# saying it had happened.
+#
+# So: the fraction of the app rect a reader of `content.py`'s section header
+# would expect to be scored, written down a second time. The two numbers under
+# it are the caption bars' top edges at the two recorders' geometries, from
+# that same header, and they are what makes 0.8 a *value* rather than a
+# preference — the trim has to reach the web caption's top edge, and must not
+# eat so much of the app that `score` describes a keyhole.
+UNIT_CONTENT_KEEP = 0.8
+WEB_CAPTION_TOP_FRACTION = 0.842
+TERMINAL_CAPTION_TOP_FRACTION = 0.857
+
+# The least of the app rect that may remain after the trim. `tests/smoke`'s
+# `check_content_healthy` makes the same claim about the rect the recorder
+# reports ("too small a keyhole to say the recording shows anything") and only
+# `--web-only` and `--terminal-only` reach it.
+UNIT_MIN_SCORED_SHARE = 0.5
+
+# The app rect issue #135 measured on a terminal take, and the height its
+# report *claimed* to have scored. Copied from the issue rather than
+# recomputed, so what this asserts is what a reader can check against the bug
+# report: 540 is the untrimmed height the injected recorder printed, 432 is
+# the trimmed one it should have.
+ISSUE_135_APP_RECT = (74, 110, 1132, 540)
+ISSUE_135_SCORED_HEIGHT = 432
+
+
 class ContentRect(unittest.TestCase):
+    def test_the_scored_rect_is_the_one_issue_135_expected_to_see(self):
+        # Exact, and on all four numbers: #135's hole was a rect that *moved*,
+        # which every "is it plausible" assertion in the suite passed.
+        self.assertEqual(
+            ISSUE_135_SCORED_HEIGHT,
+            int(ISSUE_135_APP_RECT[3] * UNIT_CONTENT_KEEP),
+            "the two hand-written numbers above disagree with each other",
+        )
+        self.assertEqual(
+            content_rect(ISSUE_135_APP_RECT),
+            (74, 110, 1132, ISSUE_135_SCORED_HEIGHT),
+        )
+
     def test_the_caption_band_is_cut_off_the_bottom(self):
         _, _, _, h = content_rect((0, 0, 1280, 720))
         self.assertLess(h, 720)
-        self.assertEqual(h, int(720 * (1.0 - CONTENT_CAPTION_TRIM)))
+        self.assertEqual(h, int(720 * UNIT_CONTENT_KEEP))
+
+    def test_the_trim_reaches_the_caption_bar_on_both_media(self):
+        # The catalogue's ungraded constant, lower bound. Under-trim is the
+        # #135 direction: the bar stays in the scored region, where it can
+        # supply the contrast for a blank app and where a caption *change*
+        # counts as the picture changing.
+        keep = 1.0 - CONTENT_CAPTION_TRIM
+        for medium, top in (
+            ("web", WEB_CAPTION_TOP_FRACTION),
+            ("terminal", TERMINAL_CAPTION_TOP_FRACTION),
+        ):
+            self.assertLessEqual(
+                keep,
+                top,
+                f"the scored region keeps the top {keep:.0%} of the app rect, "
+                f"but the {medium} caption bar's top edge sits at {top:.1%} of "
+                f"it — the recorder's own drawing is inside the region it "
+                f"scores, and both content arms are defeated by it (#135)",
+            )
+
+    def test_the_trim_does_not_eat_the_app_it_exists_to_score(self):
+        # The same constant from the other side, which is what makes this a
+        # boundary rather than a floor. Trim far enough and `score` stops
+        # describing the app at all, and every assertion about it stays green
+        # because a smaller rect is still a plausible rect.
+        keep = 1.0 - CONTENT_CAPTION_TRIM
+        self.assertGreaterEqual(
+            keep,
+            UNIT_MIN_SCORED_SHARE,
+            f"the scored region is the top {keep:.0%} of the app rect — too "
+            f"small a keyhole to say the recording shows anything",
+        )
+
+    def test_the_scored_rect_stays_inside_the_app_rect_it_was_given(self):
+        ax, ay, aw, ah = ISSUE_135_APP_RECT
+        x, y, w, h = content_rect(ISSUE_135_APP_RECT)
+        self.assertTrue(
+            ax <= x and ay <= y and x + w <= ax + aw and y + h <= ay + ah,
+            f"the recorder would score {(x, y, w, h)}, which is not inside the "
+            f"app rect {ISSUE_135_APP_RECT} it was handed — it is grading its "
+            f"own window chrome, which scores well on a blank recording (#17)",
+        )
+        self.assertLess(
+            h,
+            ah,
+            "the scored rect is exactly the app rect, so nothing was trimmed "
+            "off the bottom and the caption bar is being scored as app (#135)",
+        )
 
     def test_a_degenerate_rect_never_comes_back_zero_sized(self):
         # ffmpeg's crop filter fails on a zero dimension, and a measurement
@@ -2142,7 +2329,7 @@ class DeadPage:
         return refuse
 
 
-def recorder(test: unittest.TestCase, cls=WebRec, page=None):
+def recorder(test: unittest.TestCase, cls=WebRec, page=None, **settings):
     """A recorder wired to `page`, with the clock started and no browser."""
     tmp = tempfile.TemporaryDirectory()
     test.addCleanup(tmp.cleanup)
@@ -2157,6 +2344,7 @@ def recorder(test: unittest.TestCase, cls=WebRec, page=None):
             # either grades the box it runs on.
             speech=False,
             evidence=False,
+            **settings,
         )
     rec.page = page if page is not None else FakePage()
     rec._t0 = time.monotonic()
@@ -2603,6 +2791,368 @@ class CursorMotion(unittest.TestCase):
                 "the dot is positioned before the rule that decides whether "
                 "this event should move it, so the rule changes nothing",
             )
+
+
+# --------------------------------------------------------------------------
+# What a take writes down about the app being broken (issue #173)
+# --------------------------------------------------------------------------
+#
+# `tests/smoke`'s `check_issues` and `check_timeline` grade this off
+# `timeline.json`, and both are reachable only from `--web-only` (123 s) and
+# `--terminal-only` (186 s). At that price nobody has ever watched either of
+# them fail: `tests/smoke-inject` prints both as `ungraded`, and an assertion
+# nobody has watched fail is a claim.
+#
+# None of what those two checks grade about an *issue record* needs a browser.
+# The record is a function of the event object Playwright hands a callback,
+# which beat was open when it arrived, and two counters; the envelope is a
+# function of those plus the beats. So the same claims are made here against
+# the same production code — `_watch_page`'s four handlers, `_note_issue`,
+# `_attributed_beat`, `_beat` and `_timeline_doc` — at 0.2 s an injection.
+#
+# **What stays smoke's, and is not weakened by any of this.** That Chromium
+# fires `console` when a page calls `console.error`, that a refused connection
+# arrives as `requestfailed` rather than as a response, that a 404 for a
+# favicon reaches the handler at all, and that the beat which was open is the
+# beat that was *on screen* — those are claims about a browser and a clock.
+# These are claims about what the recorder writes down when one speaks.
+#
+# The event stand-ins are hand-written from Playwright's documented surface,
+# not imported from the recorder: a fake built out of the code under test
+# agrees with it by construction.
+
+
+class PageConsole:
+    """A `ConsoleMessage`, as `_on_console` reads one."""
+
+    def __init__(self, type_: str, text: str, url=None, line=None) -> None:
+        self.type = type_
+        self.text = text
+        self.location = {"url": url, "lineNumber": line}
+
+
+class PageError:
+    """An uncaught page exception, as `_on_page_error` reads one."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
+class FailedRequest:
+    """A request that never got a response, as `_on_request_failed` reads one."""
+
+    def __init__(self, url: str, failure: str | None = None, method="GET") -> None:
+        self.url = url
+        self.failure = failure
+        self.method = method
+
+
+class PageResponse:
+    """A response, as `_on_response` reads one."""
+
+    def __init__(self, status: int, url: str) -> None:
+        self.status = status
+        self.url = url
+
+
+class NoisyPage(FakePage):
+    """A page that delivers its queued events the next time it is called.
+
+    Playwright's sync API dispatches page events only while it is inside a
+    call — the whole reason `_pump_events` exists — so an event arrives during
+    whichever verb happened to touch the browser next. Reproducing that timing
+    rather than firing from outside a beat is what makes the attribution these
+    tests grade the attribution the recorder really makes.
+    """
+
+    def __init__(self, *events) -> None:
+        super().__init__()
+        self.queued = list(events)
+
+    def evaluate(self, *args, **kwargs):
+        while self.queued:
+            event, payload = self.queued.pop(0)
+            self.fire(event, payload)
+        return None
+
+
+# The line on screen when the problems below fire. Distinctive, so an issue
+# quoting it cannot be quoting a default that happened to be lying around.
+ISSUE_CAPTION = "The queue is filtered to open tickets."
+ISSUE_TEXT = "TypeError: Cannot read properties of undefined (reading 'id')"
+
+
+class TakeIssues(unittest.TestCase):
+    """The problem log `check_issues` reads, before it reaches a file."""
+
+    def watching(self, *events, cls=WebRec):
+        rec = recorder(self, cls=cls, page=NoisyPage(*events))
+        rec._watch_page(rec.page)
+        return rec
+
+    def test_a_problem_during_a_beat_names_that_beat_its_verb_and_its_line(self):
+        # "The take broke" is not a bug report; "the take broke during
+        # caption('The queue is filtered…')" is. All three fields, because
+        # each is satisfiable on its own by something the recorder could have
+        # copied from anywhere.
+        rec = self.watching(("pageerror", PageError(ISSUE_TEXT)))
+        rec.caption(ISSUE_CAPTION)
+        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
+        issue = rec._issues[0]
+        self.assertEqual(issue["kind"], "page_error")
+        self.assertEqual(issue["message"], ISSUE_TEXT)
+        self.assertEqual(issue["beat"], 0)
+        self.assertEqual(issue["verb"], "caption")
+        self.assertEqual(issue["caption"], ISSUE_CAPTION)
+
+    def test_a_problem_with_no_beat_open_is_attributed_to_nobody(self):
+        # A confident index and a quoted caption, both invented, is worse than
+        # a null — and naming the last beat that *ran* is exactly how "the
+        # take broke during wait_for" gets written about something that broke
+        # after it.
+        rec = self.watching()
+        rec.caption(ISSUE_CAPTION)
+        self.assertTrue(
+            rec._beats,
+            "no beat was ever opened, so 'it names no beat' is vacuous here",
+        )
+        rec.page.fire("pageerror", PageError(ISSUE_TEXT))
+        issue = rec._issues[-1]
+        self.assertIsNone(issue["beat"])
+        self.assertIsNone(issue["verb"])
+        self.assertEqual(issue["caption"], "")
+
+    def test_a_console_error_and_a_console_warning_are_told_apart(self):
+        rec = self.watching(
+            ("console", PageConsole("error", "boom", url="http://x/app.js", line=12)),
+            ("console", PageConsole("warning", "deprecated")),
+        )
+        rec.caption(ISSUE_CAPTION)
+        self.assertEqual(
+            [i["kind"] for i in rec._issues],
+            ["console_error", "console_warning"],
+        )
+        # Where it came from, which is the difference between a log line and
+        # something somebody can go and fix.
+        self.assertEqual(rec._issues[0]["url"], "http://x/app.js")
+        self.assertEqual(rec._issues[0]["line"], 12)
+        # Only one of the two is fatal under strict, and the take has to know
+        # that before `__exit__` decides anything.
+        self.assertEqual(rec._fatal_count, 1)
+
+    def test_an_app_talking_is_not_an_app_failing(self):
+        rec = self.watching(
+            ("console", PageConsole("log", "ready")),
+            ("console", PageConsole("info", "ready")),
+            ("console", PageConsole("debug", "ready")),
+        )
+        rec.caption(ISSUE_CAPTION)
+        self.assertEqual(rec._issues, [])
+        self.assertEqual(rec._issue_count, 0)
+
+    def test_the_http_error_bar_is_graded_at_400_and_not_inside_it(self):
+        # The catalogue's ungraded constant. A redirect is a redirect however
+        # the bar moves, and a 404 is an error however it moves — pinning both
+        # is what stops the threshold being any number under 500.
+        rec = self.watching(
+            ("response", PageResponse(302, "http://x/moved")),
+            ("response", PageResponse(400, "http://x/bad")),
+            ("response", PageResponse(404, "http://x/gone")),
+        )
+        rec.caption(ISSUE_CAPTION)
+        self.assertEqual(
+            [(i["kind"], i["status"]) for i in rec._issues],
+            [("http_error", 400), ("http_error", 404)],
+        )
+
+    def test_a_request_that_never_answered_records_the_url_and_the_reason(self):
+        rec = self.watching(
+            (
+                "requestfailed",
+                FailedRequest(
+                    "http://127.0.0.1:1/api", "net::ERR_CONNECTION_REFUSED", "POST"
+                ),
+            )
+        )
+        rec.caption(ISSUE_CAPTION)
+        issue = rec._issues[0]
+        self.assertEqual(issue["kind"], "request_failed")
+        self.assertIn("net::ERR_CONNECTION_REFUSED", issue["message"])
+        self.assertIn("http://127.0.0.1:1/api", issue["message"])
+        self.assertEqual(issue["method"], "POST")
+
+    def test_every_kind_a_web_take_can_record_is_one_the_package_declares(self):
+        # `check_issues`' first sweep, at this end. The haystack is asserted
+        # before anything is claimed about it: a take that recorded nothing
+        # satisfies "every kind is declared" trivially.
+        rec = self.watching(
+            ("console", PageConsole("error", "boom")),
+            ("console", PageConsole("warning", "careful")),
+            ("pageerror", PageError(ISSUE_TEXT)),
+            ("requestfailed", FailedRequest("http://x/api")),
+            ("response", PageResponse(500, "http://x/down")),
+        )
+        rec.caption(ISSUE_CAPTION)
+        kinds = [i["kind"] for i in rec._issues]
+        self.assertEqual(len(kinds), 5, f"recorded {rec._issues!r}")
+        self.assertEqual(sorted(set(kinds) - set(ISSUE_KINDS)), [])
+
+    def test_the_problem_list_stops_at_the_cap_and_the_count_does_not(self):
+        rec = self.watching()
+        rec.caption(ISSUE_CAPTION)
+        for n in range(MAX_ISSUES + 5):
+            rec.page.fire("console", PageConsole("warning", f"noise {n}"))
+        self.assertEqual(len(rec._issues), MAX_ISSUES)
+        self.assertEqual(rec._issue_count, MAX_ISSUES + 5)
+
+    def test_a_fatal_problem_past_the_cap_still_fails_a_strict_take(self):
+        # The verdict must not depend on how much noise preceded it. A page
+        # that warns 200 times and *then* throws is the shape this protects.
+        rec = self.watching()
+        rec.caption(ISSUE_CAPTION)
+        for n in range(MAX_ISSUES):
+            rec.page.fire("console", PageConsole("warning", f"noise {n}"))
+        self.assertEqual(
+            rec._fatal_count, 0, "the noise above is not supposed to be fatal"
+        )
+        self.assertEqual(len(rec._issues), MAX_ISSUES, "the cap was not reached")
+        rec.page.fire("pageerror", PageError(ISSUE_TEXT))
+        self.assertEqual(rec._fatal_count, 1)
+        self.assertIn("page_error", STRICT_KINDS)
+
+
+class BeatLog(unittest.TestCase):
+    """The `timeline.json` invariants `check_timeline` grades, off the record.
+
+    Everything here is read from `_beats` and `_timeline_doc()` rather than
+    from a written file. What that gives up is stated at the bottom of this
+    file: that the document reaches disk, that its timestamps line up with
+    frames of an mp4, and that ffprobe agrees about the duration all still
+    need a take.
+    """
+
+    def storyboard(self):
+        rec = recorder(self, page=NoisyPage())
+        rec._watch_page(rec.page)
+        rec.caption("One.")
+        rec.hold(min_s=0)
+        rec.caption("Two.")
+        rec.pause(0)
+        rec.caption("")
+        return rec
+
+    def test_every_beat_carries_its_own_position_as_its_index(self):
+        beats = self.storyboard()._beats
+        self.assertGreaterEqual(len(beats), 5, f"logged {len(beats)} beats")
+        self.assertEqual([b["index"] for b in beats], list(range(len(beats))))
+
+    def test_a_beat_is_numbered_within_its_segment_as_well_as_across_the_demo(self):
+        # `index` is renumbered by a merge and `segment_index` is not, so the
+        # pair is a beat's identity before and after a stitch (#22). Compared
+        # against a range rather than against `index`, which after a merge is
+        # a different number and would make this a tautology.
+        beats = self.storyboard()._beats
+        self.assertEqual([b["segment_index"] for b in beats], list(range(len(beats))))
+        self.assertEqual({b["segment"] for b in beats}, {None})
+
+    def test_no_beat_ends_before_it_starts_or_starts_before_the_last_ended(self):
+        previous = 0.0
+        for b in self.storyboard()._beats:
+            where = f"beat {b['index']} ({b['verb']!r})"
+            self.assertIsInstance(b["t_start"], float, where)
+            self.assertIsInstance(b["t_end"], float, where)
+            self.assertGreaterEqual(b["t_end"], b["t_start"], where)
+            self.assertGreaterEqual(b["t_start"], previous - 0.002, where)
+            previous = b["t_end"]
+
+    def test_every_beat_says_which_caption_was_on_screen_while_it_ran(self):
+        # `check_timeline`'s hardest assertion, and the reason it does not
+        # look only at `verb == "caption"` beats: drop the recorder's
+        # `self._caption = text` and the caption beats stay perfect while
+        # every other beat goes blank. Written out in full rather than
+        # derived, so it is the storyboard above that says what the answer is.
+        rec = self.storyboard()
+        self.assertEqual(
+            [(b["verb"], b["caption"]) for b in rec._beats],
+            [
+                ("caption", "One."),
+                ("hold", "One."),
+                ("caption", "Two."),
+                ("pause", "Two."),
+                ("caption", ""),
+            ],
+        )
+
+    def envelope_of(self, rec) -> dict:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return rec._timeline_doc()
+
+    def test_the_envelope_a_take_recorded_in_one_piece_writes(self):
+        doc = self.envelope_of(self.storyboard())
+        self.assertEqual(doc["schema"], TIMELINE_SCHEMA)
+        self.assertEqual(doc["media"], "demo.mp4")
+        self.assertIsNone(doc["segment"])
+        self.assertIs(doc["strict"], False)
+        # A `segments` list means the file was assembled by `stitch()`, and a
+        # consumer reading one on a single take is told a recording has parts.
+        self.assertNotIn("segments", doc)
+        # Absent, not null: its presence is the whole signal for a crash.
+        self.assertNotIn("failure", doc)
+        self.assertEqual(
+            [b["index"] for b in doc["beats"]], list(range(len(doc["beats"])))
+        )
+
+    def test_a_take_that_encoded_nothing_reports_no_duration(self):
+        # Issue #20 at this end: a take that wrote no mp4 must not probe a
+        # previous run's file and report its length beside these beats.
+        self.assertIsNone(self.envelope_of(self.storyboard())["duration"])
+
+    def test_the_envelope_carries_every_problem_and_the_count_that_saw_them_all(self):
+        rec = self.watching_storyboard()
+        doc = self.envelope_of(rec)
+        self.assertEqual([i["message"] for i in doc["issues"]], ["boom", "careful"])
+        self.assertEqual(doc["issue_count"], 2)
+
+    def watching_storyboard(self):
+        rec = recorder(
+            self,
+            page=NoisyPage(
+                ("console", PageConsole("error", "boom")),
+                ("console", PageConsole("warning", "careful")),
+            ),
+        )
+        rec._watch_page(rec.page)
+        rec.caption(ISSUE_CAPTION)
+        return rec
+
+    def test_the_determinism_record_says_which_clock_produced_the_take(self):
+        # A still committed to a repo is otherwise a picture with no record of
+        # the conditions behind it, and a future diff cannot tell "the UI
+        # changed" from "the frozen instant changed".
+        live = self.envelope_of(self.storyboard())["determinism"]
+        self.assertEqual(set(live), {"deterministic", "clock", "timezone_id", "locale"})
+        self.assertIs(live["deterministic"], False)
+        self.assertIsNone(live["clock"], "a live-clock take names no instant")
+
+        rec = recorder(
+            self,
+            page=NoisyPage(),
+            deterministic=True,
+            clock="2024-01-01T09:00:00Z",
+            timezone_id="Europe/Copenhagen",
+            locale="da-DK",
+        )
+        rec.pause(0)
+        frozen = self.envelope_of(rec)["determinism"]
+        self.assertEqual(
+            frozen,
+            {
+                "deterministic": True,
+                "clock": "2024-01-01T09:00:00Z",
+                "timezone_id": "Europe/Copenhagen",
+                "locale": "da-DK",
+            },
+        )
 
 
 # --------------------------------------------------------------------------
@@ -3259,6 +3809,143 @@ INJECTIONS = [
         "if (e.movementX === 0 && e.movementY === 0) return;",
         "if (!e.movementX && !e.movementY) return;",
         ["CursorMotion.test_a_move_that_reports_no_movement_field_still_moves_the_dot"],
+    ),
+    # -- the scored region (issue #135) ------------------------------------
+    #
+    # Both directions of the same constant, which is what makes it graded
+    # rather than merely mentioned. #135's own injection was `0.2 -> 0.0`, and
+    # that one direction was already caught here by `assertLess(h, 720)`; what
+    # nothing caught was any value in between, and `0.02` is the shape a
+    # "tune the trim down a bit" change really takes.
+    (
+        "the caption bar is left inside the region the picture check scores",
+        "content.py",
+        "CONTENT_CAPTION_TRIM = 0.2",
+        "CONTENT_CAPTION_TRIM = 0.02",
+        [
+            "ContentRect.test_the_scored_rect_is_the_one_issue_135_expected_to_see",
+            "ContentRect.test_the_caption_band_is_cut_off_the_bottom",
+            "ContentRect.test_the_trim_reaches_the_caption_bar_on_both_media",
+        ],
+    ),
+    (
+        "the trim eats most of the app instead of the caption bar",
+        "content.py",
+        "CONTENT_CAPTION_TRIM = 0.2",
+        "CONTENT_CAPTION_TRIM = 0.6",
+        [
+            "ContentRect.test_the_scored_rect_is_the_one_issue_135_expected_to_see",
+            "ContentRect.test_the_trim_does_not_eat_the_app_it_exists_to_score",
+        ],
+    ),
+    # -- the problem log (issue #173) --------------------------------------
+    (
+        # What `_attributed_beat` exists to prevent: the most recently
+        # *started* beat answers a different question from "which beat may
+        # honestly claim this", and storyboard code between two verbs is
+        # nobody's beat.
+        "an event between beats is blamed on the last beat that ran",
+        "core.py",
+        "        if not self._in_beat or not self._beats:",
+        "        if not self._beats:",
+        ["TakeIssues.test_a_problem_with_no_beat_open_is_attributed_to_nobody"],
+    ),
+    (
+        "an app writing to the console at all is recorded as an app failing",
+        "core.py",
+        "            if kind is None:\n                return  # log/info/debug is an app talking, not an app failing",
+        '            if kind is None:\n                kind = "console_error"  # log/info/debug is an app talking, not an app failing',
+        ["TakeIssues.test_an_app_talking_is_not_an_app_failing"],
+    ),
+    (
+        "a redirect the browser followed is recorded as an HTTP error",
+        "core.py",
+        "            if response.status < 400:",
+        "            if response.status < 300:",
+        ["TakeIssues.test_the_http_error_bar_is_graded_at_400_and_not_inside_it"],
+    ),
+    (
+        "a 404 is not an error until the server says 500",
+        "core.py",
+        "            if response.status < 400:",
+        "            if response.status < 500:",
+        ["TakeIssues.test_the_http_error_bar_is_graded_at_400_and_not_inside_it"],
+    ),
+    (
+        # The fatal count moved inside the cap. A page that warns 200 times
+        # and then throws is a take strict mode would pass.
+        "the strict verdict depends on how much noise preceded the exception",
+        "core.py",
+        "            if kind in STRICT_KINDS:\n"
+        "                # Outside the cap, and before the early return below it: the\n"
+        "                # verdict must not depend on how much noise preceded this.\n"
+        "                self._fatal_count += 1\n"
+        "            if len(self._issues) >= MAX_ISSUES:\n"
+        "                return",
+        "            if len(self._issues) >= MAX_ISSUES:\n"
+        "                return\n"
+        "            if kind in STRICT_KINDS:\n"
+        "                self._fatal_count += 1",
+        ["TakeIssues.test_a_fatal_problem_past_the_cap_still_fails_a_strict_take"],
+    ),
+    (
+        "the envelope drops the problems the take recorded",
+        "core.py",
+        '            "issues": issues,\n            "issue_count": self._issue_count,',
+        '            "issues": [],\n            "issue_count": self._issue_count,',
+        [
+            "BeatLog.test_the_envelope_carries_every_problem_and_the_count_that_saw_them_all"
+        ],
+    ),
+    # -- the beat log (issue #173) -----------------------------------------
+    (
+        "a beat is numbered one past the position it sits at",
+        "core.py",
+        '\n            "index": len(self._beats),',
+        '\n            "index": len(self._beats) + 1,',
+        [
+            "BeatLog.test_every_beat_carries_its_own_position_as_its_index",
+            "BeatLog.test_the_envelope_a_take_recorded_in_one_piece_writes",
+        ],
+    ),
+    (
+        # Issue #134's field, from the other end: the caption beats stay
+        # perfect and every other beat goes blank.
+        "a beat that did not set the caption reports no caption at all",
+        "core.py",
+        "            self._caption = text",
+        "            self._caption = self._caption",
+        ["BeatLog.test_every_beat_says_which_caption_was_on_screen_while_it_ran"],
+    ),
+    (
+        # Issue #20 from the other side. `duration: null` is the honest answer
+        # for a take that encoded nothing, and 0.0 is a number `stitch()`
+        # offsets every later segment's beats by.
+        "a take that encoded no mp4 reports a duration of zero rather than none",
+        "core.py",
+        "        mp4 = self._media_path()\n        duration = None",
+        "        mp4 = self._media_path()\n        duration = 0.0",
+        ["BeatLog.test_a_take_that_encoded_nothing_reports_no_duration"],
+    ),
+    # -- the readable half of the same log (issue #173) --------------------
+    (
+        "a run() beat's exit status never reaches timeline.md",
+        "timeline.py",
+        '    shows_exit = any("exit_code" in b for b in beats)',
+        "    shows_exit = False",
+        [
+            "TimelineMd.test_a_run_beats_exit_status_gets_a_column_and_a_web_take_does_not",
+            "TimelineMd.test_a_run_whose_status_could_not_be_read_says_so_rather_than_nothing",
+        ],
+    ),
+    (
+        "timeline.md files the take's problems under a heading nobody greps for",
+        "timeline.py",
+        '            "## Issues",',
+        '            "## Notes",',
+        [
+            "TimelineMd.test_every_recorded_problem_is_listed_with_the_beat_it_fired_during"
+        ],
     ),
 ]
 
