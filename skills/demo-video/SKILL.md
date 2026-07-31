@@ -106,10 +106,11 @@ behind every one, are in [reference/limits.md](reference/limits.md).
   an issue and is fatal under `strict=True`, with no way to say it was the
   point — so leave strict off for that demo, and say in the pull request which
   recorded issue is the demo's subject.
-- **A stitched demo's attribution is unproven.** An issue recorded in segment
-  two can name a beat of segment one, and a coverage row can lose the segment
-  it belongs to. Check both against the parts before handing them to a
-  reviewer.
+- **A stitched demo's issue attribution is unproven.** An issue recorded in
+  segment two can name a beat of segment one — `stitch()` re-points every
+  issue's beat while merging, and no take exercises it. Check it against the
+  parts before handing them to a reviewer. A coverage row keeping its segment
+  *is* now graded ([#137](https://github.com/rogvid/skills/issues/137)).
 - **CI does less for a fork.** A pull request from a fork gets no demo comment;
   its beat table and artifact link are on the workflow run's summary page
   instead.
