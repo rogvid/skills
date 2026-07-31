@@ -45,9 +45,10 @@ from .timeline import timeline_paths
 #     no signal at all, so whatever else repainted in the window wins;
 #   * an app that keeps repainting under the bar supplies a stronger edge than
 #     the caption does, at a time of its own choosing;
-#   * a mid-take `goto()` destroys the caption bar with the document and logs
-#     no caption change at all, so there is nothing to measure and every later
-#     frame is captioned with a line that is not on screen.
+#   * a mid-take `goto()` destroys the caption bar with the document. The beat
+#     log no longer keeps the dead line (#134), but it clears from the *next*
+#     beat, so the bar leaves the screen a beat before the log says so and
+#     there is still nothing in the picture to measure the moment against.
 #
 # All three are the same mistake — guessing which pixel change was the caption.
 # The sound fix is for the recorder to *state* the mapping rather than have it
