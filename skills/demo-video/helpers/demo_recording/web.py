@@ -84,20 +84,38 @@ _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 # all of them inside x 0-8, y 0-8.
 #
 # What tells that event apart from a real one is not its trust, its type or
-# its timing: it is that it reports **no movement**, because it is dispatched
-# at the position the pointer is already at. `movementX`/`movementY` are the
-# browser's own delta between this event and the last, so the test is
-# structural rather than a heuristic — a `mousemove` that reports no movement
-# cannot need the dot moved, since the pointer did not move. Ignoring it
-# leaves the dot where the stylesheet parks it, off screen, until the
-# storyboard moves the pointer for the first time; that position is the one
-# thing here that does not depend on when an event was delivered.
+# its timing: it is that it reports **a position the pointer was already at**.
+# So the overlay remembers the position it has been told about — seeded with
+# `(0, 0)`, where a fresh page's pointer sits and where that event lands — and
+# drops a `mousemove` that repeats it. Nothing is drawn until the pointer is
+# somewhere it has not been, so the dot stays where the stylesheet parks it,
+# off screen, until the storyboard moves the pointer for the first time. That
+# is the one thing here that does not depend on when an event was delivered:
+# both orderings of the load-time event and a storyboard's first move end with
+# the dot at the position the storyboard asked for.
 #
-# Written `=== 0` rather than `!e.movementX`, and the difference is the
-# failure mode: on an engine that does not implement `movementX` the strict
-# test is false and the dot follows the event as it always did (a determinism
-# bug), while the falsy test would swallow *every* move and the take would
-# record no cursor at all (an invisible-cursor bug nobody watching can report).
+# **Positions rather than `movementX`/`movementY`, and this is issue #202.**
+# The delta the browser reports for the *first* mouse event in a page is a
+# build detail, because there is no previous event to measure it against:
+#
+#   | Chromium | park at (60, 640) as the page's first mouse event |
+#   |---|---|
+#   | 136 (playwright 1.52) | `movementX/Y` 60, 640 — measured from the origin |
+#   | 147 (playwright 1.59) | `movementX/Y` **0, 0** — measured from itself |
+#   | 151 (playwright 1.61) | 60, 640 — and a settle event precedes it |
+#
+# A guard reading `movementX === 0 && movementY === 0` therefore threw the
+# storyboard's own park away on 147 — indistinguishable there from the
+# load-time event — while staying green on 151, which is how it passed CI and
+# `tests/smoke` on one machine and failed on another. Reading positions costs
+# nothing on any of the three and does not ask the engine for a delta at all,
+# so an engine that implements no `movementX` behaves like every other.
+#
+# What it cannot do, and cannot be made to do: draw the dot for a pointer verb
+# that lands on exactly `(0, 0)`. The pointer *starts* there, so "the pointer
+# was moved to the origin" and "the pointer has not moved" are the same state
+# and no rule reading events can separate them. A storyboard that wants the
+# cursor at the very corner of the viewport has to pass through somewhere else.
 #
 # What this does not do: place the dot after a navigation. A document that
 # replaces the one the dot lived in gets a fresh, parked dot, and Chromium
@@ -123,8 +141,11 @@ _CURSOR_JS = """
     const dot = document.createElement('div');
     dot.id = '__demo_cursor';
     document.body.appendChild(dot);
+    let atX = 0, atY = 0;
     window.addEventListener('mousemove', (e) => {
-      if (e.movementX === 0 && e.movementY === 0) return;
+      if (e.clientX === atX && e.clientY === atY) return;
+      atX = e.clientX;
+      atY = e.clientY;
       dot.style.left = e.clientX + 'px';
       dot.style.top = e.clientY + 'px';
     }, true);
