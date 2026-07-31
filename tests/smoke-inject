@@ -51,7 +51,7 @@ an aborted run cannot leave a broken recorder behind.
 
 **What this does not do** is in `tests/README.md`, under "What the injection
 manifest covers". Read it before treating a green run here as coverage of
-`tests/smoke`: 22 entries against 11 of smoke's 33 check functions is a floor
+`tests/smoke`: 25 entries against 13 of smoke's 35 check functions is a floor
 under the assertions that would be worst to lose, not a statement about the
 rest. Every check function with no entry is printed as `ungraded` at the end of
 a run, so the gap is in the output rather than in somebody's memory.
@@ -194,6 +194,64 @@ INJECTIONS = [
         arm="--strict-only",
         sites=("check_strict_failure",),
         must_contain=("the strict failure never names the beat the problem ",),
+    ),
+    # -- re-recording reproduces the take (issue #10), 19 s an entry ----------
+    #
+    # Registered from issue #185, where the determinism arm went red on `main`
+    # and on a branch that changed no pixel, and its own diagnostic said the
+    # picture was unchanged. Both halves of that were true and neither was
+    # graded: the arm had no injection at all, and the diagnostic it printed
+    # beside a whole-file hash was a mean luma over a crop of the panel — 0.00
+    # for the difference it was describing, and 1.07 and 0.98 for the two real
+    # breaks below. A number that cannot separate those three grades nothing.
+    Injection(
+        # The cause of #185. The recorder's cursor dot follows the pointer, and
+        # a storyboard that never places the pointer gets whatever Chromium's
+        # synthetic mousemove leaves — the origin, eleven takes in twelve under
+        # load, and off-screen the twelfth. The still comparison sees that one
+        # take in twelve; this assertion sees every one of them, which is the
+        # difference between a check and a coin.
+        name="the storyboard leaves the pointer where the race puts it",
+        module="tests/smoke",
+        old="        rec.page.mouse.move(*PARKED_POINTER)",
+        new="        pass  # the pointer is left to the synthetic mousemove",
+        arm="--determinism-only",
+        sites=("check_parked_pointer",),
+        must_contain=("this storyboard parked the pointer at",),
+    ),
+    Injection(
+        # The claim the byte comparison exists for: a frozen clock. Both takes
+        # then render their own instant, the stills differ across takes, and
+        # the difference lands in the clock readings — which the diagnostic has
+        # to be able to say, since saying the opposite is what #185 was.
+        name="the frozen clock freezes at whatever time it is",
+        module="core.py",
+        old="  const FIXED = __EPOCH_MS__;",
+        new="  const FIXED = Date.now();",
+        arm="--determinism-only",
+        sites=("check_entropy_stills",),
+        must_contain=(
+            "differs between two takes of the ",
+            "are inside the entropy panel at x ",
+        ),
+    ),
+    Injection(
+        # An infinite animation has no finished state to land on, so the rule
+        # forces one iteration. Without that the spinner turns through both
+        # stills of a take. Kept beside the entry above because it is the one
+        # whose difference is a *shape* rather than text, and the retired
+        # diagnostic reported it as 0.98 — indistinguishable from the 0.00 it
+        # reported for a take that had genuinely not changed.
+        name="app animations are never landed on a finished state",
+        module="core.py",
+        old="      animation-iteration-count: 1 !important;",
+        new="      animation-iteration-count: infinite !important;",
+        arm="--determinism-only",
+        sites=("check_entropy_stills",),
+        must_contain=(
+            "differ within one take, ",
+            "largest channel delta ",
+        ),
     ),
     # -- the recorder's own overlay (issues #162/#163), 31 s an entry ---------
     #

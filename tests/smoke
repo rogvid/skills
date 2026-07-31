@@ -446,6 +446,42 @@ ENTROPY_SHOTS = ("01-entropy", "02-entropy")
 ENTROPY_SETTLE_S = 1.0
 ENTROPY_GAP_S = 1.0
 
+# Where this storyboard parks the mouse, before anything is photographed.
+#
+# A storyboard that never moves the pointer does not thereby leave the
+# recorder's stand-in cursor undrawn. Chromium dispatches a *synthetic*
+# mousemove at its last known pointer position — (0, 0) on a fresh page — once
+# layout settles, the recorder's handler moves the dot there, and an 18 px dot
+# centred on the origin paints a 9x9 arc into the top-left corner of every
+# still. That event is not part of the storyboard, and it is not reliably
+# delivered before the first `shot()`: measured on this box under 14-way CPU
+# load, twelve takes of this storyboard left the dot at the origin eleven
+# times and off-screen (where the recorder's stylesheet parks it) once.
+#
+# Two takes that disagree about it differ by exactly 69 pixels and by nothing
+# else, which is the whole of issue #185 — three CI runs and a `main` bisect
+# spent on a difference the arm's own diagnostic could not see, because that
+# diagnostic cropped to a panel starting 160 px to the right of it.
+#
+# Parking the pointer makes the position the storyboard's rather than the
+# race's: `page.mouse.move` is awaited, and the synthetic move that follows
+# reuses the position it set (12 of 12 under the same load that lost the race
+# once in twelve). Chosen in the left gutter — the page is 1040 px wide,
+# centred in a 1280 px viewport — and low, so the dot cannot overlap the
+# entropy panel, the spinner, or anything carrying a `:hover` rule.
+PARKED_POINTER = (60, 640)
+
+# Read as a *rect*, not as the inline `left`/`top` the recorder's own mousemove
+# handler writes. Where the pixels landed is what the still comparison asks,
+# and a check that reads the producer's bookkeeping instead shares whatever
+# blind spot the producer has.
+_CURSOR_BOX_JS = """() => {
+  const d = document.getElementById('__demo_cursor');
+  if (!d) return null;
+  const r = d.getBoundingClientRect();
+  return {x: r.x, y: r.y, width: r.width, height: r.height};
+}"""
+
 # Stills are lossless PNGs of a frozen page, so two takes of this storyboard
 # are compared byte for byte and no threshold is needed. Video is different:
 # H.264 at crf 20 is not byte-reproducible and the screencast's frame timing
@@ -2183,6 +2219,42 @@ def check_determinism(b: Beats, page, when: str, on: bool = True) -> dict:
     return state
 
 
+def check_parked_pointer(b: Beats, page, when: str) -> None:
+    """The recorder's cursor dot is where the storyboard parked it.
+
+    Separate from the byte comparison it protects, and not dominated by it.
+    With `PARKED_POINTER` removed the dot lands wherever Chromium's synthetic
+    mousemove leaves it, which on this machine is the same corner in eleven
+    takes out of twelve — so the still comparison notices the unpinned pointer
+    one run in twelve, while this notices every one. An intermittent assertion
+    is how issue #185 cost three CI runs.
+
+    Failing on a missing dot is deliberate. A recorder that stopped drawing a
+    cursor would make this check silently unable to fail, and a check that
+    cannot fail is the thing this repo's review discipline exists to catch —
+    even though the stills would, in that one case, reproduce.
+    """
+    box = page.evaluate(_CURSOR_BOX_JS)
+    if box is None:
+        b.fail_if(
+            True,
+            f"{when}, the recorder drew no cursor dot (#__demo_cursor is not "
+            f"in the page) — this take can no longer tell a parked pointer "
+            f"from a synthetic mousemove, which is the difference issue #185 "
+            f"turned out to be",
+        )
+        return
+    at = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    b.fail_if(
+        abs(at[0] - PARKED_POINTER[0]) > 1 or abs(at[1] - PARKED_POINTER[1]) > 1,
+        f"{when}, the cursor dot is centred at ({at[0]:.0f}, {at[1]:.0f}), not "
+        f"at the ({PARKED_POINTER[0]}, {PARKED_POINTER[1]}) this storyboard "
+        f"parked the pointer at — its position is being set by something other "
+        f"than the storyboard, and whatever that is decides whether two takes "
+        f"of this storyboard produce the same pixels",
+    )
+
+
 # What has the focus, as a name a failure message can print: the element's id
 # when it has one, and its tag when it does not — `blur()` hands focus back to
 # `<body>`, which has no id and would otherwise read as the empty string beside
@@ -3009,6 +3081,15 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
         out_dir, base_url=base_url, speech=False, strict=True, **kwargs
     ) as rec:
         rec.goto("/?entropy=1")
+        # Park the pointer before anything is photographed. Every take of this
+        # storyboard has to agree about where the recorder's cursor dot is,
+        # and left alone that is decided by a synthetic mousemove rather than
+        # by the storyboard — see PARKED_POINTER, and issue #185. Deliberately
+        # `page.mouse.move` rather than the `move_to` verb: this is the
+        # storyboard stating a precondition, not a beat worth watching, and a
+        # sixth beat would change what every other measurement in this take is
+        # taken over.
+        rec.page.mouse.move(*PARKED_POINTER)
         # The worker's answer lands asynchronously and is part of what the
         # stills have to reproduce, so wait for it rather than racing it. A
         # short bound rather than the 60 s default: a Worker wrapper that
@@ -3050,6 +3131,8 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
         # else entirely (it turns once every 1.7 s).
         rec.pause(ENTROPY_GAP_S)
         rec.shot(ENTROPY_SHOTS[1])
+        # After both stills, so it grades the frames that were actually taken.
+        check_parked_pointer(b, rec.page, f"in the {label} take")
 
         box = rec.page.locator("#entropy-panel").bounding_box()
         spin = rec.page.locator("#entropy-spinner").bounding_box()
@@ -7222,6 +7305,148 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
+def png_size(path: Path) -> tuple[int, int]:
+    """A PNG's pixel dimensions, read straight out of its IHDR."""
+    head = path.read_bytes()[:24]
+    if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        raise SmokeFailure(f"{path} is not a PNG, so it cannot be a still")
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def _decode_rgb(path: Path) -> bytes:
+    """A still's pixels, full resolution, no crop and no reduction."""
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise SmokeFailure(
+            f"ffmpeg could not decode {path}: "
+            f"{proc.stderr.decode(errors='replace').strip()[:300]}"
+        )
+    return proc.stdout
+
+
+def still_difference(one: Path, two: Path, panel: Rect) -> str:
+    """Where two stills differ, in the same scope the byte comparison grades.
+
+    Deliberately *not* `gray_frames`: that crops to a rect and reduces to
+    160x90, so beside a whole-file hash it answers a different question and
+    reads ~0 for almost any answer to the one that was asked. Issue #185 is
+    what that costs. A real 69-pixel difference — the recorder's cursor dot,
+    at the top-left corner of the frame — was reported as "0.00 mean luma over
+    the entropy panel", because the panel starts 160 px to the right of the
+    dot and could not have contained it. Three CI runs and a bisect of `main`
+    went into a difference the diagnostic had ruled out by construction. Two
+    further traps in the same line: the reduction to 160x90 flattens a whole
+    turn of the spinner to 0.76 even when the difference *is* in the panel,
+    and a mean over 14 400 cells cannot distinguish a few loud pixels from
+    none at all.
+
+    So: whole frame, native resolution, and both scopes stated — how much
+    differs, where, and how much of it is inside the thing this take exists to
+    grade. The one distinction the old line could never draw is drawn first:
+    identical pixels behind differing bytes is a PNG *encoding* difference and
+    not a picture difference, and the two want opposite fixes.
+    """
+    wide, high = png_size(one)
+    if (wide, high) != png_size(two):
+        return (
+            f"the two stills are not the same size ({wide}x{high} against "
+            f"{png_size(two)[0]}x{png_size(two)[1]}), so no pixel of one "
+            f"corresponds to a pixel of the other"
+        )
+    first, second = _decode_rgb(one), _decode_rgb(two)
+    if first == second:
+        return (
+            f"all {wide * high} decoded pixels are identical — the difference "
+            f"is in the PNG encoding and not in the picture, so nothing that "
+            f"was recorded changed"
+        )
+    stride = wide * 3
+    xs: list[int] = []
+    ys: list[int] = []
+    worst = 0
+    for y in range(high):
+        row_a = first[y * stride : (y + 1) * stride]
+        row_b = second[y * stride : (y + 1) * stride]
+        if row_a == row_b:
+            continue
+        for x in range(wide):
+            i = x * 3
+            if row_a[i : i + 3] != row_b[i : i + 3]:
+                xs.append(x)
+                ys.append(y)
+                worst = max(
+                    worst,
+                    max(
+                        abs(p - q)
+                        for p, q in zip(row_a[i : i + 3], row_b[i : i + 3], strict=True)
+                    ),
+                )
+    px, py, pw, ph = panel
+    inside = sum(
+        1
+        for x, y in zip(xs, ys, strict=True)
+        if px <= x < px + pw and py <= y < py + ph
+    )
+    return (
+        f"{len(xs)} of {wide * high} pixels differ, bounded by x "
+        f"{min(xs)}-{max(xs)} and y {min(ys)}-{max(ys)}, largest channel "
+        f"delta {worst}; {inside} of them are inside the entropy panel at x "
+        f"{px}-{px + pw}, y {py}-{py + ph}, and {len(xs) - inside} are not"
+    )
+
+
+def check_entropy_stills(
+    first: EntropyTake, stills: dict[str, dict[str, Path]]
+) -> list[str]:
+    """The two byte comparisons: across two takes, and within one take.
+
+    Byte equality rather than a decoded-pixel tolerance, kept deliberately.
+    It is the strongest form of the claim ("the still you commit today is the
+    still you record next month"), it needs no threshold anybody has to
+    defend, and — since issue #185 — it is a claim the take can keep: the one
+    thing that was breaking it was a pointer position the storyboard did not
+    set. What changed is the *report*: the difference is now stated at the
+    scope the hash grades, so a failure here names its own reason instead of
+    contradicting itself.
+    """
+    failures: list[str] = []
+    for shot in ENTROPY_SHOTS:
+        one, two = stills["determinism-a"][shot], stills["determinism-b"][shot]
+        if digest(one) != digest(two):
+            failures.append(
+                f"determinism: {shot}.png differs between two takes of the "
+                f"same storyboard ({digest(one)} vs {digest(two)}) — "
+                f"re-recording does not reproduce the stills, so a still "
+                f"cannot be diffed against the one committed last month. "
+                f"{still_difference(one, two, first.still_rect)}"
+            )
+    # The same picture twice inside one take: the clock cannot have moved and
+    # the spinner cannot have turned.
+    inside = stills["determinism-a"]
+    if digest(inside[ENTROPY_SHOTS[0]]) != digest(inside[ENTROPY_SHOTS[1]]):
+        failures.append(
+            f"determinism: {ENTROPY_SHOTS[0]}.png and {ENTROPY_SHOTS[1]}.png "
+            f"differ within one take, {ENTROPY_GAP_S}s apart on a page nothing "
+            f"touched — something on screen is still moving with the clock. "
+            f"{still_difference(inside[ENTROPY_SHOTS[0]], inside[ENTROPY_SHOTS[1]], first.still_rect)}"
+        )
+    return failures
+
+
 def run_determinism(out_root: Path) -> list[str]:
     """Record one storyboard three times and compare the recordings.
 
@@ -7317,32 +7542,9 @@ def run_determinism(out_root: Path) -> list[str]:
             print(f"smoke:   default {line}")
 
     # -- the stills, byte for byte -------------------------------------------
-    reproduced = True
-    for shot in ENTROPY_SHOTS:
-        one, two = stills["determinism-a"][shot], stills["determinism-b"][shot]
-        if digest(one) != digest(two):
-            reproduced = False
-            delta = frame_difference(
-                gray_frames(one, first.still_rect)[0],
-                gray_frames(two, second.still_rect)[0],
-            )
-            failures.append(
-                f"determinism: {shot}.png differs between two takes of the "
-                f"same storyboard ({digest(one)} vs {digest(two)}, {delta:.2f} "
-                f"mean luma over the entropy panel) — re-recording does not "
-                f"reproduce the stills, so a still cannot be diffed against "
-                f"the one committed last month"
-            )
-    # The same picture twice inside one take: the clock cannot have moved and
-    # the spinner cannot have turned.
-    inside = stills["determinism-a"]
-    if digest(inside[ENTROPY_SHOTS[0]]) != digest(inside[ENTROPY_SHOTS[1]]):
-        reproduced = False
-        failures.append(
-            f"determinism: {ENTROPY_SHOTS[0]}.png and {ENTROPY_SHOTS[1]}.png "
-            f"differ within one take, {ENTROPY_GAP_S}s apart on a page nothing "
-            f"touched — something on screen is still moving with the clock"
-        )
+    still_failures = check_entropy_stills(first, stills)
+    reproduced = not still_failures
+    failures += still_failures
 
     # ...and the same two stills with the controls off, which is what makes
     # every comparison above capable of failing.
