@@ -122,4 +122,8 @@ no matter what this section does:
 - **The bytes of `demo.mp4`.** H.264 is not byte-reproducible and the
   screencast's frame timing is not either. Two takes match in what they *show*,
   not in their checksums — compare the stills, which are lossless PNGs and do
-  reproduce exactly.
+  reproduce exactly. The recorder's own cursor dot used to be the exception
+  ([#186](https://github.com/rogvid/skills/issues/186)): it followed the
+  movement-free `mousemove` Chromium dispatches at load, so a storyboard that
+  never touched the pointer got an 18 px dot in the corner of about half its
+  takes. It is now drawn only once the pointer actually moves.
