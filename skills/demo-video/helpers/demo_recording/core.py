@@ -547,6 +547,86 @@ class _DemoBase:
     storyboard author's to pin down. See the determinism section above.
     """
 
+    # -- the medium seam ----------------------------------------------------
+    #
+    # **Every base member not named here is sealed**, and `__init_subclass__`
+    # below refuses — at import — a medium that shadows one.
+    #
+    # This exists because the seam used to be prose. `_DemoBase`'s docstring
+    # named the hooks, nothing checked, and while #181 was landing a medium
+    # added a method called `_watch_page` — a name the base already used for
+    # the `console`/`pageerror`/`requestfailed`/`response` subscription. Python
+    # resolved the override, web takes recorded zero problems, `strict=True`
+    # refused nothing, and `timeline.json` stayed well-formed and empty. No
+    # error, no warning, no failing unit test: the whole error-detection
+    # surface was off because a subclass picked a name.
+    #
+    # The rule that follows is the one the accident argues for: a medium
+    # *extends* by implementing a hook it was offered, never by re-declaring
+    # something the base already promises to do. Two hooks here exist only to
+    # give the shape somewhere to go — `_watch_extra` (subscribe more) and
+    # `_before_shot` (do something before a still) — because sealing a member
+    # a medium legitimately needed to reach would just move the problem.
+    #
+    # Adding a name here is a deliberate act with a cost: it says a medium may
+    # replace that behaviour wholesale, and nothing downstream may rely on it
+    # any more.
+    MEDIUM_HOOKS = frozenset(
+        {
+            "__init__",
+            # lifecycle
+            "_init_context",
+            "_start",
+            "_stop",
+            "_postprocess",
+            # what only this medium can answer
+            "_content_rect",
+            "_evidence_payload",
+            "_failure_screen",
+            "_media_path",
+            # extension points, each beside the sealed member it extends
+            "_watch_extra",
+            "_before_shot",
+            "_idle",
+        }
+    )
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Refuse a medium that shadows a sealed base member.
+
+        Import time, not call time: the failure this replaces was invisible
+        precisely because the shadowed method still *ran* — the wrong one.
+        A `TypeError` while the module loads is the loudest available moment
+        and the only one that cannot be reached by a take.
+
+        Identity, not `in vars(cls)`: a mixin listed ahead of the recorder in
+        the MRO shadows exactly as effectively as a method on the class
+        itself, and `tests/unit` uses one.
+        """
+        super().__init_subclass__(**kwargs)  # type: ignore[call-arg]
+        broken = []
+        for name in vars(_DemoBase):
+            # Read off `_DemoBase`, never off `cls`: a subclass that could
+            # widen its own permit would have the escape hatch this exists to
+            # remove, and it would read as configuration rather than as a
+            # mistake.
+            if name in _DemoBase.MEDIUM_HOOKS or name == "__init_subclass__":
+                continue
+            promised = getattr(_DemoBase, name, None)
+            if not callable(promised):
+                continue
+            if getattr(cls, name, None) is not promised:
+                broken.append(name)
+        if broken:
+            raise TypeError(
+                f"{cls.__module__}.{cls.__qualname__} overrides "
+                f"{', '.join(sorted(broken))} — sealed on _DemoBase, so this "
+                f"silently replaces a guarantee every take is owed rather "
+                f"than extending one. A medium may override only "
+                f"_DemoBase.MEDIUM_HOOKS: "
+                f"{', '.join(sorted(_DemoBase.MEDIUM_HOOKS))}."
+            )
+
     def __init__(
         self,
         out_dir: Path | str | None = None,
@@ -1125,11 +1205,31 @@ class _DemoBase:
         self._pumped_at = time.monotonic() - self._t0
 
     def _watch_page(self, page: Page) -> None:
-        """Subscribe to everything the page can say about being broken."""
+        """Subscribe to everything the page can say about being broken.
+
+        **Sealed** (see `MEDIUM_HOOKS`). These four listeners are what the
+        issue log is made of and what `strict=True` refuses a take over, and a
+        medium that replaced this method would take all four off itself
+        without changing anything a reader of `timeline.json` could see. A
+        medium adds to them through `_watch_extra`, which cannot subtract.
+        """
         page.on("console", self._on_console)
         page.on("pageerror", self._on_page_error)
         page.on("requestfailed", self._on_request_failed)
         page.on("response", self._on_response)
+        self._watch_extra(page)
+
+    def _watch_extra(self, page: Page) -> None:
+        """Subscriptions this medium wants on top of the four above.
+
+        Called once, from `_watch_page`, before `_start()` — so the first
+        navigation is watched too. Do not subscribe from `_start` as well:
+        two subscriptions record every event twice.
+
+        A handler here should only set an attribute. Playwright delivers page
+        events on the thread that is blocked inside a Playwright call, so
+        calling back into the API from one is a way to deadlock a take.
+        """
 
     def _on_console(self, message) -> None:
         try:
@@ -2032,13 +2132,27 @@ take with fewer beats than the last one would otherwise leave the
         self._idle(max(min_s, remaining))
 
 
+    def _before_shot(self) -> None:
+        """Bring the screen up to date before a still is taken.
+
+        The hook that keeps `shot` sealed. A medium sitting on buffered output
+        (the terminal reads its PTY here) flushes it, and everything a still
+        is *for* — the beat, the `ac` claim, the file the coverage report
+        points at — stays the base's to guarantee.
+        """
+
     def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
         """Still for the written guide -> images/<name>.png.
 
         `ac` names the acceptance criterion this still is here to demonstrate.
         A tagged `shot` is the strongest thing a coverage report can hand a
         reviewer — a committed picture of the moment, at a known timestamp.
+
+        **Sealed** (see `MEDIUM_HOOKS`): a medium that replaced this would take
+        the beat and its `ac` claim with it, and the coverage report reads
+        nothing else. Medium-specific work goes in `_before_shot`.
         """
+        self._before_shot()
         claims = self._checked_ac(ac, "shot()")
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()

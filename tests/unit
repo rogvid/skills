@@ -2498,6 +2498,192 @@ class WatchedEvents(unittest.TestCase):
         self.assertEqual(doubled, {})
 
 
+# --------------------------------------------------------------------------
+# The medium seam (#147)
+# --------------------------------------------------------------------------
+#
+# `WatchedEvents` above grades the *outcome* — that a web take really is
+# subscribed to the base's four problem listeners. It caught the regression
+# once it had been fixed; it could not have stopped it being written, and it
+# says nothing about the next member somebody shadows by picking its name.
+#
+# What follows grades the seal instead: `_DemoBase.MEDIUM_HOOKS` names what a
+# medium may replace, and `__init_subclass__` refuses everything else while
+# the module imports.
+
+# The guarantees a take is owed, spelled out rather than derived from
+# `MEDIUM_HOOKS`. A list read out of the code under test agrees with that code
+# by construction — including with a change that moved one of these names into
+# the permit, which is the one edit these assertions exist to notice.
+GUARANTEED = frozenset(
+    {
+        # the take's own lifecycle
+        "__enter__",
+        "__exit__",
+        # #147's regression: the four problem listeners, and their handlers
+        "_watch_page",
+        "_on_console",
+        "_on_page_error",
+        "_on_request_failed",
+        "_on_response",
+        "_pump_events",
+        # what a take says about its problems
+        "_note_issue",
+        "_print_issue_summary",
+        "_strict_message",
+        # the artifacts a reviewer reads
+        "_beat",
+        "shot",
+        "caption",
+        "interlude",
+        "_capture_evidence",
+        "_write_evidence",
+        "_write_failure",
+        "_write_failure_marker",
+        "_timeline_doc",
+        "_convert",
+    }
+)
+
+
+class SealedSeam(unittest.TestCase):
+    """What a medium may override, and what it may not.
+
+    Written from the outage: while #181 was landing, `Recorder` gained a
+    method called `_watch_page` — a name `_DemoBase` already used for the
+    `console`/`pageerror`/`requestfailed`/`response` subscription. Python
+    resolved the override, web takes recorded zero problems, `strict=True`
+    refused nothing, and `timeline.json` stayed well-formed and empty. Nothing
+    raised, nothing warned, and `tests/unit` could not see it because no test
+    here enters the context manager that calls the shadowed method.
+
+    The fix is not another assertion about `_watch_page`; it is that a medium
+    which shadows a sealed member does not import.
+    """
+
+    def refusal(self, bases=(_DemoBase,), **members):
+        """Define a medium with `members`; return the TypeError, or None."""
+        try:
+            type("Medium", bases, dict(members))
+        except TypeError as refused:
+            return refused
+        return None
+
+    def test_a_medium_that_shadows_the_page_subscription_is_refused(self):
+        # The regression, written exactly as web.py once wrote it.
+        refused = self.refusal(_watch_page=lambda self, page: None)
+        self.assertIsNotNone(
+            refused,
+            "a medium redeclaring _watch_page silently unsubscribes the "
+            "base's four problem listeners, and that is what shipped",
+        )
+        self.assertIn("_watch_page", str(refused))
+
+    def test_the_refusal_names_the_seam_a_medium_should_have_used(self):
+        # An import-time TypeError that only says "no" sends the next author
+        # looking for the mechanism instead of the hook.
+        refused = self.refusal(_watch_page=lambda self, page: None)
+        self.assertIn("_watch_extra", str(refused))
+
+    def test_a_mixin_shadows_just_as_well_and_is_refused_too(self):
+        # `in vars(cls)` is the obvious way to write this check and it is
+        # wrong: a class listed ahead of the base in the MRO takes the call
+        # without appearing on the medium at all. `tests/unit` ships such a
+        # mixin (`_NoWait`), so this is not hypothetical here.
+        mixin = type("Mixin", (), {"_watch_page": lambda self, page: None})
+        refused = self.refusal(bases=(mixin, _DemoBase))
+        self.assertIsNotNone(
+            refused, "a mixin ahead of _DemoBase in the MRO shadows it"
+        )
+        self.assertIn("_watch_page", str(refused))
+
+    def test_a_medium_cannot_widen_its_own_permit(self):
+        # An escape hatch that reads as configuration is the accident this
+        # exists to remove, wearing a different hat.
+        refused = self.refusal(
+            MEDIUM_HOOKS=_DemoBase.MEDIUM_HOOKS | {"_watch_page"},
+            _watch_page=lambda self, page: None,
+        )
+        self.assertIsNotNone(
+            refused, "a medium granted itself permission to shadow a seal"
+        )
+
+    def test_every_declared_hook_can_still_be_implemented(self):
+        # The control. A seal that refused *everything* would satisfy all four
+        # assertions above and make the package undefinable — and this is the
+        # test that fires, rather than an unreadable import error, when a hook
+        # is dropped from the permit by mistake.
+        hooks = {
+            name: (lambda self, *args, **kwargs: None)
+            for name in _DemoBase.MEDIUM_HOOKS
+        }
+        self.assertIsNone(self.refusal(**hooks))
+
+    def test_the_guarantees_a_take_is_owed_are_not_in_the_permit(self):
+        self.assertEqual(GUARANTEED & _DemoBase.MEDIUM_HOOKS, frozenset())
+
+    def test_every_guaranteed_name_is_something_the_base_actually_defines(self):
+        # Without this the assertion above is the catalogue's vacuous sweep:
+        # a renamed member leaves a stale name in GUARANTEED that intersects
+        # nothing, forever, whatever the permit says.
+        self.assertEqual(GUARANTEED - set(vars(_DemoBase)), set())
+
+    def test_every_declared_hook_is_something_the_base_actually_defines(self):
+        # The mirror. A hook named for a member that does not exist permits
+        # nothing and hides that the real member is still sealed.
+        self.assertEqual(_DemoBase.MEDIUM_HOOKS - set(vars(_DemoBase)), frozenset())
+
+
+class TerminalStill(unittest.TestCase):
+    """A terminal still is taken of the flushed screen, not the stale one.
+
+    This behaviour predates the seam work — it was a `shot` override that
+    pumped and then called `super()`. It is asserted here because the seal
+    moved it to `_before_shot`, and a refactor's only honest evidence is that
+    what it moved still happens.
+    """
+
+    class Page(FakePage):
+        def __init__(self, log: list) -> None:
+            super().__init__()
+            self.log = log
+
+        def screenshot(self, path: str) -> None:
+            self.log.append("screenshot")
+
+    class Rec(TermRec):
+        """A terminal recorder that writes down when its screen was flushed.
+
+        `_pump` reads the PTY and returns immediately when there is none, so
+        the real one is silent in this suite — which is exactly the shape of
+        a still taken of a screen nobody refreshed.
+        """
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.log: list[str] = []
+
+        def _pump(self) -> None:
+            self.log.append("pump")
+
+    def test_the_screen_is_flushed_before_the_still_is_taken(self):
+        rec = recorder(self, cls=self.Rec)
+        rec.page = self.Page(rec.log)
+        rec.shot("01-done")
+        self.assertEqual(rec.log, ["pump", "screenshot"])
+
+    def test_the_still_is_still_a_beat_that_carries_its_criterion(self):
+        # The half a `shot` override could have dropped, and the reason `shot`
+        # is sealed: the coverage report reads nothing but this beat.
+        rec = recorder(self, cls=self.Rec, criteria={"AC-2": "The queue empties."})
+        rec.page = self.Page(rec.log)
+        rec.shot("01-done", ac="AC-2")
+        self.assertEqual(
+            [(b["verb"], b["selector"], b.get("ac")) for b in rec._beats],
+            [("shot", "01-done", ["AC-2"])],
+        )
+
+
 class VerbTarget(unittest.TestCase):
     """Which target a verb's beat names, by position and by keyword (#177).
 
@@ -3741,28 +3927,136 @@ INJECTIONS = [
         ["CaptionTruth.test_a_take_watches_its_page_before_the_medium_starts"],
     ),
     (
-        # The regression the first version of this change shipped, and the one
-        # `tests/smoke` caught after `tests/unit` went green: `Recorder`
-        # declaring `_watch_page` without delegating shadows the base's four
-        # problem listeners, so a web take records no console error, no
-        # pageerror, no failed request — and `strict=True` refuses nothing.
-        "the web recorder's page subscription shadows the base's",
-        "web.py",
-        "        super()._watch_page(page)",
-        "        pass  # the base's problem listeners are on their own",
+        # The other half of #147's regression. The seal below stops a medium
+        # *shadowing* `_watch_page`; nothing stops the base forgetting to call
+        # what a medium was told to implement instead, and then the two web
+        # subscriptions are dead code nobody notices.
+        "the base stops calling what a medium subscribes on top",
+        "core.py",
+        "        self._watch_extra(page)",
+        "        pass  # the medium's own subscriptions never happen",
         [
-            "WatchedEvents.test_a_web_take_watches_the_problems_every_take_watches",
             "WatchedEvents.test_the_web_recorder_only_adds_to_what_the_base_watches",
+            "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
         ],
     ),
     (
         # And the mirror: subscribing twice logs every problem the page emits
         # twice, which is the shape the fix for the above invites.
         "a medium subscribes its page a second time",
-        "web.py",
-        "        super()._watch_page(page)",
-        "        super()._watch_page(page)\n        super()._watch_page(page)",
+        "core.py",
+        "        self._watch_extra(page)",
+        "        self._watch_extra(page)\n        self._watch_extra(page)",
         ["WatchedEvents.test_no_page_event_is_subscribed_twice"],
+    ),
+    (
+        # #147's regression itself, and the reason there is a seal rather than
+        # one more assertion about `_watch_page`: with nothing sealed, a medium
+        # that picks a name the base already uses takes the base's four problem
+        # listeners off itself, and every artifact still looks healthy.
+        #
+        # This breaks the seal rather than re-creating the shadowing in web.py,
+        # and the difference is the point: re-declaring `_watch_extra` as
+        # `_watch_page` no longer *runs*. It raises while `demo_recording.web`
+        # imports, so there is no suite left to report a failing test — a
+        # stronger outcome than this manifest can express, and one the pull
+        # request pastes rather than automates.
+        "nothing is sealed, so a medium may shadow whatever it likes",
+        "core.py",
+        "                broken.append(name)",
+        "                continue  # every base member is a medium's to replace",
+        [
+            "SealedSeam.test_a_medium_that_shadows_the_page_subscription_is_refused",
+            "SealedSeam.test_a_mixin_shadows_just_as_well_and_is_refused_too",
+            "SealedSeam.test_a_medium_cannot_widen_its_own_permit",
+        ],
+    ),
+    (
+        # The permit read off the subclass instead of off the base: an escape
+        # hatch that reads as configuration, so the next medium turns a
+        # guarantee off in a diff nobody questions.
+        "a medium may widen its own permit",
+        "core.py",
+        '            if name in _DemoBase.MEDIUM_HOOKS or name == "__init_subclass__":',
+        '            if name in cls.MEDIUM_HOOKS or name == "__init_subclass__":',
+        ["SealedSeam.test_a_medium_cannot_widen_its_own_permit"],
+    ),
+    (
+        # The obvious way to write the check, and the wrong one: a class ahead
+        # of the base in the MRO shadows without appearing on the medium at
+        # all. `tests/unit`'s own `_NoWait` is exactly that shape.
+        "the seal only looks at the medium's own methods",
+        "core.py",
+        "            if getattr(cls, name, None) is not promised:",
+        "            if name in vars(cls):",
+        ["SealedSeam.test_a_mixin_shadows_just_as_well_and_is_refused_too"],
+    ),
+    (
+        # The seal defeated without touching the seal: move the sealed name
+        # into the permit. This is the edit a future author reaches for when
+        # the import refuses them, and it is why the guarantees are listed by
+        # hand in `tests/unit` rather than derived from `MEDIUM_HOOKS`.
+        "the page subscription is moved into the permit",
+        "core.py",
+        '            "_watch_extra",\n',
+        '            "_watch_extra",\n            "_watch_page",\n',
+        [
+            "SealedSeam.test_a_medium_that_shadows_the_page_subscription_is_refused",
+            "SealedSeam.test_the_guarantees_a_take_is_owed_are_not_in_the_permit",
+        ],
+    ),
+    (
+        # The seal pointing the other way. A permit that does not actually
+        # permit is only visible on the hook nobody has implemented yet —
+        # `_media_path` here — because every other one takes the package down
+        # at import with a traceback instead of a named failure.
+        "a declared hook is refused anyway",
+        "core.py",
+        "            if name in _DemoBase.MEDIUM_HOOKS or ",
+        '            if name in _DemoBase.MEDIUM_HOOKS - {"_media_path"} or ',
+        ["SealedSeam.test_every_declared_hook_can_still_be_implemented"],
+    ),
+    (
+        # What the seal moved, and the only thing about it that a viewer would
+        # ever have noticed: a terminal still taken before the PTY was drained
+        # is a picture of the screen one command ago.
+        "a terminal still is taken of a screen nobody refreshed",
+        "core.py",
+        "        self._before_shot()",
+        "        pass  # whatever the medium last painted will do",
+        ["TerminalStill.test_the_screen_is_flushed_before_the_still_is_taken"],
+    ),
+    (
+        # The other half of why `shot` is sealed: the still is on disk either
+        # way, and the criterion it was taken to demonstrate is what a medium
+        # owning this method could have dropped without anyone seeing it.
+        "a still stops recording the criterion it demonstrates",
+        "core.py",
+        '        with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):',
+        '        with self._beat("shot", selector=name, still=rel):',
+        ["TerminalStill.test_the_still_is_still_a_beat_that_carries_its_criterion"],
+    ),
+    (
+        # The permit's own vacuity check: a name in GUARANTEED that the base
+        # does not define intersects nothing, so the assertion above it would
+        # go green on a member that had quietly moved into MEDIUM_HOOKS.
+        "a guaranteed name outlives the member it names",
+        "tests/unit",
+        '        "_strict_message",\n',
+        '        "_strict_verdict",\n',
+        [
+            "SealedSeam.test_every_guaranteed_name_is_something_the_base_actually_defines"
+        ],
+    ),
+    (
+        # And the same trap on the permit's side: a hook named for a member
+        # that does not exist permits nothing, while the real member stays
+        # sealed and the author believes they opened it.
+        "the permit names a hook the base does not have",
+        "core.py",
+        '            "_before_shot",\n',
+        '            "_before_shot",\n            "_verify_redaction_final",\n',
+        ["SealedSeam.test_every_declared_hook_is_something_the_base_actually_defines"],
     ),
     (
         # The naive fix, and the reason the clear is not on `framenavigated`:
