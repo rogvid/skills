@@ -1,5 +1,9 @@
-Vendored from npm (UMD builds attach Terminal / FitAddon / SerializeAddon to window):
+Vendored from npm (UMD builds attach Terminal / FitAddon to window):
   @xterm/xterm            6.0.0   -> xterm.js, xterm.css
   @xterm/addon-fit        0.11.0  -> addon-fit.js
-  @xterm/addon-serialize  0.14.0  -> addon-serialize.js
-Refresh: npm pack @xterm/xterm @xterm/addon-fit @xterm/addon-serialize
+Refresh: npm pack @xterm/xterm @xterm/addon-fit
+
+Every file listed here is loaded by TerminalRecorder._start(), and every file
+in this directory is listed here; tests/unit grades both directions.
+@xterm/addon-serialize was vendored and injected and never instantiated, and
+was removed in #54.

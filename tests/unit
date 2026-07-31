@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import io
 import os
 import re
@@ -57,7 +58,9 @@ _PKG_PARENT = Path(os.environ.get("UNIT_HELPERS", HELPERS))
 sys.path.insert(0, str(_PKG_PARENT))
 
 from demo_recording.content import (  # noqa: E402
+    CONTENT_ACTING_VERBS,
     CONTENT_CAPTION_TRIM,
+    CONTENT_PASSIVE_VERBS,
     OPENING_WARN_S,
     _beats_within,
     content_rect,
@@ -65,6 +68,7 @@ from demo_recording.content import (  # noqa: E402
     opening_report,
     opening_warning,
     overlay_warning,
+    print_content_summary,
 )
 from demo_recording.coverage import (  # noqa: E402
     _checked_criteria,
@@ -75,11 +79,13 @@ from demo_recording.coverage import (  # noqa: E402
 from demo_recording.failure import (  # noqa: E402
     FAILURE_DIR,
     FAILURE_MARKER,
+    FAILURE_MARKER_MESSAGE_CHARS,
     FAILURE_MESSAGE_CHARS,
     clear_failure_dir,
     clear_failure_marker,
     failed_beat,
     failure_summary,
+    render_failure_marker,
     render_failure_md,
 )
 from demo_recording.markdown import _fmt_t, _md_cell  # noqa: E402
@@ -611,6 +617,126 @@ class MergeContent(unittest.TestCase):
     def test_segments_disagreeing_on_a_floor_report_neither(self):
         merged = merge_content([seg("a", floor=6.0), seg("b", floor=2.0)])
         self.assertIsNone(merged["floor"])
+
+
+# The two verb sets, from the other end (issue #165).
+#
+# `tests/smoke`'s `check_verb_classification` computes `declared - classified`
+# and fires when a verb the recorders log is in neither set. It is structurally
+# blind to the opposite residue — a *member* no recorder logs — and its summary
+# line intersects each set with `declared` before counting, so the number it
+# prints does not move either. `"bridge"` sat in `CONTENT_PASSIVE_VERBS` under
+# that blind spot until #165, and the shipped table in `reference/timeline.md`
+# was copied out of it.
+#
+# The scrape below is hand-written rather than imported from `tests/smoke`,
+# and deliberately anchored rather than broad: over-matching would invent
+# verbs, and an invented verb is exactly what would let a dead member hide
+# again. Under-matching cannot hide anything — it fails loudly, naming the
+# members it could not account for.
+_VERB_PATTERNS = (
+    re.compile(r'@_beat_verb\(\s*"([a-z_]+)"'),
+    re.compile(r'self\._beat\(\s*"([a-z_]+)"'),
+)
+
+# Below this many names in the two sets together, "every member is logged"
+# holds over almost nothing — the catalogue's vacuous sweep. It is 21 today.
+CONTENT_VERB_FLOOR = 15
+
+
+def logged_verbs() -> set[str]:
+    """Every verb name some recorder records a beat under."""
+    found: set[str] = set()
+    for path in (_PKG_PARENT / "demo_recording").glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for pattern in _VERB_PATTERNS:
+            found |= set(pattern.findall(source))
+    return found
+
+
+class VerbClassification(unittest.TestCase):
+    def test_every_classified_verb_is_one_a_recorder_actually_logs(self):
+        classified = CONTENT_ACTING_VERBS | CONTENT_PASSIVE_VERBS
+        # The haystack, before anything is claimed about it: an empty pair of
+        # sets satisfies "every member is logged" trivially.
+        self.assertGreaterEqual(
+            len(classified),
+            CONTENT_VERB_FLOOR,
+            f"only {len(classified)} verbs are classified — 'every member is "
+            f"logged' would hold over almost nothing",
+        )
+        logged = logged_verbs()
+        self.assertGreaterEqual(
+            len(logged),
+            CONTENT_VERB_FLOOR,
+            f"only {len(logged)} verbs were scraped out of the package "
+            f"({sorted(logged)}) — the scrape is broken, not the sets",
+        )
+        dead = sorted(classified - logged)
+        self.assertEqual(
+            dead,
+            [],
+            f"{dead} are classified acting or passive and no recorder logs "
+            f"any of them. A name sitting beside live ones reads as though it "
+            f"still classifies something, and the documentation copies it out "
+            f"(#165). Delete it, or say beside it which beat log it accepts",
+        )
+
+    def test_no_verb_is_both_acting_and_passive(self):
+        # The control for the sweep above: it is satisfied by a member that is
+        # in both sets, and a verb classified both ways is a verb whose bucket
+        # depends on which set is consulted first.
+        self.assertEqual(sorted(CONTENT_ACTING_VERBS & CONTENT_PASSIVE_VERBS), [])
+
+
+class ContentSummaryStreams(unittest.TestCase):
+    """Which stream each half of the summary goes to (issue #169).
+
+    Undeclared until now, and it cost an assertion: `"shows a picture" not in
+    stderr` is satisfied by every take ever recorded, including the occluded
+    one it was written to grade. The split itself is fine — the healthy line is
+    of the `wrote <path>` family — so what is pinned here is the split, in both
+    directions, and `content.py` now says the same in prose.
+    """
+
+    def summary(self, content: dict | None) -> tuple[str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            print_content_summary(content, "demo.mp4")
+        return out.getvalue(), err.getvalue()
+
+    def test_the_healthy_line_goes_to_stdout_and_stderr_stays_quiet(self):
+        out, err = self.summary(seg("a")["content"])
+        self.assertIn("demo.mp4 shows a picture", out)
+        self.assertEqual(err, "")
+
+    def test_a_warning_goes_to_stderr_and_never_to_stdout(self):
+        out, err = self.summary(
+            seg("a", warnings=["the rect held one picture for 30.5s"])["content"]
+        )
+        self.assertIn("WARNING", err)
+        self.assertIn("held one picture", err)
+        self.assertEqual(out, "")
+
+    def test_a_warned_take_does_not_also_claim_it_shows_a_picture(self):
+        # The half #163 grades in smoke, at this end: a take that warned must
+        # not print the healthy line as well, on either stream, or a reader
+        # piping one of them gets the reassurance without the warning.
+        out, err = self.summary(
+            seg("a", warnings=["#__demo_bridge is still on screen"])["content"]
+        )
+        self.assertNotIn("shows a picture", out + err)
+
+    def test_a_take_that_could_not_be_measured_says_so_on_stderr(self):
+        out, err = self.summary(
+            {"measured": False, "note": "ffprobe found no video stream"}
+        )
+        self.assertIn("was not measured", err)
+        self.assertIn("ffprobe found no video stream", err)
+        self.assertEqual(out, "")
+
+    def test_no_content_at_all_prints_nothing_on_either_stream(self):
+        self.assertEqual(self.summary(None), ("", ""))
 
 
 # --------------------------------------------------------------------------
@@ -1485,6 +1611,111 @@ class FailureMd(unittest.TestCase):
         self.assertIn(r"a \| b", md)
 
 
+class FailureMarker(unittest.TestCase):
+    """What `demo-video-FAILED.md` says about itself (issue #115).
+
+    This is the one file in the folder whose job is to tell a reader what
+    happened, and the sentence a reader cannot check from the folder is the one
+    about when the file appears at all. It used to claim "any abnormal exit",
+    which is false in exactly the case that matters: a `strict=True` refusal is
+    an abnormal exit, it correctly gets no marker, and a reader who believed
+    that sentence would read the absence of this file as "the take was fine".
+
+    Reachable without a browser because #115 moved the body out of `core`'s
+    recorder method into `failure.render_failure_marker`, which is the split
+    the rest of that module already draws (#147).
+    """
+
+    WHEN = "2026-07-31T09:00:00+00:00"
+
+    def failure(self, **over) -> dict:
+        base = {
+            "type": "TimeoutError",
+            "message": "waiting for #save",
+            "beat": 2,
+            "verb": "click",
+        }
+        base.update(over)
+        return base
+
+    def marker(self, **over) -> str:
+        kwargs = {"stale": False, "converted": True}
+        kwargs.update(over)
+        return render_failure_marker(self.failure(), "demo.mp4", self.WHEN, **kwargs)
+
+    def test_the_marker_states_the_condition_it_is_written_under(self):
+        md = self.marker()
+        self.assertIn("did not write its own complete set of artifacts", md)
+        self.assertIn("ffmpeg failed to encode", md)
+        # The overclaim verbatim. A marker that says this is wrong about the
+        # one take whose folder cannot contradict it.
+        self.assertNotIn("any abnormal exit", md)
+
+    def test_the_marker_says_a_strict_refusal_is_not_one_of_its_cases(self):
+        # The half that makes the absence of this file readable. Without it the
+        # sentence above is true and still leaves "no marker" meaning "nothing
+        # to report", which is what a strict take contradicts.
+        md = self.marker()
+        self.assertIn("strict=True", md)
+        self.assertIn("Its absence does not mean", md)
+
+    def test_a_stale_mp4_is_disowned_by_name(self):
+        # The case the marker exists for (#46): this take's timeline beside a
+        # previous run's video, which reads as a take that succeeded.
+        md = self.marker(stale=True, converted=False)
+        self.assertIn("`demo.mp4` in this folder is a *previous* run's", md)
+        self.assertNotIn("**is** this take's recording", md)
+
+    def test_a_partial_mp4_is_claimed_as_this_takes(self):
+        # The other side, without which the assertion above passes on a
+        # renderer that disowns every mp4 it is ever shown.
+        md = self.marker()
+        self.assertIn("**is** this take's recording", md)
+        self.assertNotIn("previous* run's", md)
+
+    def test_a_take_that_wrote_no_mp4_at_all_says_there_is_none(self):
+        md = self.marker(stale=False, converted=False)
+        self.assertIn("There is no `demo.mp4` in this folder", md)
+
+    def test_the_failing_beat_and_verb_are_named(self):
+        self.assertIn("at beat 2 (`click`), with **TimeoutError**", self.marker())
+
+    def test_a_failure_between_beats_says_so_instead_of_naming_one(self):
+        md = render_failure_marker(
+            self.failure(beat=None, verb=None),
+            "demo.mp4",
+            self.WHEN,
+            stale=False,
+            converted=True,
+        )
+        self.assertIn("at between beats", md)
+        self.assertNotIn("beat None", md)
+
+    def test_a_long_message_is_cut_to_the_markers_own_budget(self):
+        # Far under the dump's budget on purpose: this file is the one read
+        # standing up, and `failure/failure.md` beside it has the whole thing.
+        self.assertLess(FAILURE_MARKER_MESSAGE_CHARS, FAILURE_MESSAGE_CHARS)
+        md = render_failure_marker(
+            self.failure(message="x" * 5_000),
+            "demo.mp4",
+            self.WHEN,
+            stale=False,
+            converted=True,
+        )
+        self.assertIn("x" * FAILURE_MARKER_MESSAGE_CHARS, md)
+        self.assertNotIn("x" * (FAILURE_MARKER_MESSAGE_CHARS + 1), md)
+
+    def test_an_empty_message_renders_a_placeholder_not_a_blank_quote(self):
+        md = render_failure_marker(
+            self.failure(message=""),
+            "demo.mp4",
+            self.WHEN,
+            stale=False,
+            converted=True,
+        )
+        self.assertIn("> (no message)", md)
+
+
 class FailureCleanup(unittest.TestCase):
     def test_only_the_files_the_dump_writes_are_removed(self):
         # Bounded to known names, never the directory: a reader's own notes in
@@ -1678,6 +1909,85 @@ class SmokeResidue(unittest.TestCase):
             [],
             f"{len(dead)} definition(s) in {SMOKE.name} that nothing reads: "
             + ", ".join(f"{name} (line {line})" for line, name in dead),
+        )
+
+
+# --------------------------------------------------------------------------
+# helpers/assets/ — the vendored files, the manifest, and the loader (issue #54)
+# --------------------------------------------------------------------------
+#
+# `TerminalRecorder._start()` injected `addon-serialize.js` into every terminal
+# page and nothing ever instantiated `SerializeAddon`: ~16 kB of third-party JS
+# parsed per take for nothing, and a reader of `_start()` reasonably assuming
+# it was doing something. It was deleted in #54, and this is what stops the
+# three lists it lived between from drifting apart again:
+#
+#   the directory   what actually ships
+#   VERSIONS.txt    what the manifest says ships, with its upstream version
+#   _start()        what the page loads
+#
+# **What this cannot see, stated because it is precisely the defect above.** It
+# grades that the three lists agree, not that a loaded file is *used*. Nothing
+# here reads the minified bundles, and no assertion short of running the page
+# can tell an addon that is instantiated from one that is merely parsed. #54
+# was found by a person reading the recorder's read-back paths, and the next
+# one will be too. What this catches is the residue: a vendored file whose
+# loader went away, a load of a file that is not vendored, and a manifest that
+# stopped describing the directory it sits in.
+
+ASSETS = _PKG_PARENT / "assets" / "xterm"
+
+# Below this the directory was not read, and every "these agree" below holds
+# over an empty set. Three files today (xterm.js, xterm.css, addon-fit.js).
+ASSET_FLOOR = 3
+
+_ASSET_LOAD_RE = re.compile(r'_ASSETS\s*/\s*"([^"]+)"')
+_ASSET_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\.(?:js|css)")
+
+
+class VendoredAssets(unittest.TestCase):
+    def setUp(self):
+        self.on_disk = {p.name for p in ASSETS.iterdir() if p.name != "VERSIONS.txt"}
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(self.on_disk),
+            ASSET_FLOOR,
+            f"only {sorted(self.on_disk)} in {ASSETS} — the directory was not "
+            f"read, and everything below would agree trivially",
+        )
+
+    def test_every_vendored_asset_is_loaded_and_every_load_is_vendored(self):
+        source = (_PKG_PARENT / "demo_recording" / "terminal.py").read_text(
+            encoding="utf-8"
+        )
+        loaded = set(_ASSET_LOAD_RE.findall(source))
+        self.assertEqual(
+            sorted(loaded - self.on_disk),
+            [],
+            "terminal.py loads asset(s) that are not in helpers/assets/xterm/ — "
+            "the take will raise on the first terminal beat",
+        )
+        self.assertEqual(
+            sorted(self.on_disk - loaded),
+            [],
+            "asset(s) ship in helpers/assets/xterm/ that nothing loads. A "
+            "vendored file whose loader went away is dead weight in every "
+            "install (#54)",
+        )
+
+    def test_the_manifest_names_exactly_what_the_directory_holds(self):
+        listed = set(
+            _ASSET_NAME_RE.findall(
+                (ASSETS / "VERSIONS.txt").read_text(encoding="utf-8")
+            )
+        )
+        self.assertEqual(
+            sorted(listed ^ self.on_disk),
+            [],
+            f"VERSIONS.txt names {sorted(listed)} and the directory holds "
+            f"{sorted(self.on_disk)}. This is the file that says which "
+            f"upstream release each vendored blob came from; one that has "
+            f"stopped describing the directory cannot be used to refresh it",
         )
 
 
@@ -2073,6 +2383,144 @@ INJECTIONS = [
         "MIN_CONTROL_EDGE = 8.0",
         ["SmokeResidue.test_no_module_level_definition_in_tests_smoke_goes_unread"],
     ),
+    (
+        # #165 verbatim: `"bridge"` beside eight live names, classifying a beat
+        # log that has never existed. `tests/smoke`'s check computes
+        # `declared - classified` and cannot see this direction at all.
+        "a verb no recorder logs is left sitting in the passive set",
+        "content.py",
+        '        "caption",\n        "hold",',
+        '        "bridge",\n        "caption",\n        "hold",',
+        [
+            "VerbClassification.test_every_classified_verb_is_one_a_recorder_actually_logs"
+        ],
+    ),
+    (
+        # The other side of the same pair. Without it "every member is logged"
+        # is also satisfied by a set with nothing in it.
+        "a verb ends up classified as both acting and passive",
+        "content.py",
+        'CONTENT_PASSIVE_VERBS = frozenset(\n    {\n        "caption",',
+        'CONTENT_PASSIVE_VERBS = frozenset(\n    {\n        "click",\n        "caption",',
+        ["VerbClassification.test_no_verb_is_both_acting_and_passive"],
+    ),
+    (
+        # The half of #169 that cost an assertion: with the healthy line on
+        # stderr, `"shows a picture" not in stderr` is satisfied by no take at
+        # all, and the check written to grade an occluded take grades nothing.
+        "the healthy picture line moves to stderr, where the warnings are",
+        "content.py",
+        '        f"app rect, longest still stretch {held}s{why}{opened})"\n    )',
+        '        f"app rect, longest still stretch {held}s{why}{opened})",\n'
+        "        file=sys.stderr,\n    )",
+        [
+            "ContentSummaryStreams.test_the_healthy_line_goes_to_stdout_and_stderr_stays_quiet"
+        ],
+    ),
+    (
+        # The opposite drift, and the expensive one: a warning on stdout is a
+        # warning a caller piping stdout to a build log never sees.
+        "a picture warning moves to stdout, where it can be piped away",
+        "content.py",
+        '        print(f"demo-video: WARNING — {media}: {warning}", file=sys.stderr)',
+        '        print(f"demo-video: WARNING — {media}: {warning}")',
+        ["ContentSummaryStreams.test_a_warning_goes_to_stderr_and_never_to_stdout"],
+    ),
+    (
+        # #162's symptom at this end: the take warns about an overlay *and*
+        # reassures the reader that the recording shows a picture. Both
+        # stream assertions fire, which is the point — the reassurance must
+        # not reappear on either.
+        "a take that warned also prints the healthy line",
+        "content.py",
+        '    if content.get("warnings"):\n        return\n',
+        "    if False:\n        return\n",
+        [
+            "ContentSummaryStreams.test_a_warning_goes_to_stderr_and_never_to_stdout",
+            "ContentSummaryStreams.test_a_warned_take_does_not_also_claim_it_shows_a_picture",
+        ],
+    ),
+    (
+        "the 'could not be measured' note moves to stdout with the healthy line",
+        "content.py",
+        "            f\"{content.get('note')}\",\n            file=sys.stderr,\n        )\n        return\n",
+        "            f\"{content.get('note')}\",\n        )\n        return\n",
+        [
+            "ContentSummaryStreams.test_a_take_that_could_not_be_measured_says_so_on_stderr"
+        ],
+    ),
+    (
+        # A segment that recorded no content at all reaches this with None,
+        # and a summary that raises there would take the take down after the
+        # recording was already written.
+        "the summary stops tolerating a take with no content object",
+        "content.py",
+        "    if not isinstance(content, dict):\n        return\n",
+        "    if content is False:\n        return\n",
+        [
+            "ContentSummaryStreams.test_no_content_at_all_prints_nothing_on_either_stream"
+        ],
+    ),
+    (
+        # #46 in the marker's own body: the stale branch is the case the file
+        # exists for, and losing it leaves a previous run's mp4 unclaimed.
+        "the marker stops disowning a previous run's mp4",
+        "failure.py",
+        "    if stale:\n",
+        "    if False:\n",
+        ["FailureMarker.test_a_stale_mp4_is_disowned_by_name"],
+    ),
+    (
+        "the marker quotes an exception message uncapped",
+        "failure.py",
+        "message[:FAILURE_MARKER_MESSAGE_CHARS]",
+        "message",
+        ["FailureMarker.test_a_long_message_is_cut_to_the_markers_own_budget"],
+    ),
+    (
+        # #115 verbatim: the sentence the marker carried for as long as the
+        # marker existed, false in the one case a reader cannot check.
+        "the marker goes back to claiming it is written on any abnormal exit",
+        "failure.py",
+        '        "This file is written by the demo-video recorder whenever a take did "\n'
+        '        "not write its own complete set of artifacts — the storyboard raised, "\n'
+        '        "or ffmpeg failed to encode the recording — and **deleted by the next "',
+        '        "This file is written by the demo-video recorder on any abnormal "\n'
+        '        "exit — and **deleted by the next "',
+        ["FailureMarker.test_the_marker_states_the_condition_it_is_written_under"],
+    ),
+    (
+        # The other half: stating the condition is not enough on its own, because
+        # "no marker" still reads as "nothing to report" unless the marker says
+        # which abnormal exit deliberately gets none.
+        "the marker stops explaining why a strict refusal leaves none",
+        "failure.py",
+        '        "refused by `strict=True` writes every artifact and all of them are "',
+        '        "that failed writes every artifact and all of them are "',
+        ["FailureMarker.test_the_marker_says_a_strict_refusal_is_not_one_of_its_cases"],
+    ),
+    (
+        # #54 put back: a vendored file injected into every terminal page.
+        "terminal.py loads an asset that does not ship with the skill",
+        "terminal.py",
+        '        self.page.add_script_tag(content=(_ASSETS / "addon-fit.js").read_text())',
+        '        self.page.add_script_tag(content=(_ASSETS / "addon-fit.js").read_text())\n'
+        "        self.page.add_script_tag(\n"
+        '            content=(_ASSETS / "addon-serialize.js").read_text()\n'
+        "        )",
+        [
+            "VendoredAssets.test_every_vendored_asset_is_loaded_and_every_load_is_vendored"
+        ],
+    ),
+    (
+        # The manifest going stale on its own, which is how a refresh command
+        # stops being runnable: it says which upstream release each blob is.
+        "VERSIONS.txt stops naming a file the directory ships",
+        "helpers/assets/xterm/VERSIONS.txt",
+        "  @xterm/addon-fit        0.11.0  -> addon-fit.js\n",
+        "",
+        ["VendoredAssets.test_the_manifest_names_exactly_what_the_directory_holds"],
+    ),
 ]
 
 
@@ -2108,7 +2556,9 @@ def fault_inject() -> int:
                 target = unit
             elif module == "__init__.py" or module.endswith(".py"):
                 target = root / "demo_recording" / module
-            elif module.endswith(".md"):
+            elif module.endswith(".md") or "/" in module:
+                # A path relative to the skill root: shipped documents, and the
+                # vendored-asset manifest under helpers/assets/ (#54).
                 target = skill / module
             else:
                 target = root / "demo_recording" / module
