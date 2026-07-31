@@ -49,8 +49,8 @@ worse review material than no caption at all. An earlier version tried to
 recover the mapping by finding caption transitions in the video; it mislabelled
 frames on ordinary storyboards (two captions of the same length give it no
 signal, an app that repaints under the bar gives it a stronger edge than the
-caption does, and a mid-take `goto()` destroys the bar while logging no caption
-change at all). [#60](https://github.com/rogvid/skills/issues/60) is how the
+caption does, and a mid-take `goto()` destroys the bar a beat before the log
+says so — see [#134](https://github.com/rogvid/skills/issues/134)). [#60](https://github.com/rogvid/skills/issues/60) is how the
 pairing gets earned back: have the recorder render the beat index into the
 frame so extraction reads it rather than infers it.
 

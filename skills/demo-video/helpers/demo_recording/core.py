@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import functools
+import inspect
 import json
 import os
 import re
@@ -447,20 +448,51 @@ def _env_flag(name: str) -> bool | None:
     return value.lower() in ("1", "true", "yes", "on")
 
 
-def _verb_target(args: tuple, kwargs: dict) -> str | None:
-    """The string a verb acted on, dug out of how it happened to be called."""
-    if args and isinstance(args[0], str):
-        return args[0]
-    for name in ("selector", "path", "command", "text", "pattern", "name"):
-        value = kwargs.get(name)
-        if isinstance(value, str):
-            return value
-    return None
+def _verb_target(fn: Callable) -> Callable[[tuple, dict], str | None]:
+    """Build the default beat-target extractor for one storyboard verb.
+
+    The target is the verb's **first parameter after `self`**, whatever it is
+    named, and it is read the same way whether the caller passed it by
+    position or by keyword: `click("#go")` and `click(selector="#go")` are one
+    call written two ways, and a beat log that describes only one of them is
+    describing something that did not happen.
+
+    This used to be a fixed allowlist of keyword names — `selector`, `path`,
+    `command`, `text`, `pattern`, `name` — so a verb whose first parameter was
+    called anything else logged `selector: null` the moment somebody passed it
+    by keyword (issue #177). Nothing noticed: the beat was recorded, the
+    timeline was well-formed, and the only symptom was a null in a committed
+    artifact. Reading the signature removes the list rather than lengthening
+    it, so the next verb is right without anyone remembering this.
+
+    A verb that wants something else — `key(*names)`, whose target is the
+    whole chord — passes its own extractor to `_beat_verb`.
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())[1:]  # drop self
+    except (TypeError, ValueError):  # pragma: no cover - callables without one
+        params = []
+    first = params[0] if params else None
+
+    def target(args: tuple, kwargs: dict) -> str | None:
+        # Positionally the first argument *is* the first parameter, so this
+        # branch is what the allowlist version did and stays byte-identical.
+        if args:
+            return args[0] if isinstance(args[0], str) else None
+        if first is None or first.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            return None
+        value = kwargs.get(first.name)
+        return value if isinstance(value, str) else None
+
+    return target
 
 
 def _beat_verb(
     verb: str,
-    target: Callable[[tuple, dict], str | None] = _verb_target,
+    target: Callable[[tuple, dict], str | None] | None = None,
 ) -> Callable:
     """Decorate a storyboard verb so calling it records one beat.
 
@@ -468,18 +500,26 @@ def _beat_verb(
     recorders' method bodies untouched, which is the difference between a
     one-line diff per verb and re-indenting three files.
 
-    `target` extracts the beat's `selector` from the call; the default takes
-    the first string argument (so `click("#go")`, `run("ls")` and
-    `goto("/app")` all self-describe) and yields null for verbs called with
-    none (`pause(2)`, `spotlight()`).
+    `target` extracts the beat's `selector` from the call; left out, the verb's
+    own signature supplies it (see `_verb_target`), so `click("#go")`,
+    `run("ls")`, `goto("/app")` and `goto(path="/app")` all self-describe, and
+    a verb called with nothing to name (`pause(2)`, `spotlight()`) yields null.
     """
 
     def decorate(fn: Callable) -> Callable:
+        extract = _verb_target(fn) if target is None else target
+
         @functools.wraps(fn)
         def wrapper(self, *args, **kwargs):
-            with self._beat(verb, selector=target(args, kwargs)):
+            with self._beat(verb, selector=extract(args, kwargs)):
                 return fn(self, *args, **kwargs)
 
+        # The verb name, on the method. `tests/unit` sweeps every verb on both
+        # recorders and calls each one twice — once positionally, once by
+        # keyword — to hold #177 shut for verbs nobody has written yet, and a
+        # sweep that has to guess which methods are verbs would quietly stop
+        # covering the one somebody adds next.
+        wrapper._demo_verb = verb  # type: ignore[attr-defined]
         return wrapper
 
     return decorate

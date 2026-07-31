@@ -37,7 +37,9 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import inspect
 import io
+import json
 import os
 import re
 import shutil
@@ -45,7 +47,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import tokenize
+import types
 import unittest
 from pathlib import Path
 
@@ -99,6 +103,46 @@ from demo_recording.timeline import (  # noqa: E402
     render_timeline_md,
     timeline_paths,
 )
+
+# --------------------------------------------------------------------------
+# The recorders, without a browser
+# --------------------------------------------------------------------------
+#
+# `core` imports `playwright.sync_api` at module scope, so importing either
+# recorder needs the name to resolve. A stand-in is installed for it here and
+# `dependencies = []` at the top of this file stays true.
+#
+# What is being stood in for is *only* the import. `Page` is an annotation and
+# nothing here evaluates it; `sync_playwright` is reached from `__enter__`,
+# which no test in this file enters — both raise if anything ever does, so a
+# test that quietly started driving a browser would say so rather than hang.
+#
+# Installed unconditionally rather than only when Playwright is missing: a
+# suite that runs different code on the author's box than on CI grades the box
+# (the catalogue's environment-agreeing assertion). This is the same code
+# either way.
+_pw = types.ModuleType("playwright")
+_pw_sync = types.ModuleType("playwright.sync_api")
+
+
+class _NoBrowser:
+    """Whatever reached for Playwright, this suite does not have one."""
+
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError(
+            "tests/unit does not start a browser — this belongs in tests/smoke"
+        )
+
+
+_pw_sync.Page = _NoBrowser  # type: ignore[attr-defined]
+_pw_sync.sync_playwright = _NoBrowser  # type: ignore[attr-defined]
+_pw.sync_api = _pw_sync  # type: ignore[attr-defined]
+sys.modules["playwright"] = _pw
+sys.modules["playwright.sync_api"] = _pw_sync
+
+from demo_recording.core import _beat_verb, _DemoBase  # noqa: E402
+from demo_recording.terminal import TerminalRecorder  # noqa: E402
+from demo_recording.web import Recorder  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Helpers — deliberately hand-written
@@ -1992,6 +2036,353 @@ class VendoredAssets(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# The beat log says what was true of the screen (issues #134, #177)
+# --------------------------------------------------------------------------
+#
+# Both defects have the same shape: a beat that reads well, a timeline that
+# validates, and a field that describes something other than what happened.
+# Nothing downstream can notice — `timeline.json` and `timeline.md` are
+# committed, so the wrong value is what a reviewing agent reads once the video
+# is gone.
+#
+# These tests are written from the **reader's** side. None of them asks the
+# recorder what it thinks its caption is: `self._caption` is the stale field
+# in #134, so a check that consulted it would share the bug's blind spot
+# exactly. What is read is the beat record — the object that becomes a row of
+# `timeline.json` — and, for the caption, the serialized text of it, so a
+# stale line reappearing under any key is a failure rather than a near miss.
+
+# One string, distinctive enough that finding it in a beat is not a
+# coincidence and that a stale copy of it is unmistakable.
+STALE_CAPTION = "The dashboard shows every open order."
+
+# Below this many verbs, "every verb names its target both ways" holds over
+# almost nothing — the catalogue's vacuous sweep. It is 13 today (web 10,
+# terminal 4, shared 2, minus the three whose first parameter is not a
+# string and the one that takes *names).
+VERB_TARGET_FLOOR = 10
+
+# The sentinel a swept verb is handed as its target. A string, because that is
+# what the beat log records; distinctive, so an assertion cannot be satisfied
+# by a default value that happened to be lying around.
+VERB_SENTINEL = "#unit-sweep-target"
+
+
+class _VerbBodyStopped(RuntimeError):
+    """A swept verb reached for the browser it does not have."""
+
+
+class _NoWait:
+    """Hold no frames. These tests grade the beat log, not the wall clock."""
+
+    def _idle(self, seconds: float) -> None:
+        return None
+
+
+class WebRec(_NoWait, Recorder):
+    pass
+
+
+class TermRec(_NoWait, TerminalRecorder):
+    pass
+
+
+class PressRec(WebRec):
+    """#177's own example: a verb whose first parameter is named `key`.
+
+    `key` is outside the six-name allowlist `_verb_target` used to consult, so
+    `press(key="Enter")` recorded `selector: null` while `press("Enter")`
+    recorded it fine. Declared here rather than waited for in the package,
+    because the defect is about the verb somebody adds *next*.
+    """
+
+    @_beat_verb("press")
+    def press(self, key: str) -> None:
+        return None
+
+
+class FakePage:
+    """A page that remembers what was subscribed to it, and can fire it.
+
+    `Recorder._watch_page` is the production subscription and this is handed
+    to it verbatim, so the tests below fire the same callbacks Playwright
+    would, under the same event names. Getting the event name wrong is
+    therefore a test failure and not a silently unexercised handler.
+    """
+
+    def __init__(self) -> None:
+        self.subscribed: dict[str, list] = {}
+
+    def on(self, event: str, handler) -> None:
+        self.subscribed.setdefault(event, []).append(handler)
+
+    def fire(self, event: str, *args) -> int:
+        """Deliver `event`; returns how many handlers took it."""
+        handlers = self.subscribed.get(event, [])
+        for handler in handlers:
+            handler(*args)
+        return len(handlers)
+
+    def evaluate(self, *args, **kwargs):
+        return None
+
+
+class DeadPage:
+    """A page whose every call fails at once.
+
+    The verb sweep wants each verb's *beat*, not its effect; the beat is
+    opened before the body runs, so stopping the body on first contact with
+    the browser is what makes the sweep runnable here at all.
+    """
+
+    def __getattr__(self, name: str):
+        def refuse(*args, **kwargs):
+            raise _VerbBodyStopped(name)
+
+        return refuse
+
+
+def recorder(test: unittest.TestCase, cls=WebRec, page=None):
+    """A recorder wired to `page`, with the clock started and no browser."""
+    tmp = tempfile.TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    # The constructor's advisory notices about determinism and narration are
+    # for someone recording a take; several hundred of them would bury this
+    # suite's own output, and `--fault-inject` prints a tail of stderr.
+    with contextlib.redirect_stderr(io.StringIO()):
+        rec = cls(
+            tmp.name,
+            # Pinned, not inherited: speech reads ELEVENLABS_API_KEY and
+            # evidence reads the page, and a suite whose behaviour depends on
+            # either grades the box it runs on.
+            speech=False,
+            evidence=False,
+        )
+    rec.page = page if page is not None else FakePage()
+    rec._t0 = time.monotonic()
+    return rec
+
+
+def beat_verbs() -> list[tuple[type, str]]:
+    """(class, attribute) for every `@_beat_verb` method on both recorders."""
+    found = []
+    for cls in (Recorder, TerminalRecorder):
+        for name in dir(cls):
+            attr = getattr(cls, name, None)
+            if getattr(attr, "_demo_verb", None) is not None:
+                found.append((cls, name))
+    return found
+
+
+def first_string_parameter(cls: type, name: str) -> str | None:
+    """The name of the verb's first parameter after `self`, when it takes a
+    string there — the parameter #177 is about. None for the rest."""
+    fn = getattr(cls, name)
+    params = list(inspect.signature(fn).parameters.values())
+    # `signature` on a bound-less function still lists `self`; drop it, then
+    # anything that cannot be passed by keyword (`key(*names)`).
+    params = [p for p in params[1:] if p.kind is p.POSITIONAL_OR_KEYWORD]
+    if not params:
+        return None
+    annotation = str(params[0].annotation)
+    return params[0].name if "str" in annotation else None
+
+
+class CaptionTruth(unittest.TestCase):
+    """What a beat reports was on screen, across a navigation (issue #134).
+
+    The caption bar is a DOM element (`#__demo_caption`), so a document
+    replacing the one it lives in takes it off the screen. `self._caption` is
+    a Python attribute and does not notice, and every beat that does not carry
+    its own caption is stamped with it.
+    """
+
+    def prepared(self):
+        """A recorder with `STALE_CAPTION` up and one beat proving it."""
+        rec = recorder(self)
+        rec._watch_page(rec.page)
+        rec.caption(STALE_CAPTION)
+        rec.pause(0)
+        # The control. Everything below is a claim about a caption going
+        # *away*, and none of it means anything unless a beat was carrying the
+        # caption in the first place — a recorder that stamped "" on every
+        # beat would satisfy the assertions and record nothing true.
+        self.assertEqual(
+            rec._beats[-1]["caption"],
+            STALE_CAPTION,
+            "the beat before the navigation does not carry the caption, so "
+            "this test is not exercising the stamping it grades",
+        )
+        return rec
+
+    def test_a_beat_after_a_document_load_reports_no_caption(self):
+        rec = self.prepared()
+        before = len(rec._beats)
+        self.assertGreaterEqual(
+            rec.page.fire("domcontentloaded", rec.page),
+            1,
+            "no handler took the document-load event, so nothing was tested",
+        )
+        rec.pause(0)
+        after = rec._beats[before:]
+        self.assertEqual([b["caption"] for b in after], [""])
+        # Broader than the field, deliberately: the claim is that a reader of
+        # this take's timeline cannot recover the pre-navigation line from a
+        # beat recorded after it, whichever key it might have travelled under.
+        self.assertNotIn(STALE_CAPTION, json.dumps(after))
+
+    def test_an_spa_route_change_keeps_the_caption(self):
+        # The bar survives history navigation, so clearing on every
+        # `framenavigated` — which Playwright also fires for same-document
+        # navigation — would be the same lie pointing the other way: a beat
+        # reporting no caption while one is on screen.
+        rec = self.prepared()
+        before = len(rec._beats)
+        self.assertGreaterEqual(rec.page.fire("framenavigated", None), 1)
+        rec.pause(0)
+        self.assertEqual([b["caption"] for b in rec._beats[before:]], [STALE_CAPTION])
+
+    def test_a_caption_set_after_the_load_is_reported_again(self):
+        rec = self.prepared()
+        rec.page.fire("domcontentloaded", rec.page)
+        rec.caption("The order was accepted.")
+        rec.pause(0)
+        self.assertEqual(rec._beats[-1]["caption"], "The order was accepted.")
+
+    def test_a_take_watches_its_page_before_the_medium_starts(self):
+        # `__enter__` needs Chromium, so what is graded is that it reaches the
+        # seam every test above exercises, and reaches it *before* `_start` —
+        # a page that throws on load is the whole point of watching it.
+        source = inspect.getsource(_DemoBase.__enter__)
+        self.assertIn("self._watch_page(self.page)", source)
+        self.assertLess(
+            source.index("self._watch_page(self.page)"),
+            source.index("self._start()"),
+            "the medium starts before its page is watched, so the first "
+            "navigation's problems are recorded by nobody",
+        )
+
+
+class WatchedEvents(unittest.TestCase):
+    """What subscribing a recorder's page subscribes.
+
+    Written after the first version of #134's fix shipped `Recorder`'s two
+    handlers as a **new** `_watch_page`, when `_DemoBase._watch_page` — the
+    subscription for `console`, `pageerror`, `requestfailed` and `response` —
+    already existed under exactly that name. Python resolved the override, the
+    base's four listeners were never attached on a web take, and every problem
+    the recorder exists to record went unrecorded: `timeline.json` was
+    well-formed and empty of issues, and `strict=True` stopped refusing
+    anything. `tests/unit` could not see it, because no test here enters the
+    context manager that calls the shadowed method — the catalogue's
+    config-hidden path, in the suite rather than in the code.
+    """
+
+    def subscribed(self, cls) -> dict[str, int]:
+        """{event: how many handlers} after one subscription pass."""
+        rec = recorder(self, cls=cls)
+        rec._watch_page(rec.page)
+        return {event: len(h) for event, h in rec.page.subscribed.items()}
+
+    def test_a_web_take_watches_the_problems_every_take_watches(self):
+        # Spelled out rather than derived from the base class: a list read out
+        # of the code under test agrees with that code by construction, and
+        # these four names are what `timeline.json`'s issue log is made of.
+        self.assertLessEqual(
+            {"console", "pageerror", "requestfailed", "response"},
+            set(self.subscribed(WebRec)),
+        )
+
+    def test_the_web_recorder_only_adds_to_what_the_base_watches(self):
+        # The same claim from the other side, and the one that survives a
+        # listener being renamed: the terminal recorder does not override
+        # `_watch_page`, so what it subscribes *is* the base's set.
+        base = set(self.subscribed(TermRec))
+        self.assertEqual(
+            set(self.subscribed(WebRec)),
+            base | {"framenavigated", "domcontentloaded"},
+        )
+
+    def test_no_page_event_is_subscribed_twice(self):
+        # `__enter__` already calls `_watch_page`; a medium calling it again
+        # from `_start` would log every console error the page emits twice.
+        doubled = {e: n for e, n in self.subscribed(WebRec).items() if n != 1}
+        self.assertEqual(doubled, {})
+
+
+class VerbTarget(unittest.TestCase):
+    """Which target a verb's beat names, by position and by keyword (#177).
+
+    `rec.press("Enter")` and `rec.press(key="Enter")` are one action written
+    two ways. Until this, the second recorded `selector: null` — an action
+    that happened on screen and is absent from the artifact a reviewer reads.
+    """
+
+    def target_of(self, cls, name, *args, **kwargs):
+        """The `selector` the beat log records for one call of one verb."""
+        rec = recorder(
+            self, cls=WebRec if cls is Recorder else TermRec, page=DeadPage()
+        )
+        with contextlib.suppress(Exception):
+            getattr(rec, name)(*args, **kwargs)
+        self.assertTrue(
+            rec._beats, f"{name} recorded no beat at all, so it names nothing"
+        )
+        self.assertEqual(rec._beats[-1]["verb"], getattr(cls, name)._demo_verb)
+        return rec._beats[-1]["selector"]
+
+    def test_every_verb_names_its_target_the_same_way_called_either_way(self):
+        swept = []
+        for cls, name in beat_verbs():
+            parameter = first_string_parameter(cls, name)
+            if parameter is None:
+                continue
+            swept.append(f"{cls.__name__}.{name}")
+            positional = self.target_of(cls, name, VERB_SENTINEL)
+            keyword = self.target_of(cls, name, **{parameter: VERB_SENTINEL})
+            self.assertEqual(
+                positional,
+                VERB_SENTINEL,
+                f"{cls.__name__}.{name}({VERB_SENTINEL!r}) logged {positional!r}",
+            )
+            self.assertEqual(
+                keyword,
+                VERB_SENTINEL,
+                f"{cls.__name__}.{name}({parameter}={VERB_SENTINEL!r}) logged "
+                f"{keyword!r} — the same action, written the other way, is "
+                f"missing from the beat log (#177)",
+            )
+        # The haystack, before anything is claimed about it: an empty sweep
+        # satisfies "every verb names its target" trivially.
+        self.assertGreaterEqual(
+            len(swept),
+            VERB_TARGET_FLOOR,
+            f"only {len(swept)} verbs were swept ({sorted(swept)}) — the "
+            f"enumeration is broken, not the verbs",
+        )
+
+    def test_a_verb_whose_parameter_is_outside_the_old_allowlist_names_it(self):
+        # The general property, on a verb the package does not have. The sweep
+        # above can only be as general as the verbs that exist today, and
+        # every one of *their* first parameters happens to be an allowlist
+        # name — so on its own it would go green against the old code for all
+        # but one verb.
+        rec = recorder(self, cls=PressRec)
+        rec.press(key="Enter")
+        rec.press("Enter")
+        self.assertEqual([b["selector"] for b in rec._beats], ["Enter", "Enter"])
+
+    def test_a_verb_given_no_string_names_nothing(self):
+        # The other direction: null is the honest answer when there is no
+        # target, and an extractor that invented one would be worse than the
+        # bug it replaced.
+        rec = recorder(self)
+        rec.pause(0)
+        rec.hold(min_s=0)
+        self.assertEqual([b["selector"] for b in rec._beats], [None, None])
+
+
+# --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
 
@@ -2521,6 +2912,96 @@ INJECTIONS = [
         "",
         ["VendoredAssets.test_the_manifest_names_exactly_what_the_directory_holds"],
     ),
+    (
+        # Issue #177, exactly as it shipped: the six-name allowlist back in
+        # place of reading the verb's own signature.
+        "a verb's target is dug out of a fixed keyword allowlist again",
+        "core.py",
+        "        value = kwargs.get(first.name)\n"
+        "        return value if isinstance(value, str) else None",
+        '        for name in ("selector", "path", "command", "text", "pattern", "name"):\n'
+        "            if isinstance(kwargs.get(name), str):\n"
+        "                return str(kwargs[name])\n"
+        "        return None",
+        [
+            "VerbTarget.test_every_verb_names_its_target_the_same_way_called_either_way",
+            "VerbTarget.test_a_verb_whose_parameter_is_outside_the_old_allowlist_names_it",
+        ],
+    ),
+    (
+        # The other half of the same claim. A sweep that only ever checked the
+        # keyword side would go green against a verb that names nothing at all.
+        "a verb called positionally stops naming its target",
+        "core.py",
+        "            return args[0] if isinstance(args[0], str) else None",
+        "            return None",
+        [
+            "VerbTarget.test_every_verb_names_its_target_the_same_way_called_either_way",
+            "VerbTarget.test_a_verb_whose_parameter_is_outside_the_old_allowlist_names_it",
+        ],
+    ),
+    (
+        # Issue #134: the caption bar dies with the document, the recorder's
+        # copy of it does not, and every later beat reports a line that is not
+        # on screen into a committed timeline.
+        "a document load stops invalidating the caption",
+        "web.py",
+        '        self._caption = ""',
+        "        pass  # the recorder keeps a caption the document took away",
+        ["CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption"],
+    ),
+    (
+        # The handler can be right and reachable by nothing.
+        "nothing subscribes to the document being replaced",
+        "web.py",
+        '        page.on("domcontentloaded", self._note_document_replaced)',
+        "        pass  # no subscription",
+        ["CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption"],
+    ),
+    (
+        # …and the subscription can be right and never made, because
+        # `__enter__` needs Chromium and no test here runs it.
+        "a take starts the medium before it watches the page",
+        "core.py",
+        "            self._watch_page(self.page)\n            self._start()",
+        "            self._start()\n            self._watch_page(self.page)",
+        ["CaptionTruth.test_a_take_watches_its_page_before_the_medium_starts"],
+    ),
+    (
+        # The regression the first version of this change shipped, and the one
+        # `tests/smoke` caught after `tests/unit` went green: `Recorder`
+        # declaring `_watch_page` without delegating shadows the base's four
+        # problem listeners, so a web take records no console error, no
+        # pageerror, no failed request — and `strict=True` refuses nothing.
+        "the web recorder's page subscription shadows the base's",
+        "web.py",
+        "        super()._watch_page(page)",
+        "        pass  # the base's problem listeners are on their own",
+        [
+            "WatchedEvents.test_a_web_take_watches_the_problems_every_take_watches",
+            "WatchedEvents.test_the_web_recorder_only_adds_to_what_the_base_watches",
+        ],
+    ),
+    (
+        # And the mirror: subscribing twice logs every problem the page emits
+        # twice, which is the shape the fix for the above invites.
+        "a medium subscribes its page a second time",
+        "web.py",
+        "        super()._watch_page(page)",
+        "        super()._watch_page(page)\n        super()._watch_page(page)",
+        ["WatchedEvents.test_no_page_event_is_subscribed_twice"],
+    ),
+    (
+        # The naive fix, and the reason the clear is not on `framenavigated`:
+        # Playwright fires that for same-document history navigation too, so
+        # this reports no caption while one is on screen — #134 pointing the
+        # other way.
+        "an SPA route change clears a caption that is still on screen",
+        "web.py",
+        "        self._navigated = True",
+        '        self._navigated = True\n        self._caption = ""',
+        ["CaptionTruth.test_an_spa_route_change_keeps_the_caption"],
+    ),
 ]
 
 
@@ -2622,10 +3103,19 @@ def fault_inject() -> int:
 # Stated plainly rather than implied by silence:
 #
 # - **Anything that drives a browser or a PTY.** `_DemoBase`, `Recorder` and
-#   `TerminalRecorder` — every storyboard verb, per-beat evidence capture, the
-#   failure dump, narration pacing and the ffmpeg composite — are
+#   `TerminalRecorder` — every storyboard verb's *effect*, per-beat evidence
+#   capture, the failure dump, narration pacing and the ffmpeg composite — are
 #   `tests/smoke`'s, and this suite does not reduce what smoke has to run. It
 #   runs the half that never needed one.
+#
+#   Two things about the recorders *are* graded here, both with a stand-in for
+#   `playwright.sync_api` and a page that records rather than paints (#134,
+#   #177): what a beat writes down about a call, and what a document load does
+#   to the caption the beat log stamps. Neither needs a browser to be true, and
+#   both are read off the beat record — the row that becomes `timeline.json` —
+#   rather than off the screen. What a real Chromium does with the same events
+#   is still smoke's: that `domcontentloaded` fires when this claims it does is
+#   Playwright's contract, not an assertion made here.
 # - **Anything measured off real frames.** `content_report`'s ffmpeg sampling,
 #   `opening_gap`, `_luma_stddev` and `_moved_pixels` need a video to be true
 #   about. What is graded here is the logic *around* them: the warning

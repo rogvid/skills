@@ -403,8 +403,8 @@ class Recorder(_DemoBase):
         # page: `window.__spotEl` is an element handle, not a selector, and the
         # selector is the thing worth writing down.
         self._spotlit: str | None = None
-        # Set by the retained `framenavigated` listener. Nothing reads it yet;
-        # see `_note_navigation` and #134.
+        # Set by the retained `framenavigated` listener. Nothing reads it;
+        # see `_note_navigation` for why the listener is kept anyway.
         self._navigated = False
 
     def _frame_geometry(self) -> dict:
@@ -452,24 +452,45 @@ class Recorder(_DemoBase):
             .replace("__SLACK_MS__", str(SPOTLIGHT_EXIT_SLACK_MS))
         )
 
-    def _start(self) -> None:
+    def _watch_page(self, page) -> None:
+        """Everything `_DemoBase` watches, plus what a *document* being
+        replaced means to a web take.
+
+        **`super()` first, and it is load-bearing.** The base subscribes
+        `console`, `pageerror`, `requestfailed` and `response` — every problem
+        this recorder exists to write down, and what `strict=True` refuses a
+        take over. An override that forgot the call would silently unsubscribe
+        all four for web takes only, which is the one shape of bug that leaves
+        `timeline.json` looking healthy because the problems never reach it.
+        `tests/unit` holds that shut behaviourally, and it is registered as an
+        injection because it is a mistake this file has already made once.
+
+        `__enter__` calls this before `_start()`, so the first navigation is
+        watched too. Do not call it again from `_start`: two subscriptions
+        record every console error twice.
+
+        Both callbacks below only set an attribute. Playwright delivers page
+        events on the same thread that is blocked in a Playwright call, so
+        calling back into the API from one of them is a way to deadlock a take.
+        """
+        super()._watch_page(page)
         # **Kept deliberately when the masking went** — #142's carve-out.
-        # This listener was written for the paint gate, and the gate is gone;
-        # but it is also the recorder's *only* reaction to a document being
-        # replaced. A link click, go_back(), a form submit, location.href and
-        # a meta refresh all land here and nowhere else, and #134 — a mid-take
-        # goto() leaving `self._caption` stale, so every later beat logs a
-        # caption that is not on screen, into files this skill says to commit —
-        # cannot be fixed without knowing that a navigation happened.
+        # Written for the paint gate, which is gone; nothing reads the flag.
         #
         # `frameattached` went with the rest: it existed because a frame that
         # attached after the parent's checkpoint had never been verified, which
         # is a statement about a mask and about nothing else.
-        #
-        # The callback only sets a flag. Playwright delivers page events on the
-        # same thread that is blocked in a Playwright call, so calling back
-        # into the API from here is a way to deadlock a take.
-        self.page.on("framenavigated", self._note_navigation)
+        page.on("framenavigated", self._note_navigation)
+        # The caption bar is a DOM element, so a document replacing the one it
+        # lives in takes it off the screen (#134). This is the signal for that
+        # and `framenavigated` is not: Playwright fires `framenavigated` for
+        # same-document history navigation too, so an SPA route change would
+        # clear a caption that is still on screen — the same lie in the other
+        # direction. `domcontentloaded` is fired once per new document, and
+        # only for the main frame, so an iframe loading does not touch it.
+        page.on("domcontentloaded", self._note_document_replaced)
+
+    def _start(self) -> None:
         # Render the window+background frame once (on a throwaway page, so the
         # app page stays clean for goto). ffmpeg composites the recording into
         # it in _postprocess.
@@ -605,19 +626,34 @@ class Recorder(_DemoBase):
 
 
     def _note_navigation(self, frame) -> None:
-        """A frame navigated. Nothing reads this yet, and that is deliberate.
+        """A frame navigated. Nothing reads this, and that is deliberate.
 
         The flag used to mean "the next checkpoint must re-inject and re-verify
         the mask". There is no mask, so nothing consumes it. The *listener* is
-        what #142 keeps: it is the only way this recorder learns that a
-        document was replaced, and #134 needs precisely that. Keeping the hook
-        and dropping its consumer is a smaller thing to get wrong than
-        re-deriving the hook later.
+        what #142 keeps, and it fires for any frame and for same-document
+        history navigation as well, which is why it is not what invalidates the
+        caption — see `_note_document_replaced`.
 
-        Deliberately does nothing else — see `_start` for why touching
+        Deliberately does nothing else — see `_watch_page` for why touching
         Playwright from an event callback is not safe here.
         """
         self._navigated = True
+
+    def _note_document_replaced(self, page) -> None:
+        """A new document is in the main frame, so the caption bar is gone.
+
+        `_CAPTION_JS` builds `#__demo_caption` inside the document, and a full
+        page load destroys it. `self._caption` — which every beat that does not
+        carry its own caption is stamped with — is a Python attribute and
+        survives, so without this a mid-take `goto()` leaves every later beat
+        reporting a line that is not on screen, in a `timeline.json` this skill
+        says to commit (issue #134).
+
+        Clearing it here rather than in `goto()` covers a link click,
+        `go_back()`, a form submit, `location.href` and a meta refresh too:
+        they all replace the document and none of them goes through `goto`.
+        """
+        self._caption = ""
 
     # -- evidence (issue #9) ------------------------------------------------
 
