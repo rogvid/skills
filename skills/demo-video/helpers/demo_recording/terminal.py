@@ -33,7 +33,6 @@ import sys
 import termios
 import time
 from collections import deque
-from collections.abc import Sequence
 from pathlib import Path
 
 from .content import content_rect
@@ -788,16 +787,15 @@ class TerminalRecorder(_DemoBase):
 
     # -- capture ------------------------------------------------------------
 
-    def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
-        """Still for the written guide -> images/<name>.png (pumps pending
-        output first so the latest screen state is captured).
+    def _before_shot(self) -> None:
+        """Pump pending output so the still is of the latest screen state.
 
-        `ac` is passed straight through — a terminal take records against a
-        ticket exactly like a web one, and a criterion demonstrated on the
-        command line is the ordinary reason a demo has a terminal half.
+        A hook rather than a `shot` override (#147): `shot` writes the beat
+        and the `ac` claim the coverage report is built from, and a medium
+        that owned the whole method could drop either without anything
+        noticing. All this medium needs is the flush.
         """
         self._pump()
-        return super().shot(name, ac=ac)
 
     # -- evidence (issue #9) ------------------------------------------------
 
