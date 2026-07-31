@@ -142,7 +142,7 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 from demo_recording.core import _beat_verb, _DemoBase  # noqa: E402
 from demo_recording.terminal import TerminalRecorder  # noqa: E402
-from demo_recording.web import Recorder  # noqa: E402
+from demo_recording.web import _CURSOR_JS, Recorder  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Helpers — deliberately hand-written
@@ -2383,6 +2383,229 @@ class VerbTarget(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# web.py — which mousemove moves the cursor dot (issue #186)
+# --------------------------------------------------------------------------
+#
+# `Recorder(deterministic=True)` announces "re-recording reproduces the take",
+# and for a storyboard that never moves the pointer that was false about the
+# opening stills. Chromium dispatches one `mousemove` of its own per document,
+# at the widget's initial pointer position — `(0, 0)` on a fresh page — when it
+# recomputes hover state after the first layout. The overlay's handler
+# subscribes at `DOMContentLoaded`, because it needs `document.body`, and which
+# of the two comes first is decided by machine load: eleven takes in twelve
+# under 14-way load had an 18 px dot in the corner of the still and one did
+# not, and two stills that disagree differ in 69 of 921 600 pixels, all of them
+# inside x 0-8, y 0-8 (#185, #186, #188).
+#
+# The overlay now refuses a `mousemove` that reports no movement — the one
+# property that separates Chromium's event from a real one, and a structural
+# one rather than a heuristic: an event dispatched at the position the pointer
+# already has cannot report a delta, and an event that reports no delta cannot
+# need the dot moved.
+#
+# What is graded here is that **predicate**, read out of the shipped script and
+# evaluated against event shapes measured off Chromium rather than imagined. A
+# check that restated the rule in Python would agree with itself while the take
+# shipped something else, so the rule is extracted; the JS-to-Python
+# translation is hand-written and deliberately narrow, so a guard written in a
+# form it does not model fails the extraction loudly instead of passing
+# silently. What this suite cannot grade — that Chromium's events still look
+# like this, and that two takes therefore produce the same bytes — is stated at
+# the bottom of the file.
+
+
+def event(**over: object) -> dict:
+    """One `mousemove` as Chromium delivered it, with every field a guard
+    might plausibly read.
+
+    Measured with a Playwright probe against `tests/fixture`, not imagined:
+    the settle event arrives at (0, 0) with `movementX`/`movementY` 0,
+    `isTrusted` true, and a `pointermove` and `mouseover` beside it exactly as
+    a real move has. Nothing but the movement tells the two apart.
+    """
+    doc = {
+        "type": "mousemove",
+        "isTrusted": True,
+        "clientX": 0,
+        "clientY": 0,
+        "screenX": 0,
+        "screenY": 0,
+        "pageX": 0,
+        "pageY": 0,
+        "movementX": 0,
+        "movementY": 0,
+        "buttons": 0,
+        "detail": 0,
+    }
+    doc.update(over)
+    return doc
+
+
+# The event the race is about, and the only one the storyboard did not ask for.
+SETTLE_EVENT = event()
+
+# What a real glide is made of. The diagonal is the first step of `move_to`'s
+# 30-step move; the axis-aligned two are what a glide along a row or a column
+# produces, and they are why the rule is "no movement on *either* axis" rather
+# than "on one of them" — a guard joined with `||` would freeze the dot for
+# every horizontal drag across a toolbar.
+REAL_MOVES = [
+    (
+        "a diagonal glide step",
+        event(clientX=150, clientY=150, movementX=150, movementY=150),
+    ),
+    (
+        "a horizontal glide step",
+        event(clientX=310, clientY=150, movementX=160, movementY=0),
+    ),
+    (
+        "a vertical glide step",
+        event(clientX=310, clientY=400, movementX=0, movementY=250),
+    ),
+]
+
+# An engine that does not report movement at all. The dot must follow this one:
+# a rule written `!e.movementX` would swallow every move on such an engine and
+# the take would record no cursor anywhere, which is worse than the bug it
+# fixes — a determinism failure is measurable in the pixels, and a cursor that
+# was never drawn is an absence nobody watching the video can report.
+NO_MOVEMENT_FIELD = event(clientX=150, clientY=150, movementX=None, movementY=None)
+
+# The JS the guard may be written in, translated one form at a time. `!==`
+# before `!`, or the `!=` it just produced would become `not =`.
+_JS_GUARD_RE = re.compile(r"if \((?P<cond>[^)]*(?:\([^)]*\))?[^)]*)\) return;")
+_JS_TOKEN = re.compile(r"e\.[A-Za-z]+|-?\d+(?:\.\d+)?|==|!=|and\b|or\b|not\b|[()\s]")
+
+
+class _JsEvent:
+    """An event object the translated guard can read fields off."""
+
+    def __init__(self, fields: dict) -> None:
+        self.__dict__.update(fields)
+
+
+def cursor_mousemove_body() -> str:
+    """The body of the overlay's `mousemove` listener, as shipped."""
+    opening = "window.addEventListener('mousemove'"
+    if opening not in _CURSOR_JS:
+        raise AssertionError(
+            "the cursor overlay no longer subscribes to mousemove under the "
+            "name this suite looks for, so nothing below graded the rule that "
+            "decides where the dot is drawn"
+        )
+
+    start = _CURSOR_JS.index(opening)
+    return _CURSOR_JS[start : _CURSOR_JS.index("}, true);", start)]
+
+
+def cursor_guard_py() -> str:
+    """The condition the overlay refuses a `mousemove` under, in Python."""
+    found = _JS_GUARD_RE.findall(cursor_mousemove_body())
+    if len(found) != 1:
+        raise AssertionError(
+            f"the mousemove handler holds {len(found)} early-return guards, "
+            f"expected exactly 1 — with none, every event Chromium dispatches "
+            f"moves the dot, including the one it sends at load (#186)"
+        )
+    expr = found[0].replace("!==", "!=").replace("===", "==")
+    expr = re.sub(r"!(?!=)", "not ", expr)
+    expr = expr.replace("&&", " and ").replace("||", " or ")
+    residue = _JS_TOKEN.sub("", expr).strip()
+    if residue:
+        raise AssertionError(
+            f"the guard {found[0]!r} is written in a form this suite cannot "
+            f"evaluate (left over: {residue!r}). Extend the translation, or "
+            f"grade the new form in a browser — do not delete the check"
+        )
+    return expr
+
+
+class CursorMotion(unittest.TestCase):
+    """Which `mousemove` moves the recorder's cursor dot (issue #186)."""
+
+    def refuses(self, fields: dict) -> bool:
+        """Does the shipped guard drop this event?"""
+        expr = cursor_guard_py()
+        try:
+            return bool(eval(expr, {"__builtins__": {}}, {"e": _JsEvent(fields)}))
+        except AttributeError as exc:
+            self.fail(
+                f"the guard {expr!r} reads an event field this suite does not "
+                f"model ({exc}) — add it to `event()` with the value Chromium "
+                f"measured, rather than dropping the assertion"
+            )
+
+    def test_the_rule_is_one_condition_that_reads_the_event(self):
+        # The control. Every assertion below is "the guard says X about this
+        # event", and all of them are satisfied by a guard that says nothing —
+        # so what the guard is, and that it reads the event at all, is graded
+        # first and separately.
+        expr = cursor_guard_py()
+        self.assertIn(
+            "e.",
+            expr,
+            f"the guard {expr!r} never reads the event, so which mousemove "
+            f"moves the dot is not decided by the mousemove",
+        )
+
+    def test_chromiums_load_time_hover_event_does_not_move_the_dot(self):
+        self.assertTrue(
+            self.refuses(SETTLE_EVENT),
+            "the overlay accepts the movement-free mousemove Chromium "
+            "dispatches at load, so whether an 18 px dot is burned into the "
+            "corner of a take's opening stills is decided by machine load "
+            "and not by the storyboard (#186)",
+        )
+
+    def test_every_real_move_moves_the_dot(self):
+        for what, fields in REAL_MOVES:
+            with self.subTest(what):
+                self.assertFalse(
+                    self.refuses(fields),
+                    f"the overlay drops {what} ({fields['movementX']}, "
+                    f"{fields['movementY']}), so the cursor stops following "
+                    f"the pointer it exists to stand in for",
+                )
+
+    def test_a_move_that_reports_no_movement_field_still_moves_the_dot(self):
+        self.assertFalse(
+            self.refuses(NO_MOVEMENT_FIELD),
+            "an engine that does not implement movementX makes the overlay "
+            "drop every move, and a take recorded there has no cursor in it "
+            "at all — the guard is written `=== 0` rather than falsy for "
+            "exactly this reason",
+        )
+
+    def test_nothing_moves_the_dot_except_through_the_rule(self):
+        # A second positioning path — a `pointermove` listener added beside
+        # this one, a `mouseover` that snaps the dot into place — would restore
+        # the race while every assertion above stayed green.
+        body = cursor_mousemove_body()
+        for property_ in ("dot.style.left", "dot.style.top"):
+            self.assertEqual(
+                _CURSOR_JS.count(property_),
+                1,
+                f"{property_} is written in {_CURSOR_JS.count(property_)} "
+                f"places in the cursor overlay; only the guarded mousemove "
+                f"handler may position the dot (#186)",
+            )
+            self.assertIn(property_, body)
+            self.assertIn(
+                "return;",
+                body,
+                "the mousemove handler positions the dot with no early return "
+                "in front of it, so every event Chromium dispatches moves it — "
+                "including the one it sends at load (#186)",
+            )
+            self.assertLess(
+                body.index("return;"),
+                body.index(property_),
+                "the dot is positioned before the rule that decides whether "
+                "this event should move it, so the rule changes nothing",
+            )
+
+
+# --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
 
@@ -3002,6 +3225,41 @@ INJECTIONS = [
         '        self._navigated = True\n        self._caption = ""',
         ["CaptionTruth.test_an_spa_route_change_keeps_the_caption"],
     ),
+    (
+        # Issue #186 exactly as it shipped: every mousemove moves the dot,
+        # including the movement-free one Chromium dispatches at load, so a
+        # deterministic take's opening stills are a coin flip.
+        "the cursor dot follows every mousemove again",
+        "web.py",
+        "      if (e.movementX === 0 && e.movementY === 0) return;\n",
+        "",
+        [
+            "CursorMotion.test_the_rule_is_one_condition_that_reads_the_event",
+            "CursorMotion.test_chromiums_load_time_hover_event_does_not_move_the_dot",
+            "CursorMotion.test_nothing_moves_the_dot_except_through_the_rule",
+        ],
+    ),
+    (
+        # The rule pointing the other way, and the reason it is `&&`: a guard
+        # that drops a move with a zero on *either* axis freezes the dot for
+        # every horizontal glide, which no still comparison would ever notice
+        # because it makes takes agree.
+        "the cursor rule drops a move that is along one axis",
+        "web.py",
+        "if (e.movementX === 0 && e.movementY === 0) return;",
+        "if (e.movementX === 0 || e.movementY === 0) return;",
+        ["CursorMotion.test_every_real_move_moves_the_dot"],
+    ),
+    (
+        # The falsy spelling, which reads better and is wrong where it matters:
+        # on an engine that does not implement movementX it swallows every move
+        # and the take records no cursor at all.
+        "the cursor rule tests movement for falsiness instead of zero",
+        "web.py",
+        "if (e.movementX === 0 && e.movementY === 0) return;",
+        "if (!e.movementX && !e.movementY) return;",
+        ["CursorMotion.test_a_move_that_reports_no_movement_field_still_moves_the_dot"],
+    ),
 ]
 
 
@@ -3116,6 +3374,14 @@ def fault_inject() -> int:
 #   rather than off the screen. What a real Chromium does with the same events
 #   is still smoke's: that `domcontentloaded` fires when this claims it does is
 #   Playwright's contract, not an assertion made here.
+# - **That Chromium's events still look the way `event()` says they do.** The
+#   cursor rule (#186) is graded here as a predicate over measured event
+#   shapes: the guard is read out of the shipped overlay and evaluated, so a
+#   rule that changed meaning fails, but a *browser* that changed — a settle
+#   event that started reporting movement — would not. That claim, and the
+#   take-level one it serves ("two takes of a storyboard that never moves the
+#   pointer produce byte-identical stills"), need Chromium and belong to
+#   `tests/smoke`. A re-measurement lands in `event()`.
 # - **Anything measured off real frames.** `content_report`'s ffmpeg sampling,
 #   `opening_gap`, `_luma_stddev` and `_moved_pixels` need a video to be true
 #   about. What is graded here is the logic *around* them: the warning

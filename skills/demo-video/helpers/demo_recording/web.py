@@ -65,6 +65,47 @@ _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 
 # A visible stand-in for the mouse: headless recordings have no OS cursor,
 # so inject a dot that follows pointer events (and squeezes on click).
+#
+# **The dot follows pointer *motion*, not every `mousemove` — issue #186.**
+#
+# Chromium dispatches one `mousemove` of its own per document, at the widget's
+# initial pointer position — `(0, 0)` on a fresh page — when it recomputes
+# hover state after the first layout. Nothing about it says "synthetic": it is
+# `isTrusted`, it carries a `pointerover`, a `mouseover` and a `pointermove`
+# beside it exactly as a real move does, and it belongs to no storyboard beat.
+# Measured on the fixture page here, it is *created* at `timeStamp` 9 ms and
+# *delivered* at ~89 ms, against a `DOMContentLoaded` at ~20 ms — and `attach`
+# below subscribes at `DOMContentLoaded`, because it needs `document.body`.
+# Which of the two wins is load-dependent, so whether an 18 px dot is burned
+# into the top-left corner of a take's opening stills is a coin flip: eleven of
+# twelve takes under 14-way CPU load had it, one did not. That is what makes a
+# `deterministic=True` take's stills fail to reproduce (#185, #188), and it is
+# the whole of it — two stills that disagree differ in 69 of 921 600 pixels,
+# all of them inside x 0-8, y 0-8.
+#
+# What tells that event apart from a real one is not its trust, its type or
+# its timing: it is that it reports **no movement**, because it is dispatched
+# at the position the pointer is already at. `movementX`/`movementY` are the
+# browser's own delta between this event and the last, so the test is
+# structural rather than a heuristic — a `mousemove` that reports no movement
+# cannot need the dot moved, since the pointer did not move. Ignoring it
+# leaves the dot where the stylesheet parks it, off screen, until the
+# storyboard moves the pointer for the first time; that position is the one
+# thing here that does not depend on when an event was delivered.
+#
+# Written `=== 0` rather than `!e.movementX`, and the difference is the
+# failure mode: on an engine that does not implement `movementX` the strict
+# test is false and the dot follows the event as it always did (a determinism
+# bug), while the falsy test would swallow *every* move and the take would
+# record no cursor at all (an invisible-cursor bug nobody watching can report).
+#
+# What this does not do: place the dot after a navigation. A document that
+# replaces the one the dot lived in gets a fresh, parked dot, and Chromium
+# sends its hover-recompute move only for the *first* document — measured, two
+# further navigations with the pointer inside the viewport produced no
+# `mousemove` at all, over four seconds. So the cursor is already absent
+# between a `goto()` and the next pointer verb today, and this changes nothing
+# about that.
 _CURSOR_JS = """
 (() => {
   const attach = () => {
@@ -83,6 +124,7 @@ _CURSOR_JS = """
     dot.id = '__demo_cursor';
     document.body.appendChild(dot);
     window.addEventListener('mousemove', (e) => {
+      if (e.movementX === 0 && e.movementY === 0) return;
       dot.style.left = e.clientX + 'px';
       dot.style.top = e.clientY + 'px';
     }, true);
