@@ -29,11 +29,18 @@ jobs:
         with:
           enable-cache: true
 
-      - name: ruff check
-        run: uv run --with "ruff==$RUFF_VERSION" ruff check --output-format github .
+      # The guards on the pin itself: that RUFF_VERSION above is the only one,
+      # that tests/lint reads it rather than remembering a version, and that no
+      # workflow reaches ruff any other way. Runs no ruff and costs nothing.
+      - name: tests/lint --self-test
+        run: tests/lint --self-test
 
-      - name: ruff format --check
-        run: uv run --with "ruff==$RUFF_VERSION" ruff format --check .
+      # ruff, at RUFF_VERSION above — which tests/lint parses out of this file,
+      # so `tests/lint` locally is this step, at this version. Running ruff
+      # here by hand instead would be a second pin; issue #189 is what that
+      # cost, and tests/lint --self-test above refuses it.
+      - name: ruff check + ruff format --check
+        run: tests/lint --github
 
       # shellcheck comes from PyPI rather than apt so this is the same binary
       # a contributor gets from the same command locally.
@@ -116,14 +123,19 @@ jobs:
       - name: tests/unit --fault-inject
         run: tests/unit --fault-inject
 
-      # `tests/smoke`'s injection manifest costs ~14 minutes of recording and
-      # runs nightly (.github/workflows/smoke-inject.yml). Its *guards* cost
-      # nothing and belong on every push: this proves the harness still aborts
-      # on an injection that would not land, still refuses an expected failure
-      # no named assertion can print, and still reads a red suite that never
+      # `tests/smoke`'s injection manifest costs ~32 minutes of recording
+      # (`tests/smoke-inject --list`) and runs nightly
+      # (.github/workflows/smoke-inject.yml). Its *guards* cost nothing and
+      # belong on every push: this proves the harness still aborts on an
+      # injection that would not land, still refuses an expected failure no
+      # named assertion can print, and still reads a red suite that never
       # named the assertion as a miss. A harness that reports PASS on no
       # evidence would certify the whole smoke suite, so it is checked here
       # rather than only where it runs.
+      #
+      # It also reads tests/README.md's figures about the manifest back out of
+      # the file and compares them with what the manifest computes (#184), so
+      # the next drift fails this step instead of waiting to be noticed.
       - name: tests/smoke-inject --self-test
         run: tests/smoke-inject --self-test
 

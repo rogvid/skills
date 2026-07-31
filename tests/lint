@@ -1,0 +1,198 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Ruff, at exactly the version CI pins (issue #189).
+
+    tests/lint                # ruff check + ruff format --check, from the root
+    tests/lint --github       # ...with GitHub annotations; what ci.yml runs
+    tests/lint --self-test    # prove the pin is live and single-sourced (0 s)
+
+**Why this file exists rather than a line in a README.** `.github/workflows/
+ci.yml` pins ruff and runs it as `uv run --with "ruff==$RUFF_VERSION" ruff …`.
+The obvious local equivalent, `uvx ruff …`, resolves to whatever ruff is
+current, and on this tree the two disagreed by 33 files — in the bad direction,
+where the local run demands reformatting CI was happy with. That cost a cycle
+in PR #181: an agent correcting a *scope* mistake reached for the obvious
+command, which answers a different question.
+
+**The pin lives in exactly one place**, the `RUFF_VERSION:` line of ci.yml, and
+this script reads it out of that file as text. CI runs this script too, so
+there is one command and one version. Changing `RUFF_VERSION` changes what a
+local `tests/lint` runs — that is the measurement issue #189 asked for, and
+`--self-test` is what keeps it true.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CI = REPO / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = REPO / ".github" / "workflows"
+
+# The one line the pin lives on. Anchored to the key so a `ruff==` written
+# anywhere else in the file cannot stand in for it.
+PIN = re.compile(r'^\s*RUFF_VERSION:\s*"([^"]+)"\s*$', re.MULTILINE)
+
+# A workflow running ruff by hand instead of through this script: the exact
+# drift #189 is about, since such a step carries its own version.
+INLINE_RUFF = re.compile(r"^\s*run:.*\bruff\b.*$", re.MULTILINE)
+
+
+class Refused(Exception):
+    """The pin cannot be read, or has stopped being the only one."""
+
+
+def pinned_version(text: str) -> str:
+    """The ruff version a workflow file pins. Exactly one line may say so."""
+    found = PIN.findall(text)
+    if len(found) != 1:
+        raise Refused(
+            f"{len(found)} `RUFF_VERSION:` lines in the workflow, expected "
+            f"exactly 1 — with none there is no pin, and with two the local "
+            f"command and CI can run different ruffs."
+        )
+    version = found[0]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise Refused(f"RUFF_VERSION is {version!r}, which is not a pinned version")
+    return version
+
+
+def ruff(version: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Ruff, resolved by uv at `version`, run from the repository root."""
+    return subprocess.run(
+        ["uv", "run", "--with", f"ruff=={version}", "ruff", *args],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+    )
+
+
+def run(github: bool) -> int:
+    version = pinned_version(CI.read_text(encoding="utf-8"))
+    print(f"lint: ruff {version}, pinned by .github/workflows/ci.yml")
+
+    # What actually ran, not what was asked for. A `--with` that silently
+    # stopped applying would otherwise lint the tree with the ambient ruff and
+    # print the pinned version above it — a report that is confidently wrong.
+    reported = ruff(version, "--version")
+    if reported.stdout.split() != ["ruff", version]:
+        print(
+            f"lint: asked for ruff {version} and got {reported.stdout.strip()!r} "
+            f"— the pin is not reaching the binary, so this run does not "
+            f"answer what CI would say.",
+            file=sys.stderr,
+        )
+        return 3
+
+    failed = 0
+    check = ["check", "--output-format", "github", "."] if github else ["check", "."]
+    for label, args in (
+        ("ruff check", check),
+        ("ruff format --check", ["format", "--check", "."]),
+    ):
+        done = ruff(version, *args)
+        sys.stdout.write(done.stdout)
+        sys.stderr.write(done.stderr)
+        if done.returncode != 0:
+            failed += 1
+            print(f"lint: {label} failed")
+    return 1 if failed else 0
+
+
+def self_test() -> int:
+    """The guards that keep the pin from becoming decorative. Runs no ruff."""
+    bad = 0
+
+    # 1. The pin is readable from the file CI reads it from.
+    try:
+        version = pinned_version(CI.read_text(encoding="utf-8"))
+        print(f"OK       the pin is {version}, read out of .github/workflows/ci.yml")
+    except Refused as exc:
+        bad += 1
+        print(f"BROKEN   {exc}")
+        version = ""
+
+    # 2. It is *read*, not remembered. The same parser over a workflow that
+    #    says something else must say something else — if it does not, the
+    #    version in ci.yml is decorative and the two can drift apart again,
+    #    which is the state #189 is about.
+    other = CI.read_text(encoding="utf-8").replace(
+        f'RUFF_VERSION: "{version}"', 'RUFF_VERSION: "9.9.9"'
+    )
+    try:
+        got = pinned_version(other)
+    except Refused as exc:
+        got = f"refused: {exc}"
+    if got == "9.9.9":
+        print("OK       changing RUFF_VERSION changes the version this script runs")
+    else:
+        bad += 1
+        print(f"DEAD PIN a ci.yml pinning 9.9.9 still resolved to {got!r}")
+
+    # 3. Malformed pins are refused rather than passed to uv, where they would
+    #    surface as a resolver error nobody reads as "the pin is wrong".
+    for what, text in (
+        ("no RUFF_VERSION line at all", 'env:\n  MYPY_VERSION: "1.18.2"\n'),
+        (
+            "two RUFF_VERSION lines",
+            '  RUFF_VERSION: "0.1.0"\n  RUFF_VERSION: "0.2.0"\n',
+        ),
+        ("a version that is not pinned", '  RUFF_VERSION: "latest"\n'),
+    ):
+        try:
+            pinned_version(text)
+        except Refused as exc:
+            print(f"REFUSED  {what}")
+            print(f"         {str(exc).splitlines()[0][:120]}")
+            continue
+        bad += 1
+        print(f"ACCEPTED {what} — the guard is not guarding")
+
+    # 4. No workflow runs ruff by hand. Such a step brings its own version with
+    #    it, and then there are two pins again.
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for line in INLINE_RUFF.findall(path.read_text(encoding="utf-8")):
+            if "tests/lint" in line:
+                continue
+            bad += 1
+            print(
+                f"TWO PINS {path.name} runs ruff without going through "
+                f"tests/lint:{line.strip()[:90]}"
+            )
+    if not bad:
+        print("OK       every workflow reaches ruff through tests/lint")
+
+    if bad:
+        print(f"\n{bad} guard(s) did not hold: the pin cannot be trusted.")
+        return 1
+    print("\nOne pin, one command: tests/lint runs exactly what CI runs.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--github", action="store_true", help="GitHub annotations (what ci.yml runs)"
+    )
+    parser.add_argument(
+        "--self-test", action="store_true", help="prove the pin is live and singular"
+    )
+    args = parser.parse_args()
+    if args.self_test:
+        return self_test()
+    try:
+        return run(args.github)
+    except Refused as exc:
+        print(f"lint: {exc}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -940,11 +941,213 @@ def self_test() -> int:
         bad += 1
         print(f"STALE    {exc}")
 
+    # And what tests/README.md says this manifest covers, against what it
+    # covers (#184). Read as text: the README is the claim, `INJECTIONS` and
+    # the AST of tests/smoke are the truth.
+    readme = README.read_text(encoding="utf-8")
+    problems = readme_problems(readme)
+    if problems:
+        bad += 1
+        print(f"DRIFTED  tests/README.md states {len(problems)} thing(s) that are not:")
+        for problem in problems:
+            print(f"         - {problem}")
+    else:
+        print(f"OK       tests/README.md's {len(readme_claims()) + 2} stated figures")
+
+    # The README check's own guards. A checker whose patterns quietly stopped
+    # matching would report a clean README forever, so each break is applied to
+    # a copy and has to be noticed — and the break itself has to land, or the
+    # "it was caught" would be about nothing.
+    for what, pattern, replacement in (
+        (
+            "a README that undercounts the entries",
+            r"^(\d+) entries, (\d+) arms,",
+            r"16 entries, 5 arms,",
+        ),
+        (
+            "a README whose per-arm table lost a row",
+            r"^\| `--web-only` \| \d+ \|.*\n",
+            "",
+        ),
+        (
+            "a README that has dropped the coverage claim",
+            r"\*\*\d+ of `tests/smoke`'s \d+ check functions have no entry\*\*",
+            "**most check functions have no entry**",
+        ),
+        (
+            "a README naming a covered check function as a gap",
+            r"check functions have no entry\*\*",
+            "check functions have no entry**\n  `check_overlay_pair` has none.",
+        ),
+    ):
+        broken, hits = re.subn(
+            pattern, replacement, readme, count=1, flags=re.MULTILINE
+        )
+        if not hits:
+            bad += 1
+            print(f"NO-OP    {what}: the break did not land, so it proved nothing")
+        elif readme_problems(broken):
+            print(f"CAUGHT   {what}")
+        else:
+            bad += 1
+            print(f"MISSED   {what} — the README check is not checking")
+
     if bad:
         print(f"\n{bad} guard(s) did not hold. This harness cannot be trusted.")
         return 1
     print("\nEvery guard refused what it exists to refuse.")
     return 0
+
+
+# --------------------------------------------------------------------------
+# What tests/README.md says about this manifest, checked against it
+# --------------------------------------------------------------------------
+#
+# Every figure in the README's "What the injection manifest covers" was
+# maintained by hand, and by issue #184 every one of them was wrong: sixteen
+# entries claimed against 25, five arms against 7, "23 of 32 check functions
+# have no entry" against 22 of 35 — a coverage claim that read *better* than
+# the truth, in the document whose job is to say what this manifest does not
+# cover. Correcting them by hand is how they got that way.
+#
+# So they are read back out of the file as text and compared against what the
+# manifest computes. Nothing here consults the README for a number it then
+# checks the README against; the left-hand side is prose and the right-hand
+# side is `INJECTIONS`, `ARM_SECONDS` and the AST of `tests/smoke`.
+
+
+README = REPO / "tests" / "README.md"
+
+
+def arm_cost(entries: list[Injection]) -> int:
+    """Seconds of takes: every entry's arm, plus one clean baseline per arm."""
+    arms = dict.fromkeys(entry.arm for entry in entries)
+    return sum(ARM_SECONDS[entry.arm] for entry in entries) + sum(
+        ARM_SECONDS[arm] for arm in arms
+    )
+
+
+def readme_claims() -> list[tuple[str, str, tuple[str, ...]]]:
+    """(what the README states, the pattern that finds it, what is true).
+
+    A pattern that stops matching is a failure, not a pass: a README reworded
+    past the check would otherwise take its numbers out of the check's reach
+    silently, which is the same drift one level up.
+    """
+    arms = list(dict.fromkeys(entry.arm for entry in INJECTIONS))
+    cost = arm_cost(INJECTIONS)
+    coverage = arm_cost([e for e in INJECTIONS if e.arm == "--coverage-only"])
+    return [
+        (
+            "the tree diagram's cost for smoke-inject",
+            r"smoke-inject[ ]+# proves smoke's assertions can still fail "
+            r"\(~(\d+) min, nightly\)",
+            (f"{cost / 60:.0f}",),
+        ),
+        (
+            "the `--arm coverage` example's cost",
+            r"tests/smoke-inject --arm coverage # one arm's entries \(~(\d+) s\)",
+            (str(coverage),),
+        ),
+        (
+            "the whole-manifest example",
+            r"tests/smoke-inject[ ]+# all (\d+) entries, ~(\d+) min",
+            (str(len(INJECTIONS)), f"{cost / 60:.0f}"),
+        ),
+        (
+            "the quoted `--list` summary",
+            r"^(\d+) entries, (\d+) arms, ~(\d+\.\d) min of takes$",
+            (str(len(INJECTIONS)), str(len(arms)), f"{cost / 60:.1f}"),
+        ),
+        (
+            "the ungraded-coverage claim",
+            r"\*\*(\d+) of `tests/smoke`'s (\d+) check functions have no entry\*\*",
+            (str(len(ungraded())), str(len(check_functions(smoke_tree())))),
+        ),
+    ]
+
+
+def readme_tables(text: str) -> list[str]:
+    """The two per-arm tables, whose rows are a mapping and not a number.
+
+    A count alone would be satisfied by a table with the right number of wrong
+    rows, so both are compared as dictionaries: an arm that gained entries, an
+    arm nobody added a row for, and a row for an arm that no longer exists are
+    three different complaints.
+    """
+    problems = []
+    entries_by_arm = {
+        arm: sum(1 for entry in INJECTIONS if entry.arm == arm)
+        for arm in dict.fromkeys(entry.arm for entry in INJECTIONS)
+    }
+    for what, pattern, truth in (
+        (
+            "the arm cost table",
+            r"^\| `(--[a-z-]+-only)` \| (\d+) s \|",
+            {arm: str(sec) for arm, sec in ARM_SECONDS.items()},
+        ),
+        (
+            "the entries-per-arm table",
+            r"^\| `(--[a-z-]+-only)` \| (\d+) \|",
+            {arm: str(count) for arm, count in entries_by_arm.items()},
+        ),
+    ):
+        stated = dict(re.findall(pattern, text, re.MULTILINE))
+        if not stated:
+            problems.append(f"{what}: no row matched {pattern!r} — where did it go?")
+            continue
+        for arm in sorted(set(stated) | set(truth)):
+            if arm not in stated:
+                problems.append(f"{what}: no row for {arm}")
+            elif arm not in truth:
+                problems.append(f"{what}: a row for {arm}, which is not one")
+            elif stated[arm] != truth[arm]:
+                problems.append(
+                    f"{what}: says {arm} is {stated[arm]}, it is {truth[arm]}"
+                )
+    return problems
+
+
+def readme_named_gaps(text: str) -> list[str]:
+    """The check functions the README names as uncovered must be uncovered.
+
+    The count is the cheap half. `check_evidence` was listed here as having no
+    entry for as long as it had six; a number would never have said so.
+    """
+    section = re.search(
+        r"check functions have no entry\*\*(.*?)(?=\n- \*\*)", text, re.DOTALL
+    )
+    if section is None:
+        return ["the ungraded bullet: could not find it to read the names out of"]
+    blind = set(ungraded())
+    named = re.findall(r"`(_?check_[a-z_]+)`", section.group(1))
+    if not named:
+        return ["the ungraded bullet: names no check function, so it names no gap"]
+    return [
+        f"the ungraded bullet: names {name} as having no entry, and it has one"
+        for name in named
+        if name not in blind
+    ]
+
+
+def readme_problems(text: str) -> list[str]:
+    """Everything `tests/README.md` states about this manifest that is untrue."""
+    problems = []
+    for what, pattern, truth in readme_claims():
+        found = [m.groups() for m in re.finditer(pattern, text, re.MULTILINE)]
+        if len(found) != 1:
+            problems.append(
+                f"{what}: its pattern matched {len(found)} times, expected 1 — "
+                f"either the claim is gone or it was reworded past the check, "
+                f"and an unreadable number is not a checked one.\n"
+                f"         looked for: {pattern}"
+            )
+        elif found[0] != truth:
+            problems.append(
+                f"{what}: the README says {'/'.join(found[0])}, "
+                f"`--list` says {'/'.join(truth)}"
+            )
+    return problems + readme_tables(text) + readme_named_gaps(text)
 
 
 def listing(entries: list[Injection]) -> int:
@@ -954,9 +1157,7 @@ def listing(entries: list[Injection]) -> int:
     except Refused as exc:
         note = f"STALE: {exc}"
     arms = list(dict.fromkeys(entry.arm for entry in entries))
-    cost = sum(ARM_SECONDS[entry.arm] for entry in entries) + sum(
-        ARM_SECONDS[arm] for arm in arms
-    )
+    cost = arm_cost(entries)
     for arm in arms:
         print(f"{arm}  ({ARM_SECONDS[arm]}s an entry, plus one clean baseline)")
         for entry in entries:
@@ -966,7 +1167,10 @@ def listing(entries: list[Injection]) -> int:
     print(f"\n{len(entries)} entries, {len(arms)} arms, ~{cost / 60:.1f} min of takes")
     print(f"{note}")
     blind = ungraded()
-    print(f"\n{len(blind)} ungraded check function(s): {', '.join(blind)}")
+    print(
+        f"\n{len(blind)} of tests/smoke's {len(check_functions(smoke_tree()))} "
+        f"check function(s) are ungraded: {', '.join(blind)}"
+    )
     return 0
 
 
