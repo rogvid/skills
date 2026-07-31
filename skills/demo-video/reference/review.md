@@ -85,6 +85,64 @@ from demo_recording import beat_frames
 beat_frames(Path("demos/2026-07-26-x"))
 ```
 
+## Why the comprehension review reports contradictions separately
+
+Step 6's reviewer answers four questions, not three, and the fourth — the
+CLEAR/UNCLEAR verdict — is deliberately narrowed to *could you follow the
+story*. Two failures made that necessary, and both are worth knowing about
+before you write the prompt differently.
+
+### A caption leads its evidence, by design
+
+The pacing rules tell a storyboard author to set the caption **first** and then
+perform the action it introduces, so the eye is already pointed where the change
+will happen. That is right for a viewer, who experiences the caption as a
+sentence spanning several seconds with the click as an event inside it. It is
+wrong for a frame reviewer, who sees one instant per beat and finds the caption
+asserting something the pixels under it do not yet show.
+
+Asked "name any caption that asserts something the picture does not show", a
+reviewer given no warning can answer *"all of the ones written the way the skill
+prescribes"* — and a gate whose output is mostly artifact gets skimmed, taking
+the real entry with it ([#95](https://github.com/rogvid/skills/issues/95)
+measured a list of four, of which three were this).
+
+So the prompt states the lead. It does **not** tell the reviewer to ignore
+caption/picture mismatches, which would remove the finding the section exists
+for. The discriminator is *does the evidence ever arrive*: a caption still
+waiting for its picture is the house style; a caption whose claim no later frame
+shows, or that a later frame shows the opposite of, is a finding. That is a
+question about the whole sheet rather than one frame, which is exactly why the
+reviewer is asked to name the frames it checked.
+
+### A caption the app contradicts is not a recording defect
+
+The verdict used to carry this too, and it was unstable. On the reference take
+at `examples/ticket-queue/demos/2026-07-28-queue-search/` — recorded against a
+ticket one of whose criteria the app does not satisfy, with the beat claiming it
+kept and captioned in the ticket's own words — two independent reviewers given
+the same frames and the same instructions returned **UNCLEAR** and **CLEAR**.
+Both named the same beat, correctly, in the same terms. The finding was stable;
+the ship/no-ship field was a coin flip
+([#131](https://github.com/rogvid/skills/issues/131)).
+
+The reason is that one verdict was being asked to carry two different faults:
+
+- **"I could not follow this."** The storyboard is at fault, and re-recording is
+  the fix.
+- **"I followed it, and the screen disagrees with the words."** The *app* is at
+  fault. Re-recording cannot help, and the three things that would make the
+  contradiction go away — delete the beat, editorialise the caption, choose an
+  input that does not look like the unimplemented case — all hide the finding
+  the demo exists to deliver. Followed honestly, the old rule launders the
+  result.
+
+Splitting them means the verdict now grades the thing re-recording can repair,
+and the contradiction is routed where it can be acted on: the pull request, and
+the conformance pass below when the take declared `criteria=`. On a take with
+`criteria=` this is sharper still — a caption/picture contradiction on a tagged
+beat is 6b's call by construction, and 6b answers it with citations.
+
 ## Per-beat evidence (`evidence/beat-NN.json`)
 
 A reviewing agent handed frames has to infer what the page said from pixels.

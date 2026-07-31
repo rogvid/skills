@@ -106,10 +106,11 @@ behind every one, are in [reference/limits.md](reference/limits.md).
   an issue and is fatal under `strict=True`, with no way to say it was the
   point — so leave strict off for that demo, and say in the pull request which
   recorded issue is the demo's subject.
-- **A stitched demo's attribution is unproven.** An issue recorded in segment
-  two can name a beat of segment one, and a coverage row can lose the segment
-  it belongs to. Check both against the parts before handing them to a
-  reviewer.
+- **A stitched demo's issue attribution is unproven.** An issue recorded in
+  segment two can name a beat of segment one — `stitch()` re-points every
+  issue's beat while merging, and no take exercises it. Check it against the
+  parts before handing them to a reviewer. A coverage row keeping its segment
+  *is* now graded ([#137](https://github.com/rogvid/skills/issues/137)).
 - **CI does less for a fork.** A pull request from a fork gets no demo comment;
   its beat table and artifact link are on the workflow run's summary page
   instead.
@@ -416,30 +417,41 @@ return.
    frame is aimed at its beat, which is what decides how much weight a
    reviewer's reading of one can carry.
 
-   Give them the pictures and nothing else — no storyboard, no feature
-   name, no captions. `frames.md` is built that way on purpose (see
-   [reference/review.md](reference/review.md)): a `click('#refresh')` in the
-   margin answers the question you are asking before they look at anything.
+   Give them the pictures and nothing else — no storyboard, no feature name,
+   no captions; `frames.md` is built that way on purpose. A tmpdir, or
+   `frames/` beside `demo.mp4` if the reviewer needs a stable path; either way
+   it is a working file, gitignored with the mp4 it came out of (step 8).
 
-   A tmpdir, or `frames/` beside `demo.mp4` if the reviewer needs a stable
-   path. Either way they are working files — `frames/` is gitignored for the
-   same reason `evidence/` is, and for the same reason the mp4 they came out
-   of is.
+   Dispatch a subagent told NOTHING about the feature (a fresh session or
+   process fed only `frames/` works too) and ask it, in these words:
 
-   Dispatch a subagent told NOTHING about the feature (any context-free
-   reviewer works: a fresh session or process fed only `frames/`, if the
-   harness has no subagents): read the frames in order; reply with
-   (1) NARRATION — the story as understood purely from the frames,
-   (2) CONFUSIONS — anything unclear, unreadable, or contradictory, and
-   (3) VERDICT — CLEAR or UNCLEAR with the reason, plus whether the demo
-   is CONVINCING: did they see evidence of the claims on screen, or take
-   the captions' word for it. If the narration misses the intended story
-   or the verdict is UNCLEAR, fix the storyboard and re-record. Each round
-   needs a NEW subagent — the previous one is no longer fresh. Ship only
-   on CLEAR with the headline claim evidenced on screen. Reviewers
-   converge in ~2 rounds; cap at 3 and surface remaining findings to the
-   user instead of looping. Findings that need a different feature demoed
-   are future demos, not blockers.
+   > Read the frames in order and reply with:
+   > (1) NARRATION — the story as understood purely from the frames.
+   > (2) CONFUSIONS — anything unclear, unreadable, or that you could not follow.
+   > (3) CONTRADICTIONS — a caption whose claim a later frame shows the opposite
+   > of, or that no frame ever shows. Captions are written *before* the action
+   > they introduce, so a caption normally appears a frame or two ahead of the
+   > picture that evidences it — that lead is by design, and a caption still
+   > waiting for its evidence is not a contradiction. Report one only when its
+   > claim never arrives in any later frame, or when a later frame shows the
+   > opposite. Quote the caption and name the frames you checked.
+   > (4) VERDICT — CLEAR or UNCLEAR, on one question only: could you follow the
+   > story from the pictures? Anything you listed under (3) is reported there and
+   > judged elsewhere; it does not by itself make the verdict UNCLEAR. Say
+   > separately whether the demo is CONVINCING: did you see evidence of the
+   > claims on screen, or take the captions' word for it?
+
+   **The verdict and the contradictions have different owners.** A narration
+   that misses the intended story, or UNCLEAR, is the storyboard's fault — fix
+   it and re-record, with a NEW subagent each round. A CONTRADICTIONS entry
+   may not be: check the app first. If the caption overstates the storyboard,
+   fix the caption; **if the app does not do what the caption says, the demo
+   has caught a bug** — that goes in the pull request, and into 6b when the
+   take declared `criteria=`. It is not a re-record, and deleting the beat or
+   softening the caption launders the finding the demo exists to deliver
+   ([reference/review.md](reference/review.md)). Ship on CLEAR. Reviewers
+   converge in ~2 rounds; cap at 3 and surface the rest to the user instead of
+   looping. Findings that need a different feature demoed are future demos.
 
    **6b. Conformance review (only when the take declared `criteria=`).** A
    *second* reviewer, run alongside the one above and never instead of it —
