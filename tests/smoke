@@ -482,77 +482,6 @@ _CURSOR_BOX_JS = """() => {
   return {x: r.x, y: r.y, width: r.width, height: r.height};
 }"""
 
-# -- and the take the park makes structurally impossible (issue #193) --------
-#
-# `PARKED_POINTER` is what makes the determinism arm reproduce, and it is also
-# what makes that arm blind to the defect #186 fixed: it places the pointer
-# before anything is photographed, so `check_parked_pointer` passes whether or
-# not the recorder's dot follows a mousemove that reports no movement. The
-# take-level claim of #186 — *two takes of a storyboard that never moves the
-# pointer produce byte-identical stills* — needs a storyboard that does not
-# park, which is what `run_resting_pointer` records.
-#
-# Where the dot sits in such a take is decided by the recorder's own
-# stylesheet: `#__demo_cursor` is `position: fixed; left: -40px; top: -40px`
-# under `transform: translate(-50%,-50%)`, so its rect is centred on
-# (-40, -40) — off screen — until a pointer verb moves it for the first time.
-# Read as a rect through `_CURSOR_BOX_JS`, exactly as `PARKED_POINTER` is, and
-# never as the inline `left`/`top` the recorder's handler writes: a check that
-# reads the producer's bookkeeping cannot see a producer that writes the right
-# number into the wrong place.
-RESTING_POINTER = (-40, -40)
-
-# The position the recorder's overlay seeds its remembered pointer with, and
-# where a fresh page's pointer sits. The load-time `mousemove` Chromium
-# dispatches lands here, repeating a position the overlay has already been told
-# about, and dropping it is the whole of #202's rule — so this is the number
-# the control in `run_resting_pointer` looks for.
-#
-# Hardcoded rather than imported from `web.py`, deliberately: a control that
-# read the seed out of the code under test would agree with a recorder that
-# seeded it anywhere at all, including somewhere no browser ever sends an
-# event to.
-CURSOR_SEED = (0, 0)
-
-# Three takes, and the number is the control's error bar rather than taste.
-# Measured on this box, Chromium 151.0.7922.34: 13 of 15 takes received the
-# load-time mousemove and 2 received none at all. So one take would be unable
-# to grade the rule about one time in eight, and three about one time in five
-# hundred — and the run that cannot grade it refuses below rather than passing.
-#
-# It is a real refusal and it has been seen: the rebase onto #202 hit exactly
-# that run, all three takes empty. Raising this to 4 would buy an order of
-# magnitude for 5 s, and it is not done here only because the arm's cost is
-# written down in `tests/smoke-inject` and `tests/README.md`. See #205.
-RESTING_TAKES = 3
-RESTING_SHOT = "01-resting"
-RESTING_SETTLE_S = 1.0
-
-# Every mousemove the page sees, installed as an **init script** so it is in
-# place before the document exists. That is not fussiness: the only mousemove
-# this storyboard gets is the one Chromium dispatches while the page is
-# loading, and a listener added after `goto()` returns counts zero of them
-# (measured, 0 events over 10 takes, against exactly one — at (0, 0) — over 16
-# takes when installed here).
-#
-# **Positions are logged and graded; the deltas are logged and not graded**,
-# and that distinction is issue #202. `movementX`/`movementY` for the *first*
-# mouse event in a page is a build detail — `web.py`'s own table has Chromium
-# 147 reporting 0, 0 for a park at (60, 640) where 136 and 151 report 60, 640 —
-# so a control keyed on "the deltas are zero" is the reading #202 took out of
-# the product, left behind in the harness. On a build that reports a non-zero
-# delta for the settle event it would refuse a take that did receive one, which
-# is a false "this arm could not grade it". They stay in the log because a
-# refusal that prints them is what identified this in the first place.
-_MOVE_LOG_JS = """
-(() => {
-  window.__smokeMoves = [];
-  window.addEventListener('mousemove', (e) => window.__smokeMoves.push(
-    [e.clientX, e.clientY, e.movementX, e.movementY]), true);
-})();
-"""
-_MOVE_LOG_READ_JS = "() => window.__smokeMoves || []"
-
 # Stills are lossless PNGs of a frozen page, so two takes of this storyboard
 # are compared byte for byte and no threshold is needed. Video is different:
 # H.264 at crf 20 is not byte-reproducible and the screencast's frame timing
@@ -2348,47 +2277,6 @@ def check_parked_pointer(b: Beats, page, when: str) -> None:
     )
 
 
-def check_resting_pointer(b: Beats, page, when: str) -> None:
-    """The cursor dot is where the *stylesheet* parks it (issue #193).
-
-    The other half of `check_parked_pointer`, and the half no arm could make
-    before: that one asserts the dot is where the storyboard *put* it, which
-    is satisfied by a recorder whose dot chases Chromium's load-time
-    mousemove, because the storyboard's own `page.mouse.move` runs after it.
-    This one is asserted in a take no verb moved the pointer in, so the only
-    thing that can have moved the dot is an event the recorder should have
-    ignored.
-
-    Read as a rect off the live page, like `check_parked_pointer` — never the
-    inline `left`/`top` the recorder's handler writes, which is the producer's
-    own bookkeeping and shares whatever blind spot the producer has.
-
-    Failing on a missing dot is deliberate, for the same reason as above: a
-    recorder that stopped drawing a cursor would make this silently unable to
-    fail, while its stills would reproduce perfectly.
-    """
-    box = page.evaluate(_CURSOR_BOX_JS)
-    if box is None:
-        b.fail_if(
-            True,
-            f"{when}, the recorder drew no cursor dot (#__demo_cursor is not "
-            f"in the page) — a take with no dot in it cannot say where an "
-            f"unmoved pointer leaves one",
-        )
-        return
-    at = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    b.fail_if(
-        abs(at[0] - RESTING_POINTER[0]) > 1 or abs(at[1] - RESTING_POINTER[1]) > 1,
-        f"{when}, no verb moved the pointer and the cursor dot is centred at "
-        f"({at[0]:.0f}, {at[1]:.0f}), not at the "
-        f"({RESTING_POINTER[0]}, {RESTING_POINTER[1]}) the recorder's own "
-        f"stylesheet parks it at — something other than the storyboard is "
-        f"placing the cursor, which is issue #186: a mousemove reporting no "
-        f"movement is Chromium recomputing hover at the position the pointer "
-        f"is already at, and following it makes the dot's position a race",
-    )
-
-
 # What has the focus, as a name a failure message can print: the element's id
 # when it has one, and its tag when it does not — `blur()` hands focus back to
 # `<body>`, which has no id and would otherwise read as the empty string beside
@@ -3303,56 +3191,6 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
             max(2, int(box["height"] * scale_y)),
         )
     return EntropyTake(b.problems, out_dir, clock, still_rect, video_rect, spin_rect)
-
-
-class RestingTake(NamedTuple):
-    """One recording of a storyboard that never places the pointer (#193)."""
-
-    problems: list[str]
-    still: Path
-    panel: Rect  # the entropy panel, for the difference diagnostic
-    moves: list  # every mousemove the page saw, as [x, y, movementX, movementY]
-
-
-def record_resting(out_dir: Path, base_url: str, label: str) -> RestingTake:
-    """The entropy storyboard with the pointer left exactly where it was.
-
-    `record_entropy` minus the `page.mouse.move(*PARKED_POINTER)` line and
-    minus the second still, and that subtraction is the whole point: the park
-    is what makes the determinism arm structurally unable to record the case
-    issue #186 is about. Same page and same determinism controls, so the
-    stills are byte-comparable for the same reasons the entropy ones are —
-    what is not the same is that nothing in here decides where the cursor
-    goes.
-    """
-    from demo_recording import Recorder
-
-    b = Beats(label)
-    with Recorder(
-        out_dir, base_url=base_url, speech=False, strict=True, deterministic=True
-    ) as rec:
-        rec.page.add_init_script(_MOVE_LOG_JS)
-        rec.goto("/?entropy=1")
-        rec.wait_for("#entropy-worker.ready", timeout_s=15)
-        rec.pause(RESTING_SETTLE_S)
-        rec.shot(RESTING_SHOT)
-        # After the still, so it grades the frame that was actually taken.
-        check_resting_pointer(b, rec.page, f"in {label}")
-        moves = rec.page.evaluate(_MOVE_LOG_READ_JS) or []
-        box = rec.page.locator("#entropy-panel").bounding_box()
-        if box is None:
-            raise SmokeFailure(
-                "#entropy-panel has no box — ?entropy=1 rendered nothing"
-            )
-        panel: Rect = (
-            int(box["x"]),
-            int(box["y"]),
-            int(box["width"]),
-            int(box["height"]),
-        )
-    return RestingTake(
-        b.problems, out_dir / "images" / f"{RESTING_SHOT}.png", panel, moves
-    )
 
 
 # -- assertions --------------------------------------------------------------
@@ -7937,128 +7775,6 @@ def run_determinism(out_root: Path) -> list[str]:
     return failures
 
 
-def run_resting_pointer(out_root: Path) -> list[str]:
-    """Record a storyboard that never places the pointer, three times (#193).
-
-    The acceptance criterion of issue #186, at the level the fix was actually
-    made at. `tests/unit` grades the *rule* — the guard is read out of the
-    shipped overlay and evaluated against event shapes measured off Chromium —
-    and cannot see a browser that started reporting movement for its
-    hover-recompute event. The determinism arm cannot see it either, because
-    `PARKED_POINTER` decides the dot's position there before anything is
-    photographed. This is the arm that can.
-
-    Three assertions, and the order matters:
-
-    1. **the control**, first, because everything else is satisfied by a take
-       nothing happened in: at least one take has to have received a mousemove
-       reporting no movement. That event is the whole subject; a run that did
-       not get one has not exercised the guard, and saying "the dot is parked"
-       about it would be the catalogue's environment-agreeing assertion.
-    2. **the dot is where the stylesheet parks it**, per take, in
-       `check_resting_pointer` — read off the live page.
-    3. **the stills are byte-identical across takes**, which is #186's own
-       acceptance sentence. Deliberately *not* the assertion an injection is
-       registered against: with the guard removed the two positions the dot
-       lands in are both stable within a take, so this comparison only fires
-       when two takes happened to disagree — about one run in two, and rather
-       less on an idle box. An intermittent assertion is what issue #185 cost
-       three CI runs.
-    """
-    failures: list[str] = []
-    takes: dict[str, RestingTake] = {}
-    with fixture_server() as base_url:
-        for i in range(RESTING_TAKES):
-            label = f"resting-{i}"
-            out_dir = fresh_take_dir(out_root, label)
-            try:
-                takes[label] = record_resting(out_dir, base_url, label)
-            except Exception as exc:  # noqa: BLE001 - a raising take is a failure
-                return failures + [
-                    f"{label}: Recorder raised {type(exc).__name__}: {exc}"
-                ]
-            failures += takes[label].problems
-
-    # -- the control ---------------------------------------------------------
-    #
-    # Two refusals, not one, because "the browser sent nothing" and "the
-    # browser sent something this arm is not about" are different reports and
-    # only the first is a property of the machine. Both are failures: an arm
-    # that could not grade the rule has to say so, and a green run saying it in
-    # a print nobody reads is how the boundary goes back to being somebody's
-    # memory.
-    seen = {name: take.moves for name, take in takes.items()}
-    repeats = {
-        name: [m for m in moves if (m[0], m[1]) == CURSOR_SEED]
-        for name, moves in seen.items()
-    }
-    if not any(seen.values()):
-        return failures + [
-            f"resting-pointer: none of the {RESTING_TAKES} takes saw a "
-            f"mousemove at all, so this arm could not grade the rule it exists "
-            f"for — the dot being parked is equally true of a page the browser "
-            f"never sent an event to. That is the machine, not the recorder: "
-            f"Chromium dispatches this event on a load and 2 takes in 15 do "
-            f"not get one on the build this was measured on. Re-run "
-            f"--pointer-only; if it keeps happening the build has stopped "
-            f"sending it and #205 is where that is recorded."
-        ]
-    if not any(repeats.values()):
-        return failures + [
-            f"resting-pointer: the takes saw mousemove(s) {seen!r}, and not "
-            f"one of them repeats the {CURSOR_SEED} the recorder's overlay "
-            f"seeds its remembered pointer with — so nothing here exercised "
-            f"the guard that drops a move to a position the pointer was "
-            f"already at, which is the rule (#202) this arm grades. A take "
-            f"whose only events are real moves says nothing about it."
-        ]
-
-    # -- the stills ----------------------------------------------------------
-    live: dict[str, Path] = {}
-    for name, take in takes.items():
-        if not take.still.is_file():
-            failures.append(f"{name}: {take.still} was never captured")
-            continue
-        frames = gray_frames(take.still)
-        score = contrast(frames[0]) if frames else 0.0
-        if score < MIN_CONTENT_STDDEV["web"]:
-            failures.append(
-                f"{name}: {take.still.name} is blank — the whole frame scores "
-                f"{score:.1f} luma stddev, under the "
-                f"{MIN_CONTENT_STDDEV['web']} floor, so two of them being "
-                f"equal says nothing"
-            )
-            continue
-        live[name] = take.still
-    names = sorted(live)
-    first = names[0] if names else None
-    for other in names[1:]:
-        if digest(live[first]) != digest(live[other]):
-            failures.append(
-                f"resting-pointer: {RESTING_SHOT}.png differs between {first} "
-                f"and {other} ({digest(live[first])} vs {digest(live[other])}) "
-                f"— two takes of a storyboard that never moves the pointer do "
-                f"not reproduce, which is issue #186's acceptance criterion. "
-                f"{still_difference(live[first], live[other], takes[first].panel)}"
-            )
-    if len(names) < RESTING_TAKES:
-        failures.append(
-            f"resting-pointer: only {len(names)} of {RESTING_TAKES} takes "
-            f"produced a still worth comparing, so the reproduction claim was "
-            f"made over fewer takes than this arm records"
-        )
-    if not failures:
-        print(
-            f"smoke: resting-pointer {RESTING_TAKES} takes that place no "
-            f"pointer leave the dot at {RESTING_POINTER} and reproduce "
-            f"{RESTING_SHOT}.png byte for byte "
-            f"({sum(len(v) for v in repeats.values())} mousemove(s) repeating "
-            f"{CURSOR_SEED} "
-            f"delivered across them)"
-        )
-    return failures
-
-
 def _plant_mp4(path: Path) -> bytes:
     """A small, real, decodable mp4 at `path`. Returns its bytes.
 
@@ -9991,11 +9707,6 @@ def main() -> int:
         "what check_issues grades (issue #197)",
     )
     parser.add_argument(
-        "--pointer-only",
-        action="store_true",
-        help="record only the takes that never place the pointer (issue #193)",
-    )
-    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -10032,7 +9743,6 @@ def main() -> int:
             ("--coverage-only", args.coverage_only),
             ("--strict-only", args.strict_only),
             ("--issues-only", args.issues_only),
-            ("--pointer-only", args.pointer_only),
         )
         if on
     ]
@@ -10154,13 +9864,6 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
         failures += run_strict_terminal(out_root)
     if only in (None, "--determinism-only"):
         failures += run_determinism(out_root)
-    # The pointer-free case (#193). Its own arm and deliberately *not* on
-    # --determinism-only: it is three more takes, and putting them there would
-    # make every entry aimed at that arm 60% more expensive without covering
-    # any of them. What it does cover, no other arm can — the determinism
-    # storyboard parks the pointer before anything is photographed.
-    if only in (None, "--pointer-only"):
-        failures += run_resting_pointer(out_root)
     # What a take that did *not* finish leaves behind. Last, because every
     # phase above records a take that works, and reading "crash-web wrote no
     # demo.mp4" before "web wrote no demo.mp4" would send somebody to the

@@ -22,8 +22,8 @@ this file is what notices.
 ~10 minutes behind a machine-wide lock, so an injection per assertion was never
 going to be maintained. But smoke has per-arm flags, and an injection aimed at
 one arm costs that arm: measured on this box, `--coverage-only` is 8 s,
-`--strict-only` 13 s, `--pointer-only` 15 s, `--issues-only` 26 s,
-`--overlay-only` 31 s, `--failure-only` 48 s, `--web-only` 123 s,
+`--strict-only` 13 s, `--issues-only` 26 s, `--overlay-only` 31 s,
+`--failure-only` 48 s, `--web-only` 123 s,
 `--content-only` 148 s. Every entry below names the arm it needs, and nothing
 else runs. Splitting a cheap take out of an expensive arm is what makes an
 assertion gradeable at all — see issue #197 and `--issues-only`.
@@ -53,7 +53,7 @@ an aborted run cannot leave a broken recorder behind.
 
 **What this does not do** is in `tests/README.md`, under "What the injection
 manifest covers". Read it before treating a green run here as coverage of
-`tests/smoke`: 31 entries against 17 of smoke's 36 check functions is a floor
+`tests/smoke`: 30 entries against 16 of smoke's 35 check functions is a floor
 under the assertions that would be worst to lose, not a statement about the
 rest. Every check function with no entry is printed as `ungraded` at the end of
 a run, so the gap is in the output rather than in somebody's memory — and the
@@ -88,7 +88,6 @@ ARM_TIMEOUT_S = 1_200
 ARM_SECONDS = {
     "--evidence-only": 7,
     "--coverage-only": 8,
-    "--pointer-only": 15,
     "--issues-only": 26,
     "--narration-only": 8,
     "--strict-only": 13,
@@ -258,38 +257,6 @@ INJECTIONS = [
         must_contain=(
             "differ within one take, ",
             "largest channel delta ",
-        ),
-    ),
-    # -- a take that never places the pointer (issue #193), ~20 s an entry ----
-    #
-    # The arm-level half of #186. `tests/unit` grades the *rule* — the guard is
-    # read out of the shipped overlay and evaluated against event shapes
-    # measured off Chromium — and cannot see a browser that started reporting
-    # movement for its hover-recompute event; the determinism arm cannot see it
-    # either, because `PARKED_POINTER` decides where the dot is there before
-    # anything is photographed. `--pointer-only` records the case neither can.
-    Injection(
-        # Aimed at the *position* check and deliberately not at the byte
-        # comparison beside it. With the guard gone the dot lands at the origin
-        # in about seven takes in eight and stays parked in the rest, both
-        # stable within a take — so the still hashes only disagree when two
-        # takes of the three happened to differ, while the position check fires
-        # on any one of them that moved. An intermittent assertion is what #185
-        # cost three CI runs, and #193 asks for this entry by name.
-        name="the cursor dot follows a mousemove that reports no movement",
-        module="web.py",
-        # Retargeted from `movementX === 0 && movementY === 0` when #202 replaced
-        # that rule with a positional one: the engine's delta turned out to be a
-        # build detail (Chromium 147 reported 0,0 for the storyboard's own park),
-        # so the guard now reads the position the overlay remembers. Deleting
-        # this line is still the same defect — every mousemove moves the dot,
-        # including the one Chromium dispatches at load.
-        old="      if (e.clientX === atX && e.clientY === atY) return;\n",
-        new="",
-        arm="--pointer-only",
-        sites=("check_resting_pointer",),
-        must_contain=(
-            "stylesheet parks it at — something other than the storyboard is ",
         ),
     ),
     # -- what the recorder saw behind the pixels (check_issues), ~30 s an entry

@@ -49,10 +49,9 @@ tests/
 [#136]: https://github.com/rogvid/skills/issues/136
 
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
-three `resting-*` takes that never place the pointer, the problem takes,
-`segments/` — one demo recorded in two parts and joined with `stitch()` — and
-`evidence/`, a few seconds against what a beat's page text carries and what it
-caps.
+problem takes, `segments/` — one demo recorded in two parts and joined with
+`stitch()` — and `evidence/`, a few seconds against what a beat's page text
+carries and what it caps.
 
 ## Running it
 
@@ -97,8 +96,6 @@ tests/smoke --strict-only         # just the two takes strict=True must refuse
 tests/smoke --issues-only         # just the broken page and the failing
                                   #   commands, which is what check_issues
                                   #   grades (issue #197)
-tests/smoke --pointer-only        # just the takes that never place the
-                                  #   pointer (issue #193)
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -110,7 +107,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 31 entries, ~35 min
+tests/smoke-inject                # all 30 entries, ~35 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -736,44 +733,6 @@ consistently. The take reads the line and requires `worker <frozen epoch>`.
 All three takes also run `strict=True` (issue #3's machinery), which is what
 would catch the blob shim breaking worker *loading* rather than its clock.
 
-**And the take the park makes impossible** — `tests/smoke --pointer-only`,
-three recordings of the same storyboard with the pointer left exactly where it
-was ([#193](https://github.com/rogvid/skills/issues/193)). The determinism
-takes above park the mouse at `(60, 640)` before anything is photographed,
-which is what makes them reproduce — and also what makes them structurally
-unable to record the case
-[#186](https://github.com/rogvid/skills/issues/186) fixed: a storyboard that
-never moves the pointer, where the recorder's cursor dot is placed by
-Chromium's load-time hover event or by nothing at all. `tests/unit` grades the
-*rule* (`CursorMotion` evaluates the shipped guard against event shapes
-measured off Chromium) and cannot see a browser that changed its mind about
-reporting movement. This arm can.
-
-Three things, in this order:
-
-1. **the control.** At least one of the three takes has to have received a
-   `mousemove` reporting no movement — counted by a listener installed as an
-   init script, because the only one this storyboard gets is dispatched while
-   the page is loading and a listener added after `goto()` returns counts zero
-   of them (measured, 0 events over 10 takes against exactly one, at `(0, 0)`
-   with both deltas 0, when installed before). Without it "the dot is parked"
-   is also true of a take the browser never sent an event to, and the arm
-   would be grading the machine.
-2. **the dot is where the recorder's own stylesheet parks it** — centre
-   `(-40, -40)`, read as a rect off the live page through
-   `getBoundingClientRect`, never as the inline `left`/`top` the recorder's
-   handler writes.
-3. **the three stills are byte-identical**, which is #186's acceptance
-   sentence.
-
-The `tests/smoke-inject` entry names the *second* of those, not the third, and
-that is the whole reason the position check exists. With the guard removed the
-dot lands at the origin in about seven takes in eight — measured, 14 of 16 —
-and stays parked in the rest, both stable within a take. So the byte comparison
-only notices when two takes happened to disagree, while the position check
-notices any take that moved. An intermittent assertion is what
-[#185](https://github.com/rogvid/skills/issues/185) cost three CI runs.
-
 **Segments and the merge** — a demo recorded in two parts and joined by
 `stitch()` ([#7](https://github.com/rogvid/skills/issues/7)). `segments/`
 records the storyboard `SKILL.md` prescribes for a real time-skip: part one,
@@ -1370,7 +1329,6 @@ are what changed that, and they are now load-bearing rather than a convenience.
 | `--coverage-only` | 8 s |
 | `--narration-only` | 8 s |
 | `--strict-only` | 13 s |
-| `--pointer-only` | 15 s |
 | `--determinism-only` | 19 s |
 | `--issues-only` | 26 s |
 | `--polish-only` | 26 s |
@@ -1381,6 +1339,11 @@ are what changed that, and they are now load-bearing rather than a convenience.
 | `--content-only` | 148 s |
 | `--terminal-only` | 186 s |
 | the whole suite | 427 s |
+
+That whole-suite reading includes a 15 s arm the same branch dropped before
+merge (#210), so the tree as it stands is nearer 410 s. It is left as measured
+rather than corrected by subtraction — a number nobody has read off a stopwatch
+is how this row came to say 622 s.
 
 The per-arm figures are the calibration this manifest was built on. The
 whole-suite row is a fresh reading taken while
@@ -1438,7 +1401,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-31 entries, 11 arms, ~35.4 min of takes
+30 entries, 10 arms, ~34.9 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1460,7 +1423,6 @@ paragraph whose job is to say what this manifest does not cover.
 | `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
-| `--pointer-only` | 1 | the recorder's cursor dot goes back to chasing the `mousemove` Chromium fires at load ([#186](https://github.com/rogvid/skills/issues/186)) — aimed at the dot's *position*, never at the still hashes beside it, because with the guard gone the two takes agree about as often as they disagree |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
 | `--segments-only` | 2 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); or every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
@@ -1471,7 +1433,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **19 of `tests/smoke`'s 36 check functions have no entry**, and the harness
+- **19 of `tests/smoke`'s 35 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1567,6 +1529,22 @@ exactly where `--strict-only` came from.
 
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
+
+- **The take-level sentence both cursor fixes were accepted on is ungraded.**
+  [#186](https://github.com/rogvid/skills/issues/186) and
+  [#202](https://github.com/rogvid/skills/issues/202) were accepted on "two
+  takes of a storyboard that never moves the pointer produce byte-identical
+  stills". `tests/unit`'s `CursorMotion` grades the *rule* against event shapes
+  measured off three Chromium builds; the determinism arm parks the pointer
+  before anything is photographed and is structurally blind to it. An arm was
+  built for it and removed before merge, because the only event that exercises
+  the guard in such a take — the `mousemove` Chromium dispatches at load — is
+  delivered only when the page's `load` event fires inside 22 ms: 7 of 7 takes
+  under that bar received it, 0 of 9 over it, and the reviewer's box saw 0 of
+  12. Not machine load (7/9 loaded against 8/9 idle) and not listener timing
+  (installed at `readyState: 'loading'`, 7.2-8.4 ms, 16 of 16). The full
+  measurement, and the one route that might still work, are in
+  [#210](https://github.com/rogvid/skills/issues/210).
 
 - **Nothing calls the ElevenLabs API.** The narration take grades everything a
   cache hit reaches — the key, the pacing, the mix — and by construction never
