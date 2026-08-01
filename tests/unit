@@ -1264,6 +1264,13 @@ DOC_SYMBOL_ALLOWED = {
     # graded where.
     "check_coverage": "a function in tests/smoke",
     "check_coverage_merge": "a function in tests/smoke",
+    # Bars, same reason. These were named by limits.md before this entry
+    # existed, but written `MAX_CAPTURE_LOSS_S = 0.75` — a span the extractor
+    # does not read as a symbol. Naming them bare is clearer for a reader and
+    # brought them into scope, which is the check working rather than a
+    # regression in it.
+    "MAX_CAPTURE_LOSS_S": "a constant in tests/smoke",
+    "MAX_SKEW_DRIFT_S": "a constant in tests/smoke",
 }
 
 
