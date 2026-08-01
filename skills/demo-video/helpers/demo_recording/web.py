@@ -117,6 +117,44 @@ _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 # and no rule reading events can separate them. A storyboard that wants the
 # cursor at the very corner of the viewport has to pass through somewhere else.
 #
+# **The dot is built at `document_start` and inserted at `DOMContentLoaded`,
+# and that split is issue #203.** All of the above is a rule about events, and
+# a rule about events is worth nothing while nothing is listening. `attach`
+# needs `document.body`, so it can only run at `DOMContentLoaded` — and a
+# `mousemove` dispatched before that used to be delivered to no handler at
+# all. Nothing replaces it: the pointer is where it was asked to be, the
+# browser has no reason to say so again, and the dot stays at the stylesheet's
+# off-screen park for the rest of the document. Reachable through the escape
+# hatch `SKILL.md` documents:
+#
+#     rec.page.goto(url, wait_until="commit")   # Recorder.goto waits for load
+#     rec.page.mouse.move(60, 640)
+#
+# Measured against `tests/fixture` with the position rule above already in
+# place, 12 takes per build, counting only the takes where a probe confirmed
+# the move was delivered while `document.readyState` was still `'loading'`:
+# the dot was placed in **0 of 17** such takes before this split and **13 of
+# 13** after, on Chromium 136, 147 and 149. Chromium 151 never reached the
+# window in 24 takes — its `DOMContentLoaded` lands at 11-17 ms and
+# Playwright's move at 39-68 ms — so it is untested rather than passing.
+#
+# So the listeners are registered while the script itself is evaluated, which
+# for a Playwright init script is `document_start`, and the element they write
+# to is created there too. **A detached element can be styled**: the inline
+# `left`/`top` a `mousemove` writes is still on the div when `attach` puts it
+# in the document, so the dot appears at `DOMContentLoaded` already standing
+# where the pointer went. Nothing is drawn any earlier than it used to be —
+# the stylesheet and the insertion are both still at `DOMContentLoaded`, and
+# an untouched pointer still leaves the parked-off-screen dot #186 is about.
+#
+# What is deliberately *not* covered: a move dispatched before the navigation.
+# That one lands in the previous document, which had its own overlay and its
+# own dot, and no rule in the new document can recover it. Nor is the move
+# Chromium drops on the floor — in the same 48 takes the document received no
+# `mousemove` at all in 3 of 12 on 136, 4 of 12 on 147, 2 of 12 on 149 and 7
+# of 12 on 151, identically before and after this change, and a dot cannot be
+# placed for an event that never arrives. That is issue #230.
+#
 # What this does not do: place the dot after a navigation. A document that
 # replaces the one the dot lived in gets a fresh, parked dot, and Chromium
 # sends its hover-recompute move only for the *first* document — measured, two
@@ -126,6 +164,18 @@ _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 # about that.
 _CURSOR_JS = """
 (() => {
+  const dot = document.createElement('div');
+  dot.id = '__demo_cursor';
+  let atX = 0, atY = 0;
+  window.addEventListener('mousemove', (e) => {
+    if (e.clientX === atX && e.clientY === atY) return;
+    atX = e.clientX;
+    atY = e.clientY;
+    dot.style.left = e.clientX + 'px';
+    dot.style.top = e.clientY + 'px';
+  }, true);
+  window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
+  window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);
   const attach = () => {
     if (document.getElementById('__demo_cursor')) return;
     const style = document.createElement('style');
@@ -138,19 +188,7 @@ _CURSOR_JS = """
       #__demo_cursor.__down { width: 12px; height: 12px; }
     `;
     document.head.appendChild(style);
-    const dot = document.createElement('div');
-    dot.id = '__demo_cursor';
     document.body.appendChild(dot);
-    let atX = 0, atY = 0;
-    window.addEventListener('mousemove', (e) => {
-      if (e.clientX === atX && e.clientY === atY) return;
-      atX = e.clientX;
-      atY = e.clientY;
-      dot.style.left = e.clientX + 'px';
-      dot.style.top = e.clientY + 'px';
-    }, true);
-    window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
-    window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);
   };
   if (document.readyState === 'loading')
     document.addEventListener('DOMContentLoaded', attach);

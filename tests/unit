@@ -3405,6 +3405,13 @@ _JS_TOKEN = re.compile(
 # assumed: a seed anywhere other than where the pointer starts would either
 # let the load-time event through (#186) or swallow a real move.
 _JS_SEED_RE = re.compile(r"let atX = (-?\d+), atY = (-?\d+);")
+# What the overlay puts off until the document has a `<body>` to hang the dot
+# on. Everything else in the script runs at `document_start`, and issue #203 is
+# the difference: a rule about `mousemove` grades nothing while nothing is
+# subscribed, and a move dispatched before `DOMContentLoaded` has no
+# replacement — the pointer is where it was asked to be, so the browser never
+# reports it again.
+_JS_DEFER_RE = re.compile(r"document\.addEventListener\('DOMContentLoaded', (\w+)\)")
 
 
 class _JsEvent:
@@ -3464,6 +3471,64 @@ def cursor_seed() -> tuple[int, int]:
     return int(found[0][0]), int(found[0][1])
 
 
+def _js_block(text: str, start: int) -> str:
+    """The source between an already-opened `{` and the `}` that closes it.
+
+    Template literals are skipped whole rather than scanned: the overlay's
+    stylesheet lives in one, and a counter that read its braces would close
+    the function early and hand every assertion below a slice of CSS.
+    """
+    depth, i = 1, start
+    while i < len(text):
+        ch = text[i]
+        if ch in "'\"":
+            i += 1
+            while i < len(text) and text[i] != ch:
+                i += 2 if text[i] == "\\" else 1
+        elif ch == "`":
+            i += 1
+            while i < len(text) and text[i] != "`":
+                if text[i] == "$" and text[i + 1 : i + 2] == "{":
+                    raise AssertionError(
+                        "the cursor overlay interpolates into a template "
+                        "literal; this reader skips template literals whole "
+                        "and would mis-count the braces inside one"
+                    )
+                i += 2 if text[i] == "\\" else 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+        i += 1
+    raise AssertionError(
+        "the cursor overlay has an unbalanced block, so nothing below could "
+        "read what it defers to DOMContentLoaded"
+    )
+
+
+def cursor_deferred_body() -> str:
+    """The part of the overlay that does not run until `DOMContentLoaded`."""
+    found = _JS_DEFER_RE.findall(_CURSOR_JS)
+    if len(found) != 1:
+        raise AssertionError(
+            f"the cursor overlay defers {len(found)} functions to "
+            f"DOMContentLoaded, expected exactly 1 — this suite reads the "
+            f"deferred region out of the script rather than assuming it, "
+            f"because what is inside it is unreachable to a pointer move "
+            f"dispatched earlier in the document (#203)"
+        )
+    opening = f"const {found[0]} = () => {{"
+    if opening not in _CURSOR_JS:
+        raise AssertionError(
+            f"the overlay defers {found[0]!r} to DOMContentLoaded but does not "
+            f"declare it as `{opening}`, so this suite cannot say what runs "
+            f"late and what runs at document_start (#203)"
+        )
+    return _js_block(_CURSOR_JS, _CURSOR_JS.index(opening) + len(opening))
+
+
 class CursorMotion(unittest.TestCase):
     """Which `mousemove` moves the recorder's cursor dot (#186, #202)."""
 
@@ -3519,6 +3584,54 @@ class CursorMotion(unittest.TestCase):
             f"the guard {expr!r} never reads the position the overlay "
             f"remembers, so it cannot be telling an event that reports a new "
             f"position from one that repeats the old one (#186, #202)",
+        )
+
+    def test_what_the_overlay_defers_to_domcontentloaded_is_the_insertion(self):
+        # The control for the assertion below, which is "X is *not* in this
+        # string" and would be satisfied just as happily by an extraction that
+        # returned an empty one. What is legitimately late is putting the dot
+        # and its stylesheet in the document, because neither can happen
+        # before there is a `<body>` and a `<head>` to put them in.
+        deferred = cursor_deferred_body()
+        for statement in (
+            "document.head.appendChild(style);",
+            "document.body.appendChild(dot);",
+        ):
+            self.assertIn(
+                statement,
+                deferred,
+                f"the overlay never runs `{statement}` at DOMContentLoaded, so "
+                f"either the dot is never put on the page — no cursor in any "
+                f"take — or this suite is reading the wrong region and the "
+                f"assertion below grades nothing (#203)",
+            )
+
+    def test_the_pointer_is_listened_for_before_the_document_has_loaded(self):
+        # #203. `attach` cannot run before `document.body` exists, so a
+        # `mousemove` dispatched earlier in the document is delivered to
+        # whatever was subscribed *then* — and with the subscription inside
+        # `attach` that was nothing at all. Nothing replaces it either: the
+        # pointer is already where the storyboard put it, so the browser has
+        # no reason to report it again, and the dot sits at the stylesheet's
+        # off-screen park for the rest of the document. Reachable through the
+        # escape hatch SKILL.md documents, `goto(..., wait_until="commit")`
+        # followed by `page.mouse.move`, which is what #202's determinism arm
+        # drives the pointer with.
+        #
+        # So the subscription is established while the init script is
+        # evaluated, and the element it writes to is created there too; only
+        # the insertion waits. A detached div keeps the inline `left`/`top` a
+        # handler wrote on it, so the dot enters the document already standing
+        # where the pointer went.
+        deferred = cursor_deferred_body()
+        self.assertNotIn(
+            "addEventListener(",
+            deferred,
+            "the overlay subscribes to pointer events inside the function it "
+            "defers to DOMContentLoaded, so a move dispatched before the "
+            "document finished loading is delivered to no handler and no later "
+            "event replaces it — the dot stays off screen for the whole take "
+            "(#203)",
         )
 
     def test_chromiums_load_time_hover_event_does_not_move_the_dot(self):
@@ -4175,6 +4288,73 @@ class CaptureClock(unittest.TestCase):
 # --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
+
+# Issue #203, as the overlay shipped before it was fixed and after it was.
+# Nothing below is rewritten by hand: the two are the same region of
+# `_CURSOR_JS` — from the dot's creation to its insertion — in the two orders,
+# and swapping them puts the pointer subscriptions back inside the function
+# that cannot run until `document.body` exists. A `mousemove` dispatched
+# before that is then delivered to no handler, and no later event replaces it:
+# measured against `tests/fixture` with `goto(wait_until="commit")` and a raw
+# `page.mouse.move`, Chromium 147 placed the dot in 2 takes of 4 and left it
+# off screen in the other 2.
+#
+# Written out in full rather than as a one-line edit because there is no
+# one-line version: the fix *is* the order, and an injection that only looked
+# like it would leave the suite grading a script nobody ships.
+_CURSOR_LISTENS_AT_DOCUMENT_START = """\
+  const dot = document.createElement('div');
+  dot.id = '__demo_cursor';
+  let atX = 0, atY = 0;
+  window.addEventListener('mousemove', (e) => {
+    if (e.clientX === atX && e.clientY === atY) return;
+    atX = e.clientX;
+    atY = e.clientY;
+    dot.style.left = e.clientX + 'px';
+    dot.style.top = e.clientY + 'px';
+  }, true);
+  window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
+  window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);
+  const attach = () => {
+    if (document.getElementById('__demo_cursor')) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;
+        height: 18px; border-radius: 50%; background: rgba(__ACCENT__,.45);
+        border: 2px solid rgba(__ACCENT__,.95); pointer-events: none;
+        z-index: 2147483647; transform: translate(-50%,-50%);
+        transition: width .1s, height .1s; }
+      #__demo_cursor.__down { width: 12px; height: 12px; }
+    `;
+    document.head.appendChild(style);
+    document.body.appendChild(dot);"""
+
+_CURSOR_LISTENS_AT_DOMCONTENTLOADED = """\
+  const attach = () => {
+    if (document.getElementById('__demo_cursor')) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;
+        height: 18px; border-radius: 50%; background: rgba(__ACCENT__,.45);
+        border: 2px solid rgba(__ACCENT__,.95); pointer-events: none;
+        z-index: 2147483647; transform: translate(-50%,-50%);
+        transition: width .1s, height .1s; }
+      #__demo_cursor.__down { width: 12px; height: 12px; }
+    `;
+    document.head.appendChild(style);
+    const dot = document.createElement('div');
+    dot.id = '__demo_cursor';
+    document.body.appendChild(dot);
+    let atX = 0, atY = 0;
+    window.addEventListener('mousemove', (e) => {
+      if (e.clientX === atX && e.clientY === atY) return;
+      atX = e.clientX;
+      atY = e.clientY;
+      dot.style.left = e.clientX + 'px';
+      dot.style.top = e.clientY + 'px';
+    }, true);
+    window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
+    window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);"""
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
@@ -5169,7 +5349,7 @@ INJECTIONS = [
         # deterministic take's opening stills are a coin flip.
         "the cursor dot follows every mousemove again",
         "web.py",
-        "      if (e.clientX === atX && e.clientY === atY) return;\n",
+        "    if (e.clientX === atX && e.clientY === atY) return;\n",
         "",
         [
             "CursorMotion.test_the_rule_is_one_condition_that_reads_the_event",
@@ -5210,11 +5390,38 @@ INJECTIONS = [
         # event reports a "new" position and #186 is back.
         "the overlay starts out believing the pointer is somewhere else",
         "web.py",
-        "    let atX = 0, atY = 0;",
-        "    let atX = -1, atY = -1;",
+        "  let atX = 0, atY = 0;",
+        "  let atX = -1, atY = -1;",
         [
             "CursorMotion.test_chromiums_load_time_hover_event_does_not_move_the_dot",
             "CursorMotion.test_the_remembered_position_is_where_the_pointer_starts",
+        ],
+    ),
+    (
+        # Issue #203: the overlay does not start listening until the document
+        # has a body, so the pointer move a storyboard makes before that is
+        # heard by nothing. Silent everywhere else — the rule is unchanged, the
+        # seed is unchanged, and a take recorded this way looks exactly like a
+        # take whose storyboard never moved the pointer.
+        "the cursor overlay waits for the document before it listens",
+        "web.py",
+        _CURSOR_LISTENS_AT_DOCUMENT_START,
+        _CURSOR_LISTENS_AT_DOMCONTENTLOADED,
+        [
+            "CursorMotion.test_the_pointer_is_listened_for_before_the_document_has_loaded",
+        ],
+    ),
+    (
+        # The control under the assertion above, and a real defect on its own:
+        # a dot that is built and positioned but never inserted is no cursor at
+        # all, in every take. It is also what an extraction that returned the
+        # wrong slice of the script would look like.
+        "the dot is built and positioned but never put on the page",
+        "web.py",
+        "    document.body.appendChild(dot);\n",
+        "",
+        [
+            "CursorMotion.test_what_the_overlay_defers_to_domcontentloaded_is_the_insertion",
         ],
     ),
     (
@@ -5224,7 +5431,7 @@ INJECTIONS = [
         # a fiction.
         "the overlay never records where it last saw the pointer",
         "web.py",
-        "      atX = e.clientX;\n      atY = e.clientY;\n",
+        "    atX = e.clientX;\n    atY = e.clientY;\n",
         "",
         ["CursorMotion.test_nothing_moves_the_dot_except_through_the_rule"],
     ),
@@ -5512,6 +5719,16 @@ def fault_inject() -> int:
 #   byte-identical stills"), need Chromium and belong to `tests/smoke` — where
 #   the storyboard that never moves the pointer is still missing (#193). A
 #   re-measurement lands in `event()`.
+# - **That the subscription is *established* early enough (#203) is a claim
+#   about this file's text, not about a browser.** `cursor_deferred_body`
+#   reads the region the overlay puts off until `DOMContentLoaded` and requires
+#   no `addEventListener(` in it; a subscription reached through an
+#   indirection — `const listen = () => window.addEventListener(...)`, called
+#   from `attach` — would satisfy that while the defect was back. The browser
+#   half was measured once, over 12 takes per build on Chromium 136, 147 and
+#   149, and nothing re-runs it; `tests/README.md`'s Known gaps carries the
+#   numbers, and the separate mode where Chromium delivers no `mousemove` at
+#   all is #230.
 # - **Anything measured off real frames.** `content_report`'s ffmpeg sampling,
 #   `opening_gap`, `_luma_stddev` and `_moved_pixels` need a video to be true
 #   about. What is graded here is the logic *around* them: the warning

@@ -1690,6 +1690,34 @@ knows is missing is worse than one that is openly absent.
   measurement, and the one route that might still work, are in
   [#210](https://github.com/rogvid/skills/issues/210).
 
+- **That a pointer move made before `DOMContentLoaded` places the dot is graded
+  as a shape, not in a browser.**
+  [#203](https://github.com/rogvid/skills/issues/203) moved the overlay's
+  pointer subscriptions to `document_start` and left only the dot's insertion
+  at `DOMContentLoaded`. What `tests/unit`'s `CursorMotion` grades is exactly
+  that: the region the script defers holds no `addEventListener(`, read out of
+  the shipped `_CURSOR_JS`. It is a **textual** claim, and a subscription
+  registered through an indirection — a `const listen = () => window.add…`
+  called from `attach` — would satisfy it while the defect was back. The
+  browser measurement is in the pull request, not in any suite: 12 `Recorder`
+  takes per build through `goto(wait_until="commit")` plus a raw
+  `page.mouse.move`, counting only the takes where a probe confirmed the move
+  was delivered at `readyState: 'loading'`. Dot placed 0 of 17 such takes
+  before, 13 of 13 after, on Chromium 136, 147 and 149. **Chromium 151 could
+  not be measured at all**: its `DOMContentLoaded` lands at 11-17 ms and
+  Playwright's move at 39-68 ms, so 0 of 24 takes reached the window. Nothing
+  re-runs any of this, and a smoke arm for it would inherit
+  [#210](https://github.com/rogvid/skills/issues/210)'s problem — the browser,
+  not the storyboard, decides whether a take exercises the path.
+
+- **The same escape hatch loses the move outright in some takes, and no suite
+  sees that either.** Measured while grading #203 and unchanged by it: the
+  document receives no `mousemove` at all in 3 of 12 takes on Chromium 136, 4
+  of 12 on 147, 2 of 12 on 149 and **7 of 12 on 151**, so the take records no
+  cursor. `check_parked_pointer` cannot catch it — the determinism storyboard
+  parks after `Recorder.goto()`, which waits for `load`. Tracked with its
+  measurement in [#230](https://github.com/rogvid/skills/issues/230).
+
 - **Nothing calls the ElevenLabs API.** The narration take grades everything a
   cache hit reaches — the key, the pacing, the mix — and by construction never
   takes the miss path, which is the point. So `tts_clip`'s request, its 429/5xx
