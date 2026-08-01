@@ -2153,6 +2153,184 @@ class SmokeResidue(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# What `tests/smoke --cheap` runs, and what it stops running (issue #61)
+# --------------------------------------------------------------------------
+#
+# `--cheap` is the per-push selection: every phase reachable from an arm other
+# than `--web-only`, `--content-only` and `--terminal-only`. ci.yml runs it on a
+# pull request and the whole suite on merge, so what falls out of `--cheap` is
+# exactly what stops being checked before a review — which makes the selection
+# a thing to grade rather than to trust.
+#
+# It is graded here, off the browser, because the question is a function of
+# `run_phases`' guards and one small predicate, and answering it by running the
+# suite costs the ~7 minutes the split exists to avoid.
+#
+# **Why the expensive three are written out again here.** `tests/smoke` has its
+# own `EXPENSIVE_ARMS`, and importing it would make this agree with whatever
+# that tuple says — including with an arm quietly added to it, which is the
+# cheapest possible way to empty the per-push run. The three names below are
+# hand-written, and a fourth name appearing in the tuple over there is a
+# failure here.
+#
+# **What this does not grade:** that a phase does what its name says, or that
+# the takes pass. It grades *selection*. `tests/smoke` itself is the only thing
+# that can say a take is healthy.
+
+# The phases `--cheap` skips, named rather than counted. Each one is reachable
+# only from the three expensive arms, so each is a take that stops running on a
+# pull request. Editing this set is a decision about what a reviewer no longer
+# sees, and it should be made in an issue and not in a rebase.
+CHEAP_SKIPS = frozenset(
+    {
+        "run_web",  # 123 s
+        "run_terminal",  # 186 s
+        "run_content",  # 148 s, and reachable only from those two
+        "run_terminal_race",  # a terminal take, --terminal-only alone
+    }
+)
+
+# Written here so this suite disagrees with a change to smoke's own tuple.
+CHEAP_EXCLUDES = frozenset({"--web-only", "--content-only", "--terminal-only"})
+
+# Below this, `run_phases` was not read: an extraction that matched nothing
+# makes every "every phase …" below true over an empty set. 18 guards today.
+SMOKE_PHASE_FLOOR = 14
+
+
+def _smoke_module():
+    """`tests/smoke` imported as a module, so `selects` can be called."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    loader = SourceFileLoader("_smoke_under_test", str(SMOKE))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _smoke_guards():
+    """[(arms, phase)] read out of `run_phases`, and the flags argparse defines.
+
+    The extraction is this file's own: it walks the AST rather than asking
+    `tests/smoke` what it runs, so a guard that names an arm nobody can pass is
+    visible here and invisible to the script itself.
+    """
+    import ast
+
+    tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    guards = []
+    for node in funcs["run_phases"].body:
+        if not isinstance(node, ast.If):
+            continue
+        call = node.test
+        if not (
+            isinstance(call, ast.Call) and getattr(call.func, "id", "") == "selects"
+        ):
+            continue
+        arms = tuple(e.value for e in call.args[1].elts)
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id.startswith(("run_", "check_"))
+            ):
+                guards.append((arms, sub.func.id))
+    flags = {
+        node.args[0].value
+        for node in ast.walk(funcs["main"])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        and isinstance(node.args[0], ast.Constant)
+    }
+    return guards, flags
+
+
+class CheapArm(unittest.TestCase):
+    def setUp(self):
+        self.guards, self.flags = _smoke_guards()
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(self.guards),
+            SMOKE_PHASE_FLOOR,
+            f"only {len(self.guards)} guard(s) were read out of run_phases — "
+            f"either the suite shrank or this extraction stopped extracting, "
+            f"and every claim below would hold over what it did not read",
+        )
+        self.smoke = _smoke_module()
+
+    def test_cheap_runs_every_phase_a_non_expensive_arm_reaches(self):
+        """The rule, applied to each guard and compared per phase.
+
+        Per phase and not as a count: "the same number of phases" is satisfied
+        by swapping a 26 s arm for a 186 s one.
+        """
+        wanted = {
+            phase: any(arm not in CHEAP_EXCLUDES for arm in arms)
+            for arms, phase in self.guards
+        }
+        got = {
+            phase: self.smoke.selects("--cheap", arms) for arms, phase in self.guards
+        }
+        self.assertEqual(
+            got,
+            wanted,
+            "--cheap disagrees with 'every phase an arm other than "
+            f"{sorted(CHEAP_EXCLUDES)} reaches' at: "
+            + ", ".join(sorted(k for k in wanted if got[k] != wanted[k])),
+        )
+
+    def test_the_phases_cheap_skips_are_the_four_it_is_meant_to_skip(self):
+        """Named, because this is the list of what a reviewer stops seeing."""
+        skipped = {
+            phase
+            for arms, phase in self.guards
+            if not self.smoke.selects("--cheap", arms)
+        }
+        self.assertEqual(
+            skipped,
+            set(CHEAP_SKIPS),
+            f"--cheap skips {sorted(skipped)}; the set this repo decided on in "
+            f"issue #61 is {sorted(CHEAP_SKIPS)}. A phase leaving the per-push "
+            f"run is a decision, not a diff.",
+        )
+
+    def test_every_arm_a_guard_names_is_a_flag_the_script_accepts(self):
+        """A guard naming `--cheap`, or a typo, would be a phase nothing runs.
+
+        `--cheap` is a *selection over* arms, so a guard that names it is the
+        hand-maintained list this design exists to avoid — and it would put a
+        123 s take back on every push while the rule above still passed.
+        """
+        named = {arm for arms, _ in self.guards for arm in arms}
+        self.assertTrue(named, "no guard named any arm")
+        unknown = sorted(named - (self.flags - {"--cheap"}))
+        self.assertEqual(
+            unknown,
+            [],
+            f"run_phases guards name {unknown}, which is not an arm flag "
+            f"main() defines (or is --cheap itself, which selects arms rather "
+            f"than being one)",
+        )
+
+    def test_a_whole_run_still_takes_everything_and_a_named_arm_still_itself(self):
+        """The regression half: `--cheap` must not have changed the old flags."""
+        for arms, phase in self.guards:
+            self.assertTrue(
+                self.smoke.selects(None, arms), f"a whole run skipped {phase}"
+            )
+            for arm in arms:
+                self.assertTrue(self.smoke.selects(arm, arms), f"{arm} skipped {phase}")
+            self.assertFalse(
+                self.smoke.selects("--no-such-arm", arms),
+                f"an arm no guard names still ran {phase}",
+            )
+
+
+# --------------------------------------------------------------------------
 # helpers/assets/ — the vendored files, the manifest, and the loader (issue #54)
 # --------------------------------------------------------------------------
 #
@@ -5798,6 +5976,94 @@ INJECTIONS = [
         '            "## Notes",',
         [
             "TimelineMd.test_every_recorded_problem_is_listed_with_the_beat_it_fired_during"
+        ],
+    ),
+    # -- what `tests/smoke --cheap` selects (issue #61) ---------------------
+    #
+    # Five breaks, because the selection can go wrong in five places that look
+    # nothing like each other: the arm list, one guard, the predicate's cheap
+    # branch, the predicate's named-arm branch, and this file's own extraction.
+    # A take falling off the per-push run is silent by construction — the suite
+    # still passes, faster — so each of these is a change that would otherwise
+    # be noticed only by somebody wondering why a bug reached main.
+    (
+        # The cheapest possible way to empty the per-push run: one name added
+        # to the list of arms `--cheap` excludes. Nothing else moves; every
+        # guard still reads exactly as it did.
+        "an arm is quietly added to smoke's expensive list, and stops running per push",
+        "tests/smoke",
+        'EXPENSIVE_ARMS = ("--web-only", "--content-only", "--terminal-only")',
+        'EXPENSIVE_ARMS = (\n    "--web-only",\n    "--content-only",\n'
+        '    "--terminal-only",\n    "--failure-only",\n)',
+        [
+            "CheapArm.test_cheap_runs_every_phase_a_non_expensive_arm_reaches",
+            "CheapArm.test_the_phases_cheap_skips_are_the_four_it_is_meant_to_skip",
+        ],
+    ),
+    (
+        # One phase re-gated behind an expensive arm. The rule still holds —
+        # the guard is consistent with itself — which is why the check that
+        # catches this is the one that names the four phases out loud.
+        "a phase is re-gated behind an expensive arm and leaves the per-push run",
+        "tests/smoke",
+        '    if selects(only, ("--failure-only",)):',
+        '    if selects(only, ("--terminal-only",)):',
+        ["CheapArm.test_the_phases_cheap_skips_are_the_four_it_is_meant_to_skip"],
+    ),
+    (
+        # The other direction, and the one a hand-maintained list would invite:
+        # `--cheap` written into a guard, putting a 123 s take back on every
+        # push. The complement rule cannot see it — the guard names an arm the
+        # rule counts as cheap — so the flag check is what has to.
+        "--cheap is hardcoded into a guard, putting a 123 s take back on every push",
+        "tests/smoke",
+        '    if selects(only, ("--web-only",)):',
+        '    if selects(only, ("--web-only", "--cheap")):',
+        [
+            "CheapArm.test_every_arm_a_guard_names_is_a_flag_the_script_accepts",
+            "CheapArm.test_the_phases_cheap_skips_are_the_four_it_is_meant_to_skip",
+        ],
+    ),
+    (
+        # The predicate's cheap branch stops selecting and starts agreeing:
+        # `--cheap` becomes a whole run, which passes everything and costs the
+        # seven minutes the split exists to avoid.
+        "--cheap stops selecting and runs everything, at whole-suite cost",
+        "tests/smoke",
+        '    if only == "--cheap":\n        return any(arm not in EXPENSIVE_ARMS for arm in arms)',
+        '    if only == "--cheap":\n        return True',
+        [
+            "CheapArm.test_cheap_runs_every_phase_a_non_expensive_arm_reaches",
+            "CheapArm.test_the_phases_cheap_skips_are_the_four_it_is_meant_to_skip",
+        ],
+    ),
+    (
+        # The regression half. `selects()` replaced fourteen `only in (None, …)`
+        # guards, so a bug in its *named-arm* branch would silently change what
+        # every existing `--x-only` flag runs — including the ones
+        # `tests/smoke-inject` aims its entries at, which would then certify an
+        # assertion against a take that never ran.
+        "every named arm starts running every phase, so --x-only stops selecting",
+        "tests/smoke",
+        "    return only in arms\n",
+        "    return True\n",
+        [
+            "CheapArm.test_a_whole_run_still_takes_everything_and_a_named_arm_still_itself"
+        ],
+    ),
+    (
+        # And the control. Every claim above is quantified over the guards this
+        # file reads out of `run_phases`; an extraction that matches nothing
+        # makes all of them true over an empty set, which is the catalogue's
+        # vacuous sweep with a suite-wide blast radius.
+        "the guard extraction matches nothing, so every --cheap claim goes vacuous",
+        "tests/unit",
+        '            isinstance(call, ast.Call) and getattr(call.func, "id", "") == "selects"\n',
+        '            isinstance(call, ast.Call) and getattr(call.func, "id", "") == "selected"\n',
+        [
+            "CheapArm.test_cheap_runs_every_phase_a_non_expensive_arm_reaches",
+            "CheapArm.test_the_phases_cheap_skips_are_the_four_it_is_meant_to_skip",
+            "CheapArm.test_every_arm_a_guard_names_is_a_flag_the_script_accepts",
         ],
     ),
 ]

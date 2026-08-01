@@ -10706,6 +10706,14 @@ def main() -> int:
         "leaves behind, against one that started and failed (issue #105)",
     )
     parser.add_argument(
+        "--cheap",
+        action="store_true",
+        help="record every phase that any arm other than --web-only, "
+        "--content-only and --terminal-only reaches — the per-push selection "
+        "(issue #61). Derived from the guards in run_phases, not listed: a "
+        "phase a new cheap arm reaches is in it automatically.",
+    )
+    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -10743,6 +10751,7 @@ def main() -> int:
             ("--strict-only", args.strict_only),
             ("--issues-only", args.issues_only),
             ("--lock-only", args.lock_only),
+            ("--cheap", args.cheap),
         )
         if on
     ]
@@ -10822,6 +10831,39 @@ def open_output(args: argparse.Namespace) -> tuple[Path, bool]:
     return Path(tempfile.mkdtemp(prefix="demo-video-smoke-")), True
 
 
+# The three arms that record the long takes: 123 s, 148 s and 186 s against
+# 1-48 s for everything else, and 74% of a whole run between them. `--cheap` is
+# defined as their complement rather than as a list, because a list is a second
+# place to forget: an arm added to `run_phases` and not to the list would stop
+# running per push and nothing would say so. Here the only way to fall out of
+# `--cheap` is to be reachable from *nothing but* these three, which is the
+# same sentence as "this phase costs two minutes".
+#
+# What that costs is written down rather than implied: eight check functions —
+# `check_opening`, `check_opening_gap`, `check_verb_classification`,
+# `check_content_pair`, `check_content_toured`, `check_form_pacing`,
+# `_check_occlusion` and `_check_scored_region` — are reachable only from these
+# arms, so under `--cheap` they grade on merge and not on push. Three of them
+# have no `tests/smoke-inject` entry either. `tests/README.md` carries the
+# roster; `tests/unit`'s `CheapArm` is what keeps this comment honest.
+EXPENSIVE_ARMS = ("--web-only", "--content-only", "--terminal-only")
+
+
+def selects(only: str | None, arms: tuple[str, ...]) -> bool:
+    """Whether the chosen flag runs a phase the arms in `arms` reach.
+
+    `None` is a whole run and takes everything. `--cheap` takes a phase when
+    *any* arm reaching it is not one of `EXPENSIVE_ARMS` — so a phase only the
+    long takes reach is skipped, and one that a 26 s arm also reaches is not.
+    Every other flag is itself.
+    """
+    if only is None:
+        return True
+    if only == "--cheap":
+        return any(arm not in EXPENSIVE_ARMS for arm in arms)
+    return only in arms
+
+
 def run_phases(only: str | None, out_root: Path) -> list[str]:
     """Every phase the chosen flag selects, in order."""
     failures: list[str] = []
@@ -10829,13 +10871,13 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # reads what they say about their own output directory (issue #105). Two
     # seconds, before ten minutes of takes, so a full run's own report about
     # where its recordings are is graded before there are any.
-    if only in (None, "--lock-only"):
+    if selects(only, ("--lock-only",)):
         failures += check_lock_refusal(out_root)
-    if only in (None, "--web-only"):
+    if selects(only, ("--web-only",)):
         failures += run_web(out_root)
-    if only in (None, "--terminal-only"):
+    if selects(only, ("--terminal-only",)):
         failures += run_terminal(out_root)
-    if only in (None, "--segments-only"):
+    if selects(only, ("--segments-only",)):
         failures += run_segments(out_root)
     # After the graded takes, never instead of them: these five record
     # nothing worth looking at, and if a recorder is broken the messages
@@ -10843,24 +10885,24 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # How the recording *looks* (issues #110/#111). Reachable from the medium
     # flags as well as from --polish-only, because whoever is changing the
     # spotlight is running --web-only.
-    if only in (None, "--web-only", "--polish-only"):
+    if selects(only, ("--web-only", "--polish-only")):
         failures += run_spotlight(out_root)
-    if only in (None, "--terminal-only", "--polish-only"):
+    if selects(only, ("--terminal-only", "--polish-only")):
         failures += run_terminal_opening(out_root)
     # Whether the recorder notices a recording that shows nothing (issue #97).
     # Reachable from --terminal-only as well as its own flag: it is a terminal
     # take, and the card it leaves up is the terminal recorder's card.
-    if only in (None, "--terminal-only", "--content-only"):
+    if selects(only, ("--terminal-only", "--content-only")):
         failures += run_content(out_root)
     # Clearing a `light` interlude, and noticing one left up (#162/#163). A web
     # take, and reachable from --content-only as well as its own flag: it
     # grades the other half of the same question the pair above does.
-    if only in (None, "--web-only", "--content-only", "--overlay-only"):
+    if selects(only, ("--web-only", "--content-only", "--overlay-only")):
         failures += run_overlay(out_root)
     # Acceptance-criterion coverage (issue #12). Reachable from --web-only as
     # well as its own flag: it is a web take, and whoever is changing the
     # recorder's beat record is running --web-only.
-    if only in (None, "--web-only", "--coverage-only"):
+    if selects(only, ("--web-only", "--coverage-only")):
         failures += run_coverage(out_root)
     # What the recorder saw behind the pixels (`check_issues`). Reachable from
     # --issues-only as well as from the medium flags, and that split is the
@@ -10868,7 +10910,7 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # were reachable only from arms costing 123 s and 186 s. An assertion is
     # only as gradeable as its cheapest arm — `--strict-only` is the worked
     # example, and issue #197 is where this one is written down with numbers.
-    if only in (None, "--web-only", "--issues-only"):
+    if selects(only, ("--web-only", "--issues-only")):
         failures += run_web_problems(out_root)
     # The two takes strict=True must refuse. Reachable on their own as well as
     # from the medium flags, because they are the cheapest graded takes in this
@@ -10876,31 +10918,31 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # against — and the arm that reaches them otherwise costs 186 s. That
     # matters for `tests/smoke-inject`, where an assertion is only as gradeable
     # as its cheapest arm.
-    if only in (None, "--web-only", "--strict-only"):
+    if selects(only, ("--web-only", "--strict-only")):
         failures += run_strict_web(out_root)
-    if only in (None, "--web-only", "--evidence-only"):
+    if selects(only, ("--web-only", "--evidence-only")):
         failures += run_evidence(out_root)
     # Speech end to end (issue #157). A web take, so it is reachable from
     # --web-only as well as its own flag — whoever changes the narration path
     # is running one of the two.
-    if only in (None, "--web-only", "--narration-only"):
+    if selects(only, ("--web-only", "--narration-only")):
         failures += run_narration(out_root)
-    if only in (None, "--terminal-only", "--issues-only"):
+    if selects(only, ("--terminal-only", "--issues-only")):
         failures += run_terminal_problems(out_root)
     # Not on --issues-only: `run_terminal_race` manufactures its condition with
     # a shell that sleeps before exec'ing, and its assertions are its own —
     # `check_issues` never sees this take.
-    if only in (None, "--terminal-only"):
+    if selects(only, ("--terminal-only",)):
         failures += run_terminal_race(out_root)
-    if only in (None, "--terminal-only", "--strict-only"):
+    if selects(only, ("--terminal-only", "--strict-only")):
         failures += run_strict_terminal(out_root)
-    if only in (None, "--determinism-only"):
+    if selects(only, ("--determinism-only",)):
         failures += run_determinism(out_root)
     # What a take that did *not* finish leaves behind. Last, because every
     # phase above records a take that works, and reading "crash-web wrote no
     # demo.mp4" before "web wrote no demo.mp4" would send somebody to the
     # wrong place.
-    if only in (None, "--failure-only"):
+    if selects(only, ("--failure-only",)):
         failures += run_failure(out_root)
     return failures
 
