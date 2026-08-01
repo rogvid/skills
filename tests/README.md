@@ -48,6 +48,17 @@ tests/
 
 [#136]: https://github.com/rogvid/skills/issues/136
 
+**A fourth suite lives outside this directory**, and it is here so nobody has
+to find that out by accident: `examples/ticket-queue/test` grades the example
+app the demo-video reference PR records — 12 assertions read off a real browser
+(3.6 s) and 11 injections against `web/app.js` and the seeded data (87 s). It
+belongs beside the app rather than here because it grades *that application*,
+not the recorder. `.github/workflows/ticket-queue.yml` runs both halves on any
+push touching `examples/ticket-queue/**` and nightly
+([#182](https://github.com/rogvid/skills/issues/182)); before that workflow
+existed nothing ran either half, so its injections graded the change that
+introduced them and nothing after it.
+
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
 problem takes, `segments/` — one demo recorded in two parts and joined with
 `stitch()` — and `evidence/`, a few seconds against what a beat's page text

@@ -1,0 +1,78 @@
+name: ticket-queue
+
+# `examples/ticket-queue/test` — the queue's own suite, and the one thing in
+# this repository that reads a rendered page the way a viewer does.
+#
+# **Why it needed a workflow of its own (issue #182).** It landed with #132 as
+# the gate on the queue's search: 12 assertions off a real browser and an
+# `INJECTIONS` table of 11 breaks that must each make a *named* test fire.
+# Nothing ran it. `ticket-queue-demo.yml` fires on the same paths and *records*
+# — it never invokes `./test` — and `tests/unit`/`tests/ci-unit` do not know the
+# example exists. So those injections graded the change that introduced them,
+# and nothing since.
+#
+# **Why both halves run on every triggering push, and not just the suite.**
+# Measured on a 16-core developer box: the suite is 12 tests in 3.6 s and the
+# manifest is 11 injections in 87 s. That is inside the noise of the demo
+# recording that already fires on these same paths, and the manifest is the
+# half that answers "can these assertions still fail" — the question that goes
+# stale exactly when `web/app.js` changes, which is when this fires. Running it
+# nightly *as well* is what covers the weeks nobody touches the example.
+#
+# Chromium only. No ffmpeg, no lock, nothing shared: `serve` is stdlib-only and
+# the suite binds an ephemeral port, so this can run beside anything.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "examples/ticket-queue/**"
+      - ".github/workflows/ticket-queue.yml"
+  pull_request:
+    paths:
+      - "examples/ticket-queue/**"
+      - ".github/workflows/ticket-queue.yml"
+  # Same cadence as smoke-inject, half an hour later so the two do not contend
+  # for a runner. This is the leg that keeps the manifest honest in a week when
+  # the paths filter above never fires.
+  schedule:
+    - cron: "50 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ticket-queue-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: examples/ticket-queue/test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # The suite's only prerequisite. `--with-deps` because a fresh runner has
+      # none of the shared libraries headless Chromium links against.
+      - name: Install Chromium for Playwright
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      # The gate. A non-zero exit here fails the job: no pipe, no `|| true`,
+      # no `continue-on-error` — the suite's exit status is the step's.
+      - name: examples/ticket-queue/test
+        run: examples/ticket-queue/test
+
+      # An assertion nobody has watched fail is a claim, not a check. This
+      # breaks the app eleven named ways — the filter, the row markup, the case
+      # fold, the row's identity, the heading count, and the fixture control
+      # that stops a requester match being satisfied by a title — and requires
+      # the *named* test to be the one that fires. It aborts with exit 3 rather
+      # than passing if an injection's pattern does not match exactly once.
+      - name: examples/ticket-queue/test --fault-inject
+        run: examples/ticket-queue/test --fault-inject
