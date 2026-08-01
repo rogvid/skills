@@ -30,6 +30,7 @@ switched on together.
 
 ```python
 with Recorder(out_dir, deterministic=True) as rec:   # or DEMO_VIDEO_DETERMINISTIC=1
+    ...
 ```
 
 ### Why the clock is opt-in — read this before turning it on
