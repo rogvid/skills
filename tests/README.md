@@ -1660,14 +1660,19 @@ exactly where `--strict-only` came from.
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
 
-- **A click-driven navigation clears the caption one beat later than a `goto()`
-  does.** A beat stamps its caption when it opens, and `click()` returns after
-  `framenavigated` alone — the document event lands during the next Playwright
-  call, so the first beat after the click still reports the line the load took
-  away. Measured identical on Chromium 136, 147 and 151. This is today's
-  behaviour rather than a fix, so it is pinned rather than hidden, by
-  `MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_one_beat_late`
-  ([#214](https://github.com/rogvid/skills/issues/214)).
+- **That a real Chromium hands a click's deferred document event to
+  `evaluate("0")`.** [#214](https://github.com/rogvid/skills/issues/214) is
+  closed: a beat now forces one pump before it stamps the caption it inherited,
+  so the `domcontentloaded` a click left in the connection lands *inside* that
+  beat instead of one beat later.
+  `MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat`
+  grades it by queueing the measured late half of each stream on a page that
+  releases it when the recorder calls — which is Playwright's documented sync
+  dispatch, and is a *stand-in* for it. What no assertion here can see is a
+  build that stopped delivering the queued event on a trivial `evaluate`, or
+  delivered it later than the beat that pumped. That is a claim about a browser
+  and belongs to `tests/smoke`, which has no arm for it
+  ([#228](https://github.com/rogvid/skills/issues/228)).
 
 - **The take-level sentence both cursor fixes were accepted on is ungraded.**
   [#186](https://github.com/rogvid/skills/issues/186) and
