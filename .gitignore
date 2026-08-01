@@ -59,3 +59,9 @@ tests/out/
 
 # ffmpeg concat listing, written and removed by stitch()
 .concat.txt
+
+# Agent worktrees, each a full checkout of this repo. Ruff respects
+# .gitignore, so leaving these tracked makes every repo-root tool walk all of
+# them: tests/lint read 657 files here against CI's 13, and a red run pointed
+# at files on other branches (#219).
+.claude/
