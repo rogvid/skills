@@ -1323,7 +1323,7 @@ class _DemoBase:
             return None
         return beat
 
-    def _pump_events(self) -> None:
+    def _pump_events(self, force: bool = False) -> None:
         """Give Playwright a chance to deliver queued page events.
 
         The sync API dispatches `console`/`pageerror`/`requestfailed`/`response`
@@ -1333,9 +1333,19 @@ class _DemoBase:
         keeps delivery inside the beat the event belongs to. It paints nothing,
         touches no DOM, and is skipped if it fails — a pump is a diagnostic
         convenience, never a reason to lose a take.
+
+        `force` skips the interval, and `_beat` is the one caller that passes
+        it (issue #214). The interval is a *rate limit on a hold*, and at a
+        beat boundary it is exactly wrong: a click returns roughly a
+        millisecond after the `pause(0.4)` inside it pumped, so the beat that
+        follows the click — the one carrying a caption the navigation just
+        took off the screen — is the beat the interval would skip. Measured
+        against Chromium 151 with a recording context attached: 0.955 ms mean,
+        1.37 ms p95 per round trip (0.899 / 1.14 under 8-way CPU contention),
+        so a 40-beat storyboard pays about 38 ms for it.
         """
         now = time.monotonic() - self._t0
-        if now - self._pumped_at < PUMP_INTERVAL_S:
+        if not force and now - self._pumped_at < PUMP_INTERVAL_S:
             return
         try:
             self.page.evaluate("0")
@@ -1526,6 +1536,27 @@ class _DemoBase:
             )
         record.update(extra)
         self._beats.append(record)
+        if caption is None:
+            # **The line this beat inherited, re-read after the page has had
+            # its say** (issue #214). `goto()` waits for the load, so the
+            # caption is already cleared when it returns; a click is not —
+            # measured identically on Chromium 136, 147 and 151, a link click,
+            # a form submit and a `location.href` button all return after
+            # `framenavigated` alone, and the `domcontentloaded` that clears
+            # the caption arrives during whichever Playwright call comes next.
+            # That call used to be this beat's verb, one stamp too late, so
+            # the first beat after a click-driven navigation reported a line
+            # the load had already taken off the screen — #134's artifact, one
+            # beat wide.
+            #
+            # Pumped *after* the record is appended and `_in_beat` is set, so
+            # anything the pump delivers is attributed to this beat and not to
+            # the closed one before it (`_attributed_beat`). Only an inherited
+            # caption is re-read: a beat carrying its own — `caption()`,
+            # `interlude()` — is about to put that line on the screen itself,
+            # and the load it just learned about took away the *previous* one.
+            self._pump_events(force=True)
+            record["caption"] = self._caption
         try:
             yield record
         except BaseException as raised:

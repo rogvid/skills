@@ -2330,6 +2330,29 @@ class FakePage:
         return None
 
 
+class NoisyPage(FakePage):
+    """A page that delivers its queued events the next time it is called.
+
+    Playwright's sync API dispatches page events only while it is inside a
+    call — the whole reason `_pump_events` exists — so an event arrives during
+    whichever verb happened to touch the browser next. Reproducing that timing
+    rather than firing from outside a beat is what makes the attribution these
+    tests grade the attribution the recorder really makes, and it is the only
+    way to show what a click's late `domcontentloaded` does to the caption the
+    next beat inherits (#214).
+    """
+
+    def __init__(self, *events) -> None:
+        super().__init__()
+        self.queued = list(events)
+
+    def evaluate(self, *args, **kwargs):
+        while self.queued:
+            event, payload = self.queued.pop(0)
+            self.fire(event, payload)
+        return None
+
+
 class UnreadablePage(FakePage):
     """A page whose URL cannot be read — one dying mid-navigation."""
 
@@ -2635,17 +2658,37 @@ NAVIGATIONS_REQUIRED = frozenset(
 )
 
 
+def payloads(page, stream) -> list[tuple]:
+    """`(event, argument)` pairs, as Playwright hands this stream to a handler.
+
+    Split out from `replay` because the two halves of a click's stream are
+    delivered at different moments: the first when the click returns, the rest
+    on whatever the recorder calls next. The second half has to be *queued* on
+    the page rather than fired at it, and queuing needs the same arguments
+    firing does.
+    """
+    out = []
+    for event, target in stream:
+        if event == "framenavigated":
+            out.append(
+                (
+                    event,
+                    FakeFrame(
+                        LOADED_URL,
+                        None if target == _MAIN else FakeFrame("about:blank"),
+                    ),
+                )
+            )
+        else:
+            out.append((event, page))
+    return out
+
+
 def replay(rec, stream) -> int:
     """Deliver one measured page-event stream. Returns handler calls made."""
     taken = 0
-    for event, target in stream:
-        if event == "framenavigated":
-            frame = FakeFrame(
-                LOADED_URL, None if target == _MAIN else FakeFrame("about:blank")
-            )
-            taken += rec.page.fire(event, frame)
-        else:
-            taken += rec.page.fire(event, rec.page)
+    for event, arg in payloads(rec.page, stream):
+        taken += rec.page.fire(event, arg)
     return taken
 
 
@@ -2730,40 +2773,89 @@ class MeasuredNavigations(unittest.TestCase):
                 f"that the two signals are distinguishable",
             )
 
-    def test_a_load_the_verb_did_not_wait_for_reaches_the_log_one_beat_late(self):
-        # A **known gap**, pinned rather than wished away (issue #214).
+    def deferring(self):
+        """A prepared recorder on a page that holds events until it is called.
+
+        The timing a click really has (issue #214): `goto()` waits for the
+        load, so the clear has already happened when it returns, but a link
+        click, a form submit and a `location.href` button all return after
+        `framenavigated` alone — measured, all three builds — and the
+        `domcontentloaded` that takes the caption off the screen is still
+        sitting in the connection. It lands on the next round trip somebody
+        makes, and the beat that follows the click is what has to make it.
+        """
+        rec = recorder(self, page=NoisyPage())
+        rec._watch_page(rec.page)
+        rec.caption(STALE_CAPTION)
+        rec.pause(0)
+        self.assertEqual(
+            rec._beats[-1]["caption"],
+            STALE_CAPTION,
+            "the beat before the navigation does not carry the caption, so "
+            "this test is not exercising the stamping it grades",
+        )
+        return rec
+
+    def test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat(self):
+        # Issue #214's acceptance criterion, one navigation at a time:
+        # `caption(...)`, a click, `pause(3)` — and no beat after the click
+        # carrying the line the load took away.
         #
-        # `goto()` waits for the load, so by the time it returns the clear has
-        # already happened — measured, all three builds. A click does not: a
-        # link click, a form submit and a `location.href` button return after
-        # `framenavigated` only, and the document event arrives during
-        # whichever Playwright call comes next. A beat's caption is stamped
-        # when the beat *opens*, before its verb touches the browser, so the
-        # first beat after a click-driven navigation still carries the line.
-        #
-        # Both halves are asserted: the stale beat, so a fix has to come here
-        # and say so, and the clean one after it, which is the claim that the
-        # clear does land.
+        # The late half of each measured stream is *queued* on the page rather
+        # than fired at the recorder, so the only thing that can deliver it is
+        # a round trip the recorder makes for itself. That is the whole claim:
+        # a beat stamps its caption when it opens, before its verb touches the
+        # browser, so unless the beat asks the page first it inherits a line
+        # that is no longer on screen.
         for name in ("link_click", "form_submit", "location_href"):
             with self.subTest(navigation=name):
                 row = next(r for r in NAVIGATIONS if r[0] == name)
-                _, _, stream, at_return, _ = row
+                _, did, stream, at_return, _ = row
                 self.assertLess(
                     at_return,
                     len(stream),
                     "this navigation was measured as fully delivered before "
                     "its verb returned, so there is no late half to grade",
                 )
-                rec = self.prepared()
+                rec = self.deferring()
                 before = len(rec._beats)
                 replay(rec, stream[:at_return])
-                rec.pause(0)  # opens before the document event lands
-                replay(rec, stream[at_return:])
-                rec.pause(0)
+                # The control for the queueing: what the click itself
+                # delivered leaves the caption alone, so anything the beat
+                # below reports comes from the half that had not arrived yet.
                 self.assertEqual(
-                    [b["caption"] for b in rec._beats[before:]],
-                    [STALE_CAPTION, ""],
+                    rec._caption,
+                    STALE_CAPTION,
+                    f"{did} cleared the caption before its late half was "
+                    f"delivered at all, so the deferral grades nothing",
                 )
+                rec.page.queued = payloads(rec.page, stream[at_return:])
+                # As a click leaves the clock: `click()` holds for 0.4 s
+                # before it clicks, so the last pump is about a millisecond
+                # old when the next beat opens and a rate-limited pump would
+                # skip exactly this beat. Stamped rather than left to how fast
+                # this suite happens to run.
+                rec._pumped_at = time.monotonic() - rec._t0
+                # `pause(0)`, not the criterion's `pause(3)`: the hold length
+                # is not part of the claim — the caption is stamped when the
+                # beat *opens* — and three seconds times three navigations is
+                # nine seconds this suite would spend proving nothing.
+                rec.pause(0)
+                after = rec._beats[before:]
+                # One claim, with the reason in its message rather than in a
+                # second assertion: what is still queued can only be non-empty
+                # when this one fails, so asserting it separately would be a
+                # check that cannot fire on its own.
+                self.assertEqual(
+                    [b["caption"] for b in after],
+                    [""],
+                    f"{did} replaced the document, and the beat right after "
+                    f"it still reports the line the load took off the screen "
+                    f"(never delivered: {[e for e, _a in rec.page.queued]})",
+                )
+                # Broader than the field on purpose: what a reader of this
+                # take's timeline can recover, whichever key it travelled in.
+                self.assertNotIn(STALE_CAPTION, json.dumps(after))
 
 
 # --------------------------------------------------------------------------
@@ -3622,25 +3714,9 @@ class PageResponse:
         self.url = url
 
 
-class NoisyPage(FakePage):
-    """A page that delivers its queued events the next time it is called.
-
-    Playwright's sync API dispatches page events only while it is inside a
-    call — the whole reason `_pump_events` exists — so an event arrives during
-    whichever verb happened to touch the browser next. Reproducing that timing
-    rather than firing from outside a beat is what makes the attribution these
-    tests grade the attribution the recorder really makes.
-    """
-
-    def __init__(self, *events) -> None:
-        super().__init__()
-        self.queued = list(events)
-
-    def evaluate(self, *args, **kwargs):
-        while self.queued:
-            event, payload = self.queued.pop(0)
-            self.fire(event, payload)
-        return None
+# `NoisyPage` — the page that holds its events until it is called — sits with
+# `FakePage` above, because `MeasuredNavigations` needs the same timing to show
+# what a click's *late* half does to a caption (#214).
 
 
 # The line on screen when the problems below fire. Distinctive, so an issue
@@ -4732,7 +4808,54 @@ INJECTIONS = [
         [
             "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
             "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
-            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_one_beat_late",
+            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat",
+        ],
+    ),
+    (
+        # Issue #214: the clear is right and lands one beat too late. A click
+        # returns after `framenavigated` alone, so the beat that follows it
+        # inherits a caption the document event — still in the connection —
+        # is about to take away.
+        "a beat stops asking the page before it stamps the line it inherited",
+        "core.py",
+        "            self._pump_events(force=True)\n"
+        '            record["caption"] = self._caption\n',
+        "            pass  # the beat keeps whatever line it inherited\n",
+        [
+            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat"
+        ],
+    ),
+    (
+        # The `force` on its own, which is the whole difference between the
+        # pump landing and not: `click()` holds for 0.4 s before it clicks, so
+        # the interval `_idle` pumps on is a millisecond old when the next
+        # beat opens and would skip exactly the beat that needed it.
+        "the pump at beat open goes back to being rate-limited",
+        "core.py",
+        "            self._pump_events(force=True)",
+        "            self._pump_events()",
+        [
+            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat"
+        ],
+    ),
+    (
+        # The measured fact the whole of #214 rests on, graded from its own
+        # side: a click returns *before* the document event. A table that said
+        # otherwise would leave the deferral in the test delivering nothing
+        # late, and "the beat after the click is clean" would be graded
+        # against a caption that was already gone when the beat opened.
+        "a click is filed as having delivered the document event before it returned",
+        "tests/unit",
+        '        "link_click",\n'
+        "        'click(\"#link\") on an <a href> to another document',\n"
+        '        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],\n'
+        "        1,\n",
+        '        "link_click",\n'
+        "        'click(\"#link\") on an <a href> to another document',\n"
+        '        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],\n'
+        "        2,\n",
+        [
+            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat"
         ],
     ),
     (
@@ -5363,15 +5486,17 @@ def fault_inject() -> int:
 #   sending a document event for a `pushState` route change, or none for a form
 #   submit, would leave this suite green. Re-driving the real thing is still
 #   smoke's, and the arm is not there yet (see the two gaps below).
-# - **That the clear lands before the beat that follows a *click*.** Measured,
-#   identical on all three builds: `goto()` waits for the load, so the caption
-#   is already gone when it returns, but a link click, a form submit and a
-#   `location.href` return after `framenavigated` alone. A beat stamps its
-#   caption when it opens, so the first beat after a click-driven navigation
-#   still carries the line that left the screen.
-#   `MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log
-#   _one_beat_late` **pins that gap** rather than hiding it: it is today's
-#   behaviour asserted, so closing it has to be a deliberate edit here.
+# - **That a real browser hands a click's deferred document event to the pump.**
+#   #214 is closed here: `goto()` waits for the load, but a link click, a form
+#   submit and a `location.href` return after `framenavigated` alone, so `_beat`
+#   forces one `evaluate("0")` before it stamps an inherited caption and the
+#   `domcontentloaded` still in the connection lands inside that beat.
+#   `test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat`
+#   grades it by queueing the measured late half on a page that releases it when
+#   the recorder calls — Playwright's documented sync dispatch, stood in for. A
+#   build that stopped delivering on a trivial evaluate, or delivered later than
+#   the beat that pumped, would leave this green. Smoke's, and not there yet
+#   (#228).
 # - **That Chromium's events still look the way `event()` says they do.** The
 #   cursor rule (#186, #202) is graded here as a rule read out of the shipped
 #   overlay and run over measured event streams, so a rule that changed meaning
