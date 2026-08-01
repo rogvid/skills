@@ -72,27 +72,48 @@ attributes are stripped, in the same message that hands it the files
 
 ### A frame is aimed at a beat; it is not stamped with one
 
-Chromium's screencast emits a frame when the page paints and pads nothing when
-it does not, so an idle stretch costs the recording wall time that never
-reaches the webm — and every frame after it sits that much earlier in
-`demo.mp4` than `timeline.json` says. It is a discrete step, not a rate error:
-one 32-second take was measured flat at −30 ms for its first five probes and
-flat at −580 ms for its last five.
+Chromium stamps every screencast frame with
+`Page.screencastFrame.metadata.timestamp` — a `Network.TimeSinceEpoch`, which is
+the **host's wall clock** — and Playwright turns that straight into the frame's
+position in the webm. The beat log uses `time.monotonic()`. So when the host
+steps its clock, the video and the log disagree by the size of the step, and
+every frame after it sits that much earlier in `demo.mp4` than
+`timeline.json` says. It is a discrete step because a clock step is one.
+
+**The earlier explanation here was wrong, and it is worth saying why.** This
+section used to blame idle stretches: a screencast emits a frame when the page
+paints, so a still page was thought to cost wall time that never reached the
+webm. Measured directly, it does not — 30 s of a take with nothing painting
+produced seven frames and came back the full 30 s. The evidence that looked
+like idle loss was six samples of the clock step, and the ticker both
+storyboards inject was credited with preventing something it does not affect.
+
+Measured on one WSL2 host: **−0.75 to −0.81 s every 32.2 s**, confirmed by a
+sampler that opens no browser and by a patched Playwright driver that caught
+two consecutive frames 84 ms apart on the monotonic clock and 711 ms backwards
+on Chromium's. Seven takes of one storyboard: the four whose window contained a
+step encoded 0.78 s less video than the three that did not, to within 12 ms.
+A 19 s take against a 32.2 s interval is a coin flip, which is exactly the
+bimodality [#209](https://github.com/rogvid/skills/issues/209) measured.
 
 The suite's bars are asymmetric because the two directions have different
 causes: `MAX_LOG_EARLY_S = 0.25` for the log running ahead of the frame
 (nothing about capture can move an event later, so that direction is the log's
 own error) and `MAX_CAPTURE_LOSS_S = 0.75` for the video running ahead of the
-log (`tests/smoke:680-681`). Both storyboards inject a small animated element
-for their whole length to keep the compositor busy, which removes the confound
-and lets the bar grade the beat log. **A real demo has no such ticker.** What
-the ticker cannot cover is the ~0.7 s between the page being created and the
-first line of storyboard running — the recorder's own setup, which no test code
-can reach — and roughly **1 web take in 12** loses that window whole.
+log. Both storyboards inject a small animated element for their whole length,
+which gives the capture frames to measure with — **not**, as this file
+previously claimed, protection from idle loss, which does not exist. `MAX_CAPTURE_LOSS_S`
+now bounds only the gap before the first frame: 20–140 ms idle, 500–540 ms at
+load 3.1. The suite corrects for the clock step by measuring it independently
+rather than by widening a bar, which is why `MAX_SKEW_DRIFT_S` could be
+restored at 250 ms after being deleted in
+[#217](https://github.com/rogvid/skills/issues/217).
 
-What to do: read a review frame as *around* its beat. Do not build anything
-that needs a beat timestamp to be exact to the frame, and when a frame and its
-caption disagree by a fraction of a second, suspect the capture before the
+What to do: prefer `timeline.json`'s `capture_clock`, which records every step
+with its offset and size, and correct with it. Failing that, read a review
+frame as *around* its beat, do not build anything that needs a beat timestamp
+to be exact to the frame, and when a frame and its caption disagree by a
+fraction of a second, suspect the capture before the
 storyboard ([#18](https://github.com/rogvid/skills/issues/18)).
 
 ### Sixty seconds buys about twenty screens
