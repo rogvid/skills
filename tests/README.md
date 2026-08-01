@@ -1601,6 +1601,15 @@ exactly where `--strict-only` came from.
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
 
+- **A click-driven navigation clears the caption one beat later than a `goto()`
+  does.** A beat stamps its caption when it opens, and `click()` returns after
+  `framenavigated` alone — the document event lands during the next Playwright
+  call, so the first beat after the click still reports the line the load took
+  away. Measured identical on Chromium 136, 147 and 151. This is today's
+  behaviour rather than a fix, so it is pinned rather than hidden, by
+  `MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_one_beat_late`
+  ([#214](https://github.com/rogvid/skills/issues/214)).
+
 - **The take-level sentence both cursor fixes were accepted on is ungraded.**
   [#186](https://github.com/rogvid/skills/issues/186) and
   [#202](https://github.com/rogvid/skills/issues/202) were accepted on "two
