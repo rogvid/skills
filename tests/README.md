@@ -170,6 +170,8 @@ tests/smoke --issues-only         # just the broken page and the failing
                                   #   grades (issue #197)
 tests/smoke --lock-only           # records nothing: what a run the machine
                                   #   lock refuses leaves behind (issue #105)
+tests/smoke --cheap               # every arm except web/content/terminal —
+                                  #   what CI records per push (issue #61)
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -352,6 +354,118 @@ voice would still find every clip. Here a divergence is a cache *miss*, and a
 miss fails the take.
 
 Still ungraded: the HTTP call itself and its retry ladder. See "Known gaps".
+
+## When each take runs — the per-push split (issue #61)
+
+A whole run is **427 s** on this box and three arms are 74% of it:
+`--terminal-only` (186 s), `--content-only` (148 s) and `--web-only` (123 s).
+Since #61, CI does not record those three on every push.
+
+| when | what CI runs | job in `ci.yml` |
+|---|---|---|
+| every pull-request commit, and every push to `main` | `tests/smoke --cheap` | `smoke (cheap arms, every push)` |
+| merge to `main`, or a pull request labelled `smoke-full` | `tests/smoke`, the whole suite | `smoke (web, content and terminal takes)` |
+
+The merge job runs the **whole suite** rather than the three arms, because the
+arm flags are mutually exclusive: three invocations cost 123 + 148 + 186 =
+457 s of takes against a measured 427 s for one whole run, since the arms share
+takes. A whole run is cheaper and is the only invocation that grades them
+together.
+
+### The number the split is justified by
+
+**Measured, not summed**, because summing per-arm figures is what produced
+every wrong number this issue has carried. Three consecutive
+`tests/smoke --cheap` runs on this 16-core box, one at a time behind the
+machine lock, with no other suite running and the 1-minute load average read
+off `/proc/loadavg` immediately before each:
+
+| run | loadavg before | wall clock | verdict |
+|---|---|---|---|
+| 1 | 0.31 | 223.0 s | PASSED |
+| 2 | 1.28 | 221.5 s | PASSED |
+| 3 | 1.25 | 221.9 s | FAILED — see below |
+
+So **~222 s**, spread 1.5 s across the three: a 48% cut against the whole
+suite's 427 s, or about 3.4 minutes off every push once the runner's ~1.1x is
+applied.
+
+Run 3's red is [#215](https://github.com/rogvid/skills/issues/215)/[#224](https://github.com/rogvid/skills/issues/224)
+and not this selection: the host's wall clock stepped **-875 ms at 0.6s inside
+`segments/part2`**, which is the bimodal failure *Known gaps* describes on this
+box, on an arm the whole suite already ran per push before this change. It is
+recorded here rather than re-rolled until green, because the wall-clock reading
+is what this table is for and 221.9 s is a reading. What the split does change
+about that exposure is that `--web-only` and `--terminal-only`, the other two
+arms sensitive to the same host clock, now run on merge instead of per push.
+
+**Why not the arm sums.** Adding up `ARM_SECONDS` for the eleven arms `--cheap`
+covers gives 216 s, which is an upper bound on *separate* invocations rather
+than a reading of this one — the arms share takes, and the fourteen per-arm
+figures sum to 672 s against the measured whole-suite 427 s. The 142 s that
+circulated on #61 before anybody ran this included an arm that was deleted
+before merge ([#210](https://github.com/rogvid/skills/issues/210)) and silently
+dropped five others; it was never a measurement of anything.
+
+### What `--cheap` is, and why it is a complement
+
+`run_phases` guards every phase with `selects(only, arms)`, and `--cheap` takes
+a phase when **any** arm reaching it is not one of the three above. It is not a
+list, deliberately: a list is a second place to forget, and an arm added to
+`run_phases` and not to the list would drop off the per-push run silently.
+`tests/unit`'s `CheapArm` grades the rule against the guards read out of
+`run_phases`' AST, names the four phases `--cheap` skips rather than counting
+them, and refuses a guard that names an arm `main()` does not define — which is
+what stops `--cheap` from being written into a guard by hand. Its four
+assertions have six injections in `tests/unit --fault-inject`, which runs on
+every push.
+
+### What now grades only at merge
+
+Four phases — `run_web`, `run_terminal`, `run_content` and `run_terminal_race`
+— and with them **eight check functions no other phase reaches**:
+
+- `check_content_pair` — content/terminal; 1 `smoke-inject` entry, so nightly
+- `check_content_toured` — content/terminal; 1 entry, so nightly
+- `check_form_pacing` — web; 4 entries, so nightly
+- `_check_scored_region` — content/terminal; covered by the content entries
+- `_check_occlusion` — content/terminal; no entry, and none before this either
+- `check_opening` — web; **no entry**
+- `check_opening_gap` — web; **no entry**
+- `check_verb_classification` — content/terminal; **no entry**
+
+The last three are the real cost of the split and are written up under *Known
+gaps*: no injection and no per-push take means nothing exercises them between a
+pull request opening and its merge, and `check_verb_classification` is the
+guard that caught `clear`/`press` going unclassified in #130.
+[#233](https://github.com/rogvid/skills/issues/233) is the entries that would
+close it.
+
+### Why the four middle arms stayed on the push
+
+`--polish-only` (26 s), `--segments-only` (29 s), `--overlay-only` (31 s) and
+`--failure-only` (48 s) are the arms the decision did not name, and the
+argument for keeping them is cost per check function moved. Dropping one from
+`--cheap` moves this much to merge-only:
+
+| arm | seconds | check functions it would move | seconds per check moved |
+|---|---|---|---|
+| segments | 29 | 11 | 2.6 |
+| polish | 26 | 2 | 13 |
+| overlay | 31 | 1 | 31 |
+| failure | 48 | 1 | 48 |
+| the three expensive arms | 457 | 8 | 57 |
+
+Every one of the four buys check coverage more cheaply than the arms the
+decision *did* move, so a second cut inside the cheap tier would be a worse
+trade than the first one, made on no measurement. Two specifics on top of the
+ratio: `--polish-only`'s two functions (`check_opening_card`,
+`check_spotlight_transitions`) have no injection anywhere, so the per-push run
+is their only exercise in the repo; and `--failure-only` is the only thing that
+runs the recorder's exception paths, which is where the catalogue's
+*clean-path-only assertion* lives. `--failure-only` is nonetheless the one to
+revisit first if the per-push budget ever binds — it is 22% of `--cheap` for
+one check function.
 
 ## What it asserts
 
@@ -1586,11 +1700,11 @@ paragraph whose job is to say what this manifest does not cover.
   | `check_content_healthy` | `ContentRect`, same six tests: the trim reaches the caption bar on both media, does not eat the app, and never comes back zero-sized |
   | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
   | `check_healthy` | `TakeIssues` — `test_an_app_talking_is_not_an_app_failing` and the HTTP bar graded at 400 rather than inside it are the over-reporting direction, off the browser. That a real page under `strict=True` produces none of them is this suite's |
-  | `check_verb_classification` | `VerbClassification` — every classified verb is one a recorder logs, and every verb a recorder logs is classified, with the set size asserted first so neither holds vacuously |
+  | `check_verb_classification` | `VerbClassification` — every classified verb is one a recorder logs, and every verb a recorder logs is classified, with the set size asserted first so neither holds vacuously. **Merge-only since #61**: the only arms that reach it are `--content-only` and `--terminal-only`, so nothing runs it on a pull request |
   | `check_determinism` | genuinely ungraded. It reads the clock, the locale and the motion setting *out of the page*, which is the whole point of it — a constructor that stored the flag and never wired it up satisfies anything asserted on the Python side |
   | `check_merge_offset` | genuinely ungraded. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half |
-  | `check_opening_gap` | `OpeningWarning` — `held: null` against `held: 0.0`, and the blank floor that keeps the warning readable |
-  | `check_opening` | genuinely ungraded — the first frame of a web take, measured in pixels (#119) |
+  | `check_opening_gap` | `OpeningWarning` — `held: null` against `held: 0.0`, and the blank floor that keeps the warning readable. **Merge-only since #61**: `--web-only` is the only arm that reaches it |
+  | `check_opening` | genuinely ungraded — the first frame of a web take, measured in pixels (#119). **Merge-only since #61**: `--web-only` is the only arm that reaches it, so on a pull request nothing runs it and nothing injects against it |
   | `check_opening_card` | genuinely ungraded — three statements about one sweep of one corner of a frame (#110) |
   | `check_spotlight_transitions` | genuinely ungraded — the shape of the spotlight's exit, sampled frame by frame (#111) |
   | `check_narration_pacing` | genuinely ungraded. `TtsKey` covers the cache key a clip is stored under, not the beat spacing this measures |
@@ -1601,6 +1715,17 @@ paragraph whose job is to say what this manifest does not cover.
   | `_check_stale_frames` | genuinely ungraded. `FailureCleanup` is the same shape for the failure dump, not for `frames/` |
   | `_check_segment_refusal` | genuinely ungraded — an unmerged segment's document, graded against the frames a recorder did not write |
   | `_check_scene_fallback` | genuinely ungraded — measured straight off `demo.mp4`, because no beat in either storyboard is long enough to provoke it |
+
+  **Three rows above are worse off than the rest, and #61 is why.**
+  `check_opening`, `check_opening_gap` and `check_verb_classification` are
+  ungraded by this manifest *and* reachable only from the three arms that no
+  longer run per push, so between a pull request opening and its merge nothing
+  exercises them at all. The others in this table are either reached by an arm
+  `--cheap` still runs or covered by a `tests/unit` class that runs in a
+  second. This is the one real cost of the split, it was measured before the
+  split was made, and closing it means giving those three an entry — see
+  **When each take runs** near the top of this file, and the *Known gaps*
+  entry at the bottom.
 
   What is left in that list is there for cost or for pixels, and the two are
   different problems. #197 took the cost half as far as it goes for now: the
@@ -1982,6 +2107,19 @@ knows is missing is worse than one that is openly absent.
   `DEMO_VIDEO_EVIDENCE=0` env var behind it, are exercised nowhere — every
   take here writes evidence
   ([#48](https://github.com/rogvid/skills/issues/48)).
+- **Three checks are exercised by nothing between a pull request and its
+  merge.** `--cheap` is what CI records per push since
+  [#61](https://github.com/rogvid/skills/issues/61), and `check_opening`,
+  `check_opening_gap` and `check_verb_classification` are reachable only from
+  `--web-only`, `--content-only` and `--terminal-only`, which now run on merge.
+  They also have no `tests/smoke-inject` entry, so nightly injection does not
+  cover them either — the merge run is the whole of their exercise, and a
+  reviewer looking at a green pull request has not seen them pass. Five other
+  check functions moved to merge-only with them; those five do have injections
+  and are exercised nightly. Measured before the split rather than found after
+  it, and tracked in
+  [#233](https://github.com/rogvid/skills/issues/233), which is the entries
+  that would close it.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.

@@ -3,7 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+  # `labeled` is here for one job: `smoke-full` below runs the three expensive
+  # arms on a pull request that asks for them by label, and without this event
+  # the label would only take effect on the next commit. The cost is that
+  # labelling a pull request re-runs the cheap jobs too, which is seconds.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -203,10 +208,40 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # The per-push half of `tests/smoke` (issue #61). `--cheap` is every phase
+  # reachable from an arm other than `--web-only` (123 s), `--content-only`
+  # (148 s) and `--terminal-only` (186 s) — the three that are 74% of a whole
+  # run. It is a *complement* rather than a list, computed in `run_phases`, so a
+  # new cheap arm is on this job automatically; `tests/unit`'s `CheapArm` grades
+  # that and its four assertions are fault-injected in `tests/unit
+  # --fault-inject` above.
+  #
+  # **What this job does not see**, which is the cost of the split and is
+  # written out rather than implied: eight check functions are reachable only
+  # from those three arms, so they grade in `smoke-full` below and not here.
+  # Five have `tests/smoke-inject` entries and are exercised nightly; three —
+  # `check_opening`, `check_opening_gap`, `check_verb_classification` — have no
+  # entry, so between a pull request opening and its merge nothing runs them at
+  # all. That is issue #233, and `tests/README.md` carries it under *Known
+  # gaps*. Reviewers of a green pull request have not seen those three pass.
   smoke:
-    name: smoke (record against the fixture app)
+    name: smoke (cheap arms, every push)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Measured, not derived. Three consecutive `tests/smoke --cheap` runs on a
+    # 16-core developer box, one at a time behind the machine lock and with the
+    # load average read before each: **223.0 s, 221.5 s, 221.9 s** — 222 s, and
+    # a 1.5 s spread. Against the whole suite's measured 427 s that is a 48%
+    # cut. The table, the load averages and run 3's red (a host wall-clock step,
+    # #215/#224, not the selection) are in tests/README.md under "When each take
+    # runs".
+    #
+    # 12 is 222 s at the 1.16x a CI runner has measured against this box on the
+    # injection manifest (~4m18s), plus ~60 s of checkout, uv, ffmpeg and
+    # Chromium install, with about 2x headroom on top. The headroom is for
+    # runner variance, not for growth: an arm added to the cheap set lands here
+    # automatically, so if this job starts approaching the bar the thing to do
+    # is re-measure `--cheap` and update the table, not nudge this number.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -223,8 +258,8 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       # Writes outside the checkout, at a path the upload step below knows.
-      - name: Record the web and terminal demo takes
-        run: tests/smoke --out-dir "$RUNNER_TEMP/smoke-out"
+      - name: Record every take except the web, content and terminal arms
+        run: tests/smoke --cheap --out-dir "$RUNNER_TEMP/smoke-out"
 
       # Only on failure: a green run's recordings are noise, a red run's are
       # the only way to see what the recorder actually produced.
@@ -233,6 +268,61 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: smoke-recordings
+          path: ${{ runner.temp }}/smoke-out
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The other half: the three expensive arms, on merge to `main` and on a pull
+  # request labelled `smoke-full`.
+  #
+  # **Why the whole suite and not the three arms.** The arm flags are mutually
+  # exclusive, so "web, content and terminal" is three invocations —
+  # 123 + 148 + 186 = 457 s of takes against a measured 427 s for one whole
+  # run, because the arms share takes. A whole run is cheaper *and* is the only
+  # invocation that grades them together, so this job runs `tests/smoke` with
+  # no flag. It re-records the cheap arms; that is the price of the cheaper
+  # option and it is paid once per merge.
+  #
+  # **Why a label and not only a schedule.** A take that runs after the review
+  # is a take that fails after the review, which is the argument #61 was open
+  # against for months. The label is what puts it back in front of the review
+  # for the diffs where it matters — anything in `skills/demo-video/helpers/`
+  # that touches the web or terminal recorders, or `tests/smoke` itself.
+  smoke-full:
+    name: smoke (web, content and terminal takes)
+    # On a pull request only when it is labelled `smoke-full`. A push to `main`
+    # — which is what a merge is — always goes. Same shape as
+    # .github/workflows/smoke-inject.yml's `fault-inject` label.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'smoke-full')
+    runs-on: ubuntu-latest
+    # The 20 this job inherited from the undivided `smoke`, unchanged: it runs
+    # the same whole suite that number was set for (~7m30s on a runner).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install Chromium for Playwright
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      - name: Record every take, including the web and terminal demos
+        run: tests/smoke --out-dir "$RUNNER_TEMP/smoke-out"
+
+      - name: Upload recordings for debugging
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-full-recordings
           path: ${{ runner.temp }}/smoke-out
           if-no-files-found: warn
           retention-days: 7
