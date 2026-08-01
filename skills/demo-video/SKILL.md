@@ -92,11 +92,12 @@ behind every one, are in [reference/limits.md](reference/limits.md).
   it passes in silence — measured at 31.5 s of a 34 s take. Take cards down
   explicitly. A caption long enough to wrap can also silence the same warning
   on an app's own modal, so keep captions to one line.
-- **A frame is aimed at a beat, not stamped with one.** Chromium's screencast
-  loses wall time during idle stretches, so an event can land up to 0.75 s
-  earlier in `demo.mp4` than `timeline.json` puts it. Read a review frame as
-  *around* its beat, and do not build anything that needs a beat timestamp to
-  be exact to the frame.
+- **A frame is aimed at a beat, not stamped with one.** Chromium stamps frames
+  with the host's **wall** clock, the beat log uses a monotonic one, so on a
+  host whose clock steps an event lands earlier in `demo.mp4` — by the step,
+  once per step (0.75–0.81 s every 32.2 s on one WSL2 box). **No fixed bound
+  holds**; a longer demo accumulates more. `timeline.json`'s `capture_clock`
+  records each one: correct with it, or read a frame as *around* its beat.
 - **Sixty seconds buys about twenty screens.** At the pacing floors below, a
   demo shows roughly one new screen every 3 s — 69% of a real 61.2 s take was
   a picture already shown. A feature spanning two surfaces does not fit the

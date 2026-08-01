@@ -102,6 +102,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -783,40 +784,83 @@ DURATION_TOLERANCE_S = 0.2
 #     `_start()` instead of at page creation measures +280 to +320 ms here.
 #
 #   * MAX_CAPTURE_LOSS_S — the video shows it *before* the log says (negative
-#     skew). Chromium's screencast emits a frame when the page paints, and
-#     nothing pads the gap when it does not, so an idle stretch costs the webm
-#     wall time and everything after it lands early. TICKER_JS removes that
-#     for the whole storyboard, but not for the ~0.7 s between the page being
-#     created and the first line of storyboard running — the recorder's own
-#     setup, which no test code can reach. A web take that loses that window
-#     loses it whole, uniformly, from the very first caption. Tolerated and
-#     reported, not asserted away; issue #18.
+#     skew). Two separate things produce that, and the whole of issue #215 is
+#     that they were being read as one:
 #
-#     The number is stale and knowingly so. It was written as "roughly 1 take
-#     in 12, -600 ms", which is what 0.75 was set from; four `--web-only` runs
-#     measured while grading issue #209 read -880/-800, -80/-0, -120/-800 and
-#     -880/-840 ms. That is over the bar, at idle as well as under load, and
-#     the bar was **not** widened to absorb it — `tests/README.md`, Known gaps,
-#     says why, and issue #215 is where the cause is being looked for.
+#       - **the host's wall clock stepping.** Chromium stamps every screencast
+#         frame with `Page.screencastFrame`'s `metadata.timestamp`, which the
+#         protocol defines as wall-clock seconds since the epoch, and
+#         Playwright turns that straight into the frame's position in the webm.
+#         The beat log is `time.monotonic()`. So a host that steps its wall
+#         clock back by 0.8 s takes 0.8 s out of the video and leaves the log
+#         where it was. **This is not the recorder's, not the ticker's and not
+#         load** — it is measured directly, per take, by `HostClock` below and
+#         subtracted before anything is graded. See `_CaptureClock` in core.py
+#         for the frame-level evidence.
+#       - **the screencast's first frame**, which is what MAX_CAPTURE_LOSS_S
+#         is left bounding. The video's zero is that frame, not `_t0`, so
+#         everything between them is lost from the file uniformly, from the
+#         very first caption. No test code and no ticker can reach it, and
+#         **it is load-sensitive**: measured at 70-140 ms idle over fifteen
+#         takes and at 500-540 ms on one run at load 3.1. Plus the 40 ms
+#         sampling grid and the caption's fade.
 #
-#   * MAX_SKEW_DRIFT_S — how far the two probes' skews may differ. This is the
-#     sharp one, and it is symmetric. A capture stall *before* the first probe
-#     moves both of them equally and cancels here; anything wrong with the
-#     *clock* does not, since a backwards step lands between them, as does a
-#     beat stamped somewhere other than where its verb ran. Observed across
-#     twelve takes with the ticker: 0 to 120 ms, all of it the 40 ms sampling
-#     grid and the caption's own 0.3 s fade.
+#     The old comment attributed all of it to an idle screencast, and the old
+#     number — 0.75, from "roughly 1 take in 12, -600 ms" — was the size of
+#     this box's clock step. It is **unchanged** all the same, and that is the
+#     point rather than an omission: what the correction buys is not a tighter
+#     bar here, it is that MAX_SKEW_DRIFT_S below can now only be tripped by
+#     the beat log. Tightening this one would put a bar on how long Chromium
+#     takes to paint its first frame on the machine of the day, which is the
+#     shape issue #78 is about.
 #
-#     What this bar does **not** do is say which of the two it caught, and the
-#     comment here used to: a stall landing *between* the probes does not
-#     cancel either. Measured on this box while grading issue #209, one
-#     `--web-only` take read -120 ms at the first probe and -800 ms at the
-#     closing one — 680 ms of screencast stall, mid-take, with TICKER_JS
-#     running and asserted alive. The measured clock step (573 ms) is over the
-#     same bar, and from inside this measurement the two are the same number.
+#     Measured over seven takes of one storyboard with the sampler running:
+#     the four whose window contained a step encoded 0.78 s less video than
+#     the three that did not, to within 12 ms; the residual after subtracting
+#     the step is 20-140 ms on an idle box whether or not a step happened.
+#
+#   * MAX_SKEW_DRIFT_S — how far the two probes' skews may differ, **after**
+#     the same subtraction. This is the sharp one, and it is symmetric. A
+#     capture loss before the first probe moves both of them equally and
+#     cancels here; a beat stamped somewhere other than where its verb ran
+#     does not. Observed across twelve takes with the ticker: 0 to 120 ms, all
+#     of it the 40 ms sampling grid and the caption's own 0.3 s fade.
+#
+#     Before #215 this bar could not say which of two things it had caught,
+#     because a wall-clock step landing *between* the probes moved one and not
+#     the other — measured at 680 ms on this box while grading issue #209, and
+#     read at the time as a mid-take screencast stall. It is now the one thing
+#     the correction removes most cleanly: the step is timestamped, so it is
+#     subtracted from whichever probes it precedes and from no others.
 MAX_LOG_EARLY_S = 0.25
 MAX_CAPTURE_LOSS_S = 0.75
 MAX_SKEW_DRIFT_S = 0.25
+
+# How far the recorder's own `capture_clock` may sit from what this harness
+# measured over the same take. They are two samplers watching one clock from
+# two processes' threads, so this is the two sampling grids (20 ms each) plus
+# the wait for the recorder's thread to notice — not tolerance for a different
+# answer. Observed: 0.1 ms on the total, every take.
+#
+# It is what stops the correction from being self-fulfilling. This harness
+# corrects with *its own* numbers, so a recorder that stopped sampling, or
+# sampled the wrong clock, would otherwise change nothing here and the new
+# `capture_clock` field could quietly rot.
+MAX_CLOCK_RECORD_DISAGREEMENT_S = 0.06
+
+# ...and how far apart the two may put the *same* step in the take. Wider than
+# the size tolerance and for a different reason: the two samplers start on
+# their own 20 ms grids and neither is synchronised to the other, so a step
+# lands on one sample here and the next one there. What this rules out is a
+# step attributed to the wrong part of the take, which is what decides which
+# beats it applies to.
+MAX_CLOCK_STEP_TIME_DISAGREEMENT_S = 0.25
+
+# Steps smaller than this are not steps: two `time` calls are not atomic and
+# the gap between them is a reading. Deliberately the same figure the recorder
+# uses, and deliberately *not* imported from it — a threshold read out of the
+# code being graded agrees with that code no matter what it says.
+HOST_CLOCK_MIN_STEP_S = 0.005
 
 # The rate the window is sampled at (the recorders encode at 25 fps, so this is
 # every frame and the measurement quantises to 40 ms), and how far past the
@@ -835,18 +879,26 @@ MIN_BASELINE_FRAMES = 4
 # How far back the window reaches from the beat — **derived**, because a
 # hand-written number here was narrower than the bar it feeds and nothing said
 # so (issue #209). The old comment read "the run-up has to clear
-# MAX_CAPTURE_LOSS_S ... 0.45 s of margin", and 1.2 - 0.75 is indeed 0.45; but
+# MAX_CAPTURE_LOSS_S ... 0.45 s of margin", and 1.2 - 0.75 was indeed 0.45; but
 # clearing the loss is not enough. `caption_appearance_s` also needs
 # CAPTION_FADE_FRAMES + MIN_BASELINE_FRAMES (0.48 s) of quiet *in front of* the
 # arrival, so a window of 1.2 s could not measure a slide past 0.72 s — inside
-# the 0.75 s this file says it tolerates. The real margin was -0.03 s, and what
-# a reader got instead of a passing take was "the caption could not be timed".
+# the tolerance this file stated. The real margin was -0.03 s, and what a
+# reader got instead of a passing take was "the caption could not be timed".
 #
 # So: reach back far enough to measure a slide at the tolerance, plus
 # ALIGN_OVERSHOOT_S past it, so that a slide the bar *rejects* is reported as a
-# number rather than as a measurement that could not be made. Measured slides
-# on this box are 0.80-0.88 s when the capture loses anything at all, which is
-# inside the overshoot and therefore now says so in the failure.
+# number rather than as a measurement that could not be made.
+#
+# Derived from MAX_UNWATCHED_CAPTURE_LOSS_S rather than from the corrected bar,
+# and that is the point of the split: the window has to be able to *find* a
+# slide whether or not anything explains it. On a take whose host clock was
+# watched the window is additionally **centred on where the measured steps put
+# the beat in the video** rather than on `t_start` (issue #215), which costs
+# nothing here and buys back the whole overshoot — the probe's quiet run-up
+# slid by exactly the amount the probe did, so a window that follows the beat
+# sits in the same place relative to the picture on a stepped take as on a
+# clean one.
 #
 # Bounded above by the caption-band quiet PROBE_QUIET_S buys:
 #
@@ -950,13 +1002,17 @@ MAX_FRAME_PLACEMENT_S = 0.02
 # FRAME_CAPTION_GUARD_S is the honest part. The video slides under the beat log
 # (issue #18) and a frame cut at a beat's midpoint therefore shows a moment up
 # to that far *ahead* of the beat in story time — measured at 40-120 ms in
-# these ticker-protected takes, but a take that loses the recorder's own
-# ~0.7 s setup window loses it uniformly, which is what MAX_CAPTURE_LOSS_S
-# already tolerates elsewhere in this file. So a frame is graded for the
-# caption it shows only when its timestamp is at least that far from a caption
-# *change*; nearer than that, the beat log and the video genuinely disagree
-# about which side of the change the frame is on, and this harness is not the
-# place to pretend otherwise. Same number, same reason, one definition.
+# these ticker-protected takes. So a frame is graded for the caption it shows
+# only when its timestamp is at least that far from a caption *change*; nearer
+# than that, the beat log and the video genuinely disagree about which side of
+# the change the frame is on, and this harness is not the place to pretend
+# otherwise. Same number, same reason, one definition.
+#
+# It is `MAX_UNWATCHED_CAPTURE_LOSS_S` rather than the corrected bar, and it
+# stays that width: `_check_frame_captions()` corrects *where the frame is*
+# by the host's measured wall-clock steps (issue #215) rather than widening
+# the guard around it, so on a box whose clock never steps this excludes
+# exactly the frames it always did.
 #
 # Concretely, on the storyboards here that skips every `shot` beat that sits
 # against a caption change — and those frames really do show the next beat's
@@ -1097,21 +1153,27 @@ MAX_MERGE_OFFSET_ERROR_S = 0.1
 
 # Bound on how far the *two* timing probes may drift apart when they sit in
 # different segments. MAX_SKEW_DRIFT_S (250 ms) is sharp because whatever a
-# capture loses it loses for every later frame equally, so a stall moves both
+# capture loses it loses for every later frame equally, so a loss moves both
 # probes together and cancels. That argument holds inside one screencast and
 # stops at a segment boundary: each segment is its own capture, with its own
-# ~0.7 s of untickerable recorder setup, and a stall in the second shifts only
-# the second probe. Measured across four two-segment takes: -80, +80, +80, and
-# one at -520 — a real capture stall in segment two, not a merge error, which
-# a 250 ms bar here would fail on about one run in four.
+# first-frame gap, and a loss in the second shifts only the second probe.
+# Measured across four two-segment takes: -80, +80, +80, and one at -520 —
+# which a 250 ms bar here would have failed on about one run in four.
 #
-# **This is a flake guard, not a check.** It is loose because the mechanism it
-# would otherwise catch is measured properly elsewhere, per segment and per
-# capture, by check_merge_offset(): the merge's own error at 100 ms with
-# capture loss cancelled, and each segment's own skew against the same 250 /
-# 750 ms directional bars a single take gets. Neither of those is confounded
-# by the boundary, and neither is satisfied by a constant shift of any
-# segment's beats — which is what this bar, at any width, cannot say.
+# That -520 is now understood: it is the host's wall clock stepping (issue
+# #215), and `check_timeline()` subtracts it per probe before this bar sees
+# anything. What is left at a segment boundary is each capture's own
+# first-frame gap, ~80 ms, which is why this can now be the same 300 ms as
+# every other loss bar in this file rather than the 750 ms it took to absorb
+# a step nobody had measured.
+#
+# **This is still a flake guard, not a check.** The mechanism it would
+# otherwise catch is measured properly elsewhere, per segment and per capture,
+# by check_merge_offset(): the merge's own error at 100 ms with capture loss
+# cancelled, and each segment's own skew against the same directional bars a
+# single take gets. Neither of those is confounded by the boundary, and neither
+# is satisfied by a constant shift of any segment's beats — which is what this
+# bar, at any width, cannot say.
 MAX_CROSS_SEGMENT_DRIFT_S = MAX_CAPTURE_LOSS_S
 
 # -- how the recording looks (issues #110 and #111) ---------------------------
@@ -1861,6 +1923,235 @@ class Beats:
             self.problems.append(f"{self.label}: {message}")
 
 
+# -- the clock demo.mp4 is on (issues #18, #215) ------------------------------
+#
+# Chromium timestamps every screencast frame with the host's *wall* clock, and
+# Playwright turns that timestamp straight into the frame's position in the
+# webm. The beat log is `time.monotonic()`. On a host that steps its wall
+# clock — a WSL2 box was measured stepping -0.75 to -0.81 s **every 32.2 s**,
+# which in a 19 s take is a coin flip — the two clocks part company by exactly
+# the size of the step, at exactly the instant of it, and every reading of
+# "how far has the video slid under the beat log" inherits it.
+#
+# So this harness measures the same clock, itself, around every recorded take,
+# and subtracts it before grading. Three things about that are deliberate:
+#
+#   * **It is measured, not assumed.** Nothing here is tuned to 0.8 s or to
+#     32 s; a host that never steps produces an empty list and every bar below
+#     is exactly the bar it was.
+#   * **It is this harness's own reading**, not the recorder's. The recorder
+#     writes the same measurement into `timeline.json` as `capture_clock`, and
+#     that field is graded *against* this one — a correction taken from the
+#     code under test would agree with that code no matter what it said.
+#   * **It runs in this process**, not the recorder's, and watches a clock the
+#     recorder cannot influence. The two readings agreeing is therefore a
+#     claim about the recorder, not a tautology.
+class HostClock:
+    """CLOCK_REALTIME against CLOCK_MONOTONIC, sampled for a take's lifetime.
+
+    Steps are held in **absolute** `time.monotonic()` seconds and put on the
+    take's clock by `rebase()`, which is handed the recorder's own `_t0`. That
+    matters more than it looks: this watcher starts before the browser does,
+    so its zero is a second or so earlier than frame zero, and a step landing
+    inside that second would otherwise be attributed to the wrong side of a
+    beat. `_t0` is a `time.monotonic()` reading, not part of the measurement
+    being graded — the same kind of coupling as reading `Recorder._geom` for
+    the content rect.
+    """
+
+    INTERVAL_S = 0.02
+
+    def __init__(self) -> None:
+        self.raw: list[tuple[float, float]] = []  # (absolute monotonic, delta)
+        self._t0: float | None = None
+        # Where one capture ends and the next begins, on this clock. Empty for
+        # a take recorded in one piece; on a stitched demo it is where each
+        # part starts, and it is load-bearing rather than bookkeeping — see
+        # `before()`.
+        self.boundaries: list[float] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        previous = time.time() - time.monotonic()
+        while not self._stop.is_set():
+            offset = time.time() - time.monotonic()
+            delta = offset - previous
+            if abs(delta) >= HOST_CLOCK_MIN_STEP_S:
+                self.raw.append((time.monotonic(), delta))
+            previous = offset
+            self._stop.wait(self.INTERVAL_S)
+
+    def rebase(self, t0: float) -> None:
+        """Put the steps on this take's own clock — `t0` is its frame zero."""
+        self._t0 = t0
+
+    @property
+    def steps(self) -> list[tuple[float, float]]:
+        """(seconds from the take's frame zero, delta), rebased."""
+        if self._t0 is None:
+            return []
+        return [(at - self._t0, delta) for at, delta in self.raw]
+
+    @property
+    def total(self) -> float:
+        return sum(delta for _, delta in self.steps)
+
+    def before(self, t: float) -> float:
+        """How much the wall clock had stepped by `t` seconds into the video.
+
+        Negative when the clock went backwards, which is the direction that
+        takes wall time out of the video. A beat the log puts at `t` is at
+        `t + before(t)` in demo.mp4.
+
+        **Only the steps inside `t`'s own capture count.** A capture's first
+        frame is where its clock starts, so a step during an earlier part
+        shortened that part and nothing else — and `stitch()` lays the parts
+        out by their real durations, so that shortening is already in the
+        offset. Adding it again to a later part's beats would over-correct by
+        a whole step. For a single take there are no boundaries and this is
+        the whole list.
+
+        Hand-written here rather than shared with the recorder: the two have
+        to be able to disagree, or `capture_clock` is not being graded.
+        """
+        start = max((b for b in self.boundaries if b <= t), default=0.0)
+        return sum(delta for at, delta in self.steps if start <= at <= t)
+
+    def describe(self) -> str:
+        if not self.steps:
+            return "the host's wall clock did not step during this take"
+        return "the host's wall clock stepped " + ", ".join(
+            f"{delta * 1000:+.0f} ms at {at:.1f}s" for at, delta in self.steps
+        )
+
+
+def joined_clock(parts: list[tuple[HostClock, float]]) -> HostClock:
+    """The clock of a video stitched from several captures.
+
+    `parts` is (that capture's clock, where its video starts in the joined
+    one). Nothing is mutated: each part keeps its own clock, because that is
+    what grades that part's own `capture_clock` and its own `.seg.mp4`.
+    """
+    joined = HostClock()
+    joined._t0 = 0.0
+    joined.raw = [
+        (at + offset, delta) for clock, offset in parts for at, delta in clock.steps
+    ]
+    joined.boundaries = [offset for _clock, offset in parts]
+    return joined
+
+
+@contextmanager
+def watch_wall_clock() -> Iterator[HostClock]:
+    """Sample the host's wall clock for as long as a take is recording."""
+    clock = HostClock()
+    clock._t0 = time.monotonic()
+    clock._thread = threading.Thread(
+        target=clock._run, name="smoke-host-clock", daemon=True
+    )
+    clock._thread.start()
+    try:
+        yield clock
+    finally:
+        clock._stop.set()
+        clock._thread.join(timeout=1.0)
+
+
+def check_capture_clock(
+    label: str, out_dir: Path, clock: HostClock, name: str = "timeline.json"
+) -> list[str]:
+    """`timeline.json`'s `capture_clock` against this harness's own reading.
+
+    The one assertion that grades the recorder's new field, and the reason the
+    corrections elsewhere are not circular: this harness corrects with its own
+    numbers, so without this a recorder that stopped sampling would change
+    nothing here and `capture_clock` could rot in silence.
+
+    **The window is the storyboard's**, `[0, last t_end]`, and both directions
+    are asserted inside it: a step this harness saw must be in the record, and
+    a step in the record must have been seen. Outside it the two watchers do
+    not cover the same seconds — this one keeps running through conversion,
+    which the capture is not part of — so a step out there is neither's error
+    and is reported rather than graded.
+    """
+    path = out_dir / name
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"{label}: {name} could not be read for capture_clock: {exc}"]
+    record = doc.get("capture_clock")
+    if not isinstance(record, dict):
+        return [
+            f"{label}: {name} has no `capture_clock` record. The video is on "
+            f"the host's wall clock and the beats are on the monotonic one "
+            f"(issues #18, #215); without this field nothing downstream can "
+            f"tell a stepped clock from a recorder that mis-stamped a beat"
+        ]
+    reported = record.get("total")
+    if not isinstance(reported, (int, float)):
+        return [
+            f"{label}: capture_clock.total is {reported!r}, not a number — "
+            f"a consumer correcting a beat timestamp with it would get nothing"
+        ]
+    listed = record.get("steps")
+    if not isinstance(listed, list):
+        return [
+            f"{label}: capture_clock.steps is {listed!r}, not a list — the "
+            f"total says how much was lost and only the steps say which beats "
+            f"lost it"
+        ]
+    if abs(sum(float(s.get("delta", 0.0)) for s in listed) - float(reported)) > 0.001:
+        return [
+            f"{label}: capture_clock.total is {reported!r} but its own steps "
+            f"sum to {sum(float(s.get('delta', 0.0)) for s in listed):+.4f} — "
+            f"the field disagrees with itself"
+        ]
+
+    beats = doc.get("beats") or []
+    horizon = max(
+        (float(b["t_end"]) for b in beats if isinstance(b.get("t_end"), (int, float))),
+        default=0.0,
+    )
+    mine = [(at, d) for at, d in clock.steps if 0.0 <= at <= horizon]
+    theirs = [
+        (float(s.get("t", -1.0)), float(s.get("delta", 0.0)))
+        for s in listed
+        if 0.0 <= float(s.get("t", -1.0)) <= horizon
+    ]
+    inside = (
+        f"inside the {horizon:.1f}s the storyboard ran, this harness saw "
+        f"{len(mine)} wall-clock step(s) [{clock.describe()}] and "
+        f"timeline.json records {len(theirs)}"
+    )
+    if len(mine) != len(theirs):
+        return [
+            f"{label}: {inside} — `capture_clock` is not measuring the clock "
+            f"the video is on, so every consumer correcting a beat timestamp "
+            f"with it is being told the wrong number (issues #18, #215)"
+        ]
+    for (at, delta), (their_at, their_delta) in zip(
+        sorted(mine), sorted(theirs), strict=True
+    ):
+        if abs(delta - their_delta) > MAX_CLOCK_RECORD_DISAGREEMENT_S:
+            return [
+                f"{label}: this harness measured a wall-clock step of "
+                f"{delta * 1000:+.0f} ms at {at:.1f}s and timeline.json "
+                f"records {their_delta * 1000:+.0f} ms at {their_at:.1f}s — "
+                f"the same step, two different sizes, and the smaller one is "
+                f"what a consumer would correct a beat timestamp by"
+            ]
+        if abs(at - their_at) > MAX_CLOCK_STEP_TIME_DISAGREEMENT_S:
+            return [
+                f"{label}: this harness put a {delta * 1000:+.0f} ms "
+                f"wall-clock step at {at:.1f}s into the take and "
+                f"timeline.json puts it at {their_at:.1f}s. Which beats a "
+                f"step applies to is the whole of what the timestamp is for"
+            ]
+    print(f"smoke: {label} capture_clock agrees with the harness ({clock.describe()})")
+    return []
+
+
 _CAPTION_JS = """() => {
   const el = document.getElementById('__demo_caption');
   if (!el) return null;
@@ -2340,7 +2631,7 @@ _TRAIL_JS = """() => {
 
 
 def record_web(
-    out_dir: Path, base_url: str
+    out_dir: Path, base_url: str, clock: HostClock | None = None
 ) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
     """Land, read a KPI, filter the table, refresh it.
 
@@ -2371,6 +2662,11 @@ def record_web(
     with Recorder(
         out_dir, base_url=base_url, speech=False, strict=True, deterministic=True
     ) as rec:
+        # Frame zero, so the host-clock steps this run measured land on the
+        # same clock the beats do. `_t0` is a `time.monotonic()` reading and
+        # not part of what `capture_clock` claims — see HostClock.
+        if clock is not None:
+            clock.rebase(rec._t0)
         rec.goto("/")
         # #142's carve-out, graded. `framenavigated` was written for the paint
         # gate, and the gate went with the masking — but it is the recorder's
@@ -2627,7 +2923,7 @@ def record_web(
 
 
 def record_terminal(
-    out_dir: Path,
+    out_dir: Path, clock: HostClock | None = None
 ) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
     """Two trivial commands — enough to exercise PTY, xterm.js, and prompt sync."""
     from demo_recording import TerminalRecorder
@@ -2660,6 +2956,8 @@ def record_terminal(
     with TerminalRecorder(
         out_dir, speech=False, strict=True, deterministic=True
     ) as rec:
+        if clock is not None:
+            clock.rebase(rec._t0)  # see HostClock
         start_ticker(b, rec.page)
         # The determinism controls live on the context, so the terminal
         # recorder inherits every one of them — and a page that renders a real
@@ -2716,7 +3014,7 @@ def record_terminal(
 
 def record_segments(
     out_dir: Path, base_url: str
-) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
+) -> tuple[list[str], Rect, Rect, tuple[int, int], list[HostClock]]:
     """One demo, recorded as two segments — the shape a real time-skip takes.
 
     Deliberately the storyboard SKILL.md tells people to write: record part
@@ -2741,7 +3039,19 @@ def record_segments(
         "deterministic": True,
     }
 
-    with Recorder(out_dir, segment=SEGMENT_NAMES[0], **settings) as rec:
+    # One watcher per segment, because one watcher for the pair would be
+    # wrong: each segment is its own capture with its own first frame, so a
+    # wall-clock step between them moves nothing at all, and a step inside
+    # segment one does not move segment two's frames (issue #215). What is
+    # returned is therefore per-segment and `run_segments()` maps each onto the
+    # merged video's clock using the parts' own durations.
+    clocks: list[HostClock] = []
+
+    with (
+        watch_wall_clock() as clock_one,
+        Recorder(out_dir, segment=SEGMENT_NAMES[0], **settings) as rec,
+    ):
+        clock_one.rebase(rec._t0)
         rec.goto("/")
         rec.wait_for("#kpi-rev")
         start_ticker(b, rec.page)
@@ -2757,8 +3067,13 @@ def record_segments(
         video_rect: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
         size = (rec._size["width"], rec._size["height"])
         still_rect: Rect = (0, 0, size[0], size[1])
+    clocks.append(clock_one)
 
-    with Recorder(out_dir, segment=SEGMENT_NAMES[1], **settings) as rec:
+    with (
+        watch_wall_clock() as clock_two,
+        Recorder(out_dir, segment=SEGMENT_NAMES[1], **settings) as rec,
+    ):
+        clock_two.rebase(rec._t0)
         # On about:blank, before anything else: the second segment's opening
         # seconds are the ones most likely to go idle, and idle is what makes
         # the screencast lose wall time (TICKER_JS, issue #18). The interlude
@@ -2781,8 +3096,9 @@ def record_segments(
         check_caption(b, rec.page, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
         rec.caption("")
+    clocks.append(clock_two)
 
-    return b.problems, video_rect, still_rect, size
+    return b.problems, video_rect, still_rect, size, clocks
 
 
 def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
@@ -5043,12 +5359,20 @@ def _scored_region_failures(
 
 
 def caption_appearance_s(
-    label: str, mp4: Path, band: Rect, t_start: float
+    label: str, mp4: Path, band: Rect, expect_at: float
 ) -> tuple[float | None, str]:
     """When the probe caption really shows up in the video, in seconds.
 
     Returns (seconds, note) — seconds is None when the measurement could not
     be made, and `note` says why, or reports the numbers behind the answer.
+
+    `expect_at` is where the caller expects the caption **in the video's own
+    clock**, which is not the beat's `t_start` on a host whose wall clock
+    stepped: see HostClock. Centring the window there rather than on `t_start`
+    is what keeps the window in the same place relative to the *picture* — the
+    probe's quiet run-up slid by the same amount the probe did — instead of
+    reaching back past the previous caption's fade on stepped takes and
+    reporting a busy run-up (issue #215).
 
     The storyboard leaves PROBE_QUIET_S of caption-band quiet before the probe
     caption, so within this window the caption band changes for one reason
@@ -5059,6 +5383,7 @@ def caption_appearance_s(
     perturbed frame and the fully-drawn one are a third of a second apart and
     only one of them is a defensible answer.
     """
+    t_start = expect_at
     start = max(0.0, t_start - ALIGN_PRE_S)
     span = (t_start - start) + ALIGN_POST_S
     try:
@@ -5176,8 +5501,10 @@ def _explain_flat_window(
         f"{(nearest - t_start) * 1000:+.0f} ms away, outside the "
         f"{ALIGN_PRE_S:.1f}s search window. The video has slid out from under "
         f"the beat log by more than the window can see, so the skew cannot be "
-        f"measured (not that the caption is missing). Almost certainly a "
-        f"screencast stall — see issue #18."
+        f"measured (not that the caption is missing). The window is already "
+        f"centred on where the host's measured wall-clock steps put this beat "
+        f"in the video, so this slide is something else — see issues #18 "
+        f"and #215."
     )
 
 
@@ -5190,6 +5517,7 @@ def check_timeline(
     frame_size: tuple[int, int],
     expected_segments: list[str | None] | None = None,
     expected_interludes: list[str] | None = None,
+    clock: HostClock | None = None,
 ) -> list[str]:
     """The beat log the take left behind: timeline.json and timeline.md.
 
@@ -5204,6 +5532,13 @@ def check_timeline(
     segmented path is a second, softer standard. `expected_segments` names the
     segment each beat was recorded in (all None for a single take), and
     `expected_interludes` the lines any `interlude` beats show.
+
+    `clock` is this harness's own reading of the host's wall clock over the
+    take (see HostClock). The video is on that clock and the beat log is not,
+    so the timing probes below are measured against `t_start + clock.before
+    (t_start)` and the residual is what gets graded. Passing None is the same
+    as a host that never stepped, and is what every caller that does not
+    record a take of its own uses.
     """
     from demo_recording.content import media_duration
     from demo_recording.timeline import TIMELINE_SCHEMA
@@ -5401,6 +5736,12 @@ def check_timeline(
             )
 
     # -- the mp4 the timestamps are relative to ------------------------------
+    #
+    # How far the host's wall clock had stepped by a given point in the take.
+    # The video is on that clock and the beats are not (issue #215), so every
+    # comparison between the two below goes through this. Absent a reading the
+    # correction is zero and every bar is what it was.
+    stepped = clock.before if clock is not None else (lambda _t: 0.0)
     mp4 = out_dir / "demo.mp4"
     duration = doc.get("duration")
     if not mp4.is_file():
@@ -5420,11 +5761,18 @@ def check_timeline(
                 f"{label}: timeline.json says demo.mp4 is {duration}s, ffprobe "
                 f"says {probed:.3f}s"
             )
-        if previous_end > (probed or duration) + DURATION_TOLERANCE_S:
+        # On the *video's* clock: the beats are `time.monotonic()` and the
+        # file is the host's wall clock, so a take whose host stepped has a
+        # last beat past the end of a file that is exactly that much shorter
+        # (issue #215). Uncorrected, this fires on a healthy recorder.
+        last_end = previous_end + stepped(previous_end)
+        if last_end > (probed or duration) + DURATION_TOLERANCE_S:
             failures.append(
-                f"{label}: the last beat ends at {previous_end:.3f}s, past the "
-                f"end of a {duration}s demo.mp4 — the timestamps are not on "
-                f"the same clock as the video"
+                f"{label}: the last beat ends at {previous_end:.3f}s, which "
+                f"the host's measured wall-clock steps put at {last_end:.3f}s "
+                f"in the video — past the end of a {duration}s demo.mp4. The "
+                f"timestamps are not on the same clock as the video, and the "
+                f"clock this suite can see is not what put them there."
             )
 
     # -- every still a beat names is on disk ---------------------------------
@@ -5498,25 +5846,45 @@ def check_timeline(
     if not spoken:
         failures.append(f"{label}: no caption beats at all to time against")
 
+    # How far the host's wall clock had stepped by each probe. The video is on
+    # that clock, so this is where the beat really sits in demo.mp4 —
+    # subtracted here rather than absorbed by a wider bar, because a step is a
+    # *measured* quantity with a timestamp of its own and a bar is a guess
+    # about all of them at once. Absent a reading, the correction is zero and
+    # every bar below is what it was.
     measured: list[tuple[str, float]] = []
     for what, probe in probes:
         if not mp4.is_file() or not isinstance(probe.get("t_start"), (int, float)):
             continue
         text = probe["caption"]
         t_start = float(probe["t_start"])
+        shift = stepped(t_start)
+        expect_at = t_start + shift
         seen_at, note = caption_appearance_s(
-            label, mp4, caption_band(frame_size), t_start
+            label, mp4, caption_band(frame_size), expect_at
         )
         if seen_at is None:
             failures.append(
                 f"{label}: the {what} could not be timed against demo.mp4 — {note}"
             )
             continue
-        skew = seen_at - t_start
+        skew = seen_at - expect_at
         measured.append((what, skew))
+        # Both numbers, always. The raw one is what somebody scrubbing the file
+        # sees; the corrected one is what is graded. Printing only the graded
+        # one would say nothing about a take that really did lose 0.8 s.
+        raw = seen_at - t_start
+        because = (
+            f", raw {raw * 1000:+.0f} ms of which {shift * 1000:+.0f} ms is "
+            f"the host's wall clock stepping"
+            if abs(shift) >= HOST_CLOCK_MIN_STEP_S
+            else ""
+        )
         where = (
-            f"timeline.json puts the {what} {text!r} at {t_start:.2f}s, but "
-            f"demo.mp4 shows it at {seen_at:.2f}s ({skew * 1000:+.0f} ms)"
+            f"timeline.json puts the {what} {text!r} at {t_start:.2f}s, the "
+            f"host's measured wall-clock steps put that at {expect_at:.2f}s in "
+            f"the video, and demo.mp4 shows it at {seen_at:.2f}s "
+            f"({skew * 1000:+.0f} ms)"
         )
         if skew > MAX_LOG_EARLY_S:
             failures.append(
@@ -5528,24 +5896,33 @@ def check_timeline(
             )
         elif skew < -MAX_CAPTURE_LOSS_S:
             failures.append(
-                f"{label}: {where} — the video is {-skew * 1000:.0f} ms ahead of "
-                f"the log, past the {MAX_CAPTURE_LOSS_S * 1000:.0f} ms allowed "
-                f"for capture loss. That is more wall time than one stall of "
-                f"the recorder's un-tickerable setup window accounts for, so "
-                f"either TICKER_JS stopped working or issue #18 got worse. "
+                f"{label}: {where} — the video is {-skew * 1000:.0f} ms ahead "
+                f"of the log **with the host's wall-clock steps already taken "
+                f"out**, past the {MAX_CAPTURE_LOSS_S * 1000:.0f} ms this file "
+                f"allows for everything else (the screencast's first frame, "
+                f"the 40 ms sampling grid, the caption's fade). "
+                f"{clock.describe() if clock else 'This take ran without a host-clock reading'}"
+                f". So this is not issue #215's clock step: either TICKER_JS "
+                f"stopped working, or the capture lost time some other way. "
                 f"({note})"
             )
         else:
-            note = "" if abs(skew) <= MAX_LOG_EARLY_S else " — capture loss, see #18"
             print(
                 f"smoke: {label} {what} {text!r} logged at {t_start:.2f}s, on "
-                f"screen at {seen_at:.2f}s ({skew * 1000:+.0f} ms{note})"
+                f"screen at {seen_at:.2f}s ({skew * 1000:+.0f} ms{because})"
             )
 
     # The sharp one: whatever the capture loses, it loses for every frame after
-    # it, so both probes move together and the difference cancels. A clock that
-    # stepped, or a beat stamped somewhere other than where its verb ran, does
-    # not cancel.
+    # it, so both probes move together and the difference cancels. A beat
+    # stamped somewhere other than where its verb ran does not.
+    #
+    # A host wall-clock step landing *between* the probes used to reach this
+    # bar too, and used to be indistinguishable from the beat log's own error
+    # — 680 ms of it was measured on this box (issue #209) and read as a
+    # mid-take screencast stall. It no longer reaches here: the step is
+    # timestamped, so `stepped()` above subtracts it from the probes it
+    # precedes and from no others, which is exactly the distinction this bar
+    # could not make for itself.
     if len(measured) == 2:
         drift = measured[1][1] - measured[0][1]
         # ...as long as both probes rode the same capture. Across a segment
@@ -5554,14 +5931,13 @@ def check_timeline(
         same_capture = probes[0][1].get("segment") == probes[1][1].get("segment")
         bound = MAX_SKEW_DRIFT_S if same_capture else MAX_CROSS_SEGMENT_DRIFT_S
         why = (
-            "Two causes reach this bar and it cannot tell them apart: a clock "
-            "that is not being read monotonically between beats, and a "
-            "screencast stall landing *between* the probes rather than before "
-            "them. A stall before the first probe does move both equally and "
-            "does cancel here — that is what this bar is for — but one in the "
-            "middle does not, and on this box a stall of 680 ms was measured "
-            "doing exactly that with TICKER_JS running (issue #209). Read the "
-            "two skews above before blaming the beat log."
+            "Both skews above already have the host's measured wall-clock "
+            "steps taken out of them, per probe — which is the one cause that "
+            "used to land here and could not be told from the beat log's own "
+            "(issue #215). What is left is time between beats not being "
+            "measured monotonically, or a beat stamped somewhere other than "
+            "where its verb ran. "
+            f"{clock.describe() if clock else 'This take ran without a host-clock reading, so nothing was taken out'}."
             if same_capture
             else "These two probes are in different segments, so they rode "
             "different captures and this bar is only a flake guard — the "
@@ -5748,6 +6124,7 @@ def check_beat_frames(
     expected_captions: list[str],
     frame_size: tuple[int, int],
     expected_interludes: list[str] = [],  # noqa: B006 - read-only, never mutated
+    clock: HostClock | None = None,
 ) -> list[str]:
     """`frames/` — one frame per beat, at the beat's midpoint, showing it.
 
@@ -5908,6 +6285,7 @@ def check_beat_frames(
         listed,
         beats,
         _expected_context(expected_beats, expected_captions, expected_interludes),
+        clock,
     )
     failures += _check_stale_frames(label, out_dir, manifest)
     failures += _check_segment_refusal(label, out_dir, doc)
@@ -5928,6 +6306,7 @@ def _check_frame_captions(
     listed: list[dict],
     beats: dict[int, dict],
     context: list[str] | None,
+    clock: HostClock | None = None,
 ) -> list[str]:
     """Frame N shows beat N — measured on the pixels, one bit per frame.
 
@@ -5947,6 +6326,16 @@ def _check_frame_captions(
     close to a change the two disagree about which side a frame is on and
     neither is wrong. `MIN_GRADED_CAPTION_FRAMES` and the one-of-each rule keep
     that exclusion from turning the check off.
+
+    The guard is applied to **where the frame really sits in the story**, not
+    to the timestamp it was cut at. A frame cut at the log's idea of a beat's
+    midpoint shows a moment `|clock.before(t)|` later on a take whose host
+    stepped its wall clock (issue #215), so measuring its distance from a
+    caption change without that correction measures the wrong distance — and
+    grades a frame taken from well past a change as though it were nowhere
+    near one. That is #209's `beat-23.png` failure: a frame graded for a
+    caption the video had already dropped, reported as "the frames do not show
+    the beats they are named for". The guard's *width* is unchanged.
 
     The expectation comes from `_expected_context()` — the storyboard lists at
     the top of this file — and never from `timeline.json`, which is the
@@ -5969,13 +6358,28 @@ def _check_frame_captions(
     ]
 
     band = caption_band(frame_size)
+    stepped = clock.before if clock is not None else (lambda _t: 0.0)
     reference: bytes | None = None
     graded: list[tuple[int, str, bytes]] = []
     for i, frame in enumerate(listed):
         png = out_dir / "frames" / str(frame.get("file"))
         if not png.is_file():
             continue
-        near = min((abs(float(frame["t"]) - c) for c in changes), default=math.inf)
+        # Where the frame was cut, and where it actually sits in the story.
+        # The extractor seeks demo.mp4 at the beat's midpoint on the *log's*
+        # clock and the video is on the host's, so on a take whose host clock
+        # stepped those are two different moments (issue #215) — and a caption
+        # change *between* them is exactly the case where the sheet's label and
+        # the picture disagree and neither is wrong. Grade a frame only when
+        # the whole interval between the two accounts of where it is clears
+        # every caption change by the guard.
+        at = float(frame["t"])
+        shows = at - stepped(at)
+        lo, hi = min(at, shows), max(at, shows)
+        near = min(
+            (0.0 if lo <= c <= hi else min(abs(lo - c), abs(hi - c)) for c in changes),
+            default=math.inf,
+        )
         if near < FRAME_CAPTION_GUARD_S:
             continue
         try:
@@ -7109,7 +7513,13 @@ def run_web(out_root: Path) -> list[str]:
     started = time.time()
     with fixture_server() as base_url:
         try:
-            problems, video_rect, still_rect, size = record_web(out_dir, base_url)
+            # The host's wall clock, watched for exactly as long as the take is
+            # recording. demo.mp4 is on that clock and the beat log is not, so
+            # every timing reading below is corrected by this (issue #215).
+            with watch_wall_clock() as clock:
+                problems, video_rect, still_rect, size = record_web(
+                    out_dir, base_url, clock
+                )
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
     return (
@@ -7124,8 +7534,13 @@ def run_web(out_root: Path) -> list[str]:
             still_rect,
             size,
         )
-        + check_timeline("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
-        + check_beat_frames("web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size)
+        + check_capture_clock("web", out_dir, clock)
+        + check_timeline(
+            "web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size, clock=clock
+        )
+        + check_beat_frames(
+            "web", out_dir, started, WEB_BEATS, WEB_CAPTIONS, size, clock=clock
+        )
         + check_evidence("web", out_dir, WEB_EVIDENCE, WEB_EVIDENCE_SCOPE)
         # The form verbs' pacing (issue #130), read off the same beat log the
         # two checks above read for their contents.
@@ -7925,7 +8340,11 @@ def _probe_beat(doc: dict, text: str, segment: str | None = None) -> dict | None
     return None
 
 
-def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
+def check_merge_offset(
+    out_dir: Path,
+    frame_size: tuple[int, int],
+    clocks: list[HostClock] | None = None,
+) -> list[str]:
     """#7's acceptance criterion, per segment, with capture loss cancelled.
 
     Every segment carries a caption with a quiet run-up (`SEGMENT_PROBES`), and
@@ -7958,6 +8377,12 @@ def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
     demo = out_dir / "demo.mp4"
     merged_json = out_dir / "timeline.json"
     failures: list[str] = []
+    # One reading comes out of the part and one out of the stitched demo, but
+    # they are the same frames of the same capture, so the same wall-clock
+    # steps moved both (issue #215). Correcting them by the same amount leaves
+    # the differential below exactly where it was and makes each segment's own
+    # skew — the half the differential cancels on purpose — mean something.
+    per_segment = dict(zip(SEGMENT_NAMES, clocks or [], strict=False))
 
     for name, text in zip(SEGMENT_NAMES, SEGMENT_PROBES, strict=True):
         part = out_dir / f"{name}.seg.mp4"
@@ -7995,6 +8420,12 @@ def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
             continue
 
         readings: dict[str, float] = {}
+        segment_clock = per_segment.get(name)
+        shift = (
+            segment_clock.before(float(alone["t_start"]))
+            if segment_clock and isinstance(alone.get("t_start"), (int, float))
+            else 0.0
+        )
         for what, media, t_start in (
             ("in its own segment", part, alone.get("t_start")),
             ("in the stitched demo", demo, stitched.get("t_start")),
@@ -8003,8 +8434,12 @@ def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
                 readings.clear()
                 failures.append(f"segments: {name}'s probe has no t_start {what}")
                 break
+            # One shift for both readings, taken on this segment's own
+            # capture clock: `t_start` differs between the two files by the
+            # merge offset, but the frames are the same frames and the steps
+            # that moved them are this segment's either way.
             seen_at, note = caption_appearance_s(
-                "segments", media, band, float(t_start)
+                "segments", media, band, float(t_start) + shift
             )
             if seen_at is None:
                 readings.clear()
@@ -8013,7 +8448,7 @@ def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
                     f"({media.name}) — {note}"
                 )
                 break
-            readings[what] = seen_at - float(t_start)
+            readings[what] = seen_at - float(t_start) - shift
         if len(readings) != 2:
             continue
 
@@ -8039,9 +8474,11 @@ def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
                 f"segments: {name}'s probe caption is {own * 1000:+.0f} ms off "
                 f"its beat *within {part.name}*, outside the "
                 f"{-MAX_CAPTURE_LOSS_S * 1000:.0f}…{MAX_LOG_EARLY_S * 1000:+.0f} ms "
-                f"a single capture is allowed. The merge is not involved — this "
-                f"segment's own beat log and its own video disagree (a positive "
-                f"skew is the log's; a negative one is capture loss, issue #18)."
+                f"a single capture is allowed, with the host's measured "
+                f"wall-clock steps already taken out. The merge is not "
+                f"involved — this segment's own beat log and its own video "
+                f"disagree (a positive skew is the log's; a negative one is "
+                f"capture loss, issues #18 and #215)."
             )
             continue
         print(
@@ -8052,7 +8489,11 @@ def check_merge_offset(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
     return failures
 
 
-def stitch_segments(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
+def stitch_segments(
+    out_dir: Path,
+    frame_size: tuple[int, int],
+    clocks: list[HostClock] | None = None,
+) -> list[str]:
     """Stitch the recorded segments, twice, and grade what that produced.
 
     Twice because `keep_parts` has two directions and both are load-bearing:
@@ -8149,7 +8590,7 @@ def stitch_segments(out_dir: Path, frame_size: tuple[int, int]) -> list[str]:
 
     # While the parts are still here: the acceptance criterion, measured
     # against both videos so the screencast's own error cancels.
-    failures += check_merge_offset(out_dir, frame_size)
+    failures += check_merge_offset(out_dir, frame_size, clocks)
 
     # -- the default: parts and logs go together (issue #21) ------------------
     stitch(out_dir, SEGMENT_NAMES)
@@ -8260,15 +8701,45 @@ def run_segments(out_root: Path) -> list[str]:
     that is graded more softly than a single take is a segmented demo nobody
     can trust. What is extra here is `stitch_segments()`.
     """
+    from demo_recording.content import media_duration
+
     out_dir = fresh_take_dir(out_root, "segments")
     started = time.time()
     with fixture_server() as base_url:
         try:
-            problems, video_rect, still_rect, size = record_segments(out_dir, base_url)
+            problems, video_rect, still_rect, size, clocks = record_segments(
+                out_dir, base_url
+            )
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"segments: Recorder raised {type(exc).__name__}: {exc}"]
+        # Before `stitch()`, which removes the parts and their logs unless
+        # asked to keep them: each segment's own `capture_clock` is only on
+        # disk until then, and the merged envelope carries none (`stitch()`
+        # does not merge the field — see tests/README.md, Known gaps).
+        for name, part in zip(SEGMENT_NAMES, clocks, strict=True):
+            problems += check_capture_clock(
+                f"segments/{name}", out_dir, part, f"{name}.seg.timeline.json"
+            )
+        # Each segment watched its own capture; the stitched demo lays them end
+        # to end, so each part's steps sit that far along the merged clock
+        # (issue #215). The offsets are ffprobe's, taken off the parts *before*
+        # stitch() is allowed to remove them, rather than read out of the
+        # merged envelope this run is grading.
+        placed: list[tuple[HostClock, float]] = []
+        offset = 0.0
+        for name, part in zip(SEGMENT_NAMES, clocks, strict=True):
+            try:
+                placed.append((part, offset))
+                offset += media_duration(out_dir / f"{name}.seg.mp4")
+            except (subprocess.CalledProcessError, ValueError, OSError):
+                # No part durations, no merged clock. Correcting with the wrong
+                # offsets is worse than not correcting: the bar falls back to
+                # MAX_UNWATCHED_CAPTURE_LOSS_S and the failure says so.
+                placed = []
+                break
+        clock: HostClock | None = joined_clock(placed) if placed else None
         try:
-            problems += stitch_segments(out_dir, size)
+            problems += stitch_segments(out_dir, size, clocks)
         except Exception as exc:  # noqa: BLE001 - a raising stitch is a failure
             problems.append(f"segments: stitch() raised {type(exc).__name__}: {exc}")
     return (
@@ -8292,6 +8763,7 @@ def run_segments(out_root: Path) -> list[str]:
             size,
             expected_segments=SEGMENT_BEAT_SEGMENTS,
             expected_interludes=SEGMENT_INTERLUDES,
+            clock=clock,
         )
         + check_beat_frames(
             "segments",
@@ -8301,6 +8773,7 @@ def run_segments(out_root: Path) -> list[str]:
             SEGMENT_CAPTIONS,
             size,
             SEGMENT_INTERLUDES,
+            clock=clock,
         )
         + check_healthy("segments", out_dir)
     )
@@ -8935,7 +9408,10 @@ def run_terminal(out_root: Path) -> list[str]:
     previous = Path.cwd()
     os.chdir(REPO_ROOT)
     try:
-        problems, video_rect, still_rect, size = record_terminal(out_dir)
+        # The terminal records the same Chromium page through the same
+        # screencast, so it is on the same host wall clock (issue #215).
+        with watch_wall_clock() as clock:
+            problems, video_rect, still_rect, size = record_terminal(out_dir, clock)
     except Exception as exc:  # noqa: BLE001 - a raising take is a failure
         return [f"terminal: TerminalRecorder raised {type(exc).__name__}: {exc}"]
     finally:
@@ -8952,11 +9428,24 @@ def run_terminal(out_root: Path) -> list[str]:
             still_rect,
             size,
         )
+        + check_capture_clock("terminal", out_dir, clock)
         + check_timeline(
-            "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
+            "terminal",
+            out_dir,
+            started,
+            TERMINAL_BEATS,
+            TERMINAL_CAPTIONS,
+            size,
+            clock=clock,
         )
         + check_beat_frames(
-            "terminal", out_dir, started, TERMINAL_BEATS, TERMINAL_CAPTIONS, size
+            "terminal",
+            out_dir,
+            started,
+            TERMINAL_BEATS,
+            TERMINAL_CAPTIONS,
+            size,
+            clock=clock,
         )
         + check_evidence("terminal", out_dir, TERMINAL_EVIDENCE)
         + check_healthy("terminal", out_dir)

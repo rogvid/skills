@@ -383,6 +383,71 @@ INJECTIONS = [
         sites=("check_issues",),
         must_contain=("failed is indistinguishable from one that worked",),
     ),
+    # -- the clock demo.mp4 is on (issues #18/#215), 29 s an entry ------------
+    #
+    # Chromium stamps every screencast frame with the host's *wall* clock and
+    # Playwright turns that into the frame's position in the webm, so a host
+    # that steps its wall clock takes that much wall time out of the video and
+    # leaves the beat log where it was. `tests/smoke` measures the same clock
+    # itself and corrects with its own reading; `capture_clock` is what makes
+    # the recorder's copy of that measurement gradeable rather than decorative.
+    #
+    # All four entries break the *recorder* and are watched by `tests/smoke`
+    # measuring a real clock, so none of them depends on the box's clock
+    # actually stepping — which is what the "environment-agreeing assertion"
+    # entry in wip/verified-review/SKILL.md is about, and what
+    # `tests/README.md` said could not be fault-injected before this existed.
+    Injection(
+        name="the timeline stops carrying the clock the video is on",
+        module="core.py",
+        old='            "capture_clock": self._capture_clock.report(),',
+        new='            "capture_clock_unwritten": self._capture_clock.report(),',
+        arm="--segments-only",
+        sites=("check_capture_clock",),
+        must_contain=("has no `capture_clock` record",),
+    ),
+    Injection(
+        # A step nobody else saw. The correction a consumer applies is then
+        # half a second of nothing, applied to every beat after 1.0s.
+        name="the recorder reports a wall-clock step that never happened",
+        module="core.py",
+        old="    def start(self, t0: float) -> None:\n        self._t0 = t0\n",
+        new=(
+            "    def start(self, t0: float) -> None:\n"
+            "        self._t0 = t0\n"
+            '        self.steps.append({"t": 1.0, "delta": -0.5})\n'
+        ),
+        arm="--segments-only",
+        sites=("check_capture_clock",),
+        must_contain=("is not measuring the clock",),
+    ),
+    Injection(
+        # The total and the steps it is a total of, disagreeing. A consumer
+        # reading only `total` and one reading only `steps` then correct a
+        # beat by different amounts, and neither can tell.
+        name="the recorded clock total stops being the total of its own steps",
+        module="core.py",
+        old='            "total": round(self.total, 4),',
+        new='            "total": round(self.total + 0.5, 4),',
+        arm="--segments-only",
+        sites=("check_capture_clock",),
+        must_contain=("the field disagrees with itself",),
+    ),
+    Injection(
+        # Frame zero taken 0.9 s before the screencast's, so every beat in the
+        # log is stamped that much later than the frame it describes. It is
+        # the loss bar that fires, and what makes the bar mean something is
+        # that the host's own wall-clock steps are already out of the reading:
+        # before #215 a run on this box arrived at -0.88 s of that bar's
+        # 0.75 s budget with nothing wrong at all.
+        name="every beat is stamped 0.9s after the frame it describes",
+        module="core.py",
+        old="            self._t0 = time.monotonic()",
+        new="            self._t0 = time.monotonic() - 0.9",
+        arm="--segments-only",
+        sites=("check_timeline",),
+        must_contain=("with the host's wall-clock steps already taken",),
+    ),
     # -- the beat log and the review sheet (issues #8/#22), 29 s an entry ------
     #
     # `check_timeline` and `check_beat_frames` grade *a* take, not specifically
