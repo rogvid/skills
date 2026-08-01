@@ -48,6 +48,19 @@ tests/
 
 [#136]: https://github.com/rogvid/skills/issues/136
 
+**A fourth suite lives outside this directory**, and it is here so nobody has
+to find that out by accident: `examples/ticket-queue/test` grades the example
+app the demo-video reference PR records — 12 assertions read off a real browser
+and 11 injections against `web/app.js`, its stylesheet and the seeded data. On a
+16-core developer box that is 3.6 s and 87 s; on a CI runner the whole job,
+Chromium install included, measured **2m08s**. It belongs beside the app rather
+than here because it grades *that application*, not the recorder.
+`.github/workflows/ticket-queue.yml` runs both halves on any push touching
+`examples/ticket-queue/**` and nightly
+([#182](https://github.com/rogvid/skills/issues/182)); before that workflow
+existed nothing ran either half, so its injections graded the change that
+introduced them and nothing after it.
+
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
 problem takes, `segments/` — one demo recorded in two parts and joined with
 `stitch()` — and `evidence/`, a few seconds against what a beat's page text
@@ -76,6 +89,22 @@ and one pin. Change the pin and the local command changes with it;
 `tests/lint --self-test` is what keeps that true, and refuses a workflow that
 reaches ruff any other way.
 [#189](https://github.com/rogvid/skills/issues/189) is what this cost before.
+
+**The pin is 0.16.1, and `ruff.toml` excludes `*.md` from the formatter**
+([#192](https://github.com/rogvid/skills/issues/192)). From 0.16 ruff's
+formatter reads Python out of Markdown code fences — its checker still does
+not — and that one behaviour was the entire disagreement between 0.14.2 and a
+current ruff on this tree: 3 files, all documentation. A fence in a document is
+a figure rather than source; nothing imports or runs it, its reader is a person,
+and the reformat measured at 0.16.1 ragged out two columns of deliberately
+aligned trailing comments and spent the last line of `SKILL.md`'s 600-line
+budget on a blank one. What the exclusion gives up is **only layout**: the
+formatter does not validate a fence either way — hand it ```` ```python ````
+followed by `def f(:` and it prints "1 file already formatted" and exits 0. That
+nothing checks a documentation example parses is
+[#211](https://github.com/rogvid/skills/issues/211), and predates this. The
+reasoning is written at the exclusion in `ruff.toml`, which is the file a reader
+lands in.
 
 Then the recorder itself:
 
@@ -1437,10 +1466,18 @@ rather than remembered:
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
-plus one clean baseline per arm — not a stopwatch reading. The last measured
-end-to-end pair, 16.3 and 16.4 minutes, was taken when the manifest held
-sixteen entries and is not comparable; nobody has sat through the current one,
-and the nightly job's budget is set from the estimate.
+plus one clean baseline per arm — not a stopwatch reading. It has now been
+measured against a real run:
+[30705025900](https://github.com/rogvid/skills/actions/runs/30705025900), a
+`workflow_dispatch` of the nightly on main, took **41m23s** end to end, of which
+**40.3 minutes** was `tests/smoke-inject` itself and about a minute was the
+checkout and the ffmpeg and Chromium installs. So a CI runner costs about
+**1.16x** the estimate above; the 25-entry manifest, measured the same way on
+2026-08-01, gives 1.09x. `.github/workflows/smoke-inject.yml` sets its
+`timeout-minutes` from that measurement and says so
+([#191](https://github.com/rogvid/skills/issues/191)) — the 45 it replaced came
+from a rule that assumed 2x and would have predicted ~71 minutes for a manifest
+that costs 41.
 
 Every number in this section is read back out of this file and compared against
 the manifest by `tests/smoke-inject --self-test`, which runs on every push. It
