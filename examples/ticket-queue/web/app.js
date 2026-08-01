@@ -28,7 +28,7 @@ function visibleTickets() {
         // The requester is searchable *and* rendered on the row below. A match
         // on a field the queue does not show is indistinguishable from a bug:
         // the viewer sees a row survive a term that appears nowhere on it.
-        t.requester.toLowerCase().includes(term))
+        false)
   );
 }
 
