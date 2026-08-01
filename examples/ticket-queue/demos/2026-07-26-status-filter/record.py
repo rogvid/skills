@@ -76,13 +76,17 @@ with Recorder(HERE, base_url=BASE_URL, segment="part1") as rec:
 # commands the README documents rather than a path into the repo.
 os.chdir(APP_DIR)
 
-with TerminalRecorder(HERE, segment="part2") as rec:
-    rec.interlude("The same filter, on the command line.")
-    # Nothing else clears a card. A TerminalRecorder never navigates, so
-    # without this the card covers the whole segment and the terminal records
-    # underneath it, unseen — issue #91, which cost this demo its first take.
-    rec.interlude("")
-
+# The card is the recorder's, not a beat: `interlude=` raises it from an init
+# script before capture starts, and clears it when its hold is up. Written as
+# the storyboard's first statement instead — `rec.interlude(…)` inside the
+# `with` — it cannot paint until the terminal already has, and the segment
+# opens on ~300 ms of bare prompt (issues #110, #206, three human sightings).
+# It also settles #91's half of the same seam, which cost this demo its first
+# take: a TerminalRecorder never navigates, so a card no one takes down covers
+# the whole segment, and a card the recorder raises is one it clears.
+with TerminalRecorder(
+    HERE, segment="part2", interlude="The same filter, on the command line."
+) as rec:
     rec.caption("The CLI reads the same queue.")
     rec.run("./tickets list")
     rec.wait_for_prompt()
