@@ -44,7 +44,12 @@ permissions:
 
 concurrency:
   group: ticket-queue-${{ github.ref }}
-  cancel-in-progress: true
+  # Ten pushes to a branch should cost one run — but **not** at the price of the
+  # nightly. A scheduled run and a push to main share `github.ref`, so a plain
+  # `true` here lets a 04:51 commit cancel the 04:50 leg, and a cancelled run
+  # reports nothing at all. The nightly is the leg that covers the weeks the
+  # paths filter never fires, so it is the one that must not be silently lost.
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   test:
