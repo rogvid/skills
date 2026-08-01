@@ -47,4 +47,34 @@ select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
 # rewrite all three files and collide with every queued PR, so they are
 # excluded rather than reformatted. This is a starting point: delete the
 # exclusion (and land the reformat as its own commit) once #3–#12 are merged.
-exclude = ["skills/demo-video/helpers/demo_recording/*.py"]
+#
+# `*.md` is the decision issue #192 asked for, and it is a scope statement, not
+# a lint waiver. From 0.16 ruff's *formatter* reads Python out of Markdown code
+# fences; its *checker* still does not (`ruff check` on a `.md` says "No Python
+# files found"), so this one line is the entire difference between 0.14.2 and a
+# current ruff on this tree — 3 files rewritten, all of them prose.
+#
+# A fence in a document is a figure, not source. Nothing imports it, runs it or
+# tests it; its only consumer is a person reading the page, and its layout was
+# chosen for that person. The three rewrites measured at 0.16.1 each cost the
+# reader: two ragged out columns of trailing comments that were lined up on
+# purpose (`rec.run(...)  # types visibly` under `rec.wait_for_prompt()  # …`),
+# one exploded a single-line call into a five-line vertical list, and one added
+# a blank line to skills/demo-video/SKILL.md — the always-loaded file, which
+# sits at 599 of the 600-line budget `tests/unit --budget` reports, so accepting
+# it would spend the last line of that budget on whitespace.
+#
+# What this gives up is *only* layout, and that is measured rather than assumed.
+# The formatter does not validate a fence: given ```python\ndef f(:\n it prints
+# "1 file already formatted" and exits 0. So including `.md` buys no error
+# detection at any version — it buys the formatter's opinion about columns, on
+# text whose columns were chosen by hand. Nothing in this repo checks that a
+# documentation example parses; that gap is issue #211 and this line does not
+# widen it.
+#
+# The counterpart, so this stays a decision and not a hiding place: RUFF_VERSION
+# in ci.yml names a current ruff, and `tests/lint` is clean at it.
+exclude = [
+    "skills/demo-video/helpers/demo_recording/*.py",
+    "*.md",
+]

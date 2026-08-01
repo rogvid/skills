@@ -14,7 +14,7 @@ concurrency:
 
 env:
   # Pinned so a tool release never turns a green branch red on its own.
-  RUFF_VERSION: "0.14.2"
+  RUFF_VERSION: "0.16.1"
   MYPY_VERSION: "1.18.2"
 
 jobs:

@@ -77,6 +77,22 @@ and one pin. Change the pin and the local command changes with it;
 reaches ruff any other way.
 [#189](https://github.com/rogvid/skills/issues/189) is what this cost before.
 
+**The pin is 0.16.1, and `ruff.toml` excludes `*.md` from the formatter**
+([#192](https://github.com/rogvid/skills/issues/192)). From 0.16 ruff's
+formatter reads Python out of Markdown code fences — its checker still does
+not — and that one behaviour was the entire disagreement between 0.14.2 and a
+current ruff on this tree: 3 files, all documentation. A fence in a document is
+a figure rather than source; nothing imports or runs it, its reader is a person,
+and the reformat measured at 0.16.1 ragged out two columns of deliberately
+aligned trailing comments and spent the last line of `SKILL.md`'s 600-line
+budget on a blank one. What the exclusion gives up is **only layout**: the
+formatter does not validate a fence either way — hand it ```` ```python ````
+followed by `def f(:` and it prints "1 file already formatted" and exits 0. That
+nothing checks a documentation example parses is
+[#211](https://github.com/rogvid/skills/issues/211), and predates this. The
+reasoning is written at the exclusion in `ruff.toml`, which is the file a reader
+lands in.
+
 Then the recorder itself:
 
 ```sh
