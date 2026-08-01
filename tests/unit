@@ -2243,6 +2243,10 @@ class VendoredAssets(unittest.TestCase):
 # coincidence and that a stale copy of it is unmistakable.
 STALE_CAPTION = "The dashboard shows every open order."
 
+# The document the caption is lost *to*. Distinctive for the same reason: an
+# issue quoting it cannot be quoting a default that happened to be around.
+LOADED_URL = "http://127.0.0.1:8991/orders/4821"
+
 # Below this many verbs, "every verb names its target both ways" holds over
 # almost nothing — the catalogue's vacuous sweep. It is 13 today (web 10,
 # terminal 4, shared 2, minus the three whose first parameter is not a
@@ -2297,8 +2301,12 @@ class FakePage:
     therefore a test failure and not a silently unexercised handler.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, url: str = LOADED_URL) -> None:
         self.subscribed: dict[str, list] = {}
+        # What Playwright's `Page.url` is: the last URL the connection told
+        # this process about, readable without a round trip. The issue a lost
+        # caption records names it (#180).
+        self.url = url
 
     def on(self, event: str, handler) -> None:
         self.subscribed.setdefault(event, []).append(handler)
@@ -2312,6 +2320,26 @@ class FakePage:
 
     def evaluate(self, *args, **kwargs):
         return None
+
+
+class UnreadablePage(FakePage):
+    """A page whose URL cannot be read — one dying mid-navigation."""
+
+    @property
+    def url(self) -> str:  # type: ignore[override]
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    @url.setter
+    def url(self, value: str) -> None:
+        return None
+
+
+class FakeFrame:
+    """A frame as `framenavigated` delivers one. A main frame has no parent."""
+
+    def __init__(self, url: str = LOADED_URL, parent: FakeFrame | None = None):
+        self.url = url
+        self.parent_frame = parent
 
 
 class DeadPage:
@@ -2449,6 +2477,394 @@ class CaptionTruth(unittest.TestCase):
             "the medium starts before its page is watched, so the first "
             "navigation's problems are recorded by nobody",
         )
+
+
+# --------------------------------------------------------------------------
+# What Chromium really sends for each way of leaving a page (issue #179)
+# --------------------------------------------------------------------------
+#
+# `CaptionTruth` above fires `domcontentloaded` itself. That grades the handler
+# and the subscription and takes the *event name* on trust — and the name is
+# the whole of the decision, because `framenavigated` fires for same-document
+# history navigation as well, so clearing there would take a caption off the
+# beat log while it is still on screen. A check that fires the event it is
+# unsure about is the catalogue's *check that shares the bug's blind spot*.
+#
+# So the streams below were **measured**. A probe served a fixture with a link,
+# a GET form, a `location.href` button, a `history.pushState` button, an iframe
+# and a `<meta http-equiv=refresh>`, put the shipped `Recorder._watch_page`
+# subscription on a real page, and recorded the ordered page events each way of
+# leaving produced, plus how many of them had arrived by the time the driving
+# Playwright call returned.
+#
+# **Measured on three Chromium builds, byte-identical on all three:**
+# 136.0.7103.25 (Playwright 1.52), 147.0.7727.15 (1.59) and 151.0.7922.34
+# (1.62) — the same three #202 is about, where one build disagreeing with the
+# others is exactly what this is written to notice. The probe is not committed;
+# a re-measurement lands in this table.
+#
+# What the tests do with it is replay each measured stream through the
+# production subscription and read the *beat log* — never `rec._caption`,
+# which is the field #134 was about. The table is data, not code shared with
+# `web.py`: an author who changes the event the clear hangs off has to change
+# the browser to make these agree again.
+#
+# (name, what the storyboard did, stream, events delivered by the time the
+#  driving call returned, does the caption survive it)
+_MAIN, _CHILD, _PAGE = "main", "child", None
+NAVIGATIONS = [
+    (
+        "goto",
+        'page.goto("/b.html") — the recorder\'s own goto verb',
+        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],
+        3,
+        False,
+    ),
+    (
+        "link_click",
+        'click("#link") on an <a href> to another document',
+        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],
+        1,
+        False,
+    ),
+    (
+        "go_back",
+        "page.go_back() across two documents",
+        [
+            ("framenavigated", _MAIN),
+            ("framenavigated", _CHILD),
+            ("domcontentloaded", _PAGE),
+            ("load", _PAGE),
+        ],
+        4,
+        False,
+    ),
+    (
+        "form_submit",
+        'click("#submit") on a GET form',
+        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],
+        1,
+        False,
+    ),
+    (
+        "location_href",
+        "a button that assigns location.href",
+        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],
+        1,
+        False,
+    ),
+    (
+        # Two documents, one `domcontentloaded` each: the "once per new
+        # document" half of the claim, from the only case that can show it.
+        "meta_refresh",
+        'goto() to a page whose <meta http-equiv="refresh"> sends it on',
+        [
+            ("framenavigated", _MAIN),
+            ("domcontentloaded", _PAGE),
+            ("load", _PAGE),
+            ("framenavigated", _MAIN),
+            ("domcontentloaded", _PAGE),
+            ("load", _PAGE),
+        ],
+        6,
+        False,
+    ),
+    (
+        "reload",
+        "page.reload()",
+        [
+            ("framenavigated", _MAIN),
+            ("framenavigated", _CHILD),
+            ("domcontentloaded", _PAGE),
+            ("load", _PAGE),
+        ],
+        4,
+        False,
+    ),
+    (
+        # The three that must NOT clear. The bar is still in the document, so
+        # a beat reporting no caption here is #134 pointing the other way.
+        "spa_push_state",
+        "history.pushState to a new route, no document loaded",
+        [("framenavigated", _MAIN)],
+        1,
+        True,
+    ),
+    (
+        "spa_back",
+        "page.go_back() over that pushState — same document",
+        [("framenavigated", _MAIN)],
+        1,
+        True,
+    ),
+    (
+        # The "only for the main frame" half: an iframe loading a document
+        # produces a child-frame `framenavigated` and no page-level
+        # `domcontentloaded` at all.
+        "iframe_load",
+        "an iframe loading a document while the page stands still",
+        [("framenavigated", _CHILD)],
+        1,
+        True,
+    ),
+]
+
+# The ways of leaving a page #179 names by hand, spelled out rather than
+# counted: a table that lost the SPA rows would still satisfy a floor, and the
+# SPA rows are the half that decides the event name.
+NAVIGATIONS_REQUIRED = frozenset(
+    {
+        "goto",
+        "link_click",
+        "go_back",
+        "form_submit",
+        "location_href",
+        "meta_refresh",
+        "spa_push_state",
+        "spa_back",
+        "iframe_load",
+    }
+)
+
+
+def replay(rec, stream) -> int:
+    """Deliver one measured page-event stream. Returns handler calls made."""
+    taken = 0
+    for event, target in stream:
+        if event == "framenavigated":
+            frame = FakeFrame(
+                LOADED_URL, None if target == _MAIN else FakeFrame("about:blank")
+            )
+            taken += rec.page.fire(event, frame)
+        else:
+            taken += rec.page.fire(event, rec.page)
+    return taken
+
+
+class MeasuredNavigations(unittest.TestCase):
+    """The beat log against event streams a real Chromium produced (#179)."""
+
+    def prepared(self):
+        return CaptionTruth.prepared(self)  # the same control, same reasons
+
+    def test_every_measured_document_load_takes_the_line_off_the_beat_log(self):
+        for name, did, stream, _, keeps in NAVIGATIONS:
+            if keeps:
+                continue
+            with self.subTest(navigation=name):
+                rec = self.prepared()
+                before = len(rec._beats)
+                self.assertGreaterEqual(
+                    replay(rec, stream),
+                    1,
+                    f"nothing was subscribed to any event {name} delivers, so "
+                    f"this replayed a stream at nobody",
+                )
+                rec.pause(0)
+                after = rec._beats[before:]
+                self.assertEqual(
+                    [b["caption"] for b in after],
+                    [""],
+                    f"{did} replaced the document, and a beat after it still "
+                    f"reports a caption",
+                )
+                # Broader than the field on purpose: what a reader of this
+                # take's timeline can recover, whichever key it travelled in.
+                self.assertNotIn(STALE_CAPTION, json.dumps(after))
+
+    def test_every_measured_same_document_navigation_keeps_the_line(self):
+        for name, did, stream, _, keeps in NAVIGATIONS:
+            if not keeps:
+                continue
+            with self.subTest(navigation=name):
+                rec = self.prepared()
+                before = len(rec._beats)
+                self.assertGreaterEqual(
+                    replay(rec, stream),
+                    1,
+                    f"nothing took any event {name} delivers — with the whole "
+                    f"subscription gone this test would pass on silence",
+                )
+                rec.pause(0)
+                self.assertEqual(
+                    [b["caption"] for b in rec._beats[before:]],
+                    [STALE_CAPTION],
+                    f"{did} left the caption bar in the document, and the "
+                    f"beat log says it went away",
+                )
+
+    def test_the_measured_table_covers_every_way_issue_179_names(self):
+        # The vacuous half of both sweeps above. Each loop is over whatever
+        # rows carry its flag, so a table that lost the SPA rows would leave
+        # "an SPA route change keeps the caption" graded over nothing at all.
+        measured = {row[0] for row in NAVIGATIONS}
+        self.assertEqual(sorted(NAVIGATIONS_REQUIRED - measured), [])
+        kept = [row[0] for row in NAVIGATIONS if row[4]]
+        replaced = [row[0] for row in NAVIGATIONS if not row[4]]
+        self.assertGreaterEqual(len(kept), 3, kept)
+        self.assertGreaterEqual(len(replaced), 5, replaced)
+        # And the streams have to disagree in the way the fix depends on:
+        # every same-document navigation is `framenavigated` with no document
+        # event, and every replacement carries one. If that stopped being
+        # true, no subscription could tell them apart and the tests above
+        # would be grading a coincidence.
+        for name, _, stream, _, keeps in NAVIGATIONS:
+            loads = [e for e, _t in stream if e == "domcontentloaded"]
+            self.assertEqual(
+                bool(loads),
+                not keeps,
+                f"{name} was measured with {len(loads)} document-load "
+                f"event(s), which does not match what it does to the page",
+            )
+            self.assertTrue(
+                any(e == "framenavigated" for e, _t in stream),
+                f"{name} produced no framenavigated at all, so it cannot show "
+                f"that the two signals are distinguishable",
+            )
+
+    def test_a_load_the_verb_did_not_wait_for_reaches_the_log_one_beat_late(self):
+        # A **known gap**, pinned rather than wished away (issue #214).
+        #
+        # `goto()` waits for the load, so by the time it returns the clear has
+        # already happened — measured, all three builds. A click does not: a
+        # link click, a form submit and a `location.href` button return after
+        # `framenavigated` only, and the document event arrives during
+        # whichever Playwright call comes next. A beat's caption is stamped
+        # when the beat *opens*, before its verb touches the browser, so the
+        # first beat after a click-driven navigation still carries the line.
+        #
+        # Both halves are asserted: the stale beat, so a fix has to come here
+        # and say so, and the clean one after it, which is the claim that the
+        # clear does land.
+        for name in ("link_click", "form_submit", "location_href"):
+            with self.subTest(navigation=name):
+                row = next(r for r in NAVIGATIONS if r[0] == name)
+                _, _, stream, at_return, _ = row
+                self.assertLess(
+                    at_return,
+                    len(stream),
+                    "this navigation was measured as fully delivered before "
+                    "its verb returned, so there is no late half to grade",
+                )
+                rec = self.prepared()
+                before = len(rec._beats)
+                replay(rec, stream[:at_return])
+                rec.pause(0)  # opens before the document event lands
+                replay(rec, stream[at_return:])
+                rec.pause(0)
+                self.assertEqual(
+                    [b["caption"] for b in rec._beats[before:]],
+                    [STALE_CAPTION, ""],
+                )
+
+
+# --------------------------------------------------------------------------
+# What the log says about the line it dropped (issue #180)
+# --------------------------------------------------------------------------
+#
+# Clearing the caption made the timeline honest and mute. A storyboard that
+# captions, navigates and holds for eight seconds records eight seconds of
+# empty caption column and nothing naming the cause, and the recorder knew
+# both the line and the document at the moment it dropped it.
+
+
+class CaptionLost(unittest.TestCase):
+    """The issue a page load records for the caption it took away (#180)."""
+
+    def dropped(self, url: str = LOADED_URL):
+        """A recorder that captioned, then had its document replaced."""
+        rec = recorder(self, page=FakePage(url))
+        rec._watch_page(rec.page)
+        rec.caption(STALE_CAPTION)
+        self.assertEqual(
+            rec._issues,
+            [],
+            "something else was already recorded, so the "
+            "assertions below are not about the caption",
+        )
+        self.assertGreaterEqual(rec.page.fire("domcontentloaded", rec.page), 1)
+        return rec
+
+    def test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem(self):
+        rec = self.dropped()
+        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
+        issue = rec._issues[0]
+        self.assertEqual(issue["kind"], "caption_lost")
+        # Both facts the recorder had and neither of which reached anything
+        # before: which line, and which document took it.
+        self.assertEqual(issue["lost_caption"], STALE_CAPTION)
+        self.assertEqual(issue["url"], LOADED_URL)
+        # …and in the one field a reader of timeline.md's Issues section sees,
+        # because that list renders `message` and nothing else.
+        self.assertIn(STALE_CAPTION, issue["message"])
+        self.assertIn(LOADED_URL, issue["message"])
+
+    def test_the_kind_is_one_the_package_publishes(self):
+        # `check_issues` in tests/smoke refuses a kind outside this tuple, and
+        # a take that recorded one would fail on the artifact rather than on
+        # the defect.
+        self.assertIn("caption_lost", ISSUE_KINDS)
+
+    def test_a_load_with_no_caption_up_records_nothing(self):
+        # Every take begins with a document load and most storyboards navigate
+        # before they caption anything. An issue for each would be a log
+        # nobody reads.
+        rec = recorder(self)
+        rec._watch_page(rec.page)
+        rec.page.fire("domcontentloaded", rec.page)
+        rec.pause(0)
+        rec.page.fire("domcontentloaded", rec.page)
+        self.assertEqual(rec._issues, [])
+        self.assertEqual(rec._issue_count, 0)
+
+    def test_a_second_load_does_not_report_the_line_a_second_time(self):
+        # The caption is gone after the first one. A recorder that logged the
+        # same lost line once per document would bury a real one under a
+        # storyboard that navigates six times.
+        rec = self.dropped()
+        rec.page.fire("domcontentloaded", rec.page)
+        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
+
+    def test_losing_a_caption_does_not_fail_a_strict_take(self):
+        # A storyboard mistake is not the app saying it is broken, and strict
+        # mode is a verdict on the app. Asserted on the counter `__exit__`
+        # reads, not on the tuple, so moving the kind into STRICT_KINDS is
+        # what this notices.
+        rec = self.dropped()
+        self.assertNotIn("caption_lost", STRICT_KINDS)
+        self.assertEqual(rec._fatal_count, 0)
+
+    def test_a_page_too_far_gone_to_name_still_reports_the_line(self):
+        # The catalogue's clean-path-only assertion. The URL is read off a
+        # page that is, by definition, in the middle of replacing itself, and
+        # a diagnostic that threw here would surface inside an unrelated
+        # Playwright call and cost the take. What must not happen is the
+        # *line* being lost with it: which caption went away is the half the
+        # recorder alone knows.
+        rec = recorder(self, page=UnreadablePage())
+        rec._watch_page(rec.page)
+        rec.caption(STALE_CAPTION)
+        rec.page.fire("domcontentloaded", rec.page)
+        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
+        self.assertEqual(rec._issues[0]["lost_caption"], STALE_CAPTION)
+        self.assertIn(STALE_CAPTION, rec._issues[0]["message"])
+        # …and says so, rather than naming a URL it never had.
+        self.assertEqual(rec._issues[0]["url"], "(unknown)")
+        self.assertEqual(rec._caption, "", "the caption survived the load")
+
+    def test_the_lost_line_reaches_the_document_a_reviewer_reads(self):
+        # The consumer's side, end to end: the envelope a take writes, then
+        # the markdown rendered off it. Neither is asked what the recorder
+        # thinks; both are searched for the line that went missing.
+        rec = self.dropped()
+        rec.pause(0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = rec._timeline_doc()
+        self.assertEqual([i["kind"] for i in doc["issues"]], ["caption_lost"])
+        md = render_timeline_md(doc)
+        body = md[md.index("## Issues") :]
+        self.assertIn(STALE_CAPTION, body)
+        self.assertIn(LOADED_URL, body)
 
 
 class WatchedEvents(unittest.TestCase):
@@ -4062,9 +4478,13 @@ INJECTIONS = [
         # on screen into a committed timeline.
         "a document load stops invalidating the caption",
         "web.py",
-        '        self._caption = ""',
-        "        pass  # the recorder keeps a caption the document took away",
-        ["CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption"],
+        '        lost, self._caption = self._caption, ""',
+        "        lost = self._caption  # the recorder keeps what the document took",
+        [
+            "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
+            "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
+            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_one_beat_late",
+        ],
     ),
     (
         # The handler can be right and reachable by nothing.
@@ -4072,7 +4492,149 @@ INJECTIONS = [
         "web.py",
         '        page.on("domcontentloaded", self._note_document_replaced)',
         "        pass  # no subscription",
-        ["CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption"],
+        # Not the same-document sweep: `framenavigated` is still subscribed,
+        # so its control (`replay` reached a handler) still holds and the
+        # caption still survives. Listing it here would be a claim this
+        # injection does not support.
+        [
+            "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
+            "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
+        ],
+    ),
+    (
+        # **Issue #179's injection.** The event name is the whole decision,
+        # and until the streams in `NAVIGATIONS` were measured off a browser
+        # nothing here could tell the two apart: `CaptionTruth` fires the
+        # event it is unsure about, so it goes green against either name.
+        # This is caught now because a real Chromium sends `framenavigated`
+        # for a pushState route change and no document event at all, so the
+        # clear lands on a caption still on screen.
+        "the caption clear hangs off the navigation signal, not the document one",
+        "web.py",
+        '        page.on("domcontentloaded", self._note_document_replaced)',
+        '        page.on("framenavigated", self._note_document_replaced)',
+        # Deliberately *not* the document-load sweep: every stream that
+        # replaces a document carries a `framenavigated` too, so the caption
+        # still clears there and that sweep stays green. Only the
+        # same-document half can tell the two names apart, which is the whole
+        # reason it had to be measured.
+        [
+            "MeasuredNavigations.test_every_measured_same_document_navigation_keeps_the_line",
+            "WatchedEvents.test_the_web_recorder_only_adds_to_what_the_base_watches",
+        ],
+    ),
+    (
+        # The measured table graded from its own side. Each sweep loops over
+        # whichever rows carry its flag, so a row that changed sides would
+        # quietly move out of one sweep and into the other — and the SPA rows
+        # are the half that decides the event name.
+        "a same-document route change is filed as a document replacement",
+        "tests/unit",
+        '        "history.pushState to a new route, no document loaded",\n'
+        '        [("framenavigated", _MAIN)],\n'
+        "        1,\n"
+        "        True,",
+        '        "history.pushState to a new route, no document loaded",\n'
+        '        [("framenavigated", _MAIN)],\n'
+        "        1,\n"
+        "        False,",
+        [
+            "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
+            "MeasuredNavigations.test_the_measured_table_covers_every_way_issue_179_names",
+        ],
+    ),
+    (
+        # …and the table losing a row outright, which no sweep over it can
+        # notice — the catalogue's vacuous sweep, in the data rather than in
+        # the code.
+        "the measured table stops covering the iframe #179 names",
+        "tests/unit",
+        '        "iframe_load",\n'
+        '        "an iframe loading a document while the page stands still",',
+        '        "iframe_load_renamed",\n'
+        '        "an iframe loading a document while the page stands still",',
+        [
+            "MeasuredNavigations.test_the_measured_table_covers_every_way_issue_179_names"
+        ],
+    ),
+    # -- the line the load took away (issue #180) --------------------------
+    (
+        # #180 itself: the clear on its own leaves a true, mute timeline.
+        "a caption lost to a page load goes unrecorded",
+        "web.py",
+        '        self._note_issue(\n            "caption_lost",',
+        '        return\n        self._note_issue(\n            "caption_lost",',
+        [
+            "CaptionLost.test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem",
+            "CaptionLost.test_the_lost_line_reaches_the_document_a_reviewer_reads",
+        ],
+    ),
+    (
+        # The other direction: every take opens with a document load, so a
+        # recorder that logged one per load buries the real one.
+        "every document load records a lost caption, including the ones with none",
+        "web.py",
+        "        if not lost:\n",
+        "        if False:\n",
+        [
+            "CaptionLost.test_a_load_with_no_caption_up_records_nothing",
+            "CaptionLost.test_a_second_load_does_not_report_the_line_a_second_time",
+        ],
+    ),
+    (
+        # The Issues section renders `message` and nothing else, so an issue
+        # whose extra keys carry the line and whose message does not is one a
+        # reviewer reading timeline.md cannot act on.
+        "the recorded problem stops naming the line that was lost",
+        "web.py",
+        '            f"{lost!r}, so the line left the screen — every beat after this "',
+        '            f"so the line left the screen — every beat after this "',
+        [
+            "CaptionLost.test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem",
+            "CaptionLost.test_the_lost_line_reaches_the_document_a_reviewer_reads",
+        ],
+    ),
+    (
+        "the recorded problem stops naming the document that replaced it",
+        "web.py",
+        '            f"a new document at {url} replaced the one holding the caption "',
+        '            f"a new document replaced the one holding the caption "',
+        [
+            "CaptionLost.test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem",
+            "CaptionLost.test_the_lost_line_reaches_the_document_a_reviewer_reads",
+        ],
+    ),
+    (
+        # The exception path, which is where a guard usually is not tested:
+        # the URL is read off a page in the middle of replacing itself, and a
+        # diagnostic that threw there would surface inside an unrelated
+        # Playwright call and take the whole recording with it.
+        "reading the new document's URL is allowed to throw out of the callback",
+        "web.py",
+        "        try:\n"
+        "            url = page.url\n"
+        "        except Exception:  # noqa: BLE001 - a page dying still lost the caption\n"
+        '            url = "(unknown)"\n',
+        "        url = page.url\n",
+        ["CaptionLost.test_a_page_too_far_gone_to_name_still_reports_the_line"],
+    ),
+    (
+        # A kind the package does not publish fails `check_issues` on the
+        # artifact instead of on the defect, which is a worse bug report.
+        "the new kind is not one the timeline contract declares",
+        "timeline.py",
+        '    "caption_lost",     # a page load took the caption bar off the screen\n',
+        "",
+        ["CaptionLost.test_the_kind_is_one_the_package_publishes"],
+    ),
+    (
+        # A storyboard mistake made into a verdict on the app: every demo that
+        # navigates away from a captioned screen stops recording under strict.
+        "losing a caption becomes something strict mode refuses a take over",
+        "timeline.py",
+        'STRICT_KINDS = ("console_error", "page_error", "nonzero_exit")',
+        'STRICT_KINDS = ("console_error", "page_error", "nonzero_exit", "caption_lost")',
+        ["CaptionLost.test_losing_a_caption_does_not_fail_a_strict_take"],
     ),
     (
         # …and the subscription can be right and never made, because
@@ -4224,7 +4786,10 @@ INJECTIONS = [
         "web.py",
         "        self._navigated = True",
         '        self._navigated = True\n        self._caption = ""',
-        ["CaptionTruth.test_an_spa_route_change_keeps_the_caption"],
+        [
+            "CaptionTruth.test_an_spa_route_change_keeps_the_caption",
+            "MeasuredNavigations.test_every_measured_same_document_navigation_keeps_the_line",
+        ],
     ),
     (
         # Issue #186 exactly as it shipped before it was fixed: every mousemove
@@ -4534,14 +5099,30 @@ def fault_inject() -> int:
 #   `tests/smoke`'s, and this suite does not reduce what smoke has to run. It
 #   runs the half that never needed one.
 #
-#   Two things about the recorders *are* graded here, both with a stand-in for
+#   Three things about the recorders *are* graded here, all with a stand-in for
 #   `playwright.sync_api` and a page that records rather than paints (#134,
-#   #177): what a beat writes down about a call, and what a document load does
-#   to the caption the beat log stamps. Neither needs a browser to be true, and
-#   both are read off the beat record — the row that becomes `timeline.json` —
-#   rather than off the screen. What a real Chromium does with the same events
-#   is still smoke's: that `domcontentloaded` fires when this claims it does is
-#   Playwright's contract, not an assertion made here.
+#   #177, #179, #180): what a beat writes down about a call, what a document
+#   load does to the caption the beat log stamps, and what the problem log says
+#   about the line that load took away. None of them needs a browser to be
+#   true, and all are read off the beat record — the row that becomes
+#   `timeline.json` — rather than off the screen.
+#
+#   `NAVIGATIONS` is the seam where a browser's answer got written down instead
+#   of assumed (#179): the event streams there were measured off Chromium 136,
+#   147 and 151 and are replayed through the production subscription. That is
+#   a **recording** of three browsers, not a test of one — a build that started
+#   sending a document event for a `pushState` route change, or none for a form
+#   submit, would leave this suite green. Re-driving the real thing is still
+#   smoke's, and the arm is not there yet (see the two gaps below).
+# - **That the clear lands before the beat that follows a *click*.** Measured,
+#   identical on all three builds: `goto()` waits for the load, so the caption
+#   is already gone when it returns, but a link click, a form submit and a
+#   `location.href` return after `framenavigated` alone. A beat stamps its
+#   caption when it opens, so the first beat after a click-driven navigation
+#   still carries the line that left the screen.
+#   `MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log
+#   _one_beat_late` **pins that gap** rather than hiding it: it is today's
+#   behaviour asserted, so closing it has to be a deliberate edit here.
 # - **That Chromium's events still look the way `event()` says they do.** The
 #   cursor rule (#186, #202) is graded here as a rule read out of the shipped
 #   overlay and run over measured event streams, so a rule that changed meaning

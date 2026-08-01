@@ -527,9 +527,12 @@ class Recorder(_DemoBase):
         and empty of issues. The base now seals `_watch_page` and calls this,
         so the same mistake is a `TypeError` while the module imports.
 
-        Both callbacks below only set an attribute. Playwright delivers page
-        events on the same thread that is blocked in a Playwright call, so
-        calling back into the API from one of them is a way to deadlock a take.
+        Neither callback below calls into Playwright. Page events are
+        delivered on the same thread that is blocked inside a Playwright call,
+        so calling back into the API from one of them is a way to deadlock a
+        take — `_note_document_replaced` writes an issue and reads `page.url`,
+        which is the last URL the connection already told this process about
+        and costs no round trip.
         """
         # **Kept deliberately when the masking went** — #142's carve-out.
         # Written for the paint gate, which is gone; nothing reads the flag.
@@ -545,6 +548,14 @@ class Recorder(_DemoBase):
         # clear a caption that is still on screen — the same lie in the other
         # direction. `domcontentloaded` is fired once per new document, and
         # only for the main frame, so an iframe loading does not touch it.
+        #
+        # That last sentence was read off `playwright-core` and is now
+        # measured: `NAVIGATIONS` in `tests/unit` holds the page-event stream
+        # a real Chromium delivers for `goto`, a link click, `go_back`, a form
+        # submit, `location.href`, a meta refresh, a reload, two same-document
+        # SPA route changes and an iframe load, identical on Chromium 136, 147
+        # and 151, and the suite replays each one through this subscription
+        # (issue #179).
         page.on("domcontentloaded", self._note_document_replaced)
 
     def _start(self) -> None:
@@ -709,8 +720,37 @@ class Recorder(_DemoBase):
         Clearing it here rather than in `goto()` covers a link click,
         `go_back()`, a form submit, `location.href` and a meta refresh too:
         they all replace the document and none of them goes through `goto`.
+        Measured, not assumed — see `_watch_extra` and `NAVIGATIONS` in
+        `tests/unit`.
+
+        **The line does not go quietly (issue #180).** Clearing alone leaves
+        the beat log honest and mute: a storyboard that captions, navigates
+        and then holds records an empty caption column and nothing that says
+        why, which is true and is almost certainly not what its author meant.
+        So the drop is recorded as a `caption_lost` issue naming the line and
+        the document that replaced it, and `timeline.md`'s Issues section
+        carries it. Deliberately **not** in `STRICT_KINDS`: this is the
+        storyboard's mistake, not the app saying it is broken, and strict mode
+        is a verdict on the app.
         """
-        self._caption = ""
+        lost, self._caption = self._caption, ""
+        if not lost:
+            # Every take opens with a document load, and a storyboard that
+            # navigates before it says anything does it again. An issue per
+            # load with no caption up would be noise nobody reads.
+            return
+        try:
+            url = page.url
+        except Exception:  # noqa: BLE001 - a page dying still lost the caption
+            url = "(unknown)"
+        self._note_issue(
+            "caption_lost",
+            f"a new document at {url} replaced the one holding the caption "
+            f"{lost!r}, so the line left the screen — every beat after this "
+            f"reports no caption until the storyboard sets one again",
+            lost_caption=lost,
+            url=url,
+        )
 
     # -- evidence (issue #9) ------------------------------------------------
 

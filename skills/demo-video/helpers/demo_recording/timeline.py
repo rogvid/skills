@@ -256,7 +256,7 @@ def _cap_text(text: str, limit: int) -> tuple[str, int]:
 #   message  str   — one human-readable line
 #   plus kind-specific keys: `url`/`line` (console), `url`/`method`
 #   (request_failed), `url`/`status` (http_error), `exit_code`/`command`
-#   (nonzero_exit)
+#   (nonzero_exit), `lost_caption`/`url` (caption_lost)
 #
 # `t` is when the problem was *observed*, which is not always when it happened:
 # Playwright's sync API only delivers page events while it is being called, and
@@ -280,13 +280,15 @@ ISSUE_KINDS = (
     "request_failed",   # a request that never got a response at all
     "http_error",       # a response with status >= 400
     "nonzero_exit",     # a TerminalRecorder run() whose command failed
+    "caption_lost",     # a page load took the caption bar off the screen
 )
 
 # What `strict=True` refuses to pass: the app saying, in its own voice, that it
-# is broken. `console_warning`, `request_failed` and `http_error` are recorded
-# but not fatal on their own — a warning is not a failure, and a request the
-# storyboard never depended on is the recorder's business to report, not to
-# veto.
+# is broken. `console_warning`, `request_failed`, `http_error` and
+# `caption_lost` are recorded but not fatal on their own — a warning is not a
+# failure, a request the storyboard never depended on is the recorder's
+# business to report rather than to veto, and a caption dropped by a
+# navigation is the storyboard's mistake and not the app's.
 #
 # In practice that distinction is narrower than it looks, and deliberately so:
 # Chromium writes its own "Failed to load resource: …" line to the console for
@@ -554,9 +556,9 @@ def render_timeline_md(doc: dict) -> str:
             "## Issues",
             "",
             f"{total} recorded while this take ran — console errors, failed "
-            f"requests, and non-zero exit codes, each attributed to the beat "
-            f"it fired during. A demo can look perfect and still be a "
-            f"recording of a broken app.",
+            f"requests, non-zero exit codes, and captions a page load took "
+            f"off the screen, each attributed to the beat it fired during. A "
+            f"demo can look perfect and still be a recording of a broken app.",
             "",
         ]
         # A bullet list rather than a table on purpose: a table row starting
