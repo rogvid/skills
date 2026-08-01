@@ -86,6 +86,10 @@ ARM_TIMEOUT_S = 1_200
 
 # Measured on this box, clean, one arm at a time (see tests/README.md).
 ARM_SECONDS = {
+    # Records nothing at all: two child runs of tests/smoke that both fail
+    # before a browser starts. Measured at 0.31 s, rounded to the 1 s this
+    # table's other rows are in.
+    "--lock-only": 1,
     "--evidence-only": 7,
     "--coverage-only": 8,
     "--issues-only": 26,
@@ -117,6 +121,67 @@ class Injection(NamedTuple):
 # The order is the order they run in: cheapest arm first, so a manifest that is
 # going to abort on a stale search string does it in eight seconds.
 INJECTIONS = [
+    # -- what a run that never started leaves behind (issue #105), 1 s an entry
+    #
+    # Three entries against one check function, because it is a *pair* of
+    # claims and either half alone is satisfied by the wrong fix. The first two
+    # break the refusal path — the directory, then the line — and the third
+    # breaks the control, a run that started and failed and must still be told
+    # where its recordings are. Without the third, "do not print that line" is
+    # a passing answer to issue #105 and it is the wrong one.
+    Injection(
+        name="a refused run builds its output directory before taking the lock",
+        module="tests/smoke",
+        old=(
+            "        with only_one_suite(args.allow_concurrent):\n"
+            "            out_root, ephemeral = open_output(args)\n"
+        ),
+        new=(
+            "        out_root, ephemeral = open_output(args)\n"
+            "        with only_one_suite(args.allow_concurrent):\n"
+        ),
+        arm="--lock-only",
+        sites=("check_lock_refusal",),
+        must_contain=(
+            "a run the lock refused created ",
+            "a run the lock refused printed `recordings left in`",
+        ),
+    ),
+    Injection(
+        name="a run that never started is told where its recordings are",
+        module="tests/smoke",
+        old="        if out_root is None:\n",
+        new="        if False:\n",
+        arm="--lock-only",
+        sites=("check_lock_refusal",),
+        must_contain=("a run the lock refused printed `recordings left in`",),
+    ),
+    Injection(
+        # The control. A `main()` that never says where the recordings are
+        # passes both entries above and fails this one.
+        name="no failing run is told where its recordings are",
+        module="tests/smoke",
+        old='            print(f"\\nsmoke: recordings left in {out_root}", file=sys.stderr)',
+        new="            pass",
+        arm="--lock-only",
+        sites=("check_lock_refusal",),
+        must_contain=("a run that started and then failed did not say",),
+    ),
+    # -- an overlay left up by accident (issue #168), 8 s an entry -------------
+    Injection(
+        # The narration fixture put an interlude card up in its third beat and
+        # never took it down, so every frame after it — including both captions
+        # the arm measures — was the card. Nothing failed: pacing is read out
+        # of timeline.json and the mix out of the audio track, and a warning
+        # was printed on an arm the suite called healthy.
+        name="the narration fixture leaves its interlude card up",
+        module="tests/smoke",
+        old='            rec.interlude("")\n            rec.caption(NARRATION_SHORT_LINE)',
+        new="            rec.caption(NARRATION_SHORT_LINE)",
+        arm="--narration-only",
+        sites=("check_overlay_cleared",),
+        must_contain=("the take ended with one of the recorder's own overlays",),
+    ),
     # -- the coverage report (issue #12), 8 s an entry ------------------------
     Injection(
         name="nothing is ever reported unclaimed",
@@ -699,7 +764,18 @@ class Refused(Exception):
 # A contended arm records nothing, so its failure list is that refusal and not
 # a verdict — reporting it as "the assertion did not fire" would be a lie in
 # the one direction this file exists to prevent.
+#
+# Matched against the *start of a failure line* rather than anywhere in the
+# failure list, and that is not tidiness: `--lock-only` grades the refusal path
+# by running a child of tests/smoke that the lock refuses, and quotes what the
+# child said. Searching the whole blob read that quotation as this run being
+# contended and aborted the manifest — a guard against a lie, telling one.
 CONTENDED = "refusing to run a second smoke suite"
+
+
+def contended(lines: list[str]) -> bool:
+    """Was this arm refused by the machine lock? `lines` is the failure list."""
+    return any(line.startswith(CONTENDED) for line in lines)
 
 
 def verify_manifest(entries: list[Injection]) -> None:
@@ -848,7 +924,7 @@ def baseline(arm: str) -> float:
     spent = time.monotonic() - started
     if code != 0:
         blob, lines = failure_report(err)
-        if CONTENDED in blob:
+        if contended(lines):
             raise Refused(
                 f"another smoke run holds the machine lock, so {arm} recorded "
                 f"nothing. Wait for it — a contended arm is not a verdict."
@@ -922,7 +998,7 @@ def inject(entries: list[Injection]) -> int:
             path.write_text(text.replace(entry.old, entry.new), encoding="utf-8")
             code, _, err = run_arm(root, entry.arm, Path(tmp) / "out")
         blob, lines = failure_report(err)
-        if CONTENDED in blob:
+        if contended(lines):
             print(
                 f"ABORT: another smoke run took the machine lock partway "
                 f"through, so {entry.arm} recorded nothing for "
@@ -1055,6 +1131,32 @@ def self_test() -> int:
         else:
             bad += 1
             print(f"WRONG    {what}: verdict said {'caught' if got else 'missed'}")
+
+    # And "was this arm refused by the lock", both ways. The false direction is
+    # the one that bit: `--lock-only` grades the refusal path by quoting what a
+    # refused child said, and a substring search over the whole failure list
+    # read that quotation as this run being contended.
+    for what, lines, want in (
+        (
+            "an arm the machine lock refused",
+            ["refusing to run a second smoke suite on this machine"],
+            True,
+        ),
+        (
+            "an assertion quoting a refused child (--lock-only)",
+            [
+                "lock: a run the lock refused printed `recordings left in`, "
+                "naming a directory it never wrote to: 'smoke: ANOTHER RUN "
+                "HOLDS ... refusing to run a second smoke suite'"
+            ],
+            False,
+        ),
+    ):
+        if contended(lines) == want:
+            print(f"{'REFUSED ' if want else 'CAUGHT  '} {what}")
+        else:
+            bad += 1
+            print(f"WRONG    {what}: contended() said {contended(lines)}")
 
     # The real manifest, against the real tree.
     try:

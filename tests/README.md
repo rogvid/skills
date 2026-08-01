@@ -96,6 +96,8 @@ tests/smoke --strict-only         # just the two takes strict=True must refuse
 tests/smoke --issues-only         # just the broken page and the failing
                                   #   commands, which is what check_issues
                                   #   grades (issue #197)
+tests/smoke --lock-only           # records nothing: what a run the machine
+                                  #   lock refuses leaves behind (issue #105)
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -107,7 +109,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 30 entries, ~35 min
+tests/smoke-inject                # all 34 entries, ~35 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1308,6 +1310,35 @@ Three things about how these are built are worth knowing before trusting them:
   deviation against the same 6.0 floor the web stills use — which transitively
   says `demo.mp4` has a picture where it stopped.
 
+### What a run that never started leaves behind (issue #105)
+
+`tests/smoke --lock-only` records nothing and takes under a second. It spawns
+two child runs of `tests/smoke` and grades what they say about their own output
+directory — the suite's account of itself, on the one path where the suite used
+to lie.
+
+`main()` built its output directory and announced it *before* taking the
+machine lock, so a run the lock refused created an empty
+`/tmp/demo-video-smoke-*`, never removed it, and printed `recordings left in`
+naming it, directly under `smoke: FAILED`. 85 such directories, 80 MB, over
+three days of ordinary work — and a reader who followed that last line went
+looking for a failure's evidence and found an empty directory.
+
+It is **a pair**, and it has to be:
+
+| child | how it ends | what it must show |
+|---|---|---|
+| refused | the arm itself holds the machine lock, so the child is refused by construction | it added nothing to `$TMPDIR`, and printed no `recordings left in` |
+| started, then failed | `--allow-concurrent`, into an `--out-dir` whose take directory carries a planted file `fresh_take_dir` refuses | it *did* print `recordings left in`, naming that directory |
+
+Without the second, "never print that line" is a passing answer to #105 and it
+is the wrong one: the line is how somebody reading `smoke: FAILED` finds the
+recordings, on every failure of a run that actually started. What the two pin
+between them is the only rule true on both paths — **the line follows whether
+this run started**, not whether the directory happens to hold anything. All
+three of the manifest's entries for this arm are there to keep both halves
+gradeable.
+
 ## The injection manifest — proving `smoke` can still fail
 
 Everything above is an assertion. `tests/smoke-inject` is what says those
@@ -1325,6 +1356,7 @@ are what changed that, and they are now load-bearing rather than a convenience.
 
 | arm | clean, measured on one box |
 |---|---|
+| `--lock-only` | 1 s |
 | `--evidence-only` | 7 s |
 | `--coverage-only` | 8 s |
 | `--narration-only` | 8 s |
@@ -1401,7 +1433,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-30 entries, 10 arms, ~34.9 min of takes
+34 entries, 12 arms, ~35.2 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1420,6 +1452,8 @@ paragraph whose job is to say what this manifest does not cover.
 
 | arm | entries | what a miss would mean |
 |---|---|---|
+| `--lock-only` | 3 | a run the machine lock refuses goes back to building an output directory it will never write to and printing `recordings left in` under `smoke: FAILED`, naming it ([#105](https://github.com/rogvid/skills/issues/105)) — or the fix overshoots and no failing run is told where its recordings are, which the third entry is the control for |
+| `--narration-only` | 1 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)) |
 | `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
@@ -1433,7 +1467,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **19 of `tests/smoke`'s 35 check functions have no entry**, and the harness
+- **19 of `tests/smoke`'s 37 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1601,6 +1635,55 @@ knows is missing is worse than one that is openly absent.
   the wall clock while pixels ride the screencast. Tracked in
   [#18](https://github.com/rogvid/skills/issues/18), which matters most to
   [#8](https://github.com/rogvid/skills/issues/8).
+
+- **`--web-only` still goes red when the capture loses more than 0.75 s, and
+  the bars were not widened to stop it.**
+  [#209](https://github.com/rogvid/skills/issues/209) asked whether the
+  caption-timing bars measure something real that load breaks, or an artefact
+  of the harness's own timing. Measured, four `--web-only` runs on this box,
+  one at a time behind the machine lock, reading how far the video sits ahead
+  of the beat log at each of the two probes:
+
+  | run | loadavg | result | first probe | closing probe |
+  |---|---|---|---|---|
+  | 1 | 1.25 | FAILED | -880 ms | -800 ms |
+  | 2 | 2.05 | PASSED | -80 ms | 0 ms |
+  | 3 | 2.85 | FAILED | -120 ms | -800 ms |
+  | 4 | 19.8, 16 busy workers | FAILED | -880 ms | -840 ms |
+
+  **Real, and not load.** The reading is bimodal — either under 120 ms or
+  800-880 ms, never in between — and it is taken off a file that was already
+  written, so nothing the analysis does can produce it. Two of the three runs
+  with no load generator failed, at the loads the issue's own
+  counter-measurement called idle; the run at loadavg 19.8 failed the same way
+  and took 383 s against 137 s, with extra failures in
+  [#78](https://github.com/rogvid/skills/issues/78)'s shape (a blank opening,
+  both spotlight windows). Load makes it worse and much slower. It does not
+  cause it.
+
+  **Why the bars are unchanged.** Run 3 is the reason. Its first probe read
+  -120 ms and its closing probe -800 ms: 680 ms of screencast stall landing
+  *between* the probes, with `TICKER_JS` injected and asserted alive. A
+  `MAX_CAPTURE_LOSS_S` wide enough to absorb runs 1 and 4 turns run 3 into a
+  `MAX_SKEW_DRIFT_S` failure instead — and that bar's message attributed drift
+  to the beat log's clock, so the arm would have gone from red to *confidently
+  wrong* about a third of the time. A bar tuned to this box, buying a worse
+  artifact, is not a trade worth making, so it was not made.
+
+  What did change is the one thing here that was the harness's own.
+  `ALIGN_PRE_S` was a hand-written 1.2 s against a requirement of
+  `MAX_CAPTURE_LOSS_S + 0.48 s` = 1.23 s, so a slide *inside* the tolerance
+  this file states was reported as "the caption could not be timed" instead of
+  passing; its comment claimed 0.45 s of margin and the real figure was
+  -0.03 s. It is derived from the bar now, and reaches `ALIGN_OVERSHOOT_S`
+  past it so a slide the bar rejects is reported as a number rather than as a
+  measurement that could not be made. The drift message no longer names a
+  cause it cannot tell apart from the other one.
+
+  So `--web-only` on a box where the capture loses that window is still red,
+  and now it is red about something it can state. What nothing here grades is
+  *why* the capture loses it with the ticker running —
+  [#215](https://github.com/rogvid/skills/issues/215).
 - **Nothing reads the caption text off the video.** The timing check proves the
   caption *band* changed when `timeline.json` says it did; that the words are
   the right words is a DOM assertion (`check_caption`) taken at record time.

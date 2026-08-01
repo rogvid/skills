@@ -426,8 +426,10 @@ CAPTION_PROBE = ("90-caption-off", "91-caption-on")
 # is how long the clearing caption's fade-out keeps moving the band after
 # `caption("")` returns. Reach back further than that and the measurement takes
 # the tail of the *previous* caption as its baseline and reports a busy run-up.
-# At 2.0 against ALIGN_PRE_S of 1.2 there is 0.54 s of margin. A capture loss
-# does not enter into it: it slides the window and the fade together.
+# At 2.0 against ALIGN_PRE_S of 1.50 there is 0.24 s of margin — six frames,
+# and down from the 0.54 s it was before issue #209 widened the window to reach
+# the bar it feeds. A capture loss does not enter into it: it slides the window
+# and the fade together.
 PROBE_CAPTION = "Recorded end to end."
 PROBE_QUIET_S = 2.0
 
@@ -786,31 +788,40 @@ DURATION_TOLERANCE_S = 0.2
 #     wall time and everything after it lands early. TICKER_JS removes that
 #     for the whole storyboard, but not for the ~0.7 s between the page being
 #     created and the first line of storyboard running — the recorder's own
-#     setup, which no test code can reach. Roughly 1 web take in 12 loses that
-#     window whole: -600 ms, uniformly, from the very first caption. Tolerated
-#     and reported, not asserted away; issue #18.
+#     setup, which no test code can reach. A web take that loses that window
+#     loses it whole, uniformly, from the very first caption. Tolerated and
+#     reported, not asserted away; issue #18.
+#
+#     The number is stale and knowingly so. It was written as "roughly 1 take
+#     in 12, -600 ms", which is what 0.75 was set from; four `--web-only` runs
+#     measured while grading issue #209 read -880/-800, -80/-0, -120/-800 and
+#     -880/-840 ms. That is over the bar, at idle as well as under load, and
+#     the bar was **not** widened to absorb it — `tests/README.md`, Known gaps,
+#     says why, and issue #215 is where the cause is being looked for.
 #
 #   * MAX_SKEW_DRIFT_S — how far the two probes' skews may differ. This is the
-#     sharp one, and it is symmetric. Anything the capture does to a take, it
-#     does to every frame after it equally, so a stall moves both probes
-#     together and cancels here. Anything wrong with the *clock* does not: a
-#     backwards step lands between the probes and shows up as drift, as does a
+#     sharp one, and it is symmetric. A capture stall *before* the first probe
+#     moves both of them equally and cancels here; anything wrong with the
+#     *clock* does not, since a backwards step lands between them, as does a
 #     beat stamped somewhere other than where its verb ran. Observed across
 #     twelve takes with the ticker: 0 to 120 ms, all of it the 40 ms sampling
-#     grid and the caption's own 0.3 s fade. A mid-take screencast stall (520
-#     ms) and the measured clock step (573 ms) are both well over the bar.
+#     grid and the caption's own 0.3 s fade.
+#
+#     What this bar does **not** do is say which of the two it caught, and the
+#     comment here used to: a stall landing *between* the probes does not
+#     cancel either. Measured on this box while grading issue #209, one
+#     `--web-only` take read -120 ms at the first probe and -800 ms at the
+#     closing one — 680 ms of screencast stall, mid-take, with TICKER_JS
+#     running and asserted alive. The measured clock step (573 ms) is over the
+#     same bar, and from inside this measurement the two are the same number.
 MAX_LOG_EARLY_S = 0.25
 MAX_CAPTURE_LOSS_S = 0.75
 MAX_SKEW_DRIFT_S = 0.25
 
-# Window sampled around the probe beat, and the rate it is sampled at (the
-# recorders encode at 25 fps, so this is every frame and the measurement
-# quantises to 40 ms). The run-up has to clear MAX_CAPTURE_LOSS_S — a take that
-# lost that much wall time puts the caption that far into the window, and a
-# window starting after it has no baseline at all — while staying inside the
-# caption-band quiet PROBE_QUIET_S buys. Both, at 1.2: 0.45 s of margin on the
-# first, 0.54 s on the second.
-ALIGN_PRE_S, ALIGN_POST_S, ALIGN_FPS = 1.2, 0.8, 25
+# The rate the window is sampled at (the recorders encode at 25 fps, so this is
+# every frame and the measurement quantises to 40 ms), and how far past the
+# beat it runs.
+ALIGN_POST_S, ALIGN_FPS = 0.8, 25
 
 # How far the band may wander before the caption arrives, as a fraction of how
 # far it travels once it does. Measured on quiet run-ups: under 1%. Judged over
@@ -820,6 +831,37 @@ ALIGN_PRE_S, ALIGN_POST_S, ALIGN_FPS = 1.2, 0.8, 25
 MAX_BASELINE_NOISE_FRACTION = 0.15
 CAPTION_FADE_FRAMES = int(ALIGN_FPS * 0.35)
 MIN_BASELINE_FRAMES = 4
+
+# How far back the window reaches from the beat — **derived**, because a
+# hand-written number here was narrower than the bar it feeds and nothing said
+# so (issue #209). The old comment read "the run-up has to clear
+# MAX_CAPTURE_LOSS_S ... 0.45 s of margin", and 1.2 - 0.75 is indeed 0.45; but
+# clearing the loss is not enough. `caption_appearance_s` also needs
+# CAPTION_FADE_FRAMES + MIN_BASELINE_FRAMES (0.48 s) of quiet *in front of* the
+# arrival, so a window of 1.2 s could not measure a slide past 0.72 s — inside
+# the 0.75 s this file says it tolerates. The real margin was -0.03 s, and what
+# a reader got instead of a passing take was "the caption could not be timed".
+#
+# So: reach back far enough to measure a slide at the tolerance, plus
+# ALIGN_OVERSHOOT_S past it, so that a slide the bar *rejects* is reported as a
+# number rather than as a measurement that could not be made. Measured slides
+# on this box are 0.80-0.88 s when the capture loses anything at all, which is
+# inside the overshoot and therefore now says so in the failure.
+#
+# Bounded above by the caption-band quiet PROBE_QUIET_S buys:
+#
+#     ALIGN_PRE_S < PROBE_QUIET_S + 0.04 - 0.30 = 1.74
+#
+# At 1.50 that leaves 0.24 s — six frames — between the start of the window and
+# the previous caption's fade-out. Thinner than the 0.54 s the old number had,
+# and the trade is deliberate: the fade is at a known place and a capture slide
+# is not.
+ALIGN_OVERSHOOT_S = 0.27
+ALIGN_PRE_S = (
+    MAX_CAPTURE_LOSS_S
+    + ALIGN_OVERSHOOT_S
+    + (CAPTION_FADE_FRAMES + MIN_BASELINE_FRAMES) / ALIGN_FPS
+)
 
 # When the narrow window comes up empty, re-sample this far either side before
 # concluding the caption was never drawn. The two answers — "the video slid out
@@ -4714,6 +4756,51 @@ def check_overlay_pair(takes: dict[str, dict]) -> list[str]:
     return failures
 
 
+def check_overlay_cleared(label: str, out_dir: Path) -> list[str]:
+    """This take did not end with one of the recorder's own overlays up.
+
+    The clean-path half of #163, on an arm that is not about overlays at all.
+    `check_overlay_pair` and `check_content_pair` grade the *reporting* — a
+    take that leaves a card up must name it by element id — and both leave one
+    up deliberately, so neither can notice a fixture that leaves one up by
+    accident. Issue #168 is what that costs: the narration take raised an
+    interlude in its third beat and never took it down, so every frame from
+    there to the end was the card rather than the app, including both captions
+    the arm exists to measure. Nothing failed. A warning was printed on an arm
+    the suite then called healthy, which is how a reader learns to skim
+    (`reference/limits.md`, "A demo of an error path always records a
+    problem").
+
+    Read off `content.warnings` in timeline.json — what a reader is handed —
+    rather than off the stderr line that carries the same finding, and by
+    element-id prefix rather than by the sentence the recorder happens to
+    phrase it in.
+    """
+    content = content_of(out_dir)
+    if content is None or not content.get("measured"):
+        return [
+            f"{label}: timeline.json carries no measured `content` report, so "
+            f"whether this take ended with one of the recorder's own overlays "
+            f"on screen was not graded at all "
+            f"({None if content is None else content.get('note')})"
+        ]
+    still_up = [
+        str(w)
+        for w in content.get("warnings") or []
+        if "__demo_" in str(w) or "__term_" in str(w)
+    ]
+    if still_up:
+        return [
+            f"{label}: the take ended with one of the recorder's own overlays "
+            f"still on screen — {still_up[0]!r}. It is opaque and at the top of "
+            f"the z-order, so every frame from the moment it went up is that "
+            f"overlay and not the app, whatever else this arm measures off the "
+            f'beat log. Take it down with `interlude("")` before the storyboard '
+            f"ends, or say in a comment why it has to stay (issue #168)"
+        ]
+    return []
+
+
 def crop_png(src: Path, rect: Rect, out: Path) -> bytes | None:
     """`rect` of a PNG, losslessly, as bytes."""
     x, y, w, h = rect
@@ -5014,9 +5101,15 @@ def caption_appearance_s(
     if usable < MIN_BASELINE_FRAMES:
         return None, (
             f"the caption arrives {arrived / ALIGN_FPS:.2f}s into a "
-            f"{ALIGN_PRE_S:.1f}s run-up, leaving no frames before its fade to "
-            f"use as a baseline — the video has slid further under the beat log "
-            f"than the search window allows for (see issue #18)"
+            f"{ALIGN_PRE_S:.2f}s run-up, so the video is "
+            f"{(ALIGN_PRE_S - arrived / ALIGN_FPS) * 1000:.0f} ms ahead of the "
+            f"beat log — further than this window can measure and still leave "
+            f"{MIN_BASELINE_FRAMES} frames of baseline in front of the "
+            f"caption's own fade. The window already reaches "
+            f"{ALIGN_OVERSHOOT_S * 1000:.0f} ms past the "
+            f"{MAX_CAPTURE_LOSS_S * 1000:.0f} ms of capture loss this file "
+            f"tolerates, so a slide this size is the capture and not the "
+            f"measurement (issue #18)"
         )
     noise = max(travel[1:usable], default=0.0)
     if noise > settled * MAX_BASELINE_NOISE_FRACTION:
@@ -5461,9 +5554,14 @@ def check_timeline(
         same_capture = probes[0][1].get("segment") == probes[1][1].get("segment")
         bound = MAX_SKEW_DRIFT_S if same_capture else MAX_CROSS_SEGMENT_DRIFT_S
         why = (
-            "A capture that dropped time would have moved both equally, so "
-            "this is the beat log's clock: time between beats is not being "
-            "measured monotonically."
+            "Two causes reach this bar and it cannot tell them apart: a clock "
+            "that is not being read monotonically between beats, and a "
+            "screencast stall landing *between* the probes rather than before "
+            "them. A stall before the first probe does move both equally and "
+            "does cancel here — that is what this bar is for — but one in the "
+            "middle does not, and on this box a stall of 680 ms was measured "
+            "doing exactly that with TICKER_JS running (issue #209). Read the "
+            "two skews above before blaming the beat log."
             if same_capture
             else "These two probes are in different segments, so they rode "
             "different captures and this bar is only a flake guard — the "
@@ -8621,6 +8719,15 @@ def record_narration(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
             rec.goto("/")
             rec.wait_for("#kpi-rev")
             rec.interlude(NARRATION_LONG_LINE, hold=NARRATION_HOLD_S)
+            # Take the card down before the captions this arm measures are on
+            # screen (issue #168). It is opaque at the top of the z-order, so
+            # without this every frame from here to the end of the take is the
+            # card and not the app — including both captions — and the arm
+            # still passed, because pacing is read out of timeline.json and
+            # the mix out of the audio track. The take now demonstrates what
+            # SKILL.md tells an author to do rather than the thing #162/#163
+            # exist to report.
+            rec.interlude("")
             rec.caption(NARRATION_SHORT_LINE)
             rec.pause(NARRATION_HOLD_S)
             rec.caption("")
@@ -8801,6 +8908,7 @@ def run_narration(out_root: Path) -> list[str]:
         + check_narration_pacing(out_dir)
         + check_narration_audio(out_dir, info["lines"])
         + check_healthy("narration", out_dir)
+        + check_overlay_cleared("narration", out_dir)
     )
     if not failures:
         offsets = ", ".join(f"{off:.2f}s" for off, _ in info["lines"])
@@ -9634,6 +9742,144 @@ def only_one_suite(allow_concurrent: bool) -> Iterator[None]:
         handle.close()
 
 
+# How long a child run of this file gets before the arm below gives up on it.
+# Both children fail within a second or two — one is refused by the lock, the
+# other by `fresh_take_dir` — so this is only a bound on a hang.
+LOCK_CHILD_TIMEOUT_S = 120.0
+
+
+def check_lock_refusal(out_root: Path) -> list[str]:
+    """What a run that never started leaves behind, against one that did.
+
+    Issue #105. `main()` used to build its output directory and announce it
+    *before* taking the machine lock, so a run the lock refused created an
+    empty `/tmp/demo-video-smoke-*`, never removed it, and printed
+    `recordings left in` naming it — directly under `smoke: FAILED`. That is
+    the artifact-lying shape this whole suite exists to catch, produced by the
+    suite: a reader goes looking for the failure's evidence, finds an empty
+    directory, and reads it as "the recorder wrote nothing" rather than "this
+    run never happened".
+
+    **Graded as a pair, and it has to be a pair.** The refusal on its own would
+    be satisfied by a `main()` that never printed the line at all, and that
+    line is right and wanted on every failure of a run that *did* start — a
+    failed take is debugged out of its directory. So the second child gets past
+    the lock and fails, and must name its directory. What the two pin between
+    them is the rule "the line follows whether this run started", which is the
+    only rule that is true on both paths.
+
+    This process holds the machine lock — every arm runs inside
+    `only_one_suite()` — so the first child is refused by construction rather
+    than by a fixture that has to be believed. The second is handed
+    `--allow-concurrent` for the same reason: this arm records nothing, which
+    is the one circumstance the flag documents.
+
+    `--coverage-only` on both, deliberately: if the lock were somehow *not*
+    held, the first child would run an 8 s arm rather than the whole suite.
+    """
+    smoke = Path(__file__).resolve()
+    failures: list[str] = []
+
+    def child(*extra: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                [str(smoke), "--coverage-only", *extra],
+                capture_output=True,
+                text=True,
+                timeout=LOCK_CHILD_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            failures.append(
+                f"lock: a child smoke run did not finish in "
+                f"{LOCK_CHILD_TIMEOUT_S:.0f}s ({' '.join(extra) or 'no flags'})"
+            )
+            return None
+
+    # -- the refused run ------------------------------------------------------
+    #
+    # Written from the reader's side: the reproduction in #105 is
+    # `ls -d /tmp/demo-video-smoke-*`, and the claim is that a refused run adds
+    # nothing to the temp directory. Matched more broadly than the prefix
+    # `open_output()` uses, so a renamed prefix surfaces as a failure here
+    # rather than as a check quietly looking for the wrong name.
+    tmp = Path(tempfile.gettempdir())
+
+    def litter() -> set[str]:
+        return {
+            p.name for p in tmp.iterdir() if "smoke" in p.name or "demo-video" in p.name
+        }
+
+    before = litter()
+    refused = child()
+    left = sorted(litter() - before)
+    if refused is not None:
+        output = refused.stdout + refused.stderr
+        if "refusing to run a second smoke suite" not in output:
+            failures.append(
+                f"lock: a second suite started while this one holds "
+                f"{SMOKE_LOCK} — the premise of everything below is that the "
+                f"child is refused, and it was not. Exit {refused.returncode}, "
+                f"tail: {output[-400:]!r}"
+            )
+        else:
+            if left:
+                failures.append(
+                    f"lock: a run the lock refused created {left!r} in {tmp} "
+                    f"and left it there. The run never recorded anything, so "
+                    f"each refusal adds an empty directory nothing will ever "
+                    f"reap — 85 of them, 80 MB, is what issue #105 measured"
+                )
+            said = [ln for ln in output.splitlines() if "recordings left in" in ln]
+            if said:
+                failures.append(
+                    f"lock: a run the lock refused printed `recordings left "
+                    f"in` under `smoke: FAILED`, naming a directory it never "
+                    f"wrote to. Nothing was recorded, so there is nothing to "
+                    f"read there and the line sends its reader looking: "
+                    f"{said[0].strip()!r}"
+                )
+
+    # -- the run that started, and failed -------------------------------------
+    #
+    # The control. `fresh_take_dir` refuses a take directory this harness did
+    # not create, which fails the child in about a second, past the lock and
+    # with an output directory of its own — so the line the refused run must
+    # not print is one this run must.
+    started_root = (out_root / "lock-started").resolve()
+    (started_root / "coverage").mkdir(parents=True, exist_ok=True)
+    (started_root / "coverage" / "somebody-elses-file.txt").write_text(
+        "Planted by check_lock_refusal so the child fails after it starts.\n"
+    )
+    started = child("--allow-concurrent", "--out-dir", str(started_root))
+    if started is not None:
+        output = started.stdout + started.stderr
+        if "refusing to touch" not in output:
+            failures.append(
+                f"lock: the control run was supposed to get past the lock and "
+                f"fail on a take directory it does not own, and did not — so "
+                f"nothing here grades the failure path the `recordings left "
+                f"in` line is *for*. Exit {started.returncode}, tail: "
+                f"{output[-400:]!r}"
+            )
+        elif f"recordings left in {started_root}" not in output:
+            failures.append(
+                f"lock: a run that started and then failed did not say "
+                f"`recordings left in {started_root}`. That line is how "
+                f"somebody reading `smoke: FAILED` finds the evidence, and "
+                f"suppressing it everywhere is not the fix to issue #105 — the "
+                f"refusal path is. tail: {output[-400:]!r}"
+            )
+
+    if not failures:
+        print(
+            "smoke: lock — a refused run left nothing in "
+            f"{tmp} and claimed no recordings; a run that started and failed "
+            "named its directory"
+        )
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Smoke-test the demo-video recorders against tests/fixture.",
@@ -9707,6 +9953,12 @@ def main() -> int:
         "what check_issues grades (issue #197)",
     )
     parser.add_argument(
+        "--lock-only",
+        action="store_true",
+        help="record nothing: grade what a run the machine lock refuses "
+        "leaves behind, against one that started and failed (issue #105)",
+    )
+    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -9743,6 +9995,7 @@ def main() -> int:
             ("--coverage-only", args.coverage_only),
             ("--strict-only", args.strict_only),
             ("--issues-only", args.issues_only),
+            ("--lock-only", args.lock_only),
         )
         if on
     ]
@@ -9765,18 +10018,13 @@ def main() -> int:
 
     scrub_env()
 
-    if args.out_dir:
-        out_root = args.out_dir.resolve()
-        out_root.mkdir(parents=True, exist_ok=True)
-        ephemeral = False
-    else:
-        out_root = Path(tempfile.mkdtemp(prefix="demo-video-smoke-"))
-        ephemeral = True
-    print(f"smoke: output -> {out_root}")
-
     failures: list[str] = []
+    out_root: Path | None = None
+    ephemeral = False
     try:
         with only_one_suite(args.allow_concurrent):
+            out_root, ephemeral = open_output(args)
+            print(f"smoke: output -> {out_root}")
             failures += run_phases(only, out_root)
     except SmokeFailure as exc:
         failures.append(str(exc))
@@ -9785,20 +10033,57 @@ def main() -> int:
         print("\nsmoke: FAILED", file=sys.stderr)
         for line in failures:
             print(f"  - {line}", file=sys.stderr)
-        print(f"\nsmoke: recordings left in {out_root}", file=sys.stderr)
+        # `out_root is None` is exactly "this run never got past the lock", and
+        # that — rather than whether the directory happens to hold anything —
+        # is what decides the line. On every other failure the directory is the
+        # evidence and saying where it is is the useful thing; on a refusal
+        # there is no directory, and telling somebody who has just been told
+        # their run did not happen where to find its recordings sends them
+        # looking for files that were never written (issue #105).
+        if out_root is None:
+            print(
+                "\nsmoke: nothing was recorded — this run never started, so "
+                "there is no output directory to look in.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\nsmoke: recordings left in {out_root}", file=sys.stderr)
         return 1
 
     print("\nsmoke: PASSED")
-    if ephemeral and not args.keep:
+    if out_root is not None and ephemeral and not args.keep:
         shutil.rmtree(out_root, ignore_errors=True)
-    else:
+    elif out_root is not None:
         print(f"smoke: recordings kept in {out_root}")
     return 0
+
+
+def open_output(args: argparse.Namespace) -> tuple[Path, bool]:
+    """This run's output directory, and whether the run owns it.
+
+    Called from **inside** `only_one_suite()`, which is the whole of issue
+    #105: a run the lock refuses has not started, and a directory it will
+    never write to is not evidence of anything. Creating it first left an
+    empty `/tmp/demo-video-smoke-*` behind for every refused run — 85 of them,
+    80 MB, over three days of ordinary work — and named it in a
+    `recordings left in` line printed directly under `smoke: FAILED`.
+    """
+    if args.out_dir:
+        out_root = args.out_dir.resolve()
+        out_root.mkdir(parents=True, exist_ok=True)
+        return out_root, False
+    return Path(tempfile.mkdtemp(prefix="demo-video-smoke-")), True
 
 
 def run_phases(only: str | None, out_root: Path) -> list[str]:
     """Every phase the chosen flag selects, in order."""
     failures: list[str] = []
+    # First, and it records nothing: it spawns two child runs of this file and
+    # reads what they say about their own output directory (issue #105). Two
+    # seconds, before ten minutes of takes, so a full run's own report about
+    # where its recordings are is graded before there are any.
+    if only in (None, "--lock-only"):
+        failures += check_lock_refusal(out_root)
     if only in (None, "--web-only"):
         failures += run_web(out_root)
     if only in (None, "--terminal-only"):
