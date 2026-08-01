@@ -45,6 +45,73 @@ def _merge_determinism(records: list[dict]) -> dict:
     }
 
 
+def _merge_capture_clock(docs: list[dict], records: list[dict]) -> dict | None:
+    """Every part's wall-clock steps, moved onto the stitched video's clock.
+
+    Chromium stamps each screencast frame with the host's *wall* clock while
+    the beat log is `time.monotonic()`, so a host that steps its clock parts
+    the two by the size of the step (issues #18, #215). Each take records its
+    own steps as `capture_clock`; those files are removed by the merge, so
+    without this a reader of a stitched `demo.mp4` has a beat log on one clock,
+    a video on another, and nothing to reconcile them with (issue #225).
+
+    Two things make the merged record usable, and both are about **which steps
+    apply to which beats**:
+
+    * every step carries the `segment` it was measured in, and that is the
+      attribution to trust. A step is sampled for as long as the capture runs,
+      which is longer than the video it produced — losing wall time is the
+      whole phenomenon — so a step's merged `t` can legitimately fall past the
+      next part's `offset`, and a reader keying on time alone would hand it to
+      the wrong capture.
+    * `boundaries` records where each capture starts on the stitched clock.
+
+    The correction for one beat is therefore the steps of **its own** segment
+    up to its own `t_start`, never the running total: each capture's first
+    frame restarts its clock, and `_merged_timeline` already lays the parts out
+    by their measured durations, so a step in an earlier part is *already* in
+    the later parts' offsets. Adding it again would over-correct by a whole
+    step.
+
+    Returns **null** unless every part carries a well-formed record. A merge
+    that quietly treated a missing one as "the clock held still" would state,
+    in an artifact somebody corrects timestamps with, that a part nobody
+    measured was measured — and `total` would be short by whatever it stepped.
+    """
+    steps: list[dict] = []
+    for doc, record in zip(docs, records, strict=True):
+        clock = doc.get("capture_clock")
+        listed = clock.get("steps") if isinstance(clock, dict) else None
+        if not isinstance(listed, list):
+            return None
+        for step in listed:
+            if not isinstance(step, dict):
+                return None
+            at = _shift(step.get("t"), record["offset"])
+            delta = step.get("delta")
+            unusable = (
+                at is None
+                or not isinstance(delta, (int, float))
+                or isinstance(delta, bool)
+            )
+            if unusable:
+                return None
+            steps.append(
+                {**step, "t": at, "delta": float(delta), "segment": record["segment"]}
+            )
+    clocks = [doc.get("capture_clock") or {} for doc in docs]
+    return {
+        "steps": steps,
+        # The sum across the whole recording session, which is **not** the
+        # correction for any single beat — see above. It is here because a
+        # non-zero total is what tells a reader to look at `steps` at all.
+        "total": round(sum(step["delta"] for step in steps), 4),
+        "sample_interval": _common([c.get("sample_interval") for c in clocks]),
+        "min_step": _common([c.get("min_step") for c in clocks]),
+        "boundaries": [record["offset"] for record in records],
+    }
+
+
 # How far a segment's recorded `duration` may sit from what its .seg.mp4
 # measures now. The recorder probed the same file with the same tool moments
 # after writing it, so anything past this is not rounding — it is a log paired
@@ -235,6 +302,11 @@ def _merged_timeline(
                 # may join two media with two different geometries. See
                 # `merge_content`.
                 "content": doc.get("content"),
+                # This part's own record, on its own clock, untouched. The
+                # merged one above is null the moment any part is missing
+                # theirs, and the parts that *were* measured should not go
+                # with it — see `_merge_capture_clock`.
+                "capture_clock": doc.get("capture_clock"),
             }
         )
         offset = round(offset + duration, 3)
@@ -253,6 +325,11 @@ def _merged_timeline(
         "duration": total,
         "determinism": _merge_determinism([r["determinism"] for r in records]),
         "content": merge_content(records),
+        # The clock demo.mp4 is on, which is not the clock the beats above are
+        # on. Merged the way the beats are — by the parts' measured durations —
+        # and attributed per capture, because a step in an earlier part must
+        # not be applied to a later part's beats (issue #225).
+        "capture_clock": _merge_capture_clock(docs, records),
         # Recomputed over the *merged* beat list, not unioned from the
         # segments' own reports: `index` is renumbered by the merge, and a
         # report assembled from per-segment ones would point a reviewer at beat

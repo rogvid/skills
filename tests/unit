@@ -98,6 +98,7 @@ from demo_recording.narration import (  # noqa: E402
     TTS_KEY_SEP,
     _tts_key,
 )
+from demo_recording.stitching import _merged_timeline  # noqa: E402
 from demo_recording.timeline import (  # noqa: E402
     ISSUE_KINDS,
     MAX_ISSUES,
@@ -4285,6 +4286,172 @@ class CaptureClock(unittest.TestCase):
         self.assertEqual(doc["capture_clock"]["total"], 0.0)
 
 
+def merged_of(clocks: list[object], durations: list[float]) -> dict:
+    """A two-part merged timeline whose parts carry `clocks` as their records.
+
+    `_merged_timeline` reads the parts off disk nowhere — it is handed their
+    documents and their measured durations — so a stitched envelope can be
+    built here with no ffmpeg, no browser and no recording, which is what
+    makes the arithmetic below gradeable on a box whose clock never steps.
+    """
+    names = [f"part{n + 1}" for n in range(len(clocks))]
+    docs = [
+        {
+            "recorder": "Recorder",
+            "segment": name,
+            "beats": [
+                {
+                    "index": n,
+                    "segment": name,
+                    "verb": "caption",
+                    "t_start": t,
+                    "t_end": t + 0.1,
+                }
+                for n, t in enumerate((0.5, 2.0))
+            ],
+            "capture_clock": clock,
+        }
+        for name, clock in zip(names, clocks, strict=True)
+    ]
+    return _merged_timeline(
+        names,
+        [Path(f"{name}.seg.mp4") for name in names],
+        docs,
+        durations,
+        # Never created: `_merged_timeline` probes it only to fill `duration`,
+        # and falls back to null when it is not there.
+        Path("demo.mp4"),
+    )
+
+
+def reader_correction(doc: dict, beat: dict) -> float:
+    """What a consumer of a stitched timeline corrects one beat by.
+
+    **Hand-written from the envelope's documentation in `timeline.py`**, not
+    imported from `stitching.py`: a reader built out of the merge's own code
+    would agree with that code whatever it said. The documented rule is the
+    steps of *this beat's own capture*, up to this beat — and nothing else.
+    """
+    record = doc.get("capture_clock") or {}
+    return sum(
+        step["delta"]
+        for step in record.get("steps") or []
+        if step.get("segment") == beat.get("segment") and step["t"] <= beat["t_start"]
+    )
+
+
+class MergedCaptureClock(unittest.TestCase):
+    """What a stitched demo carries about the clock its video is on (#225).
+
+    `stitch()` removes the parts and their beat logs, so whatever is not in
+    the merged envelope is gone. Before this the field was one of those: the
+    merged document had a beat log on the monotonic clock, a video on the
+    host's wall clock, and nothing to reconcile them with.
+
+    Every case below is driven by a **scripted** record rather than a measured
+    one, for the reason `CaptureClock` gives: a box either steps its clock or
+    it does not, and an assertion that only bites on the ones that do grades
+    the box. `tests/smoke --segments-only` is where the merged record is
+    graded against a real measurement.
+    """
+
+    def clock(self, *steps: tuple[float, float], interval: float = 0.02) -> dict:
+        """One part's own record: (seconds into that part, size of the step)."""
+        return {
+            "steps": [{"t": t, "delta": delta} for t, delta in steps],
+            "total": round(sum(delta for _, delta in steps), 4),
+            "sample_interval": interval,
+            "min_step": 0.005,
+        }
+
+    def test_each_parts_steps_are_moved_onto_the_stitched_clock(self):
+        doc = merged_of([self.clock((1.5, -0.78)), self.clock((2.0, -0.8))], [7.5, 6.0])
+        self.assertEqual(
+            [(s["t"], s["delta"]) for s in doc["capture_clock"]["steps"]],
+            [(1.5, -0.78), (9.5, -0.8)],
+        )
+
+    def test_every_step_names_the_capture_that_measured_it(self):
+        doc = merged_of([self.clock((1.5, -0.78)), self.clock((2.0, -0.8))], [7.5, 6.0])
+        self.assertEqual(
+            [s["segment"] for s in doc["capture_clock"]["steps"]], ["part1", "part2"]
+        )
+
+    def test_the_boundaries_are_where_each_capture_starts(self):
+        doc = merged_of([self.clock(), self.clock()], [7.5, 6.0])
+        self.assertEqual(doc["capture_clock"]["boundaries"], [0.0, 7.5])
+
+    def test_a_step_in_an_earlier_part_does_not_correct_a_later_parts_beats(self):
+        """The one that matters, and the one that is easy to get wrong.
+
+        Each capture's first frame restarts its clock, and the merge already
+        lays the parts out by their measured durations — so part one losing
+        0.78 s of wall time is *already* in part two's offset. A reader that
+        applied it again would put every beat of part two 0.78 s from its
+        frame, which is worse than not correcting at all.
+        """
+        doc = merged_of([self.clock((1.5, -0.78)), self.clock()], [7.5, 6.0])
+        by_segment = {b["segment"]: b for b in doc["beats"] if b["t_start"] > 1.6}
+        self.assertAlmostEqual(
+            reader_correction(doc, by_segment["part1"]), -0.78, places=4
+        )
+        self.assertAlmostEqual(reader_correction(doc, by_segment["part2"]), 0.0)
+
+    def test_a_beat_before_its_own_parts_step_is_not_corrected_by_it(self):
+        # The other direction of the same rule: a step at 1.5 s into part two
+        # moved the frames after it, not the ones before it.
+        doc = merged_of([self.clock(), self.clock((1.5, -0.78))], [7.5, 6.0])
+        early, late = (b for b in doc["beats"] if b["segment"] == "part2")
+        self.assertAlmostEqual(reader_correction(doc, early), 0.0)
+        self.assertAlmostEqual(reader_correction(doc, late), -0.78, places=4)
+
+    def test_a_step_sampled_after_its_parts_last_frame_stays_with_that_part(self):
+        """Why the attribution is `segment` and not the timestamp.
+
+        A capture that loses 0.8 s of wall time produces a video shorter than
+        the time it ran, so a step sampled near the end of part one lands, on
+        the stitched clock, *past* where part two starts. Handing it to part
+        two on that basis would correct beats it never touched.
+        """
+        doc = merged_of([self.clock((8.0, -0.8)), self.clock()], [7.5, 6.0])
+        step = doc["capture_clock"]["steps"][0]
+        self.assertEqual(step["segment"], "part1")
+        self.assertGreater(step["t"], doc["capture_clock"]["boundaries"][1])
+        for beat in (b for b in doc["beats"] if b["segment"] == "part2"):
+            self.assertAlmostEqual(reader_correction(doc, beat), 0.0)
+
+    def test_the_total_is_every_parts_steps_and_totals_the_list_it_ships(self):
+        doc = merged_of([self.clock((1.5, -0.78)), self.clock((2.0, -0.8))], [7.5, 6.0])
+        record = doc["capture_clock"]
+        self.assertAlmostEqual(record["total"], -1.58, places=4)
+        self.assertAlmostEqual(
+            record["total"], sum(s["delta"] for s in record["steps"]), places=4
+        )
+
+    def test_a_part_that_measured_nothing_makes_the_merged_record_null(self):
+        # Not an empty step list. "The clock held still" and "nobody looked"
+        # are different answers, and a merge that returned the first for the
+        # second would understate `total` by whatever that part stepped — in
+        # a file whose entire purpose is correcting timestamps.
+        doc = merged_of([self.clock((1.5, -0.78)), None], [7.5, 6.0])
+        self.assertIsNone(doc["capture_clock"])
+
+    def test_a_part_that_measured_nothing_keeps_its_own_record_in_segments(self):
+        # The merged field going null must not take the parts that *were*
+        # measured with it: the per-segment records are what is left to read.
+        doc = merged_of([self.clock((1.5, -0.78)), None], [7.5, 6.0])
+        self.assertEqual(doc["segments"][0]["capture_clock"]["total"], -0.78)
+        self.assertIsNone(doc["segments"][1]["capture_clock"])
+
+    def test_the_samplers_settings_survive_agreement_and_null_on_a_disagreement(self):
+        # Same rule as `determinism`: a value every part agrees on is that
+        # value, and there is no honest single answer when they differ.
+        same = merged_of([self.clock(), self.clock()], [7.5, 6.0])
+        self.assertEqual(same["capture_clock"]["sample_interval"], 0.02)
+        mixed = merged_of([self.clock(), self.clock(interval=0.05)], [7.5, 6.0])
+        self.assertIsNone(mixed["capture_clock"]["sample_interval"])
+
+
 # --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
@@ -4423,6 +4590,67 @@ INJECTIONS = [
         [
             "CaptureClock.test_a_backwards_step_tells_the_author_the_video_is_short",
             "CaptureClock.test_a_forward_step_tells_the_author_the_opposite",
+        ],
+    ),
+    (
+        # The parts are laid out by their measured durations, and their clocks
+        # are not: every step ends up on the first part's clock, so a reader
+        # correcting the last part's beats reaches for steps that are hundreds
+        # of seconds away from them.
+        "the merge leaves each part's steps on that part's own clock",
+        "stitching.py",
+        '            at = _shift(step.get("t"), record["offset"])',
+        '            at = _shift(step.get("t"), 0.0)',
+        [
+            "MergedCaptureClock.test_each_parts_steps_are_moved_onto_the_stitched_clock",
+            "MergedCaptureClock.test_a_beat_before_its_own_parts_step_is_not_corrected_by_it",
+        ],
+    ),
+    (
+        # A merged record whose steps belong to nobody. The field is there,
+        # the total is right, and the one thing a consumer has to know — which
+        # beats this step moved — is gone.
+        "a merged step stops saying which capture measured it",
+        "stitching.py",
+        '                {**step, "t": at, "delta": float(delta), "segment": record["segment"]}',
+        '                {**step, "t": at, "delta": float(delta), "segment": None}',
+        [
+            "MergedCaptureClock.test_every_step_names_the_capture_that_measured_it",
+            "MergedCaptureClock.test_a_step_in_an_earlier_part_does_not_correct_a_later_parts_beats",
+        ],
+    ),
+    (
+        # "Nobody looked" merged as "the clock held still". `total` is then
+        # short by whatever the unmeasured part stepped, and nothing in the
+        # document says so — the artifact-lies shape, in the one field whose
+        # whole job is correcting other fields.
+        "a part that measured no clock is merged as a part whose clock held still",
+        "stitching.py",
+        "        if not isinstance(listed, list):\n            return None",
+        "        if not isinstance(listed, list):\n            listed = []",
+        [
+            "MergedCaptureClock.test_a_part_that_measured_nothing_makes_the_merged_record_null",
+        ],
+    ),
+    (
+        # Every capture starting at zero, which is what the document says when
+        # `stitch()` has not run — so a reader hands part one's steps to part
+        # two's beats and over-corrects them by a whole step.
+        "the merged record puts every capture boundary at the start of the demo",
+        "stitching.py",
+        '        "boundaries": [record["offset"] for record in records],',
+        '        "boundaries": [0.0 for record in records],',
+        ["MergedCaptureClock.test_the_boundaries_are_where_each_capture_starts"],
+    ),
+    (
+        # The merged field going null takes the parts that *were* measured with
+        # it, and a stitched demo that lost one part's clock loses all of them.
+        "a part's own clock stops reaching the merged segment records",
+        "stitching.py",
+        '                "capture_clock": doc.get("capture_clock"),',
+        '                "capture_clock": None,',
+        [
+            "MergedCaptureClock.test_a_part_that_measured_nothing_keeps_its_own_record_in_segments",
         ],
     ),
     (
