@@ -24,7 +24,11 @@ function visibleTickets() {
       (activeStatus === "all" || t.status === activeStatus) &&
       (term === "" ||
         t.title.toLowerCase().includes(term) ||
-        t.id.toLowerCase().includes(term))
+        t.id.toLowerCase().includes(term) ||
+        // The requester is searchable *and* rendered on the row below. A match
+        // on a field the queue does not show is indistinguishable from a bug:
+        // the viewer sees a row survive a term that appears nowhere on it.
+        t.requester.toLowerCase().includes(term))
   );
 }
 
@@ -45,7 +49,10 @@ function renderList() {
         <button class="ticket" type="button" data-id="${t.id}"
                 aria-current="${t.id === selectedId}">
           <span class="ticket-id">${t.id}</span>
-          <span class="ticket-title">${t.title}</span>
+          <span class="ticket-text">
+            <span class="ticket-title">${t.title}</span>
+            <span class="ticket-requester">${t.requester}</span>
+          </span>
           ${statusPill(t.status)}
         </button>
       </li>`
