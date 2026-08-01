@@ -182,6 +182,65 @@ INJECTIONS = [
         sites=("check_overlay_cleared",),
         must_contain=("the take ended with one of the recorder's own overlays",),
     ),
+    # -- what else the 8 s narration arm reaches (issue #238) -----------------
+    #
+    # Three check functions were on the `ungraded` roster as though they cost
+    # a medium arm. `run_narration` reaches all three, and it is 8 s. The one
+    # that matters most is `check_healthy`, which the roster listed beside the
+    # pixel checks: it is called from six phases and the cheapest is this one.
+    Injection(
+        # The **over-reporting** direction, and `check_healthy` is the only
+        # assertion in tests/smoke that can fail on it. Every other problem
+        # check is "at least one issue matches", which a recorder that flagged
+        # every healthy 2xx satisfies perfectly — while refusing every strict
+        # take of every working app ever recorded. `check_healthy`'s own
+        # docstring records that exact injection passing the suite before it
+        # existed, and nothing has re-run it since.
+        #
+        # `< 200` rather than a fatal kind on purpose: `http_error` is outside
+        # STRICT_KINDS, so the take finishes and this check is what notices. A
+        # console_error would abort the take under `strict=True` and grade the
+        # refusal path instead — a different assertion, in a different file.
+        name="every healthy response is recorded as a problem",
+        module="core.py",
+        old="            if response.status < 400:\n",
+        new="            if response.status < 200:\n",
+        arm="--narration-only",
+        sites=("check_healthy",),
+        must_contain=("nothing is wrong with the fixture app, but the take",),
+    ),
+    Injection(
+        # `_prepare_line` waits out the previous clip before the next beat
+        # opens, so a caption never appears while the voice is still on the
+        # last line. The wait lands in the gap between beats, which is why the
+        # only observable is the *next* beat's `t_start`.
+        name="a beat opens while the previous line is still being spoken",
+        module="core.py",
+        old=(
+            "        remaining = self._line_end - time.monotonic()\n"
+            "        if remaining > 0:\n"
+        ),
+        new=(
+            "        remaining = self._line_end - time.monotonic()\n        if False:\n"
+        ),
+        arm="--narration-only",
+        sites=("check_narration_pacing",),
+        must_contain=("the recorder cut its own narration off",),
+    ),
+    Injection(
+        # The mix, aimed at the *control* rather than at the loud window. A
+        # take whose clips all start at zero is loud inside the first line —
+        # so "loud where a line is" passes — and loud before it, where the
+        # storyboard leaves silence on purpose. That control is the whole
+        # reason the loud bar means anything, and it had never been seen fail.
+        name="every narration clip is mixed in at the start of the take",
+        module="core.py",
+        old='                    f"[{i + 1}:a]adelay={int(off * 1000)}:all=1[a{i}]"',
+        new='                    f"[{i + 1}:a]adelay=0:all=1[a{i}]"',
+        arm="--narration-only",
+        sites=("check_narration_audio",),
+        must_contain=("audio is playing where no line was spoken",),
+    ),
     # -- the coverage report (issue #12), 8 s an entry ------------------------
     Injection(
         name="nothing is ever reported unclaimed",

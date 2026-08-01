@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~39 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~40 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -183,7 +183,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 42 entries, ~39 min
+tests/smoke-inject                # all 45 entries, ~40 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1109,6 +1109,14 @@ before:
 | the `aformat` filter is dropped from the graph | *audio channels is 1, expected 2 — stitch() cannot join streams that disagree* |
 | `_tts_key` hashes different text than the harness seeds | the take raises: `ElevenLabs TTS failed: Connection refused` |
 
+**Two of those rows are now executed rather than remembered.** The first and
+the third are entries in `tests/smoke-inject`, aimed at `--narration-only` at
+8 s each, and the manifest re-performs them nightly
+([#238](https://github.com/rogvid/skills/issues/238)); two re-runs read
+*0.55-0.57 s* and *−19.4 dBFS* against the 0.56 s and −19.4 dBFS recorded here
+by hand. The other three rows are still prose — a break somebody performed once,
+which nothing repeats, which is the exact condition #136 exists to end.
+
 The last one is why `TTS_API_BASE` exists as a module constant. Before it, that
 break put `NARRATION_KEY` on the wire to `api.elevenlabs.io` and read a 401
 back — an outbound request carrying a fabricated credential to a third party, on
@@ -1663,7 +1671,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-42 entries, 12 arms, ~39.1 min of takes
+45 entries, 12 arms, ~39.5 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1691,7 +1699,7 @@ paragraph whose job is to say what this manifest does not cover.
 | arm | entries | what a miss would mean |
 |---|---|---|
 | `--lock-only` | 3 | a run the machine lock refuses goes back to building an output directory it will never write to and printing `recordings left in` under `smoke: FAILED`, naming it ([#105](https://github.com/rogvid/skills/issues/105)) — or the fix overshoots and no failing run is told where its recordings are, which the third entry is the control for |
-| `--narration-only` | 1 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)) |
+| `--narration-only` | 4 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for |
 | `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
@@ -1705,7 +1713,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **19 of `tests/smoke`'s 39 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 39 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1727,7 +1735,6 @@ paragraph whose job is to say what this manifest does not cover.
   | `check_take` | `ContentRect` — the rect the picture half is scored over, exactly, on all four numbers (#135/#195). The artifact half — the files exist, are this run's, and are not repeats of one another — is genuinely ungraded |
   | `check_content_healthy` | `ContentRect`, same six tests: the trim reaches the caption bar on both media, does not eat the app, and never comes back zero-sized |
   | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
-  | `check_healthy` | `TakeIssues` — `test_an_app_talking_is_not_an_app_failing` and the HTTP bar graded at 400 rather than inside it are the over-reporting direction, off the browser. That a real page under `strict=True` produces none of them is this suite's |
   | `check_verb_classification` | `VerbClassification` — every classified verb is one a recorder logs, and every verb a recorder logs is classified, with the set size asserted first so neither holds vacuously. **Merge-only since #61**: the only arms that reach it are `--content-only` and `--terminal-only`, so nothing runs it on a pull request |
   | `check_determinism` | genuinely ungraded. It reads the clock, the locale and the motion setting *out of the page*, which is the whole point of it — a constructor that stored the flag and never wired it up satisfies anything asserted on the Python side |
   | `check_merge_offset` | genuinely ungraded. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half |
@@ -1735,8 +1742,6 @@ paragraph whose job is to say what this manifest does not cover.
   | `check_opening` | genuinely ungraded — the first frame of a web take, measured in pixels (#119). **Merge-only since #61**: `--web-only` is the only arm that reaches it, so on a pull request nothing runs it and nothing injects against it |
   | `check_opening_card` | genuinely ungraded — three statements about one sweep of one corner of a frame (#110) |
   | `check_spotlight_transitions` | genuinely ungraded — the shape of the spotlight's exit, sampled frame by frame (#111) |
-  | `check_narration_pacing` | genuinely ungraded. `TtsKey` covers the cache key a clip is stored under, not the beat spacing this measures |
-  | `check_narration_audio` | genuinely ungraded — mean dBFS over stretches of the mp4 |
   | `_check_video` | genuinely ungraded — ffprobe against the file the take wrote |
   | `_check_occlusion` | genuinely ungraded — PSNR between two moments of a recording |
   | `_check_frame_captions` | genuinely ungraded — the caption band of frame N read against the hand-written storyboard |
@@ -1755,11 +1760,50 @@ paragraph whose job is to say what this manifest does not cover.
   **When each take runs** near the top of this file, and the *Known gaps*
   entry at the bottom.
 
-  What is left in that list is there for cost or for pixels, and the two are
-  different problems. #197 took the cost half as far as it goes for now: the
-  claims that only needed *a* take rather than the long one moved to
-  `--issues-only` (26 s), `--segments-only` (29 s) and `--evidence-only` (7 s).
-  What did not move is what needs a picture, and no arm makes that cheaper.
+  **What is left is not there for cost, and this file used to say it was.**
+  The sentence that stood here read "what is left in that list is there for
+  cost or for pixels", which was never measured. Measured — the call graph of
+  `tests/smoke` walked from each `run_*` phase transitively through the take
+  helper, the review-frame helper, the `record_*` functions and the stitch,
+  against `run_phases`' `selects()` guards and `smoke-inject`'s `ARM_SECONDS`
+  — only **four** of the sixteen cost a medium arm. The other twelve are
+  reachable from arms of 19-29 s and are ungraded because nobody wrote the
+  entry:
+
+  - **`--determinism-only`, 19 s an entry** — `check_determinism`.
+    [#239](https://github.com/rogvid/skills/issues/239).
+  - **`--polish-only`, 26 s an entry** — `check_spotlight_transitions`,
+    `check_opening_card`, `_check_video`. The arm carries no entry at all
+    today, so it also pays one baseline.
+    [#240](https://github.com/rogvid/skills/issues/240).
+  - **`--segments-only`, 29 s an entry** — `check_caption`, `check_take`,
+    `check_content_healthy`, `check_merge_offset`, `_check_frame_captions`,
+    `_check_stale_frames`, `_check_segment_refusal`, `_check_scene_fallback`.
+    [#241](https://github.com/rogvid/skills/issues/241), which supersedes
+    [#200](https://github.com/rogvid/skills/issues/200) — that issue counted
+    two of these eight.
+  - **The four that really are expensive** — `check_opening` and
+    `check_opening_gap` on `--web-only` (123 s), `check_verb_classification`
+    and `_check_occlusion` on `--content-only` (148 s).
+    [#233](https://github.com/rogvid/skills/issues/233) covers the first
+    three; `_check_occlusion` is PSNR between two moments of a recording and
+    has neither an issue nor a cheaper arm.
+
+  An arm above is the **cheapest** phase that reaches the function, which is
+  not the arm this roster's prose implies for several of them: `check_take`,
+  `check_content_healthy`, `check_caption` and the four review-frame helpers
+  all read as web/terminal claims and are all reachable from
+  `--segments-only`, and `_check_video` is reachable from `--polish-only`
+  without going through the take helper at all. Three rows this table used to
+  carry were the same mistake at 8 s — the healthy-take assertion and the two
+  narration ones, all three reached by `run_narration` — and they are graded
+  as of [#238](https://github.com/rogvid/skills/issues/238), which is why they
+  are gone from it.
+
+  #197 took the cost half as far as it went at the time: the claims that only
+  needed *a* take rather than the long one moved to `--issues-only` (26 s),
+  `--segments-only` (29 s) and `--evidence-only` (7 s). What genuinely needs a
+  picture nothing makes cheaper — but that is four functions, not sixteen.
 - **It does not find assertions nobody wrote.** Every entry names a message
   that already exists. A behaviour with no check at all is invisible here —
   that is [#103](https://github.com/rogvid/skills/issues/103)'s shape and still
