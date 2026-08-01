@@ -144,7 +144,8 @@ _pw.sync_api = _pw_sync  # type: ignore[attr-defined]
 sys.modules["playwright"] = _pw
 sys.modules["playwright.sync_api"] = _pw_sync
 
-from demo_recording.core import _beat_verb, _DemoBase  # noqa: E402
+import demo_recording.core as core_module  # noqa: E402
+from demo_recording.core import _beat_verb, _CaptureClock, _DemoBase  # noqa: E402
 from demo_recording.terminal import TerminalRecorder  # noqa: E402
 from demo_recording.web import _CURSOR_JS, Recorder  # noqa: E402
 
@@ -3914,12 +3915,253 @@ class BeatLog(unittest.TestCase):
         )
 
 
+class _ScriptedTime:
+    """A stand-in for the `time` module whose wall clock steps on cue.
+
+    `offsets[i]` is what CLOCK_REALTIME minus CLOCK_MONOTONIC reads at sample
+    `i`. Monotonic time advances by one sampling interval per sample and never
+    goes backwards, which is the whole point of the split being measured.
+    """
+
+    def __init__(self, offsets: list[float], interval: float = 0.02) -> None:
+        self.offsets = offsets
+        self.interval = interval
+        self.index = 0
+        # Zero, not a realistic uptime: `time() - monotonic()` at 1e3 seconds
+        # loses enough of a 5 ms offset that a step written as exactly
+        # MIN_STEP_S comes back a hair under it, and the boundary test below
+        # would then be grading float64 rather than the threshold.
+        self.mono = 0.0
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def time(self) -> float:
+        return self.mono + self.offsets[min(self.index, len(self.offsets) - 1)]
+
+
+class _ScriptedStop:
+    """Stands in for the sampler's stop Event, driving `_ScriptedTime`."""
+
+    def __init__(self, clock: _ScriptedTime, samples: int) -> None:
+        self.clock = clock
+        self.left = samples
+
+    def is_set(self) -> bool:
+        return self.left <= 0
+
+    def set(self) -> None:
+        self.left = 0
+
+    def wait(self, _timeout: float) -> None:
+        self.left -= 1
+        self.clock.index += 1
+        self.clock.mono += self.clock.interval
+
+
+def sampled(offsets: list[float]) -> _CaptureClock:
+    """Run the capture-clock sampler over a scripted wall clock."""
+    clock = _CaptureClock()
+    fake = _ScriptedTime(offsets)
+    clock._t0 = fake.mono
+    clock._stop = _ScriptedStop(fake, len(offsets))  # type: ignore[assignment]
+    real = core_module.time
+    core_module.time = fake  # type: ignore[assignment]
+    try:
+        clock._run()
+    finally:
+        core_module.time = real  # type: ignore[assignment]
+    return clock
+
+
+class CaptureClock(unittest.TestCase):
+    """The one clock in the recorder that is not `time.monotonic()`.
+
+    Chromium stamps every screencast frame with the host's wall clock and
+    Playwright turns that into the frame's position in the webm, so a host
+    that steps its wall clock takes that much wall time out of demo.mp4 and
+    leaves the beat log where it was (issues #18, #215). The recorder cannot
+    stop that; what it can do is measure it, and this grades the measuring.
+
+    Driven over a **scripted** clock rather than the real one, which is the
+    only way this is gradeable at all: the box a test runs on either steps or
+    it does not, and `tests/README.md` records that the wall-clock class of bug
+    could not be fault-injected before this existed.
+    """
+
+    def test_a_steady_wall_clock_records_no_steps(self):
+        clock = sampled([0.0] * 8)
+        self.assertEqual(clock.steps, [])
+        self.assertEqual(clock.total, 0.0)
+
+    def test_a_backwards_step_is_recorded_once_with_its_size_and_time(self):
+        # Four samples at the original offset, then four at 0.78 s less: one
+        # step, not four, and not one per sample after it.
+        clock = sampled([0.0] * 4 + [-0.78] * 4)
+        self.assertEqual(len(clock.steps), 1)
+        self.assertAlmostEqual(clock.steps[0]["delta"], -0.78, places=4)
+        # Sample 4, at 20 ms a sample, measured from `_t0`.
+        self.assertAlmostEqual(clock.steps[0]["t"], 0.08, places=3)
+        self.assertAlmostEqual(clock.total, -0.78, places=4)
+
+    def test_two_steps_in_one_take_accumulate(self):
+        clock = sampled([0.0, 0.0, -0.78, -0.78, -1.56, -1.56])
+        self.assertEqual(len(clock.steps), 2)
+        self.assertAlmostEqual(clock.total, -1.56, places=4)
+
+    def test_a_forward_step_is_recorded_with_its_sign(self):
+        # NTP correcting the other way lengthens the video instead. The sign
+        # has to survive: a consumer subtracting it does the opposite of the
+        # right thing if it does not.
+        clock = sampled([0.0, 0.0, 0.5, 0.5])
+        self.assertEqual(len(clock.steps), 1)
+        self.assertGreater(clock.steps[0]["delta"], 0.0)
+
+    # The floor, from both sides, and **hand-written**. Reading
+    # `_CaptureClock.MIN_STEP_S` here and scaling it agrees with the constant
+    # no matter what the constant says — widen the floor to five seconds and a
+    # test written that way still passes, which is exactly what fault
+    # injection found the first time these were written. 4 ms is jitter, 6 ms
+    # is a step, and between them sits the 5 ms the recorder declares.
+    def test_jitter_just_under_the_floor_is_not_a_step(self):
+        # Two `time` calls are not atomic, so every sample carries the gap
+        # between them. Reading that as a step would put a correction on every
+        # beat of every take on every box.
+        clock = sampled([0.0, 0.004, 0.0, -0.004, 0.0])
+        self.assertEqual(clock.steps, [])
+
+    def test_a_step_just_over_the_floor_is_a_step(self):
+        clock = sampled([0.0, 0.0, -0.006, -0.006])
+        self.assertEqual(len(clock.steps), 1)
+
+    def test_the_report_totals_its_own_steps(self):
+        clock = sampled([0.0, 0.0, -0.78, -0.78])
+        report = clock.report()
+        self.assertAlmostEqual(
+            report["total"], sum(s["delta"] for s in report["steps"]), places=4
+        )
+        self.assertEqual(report["sample_interval"], _CaptureClock.INTERVAL_S)
+        self.assertEqual(report["min_step"], _CaptureClock.MIN_STEP_S)
+
+    def test_a_clock_that_held_still_says_nothing_to_the_author(self):
+        self.assertIsNone(sampled([0.0] * 6).warning())
+
+    def test_a_step_under_one_frame_of_the_encode_says_nothing(self):
+        # 25 fps, so under 40 ms the video and the log still agree about which
+        # frame a beat is on and there is nothing for an author to act on.
+        clock = sampled([0.0, 0.0, -0.02, -0.02])
+        self.assertIsNone(clock.warning())
+
+    def test_a_backwards_step_tells_the_author_the_video_is_short(self):
+        warning = sampled([0.0, 0.0, -0.78, -0.78]).warning()
+        self.assertIsNotNone(warning)
+        assert warning is not None
+        self.assertIn("shorter", warning)
+        self.assertIn("ahead of", warning)
+        self.assertIn("capture_clock", warning)
+        self.assertIn("-780 ms", warning)
+
+    def test_a_forward_step_tells_the_author_the_opposite(self):
+        # The direction is the whole content of the warning, and a message
+        # that says "shorter" either way is worse than none: it sends the
+        # reader looking for lost frames that are not lost.
+        warning = sampled([0.0, 0.0, 0.78, 0.78]).warning()
+        assert warning is not None
+        self.assertIn("longer", warning)
+        self.assertIn("behind", warning)
+        self.assertNotIn("shorter", warning)
+
+    def test_the_take_carries_the_measurement_into_its_timeline(self):
+        rec = recorder(self)
+        rec._capture_clock = sampled([0.0, 0.0, -0.78, -0.78])
+        doc = rec._timeline_doc()
+        self.assertIn("capture_clock", doc)
+        self.assertAlmostEqual(doc["capture_clock"]["total"], -0.78, places=4)
+        self.assertEqual(len(doc["capture_clock"]["steps"]), 1)
+
+    def test_a_take_on_a_steady_clock_still_carries_the_field(self):
+        # Empty and absent are different answers. A consumer that cannot tell
+        # "the clock held still" from "nobody looked" has to assume the worst
+        # of every timeline ever written.
+        rec = recorder(self)
+        doc = rec._timeline_doc()
+        self.assertEqual(doc["capture_clock"]["steps"], [])
+        self.assertEqual(doc["capture_clock"]["total"], 0.0)
+
+
 # --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    (
+        # The correction a consumer would apply to a beat timestamp, with its
+        # sign flipped. The field is still there and still lists the right
+        # number of steps, which is what makes this the shape worth grading.
+        "the recorded wall-clock step carries the wrong sign",
+        "core.py",
+        '                        "delta": round(delta, 4),',
+        '                        "delta": round(-delta, 4),',
+        [
+            "CaptureClock.test_a_backwards_step_is_recorded_once_with_its_size_and_time",
+            "CaptureClock.test_a_forward_step_is_recorded_with_its_sign",
+            "CaptureClock.test_a_backwards_step_tells_the_author_the_video_is_short",
+        ],
+    ),
+    (
+        # The sampler records the *offset* instead of the change in it, so
+        # every sample after a step reads as another step and the total grows
+        # for as long as the take lasts.
+        "every sample after a step is recorded as another step",
+        "core.py",
+        "            previous = offset\n            self._stop.wait(self.INTERVAL_S)",
+        "            self._stop.wait(self.INTERVAL_S)",
+        [
+            "CaptureClock.test_a_backwards_step_is_recorded_once_with_its_size_and_time",
+            "CaptureClock.test_two_steps_in_one_take_accumulate",
+        ],
+    ),
+    (
+        # The floor that tells a step from the gap between two `time` calls,
+        # widened past any real step. `capture_clock` then reads zero on every
+        # take on every box, and nothing downstream can tell that from a host
+        # whose clock held still.
+        "the step floor is widened past the steps it exists to catch",
+        "core.py",
+        "    MIN_STEP_S = 0.005",
+        "    MIN_STEP_S = 5.0",
+        [
+            "CaptureClock.test_a_backwards_step_is_recorded_once_with_its_size_and_time",
+            "CaptureClock.test_a_step_just_over_the_floor_is_a_step",
+            "CaptureClock.test_the_take_carries_the_measurement_into_its_timeline",
+        ],
+    ),
+    (
+        # The measurement is taken and the artifact does not carry it, which
+        # is the state everything was in before issue #215: the recorder knows
+        # the video slid under the beats and nobody reading the take can.
+        "the timeline stops carrying the clock the video is on",
+        "core.py",
+        '            "capture_clock": self._capture_clock.report(),',
+        '            "capture_clock_unwritten": self._capture_clock.report(),',
+        [
+            "CaptureClock.test_the_take_carries_the_measurement_into_its_timeline",
+            "CaptureClock.test_a_take_on_a_steady_clock_still_carries_the_field",
+        ],
+    ),
+    (
+        # The author is told nothing about a take whose video came out 0.8 s
+        # short of its own beat log. Everything written to disk is unchanged.
+        "a take whose host clock stepped says nothing on the way out",
+        "core.py",
+        "        if abs(self.total) < self.WARN_S:",
+        "        if True:",
+        [
+            "CaptureClock.test_a_backwards_step_tells_the_author_the_video_is_short",
+            "CaptureClock.test_a_forward_step_tells_the_author_the_opposite",
+        ],
+    ),
     (
         "coverage accumulates criteria from the tags instead of the declaration",
         "coverage.py",

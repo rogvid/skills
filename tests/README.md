@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~35 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~37 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -181,7 +181,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 34 entries, ~35 min
+tests/smoke-inject                # all 38 entries, ~37 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -471,11 +471,24 @@ Both the take's first caption and its last are timed, and the skew is graded
 three ways, because the two directions have different causes and only one of
 them is the beat log's:
 
+Every reading is taken **after the host's wall clock is subtracted**, and
+that is the part to understand before trusting this axis
+([#215](https://github.com/rogvid/skills/issues/215)). Chromium stamps every
+screencast frame with `Page.screencastFrame`'s `metadata.timestamp` — wall
+clock by the protocol's own definition — and Playwright turns that straight
+into the frame's position in the webm, while the beat log is
+`time.monotonic()`. On a host that steps its wall clock the two part company
+by exactly the size of the step, at exactly the instant of it. So `HostClock`
+samples `time.time() - time.monotonic()` beside every recorded take, in this
+process, and each probe is measured against `t_start + steps_before(t_start)`.
+The raw figure is printed next to the corrected one, always, so a take that
+really did lose 0.8 s of video says so.
+
 | | bound | why |
 |---|---|---|
 | log **ahead** of the frame | 250 ms | nothing about the capture can move an event *later*, so a positive skew is the log's own error |
-| video **ahead** of the log | 750 ms | a screencast that drops frames only ever makes events land early; capped at one lost setup window |
-| the two probes **drifting apart** | 250 ms | whatever the capture loses, it loses for every later frame equally, so a stall cancels here and only a bad clock survives |
+| video **ahead** of the log, host clock subtracted | 750 ms | what is left once the host's steps are out: the gap before the screencast's *first* frame, which the video's zero is, plus the 40 ms sampling grid and the caption's fade. Measured at 20-140 ms over fifteen idle takes and **500-540 ms at load 3.1** — it is how long Chromium takes to paint, so it stays wide on purpose ([#78](https://github.com/rogvid/skills/issues/78) is what tightening it would become) |
+| the two probes **drifting apart** | 250 ms | whatever the capture loses at the head, it loses for every frame equally, so it cancels here — and a wall-clock step landing *between* the probes is now subtracted per probe rather than reaching this bar. **This is the sharp one, and the correction is what made it sharp:** before it, 680 ms of drift on a healthy recorder was indistinguishable from a beat log that was not being read monotonically |
 
 Observed across eight consecutive `--web-only` runs and six full runs, both
 media: first caption **-80 to -200 ms**, closing caption **-160 to 0 ms**,
@@ -483,19 +496,22 @@ drift **0 to 80 ms**. Nothing came near the 250 ms *ahead* bound — no run has
 ever produced a positive skew — which is the point of splitting by direction:
 the tight bound guards a failure mode with no natural variation near it.
 `_t0` set after `_start()` instead of at page creation measures **+320 ms** and
-fails it; a beat clock running 3% fast drifts **-360 ms** and fails the third.
+fails it; `_t0` set 0.9 s *early* measures **-900 ms** and fails the second
+(`tests/smoke-inject`, "every beat is stamped 0.9s after the frame it
+describes"); a beat clock running 3% fast drifts **-360 ms** and fails the
+third.
 
-That split, and the tightness, only work because of `TICKER_JS` — the part to
-understand before trusting this axis. Chromium's screencast emits a frame when
-the page paints and nothing pads the gap when it does not, so an idle stretch
-silently costs the recording ~0.6 s of wall time and everything after it sits
-that much early. Measured, three runs each: 3/3 idle takes stalled, 3/3 takes
-with a small animated element running did not. Both storyboards inject one for
-their whole length. It cannot cover the ~0.7 s between the page being created
-and the first line of storyboard running — the recorder's own setup, which no
-test code can reach — and roughly 1 web take in 12 loses that window whole,
-which is what the 750 ms bound is for. **A real demo has no ticker at all**;
-see Known gaps and [#18](https://github.com/rogvid/skills/issues/18).
+`TICKER_JS` is still injected for the length of both storyboards, and what it
+is for is now smaller than this file used to claim. Instrumenting Playwright's
+driver to log every screencast frame shows that an idle page loses **no** wall
+time on Playwright 1.62.0 / Chromium 151.0.7922.34: the recorder numbers each
+frame from its timestamp and writes the gaps into the webm's cluster
+timestamps, so 30 s of a take with nothing painting at all — seven frames in
+total — came back the full 30 s long. The 3/3-idle-stalled measurement that
+justified the ticker is the wall-clock step, sampled six times without the
+clock being watched. The ticker still buys frames to *measure* — a caption
+transition can only be timed to the nearest frame the screencast sent — so it
+stays, with its claim reduced to that.
 
 The recorder's determinism controls ([#10](https://github.com/rogvid/skills/issues/10))
 land an animation on its final frame — which is exactly what the ticker must
@@ -1505,7 +1521,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-34 entries, 12 arms, ~35.2 min of takes
+38 entries, 12 arms, ~37.2 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1538,7 +1554,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--segments-only` | 2 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); or every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins |
+| `--segments-only` | 6 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; or the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
@@ -1547,7 +1563,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **19 of `tests/smoke`'s 37 check functions have no entry**, and the harness
+- **19 of `tests/smoke`'s 38 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1712,21 +1728,78 @@ knows is missing is worse than one that is openly absent.
   the attribute while moving the app elsewhere would silently score the wrong
   pixels. Tracked in [#17](https://github.com/rogvid/skills/issues/17), which
   proposes the recorder expose its geometry as public API.
-- **This harness no longer sees the drift real demos have, on purpose.**
-  Chromium's screencast stalls during idle stretches and Playwright's webm does
-  not pad the gap, so a real take loses ~0.6 s of wall time per stall and every
-  frame after it sits that much early (a 32 s take was measured losing 1.44 s;
-  it is not confined to late in a take, it accumulates with idle time).
-  `TICKER_JS` removes the confound here so the timing bar grades the beat log —
-  which means **a pass says nothing about how well a real, tickerless demo's
-  timestamps line up.** Consequence: a frame extracted at a beat timestamp can
-  show the wrong beat, and narration inherits the same lag because audio rides
-  the wall clock while pixels ride the screencast. Tracked in
-  [#18](https://github.com/rogvid/skills/issues/18), which matters most to
-  [#8](https://github.com/rogvid/skills/issues/8).
+- **The video and the beat log are on different clocks, and this harness
+  corrects for that rather than fixing it.** Chromium stamps every screencast
+  frame with the host's *wall* clock and Playwright turns that into the frame's
+  position in the webm; the beat log is `time.monotonic()`. A host that steps
+  its wall clock therefore takes that much wall time out of `demo.mp4` and
+  leaves the log where it was. The box this was found on steps **-0.75 to
+  -0.81 s every 32.2 s**, which is a coin flip inside a 19 s take and is the
+  whole of the bimodality
+  [#215](https://github.com/rogvid/skills/issues/215) reported.
 
-- **`--web-only` still goes red when the capture loses more than 0.75 s, and
-  the bars were not widened to stop it.**
+  What is fixed: the recorder measures the same clock and writes it into
+  `timeline.json` as `capture_clock`, warns on the way out, and this harness
+  measures it independently and subtracts it before grading. What is **not**
+  fixed: a real demo's `timeline.json` still carries timestamps on a clock the
+  video is not on — a consumer has to apply `capture_clock` itself, and
+  nothing in the recorder does it for them. So a frame extracted at a beat
+  timestamp can still show the wrong moment, and narration still inherits the
+  lag because audio is mixed at wall-clock offsets while pixels ride the
+  screencast — measured at +0.70 s and now correctable from `capture_clock`,
+  which is [#226](https://github.com/rogvid/skills/issues/226). What is left of
+  [#18](https://github.com/rogvid/skills/issues/18) is that boundary, and it
+  matters most to [#8](https://github.com/rogvid/skills/issues/8).
+
+- **The terminal arm loses roughly a second more than its host clock explains,
+  and nothing here knows why.** The correction is exact on the web arm — six
+  consecutive `--web-only` runs after it, residual 20-140 ms, three of them
+  with a step inside the take — and on both segments of the stitched demo. The
+  terminal take is not. Four `--terminal-only` runs, each with the recorder's
+  own `capture_clock` read back out of the take:
+
+  | run | step | first probe | closing probe | result |
+  |---|---|---|---|---|
+  | 1 | none | -180 ms | -140 ms | PASSED |
+  | 2 | -800 ms at 1.8s | unmeasurable, ~-1.94 s raw | over the bar | FAILED |
+  | 3 | -839 ms at 8.9s | -100 ms | **-900 ms** after correction | FAILED |
+  | 4 | -830 ms at 15.5s, past the last beat | -100 ms | -60 ms | PASSED |
+
+  Both runs that failed are runs whose step landed *inside* the storyboard;
+  both that passed are runs where it did not. Run 3 is the shape: the step is subtracted, and what is left is another
+  0.9 s of wall time gone from the video between 8.9 s and 11.95 s — about one
+  more step, in a take where only one was measured and where this harness and
+  the recorder agree on that, inside the storyboard's own window. The take's
+  *length* only lost the one step (`duration` fell by 0.76 s against a
+  step-free run), so the video did not simply get shorter: something between
+  the jump and the closing caption is compressed. The most likely candidate is
+  what ffmpeg does with the non-monotonic cluster timestamps Playwright writes
+  after Chromium's clock goes backwards, which is not something this repo can
+  measure from outside. Tracked in
+  [#224](https://github.com/rogvid/skills/issues/224).
+
+  **The bars were not widened for it.** `MAX_SKEW_DRIFT_S` at 250 ms is the
+  sharp claim this whole correction exists to make usable, and a bar wide
+  enough for -800 ms of it grades nothing at all. So a `--terminal-only` run on
+  a box whose wall clock steps inside the take is still red about half the
+  time, and it is red about something true and now says which part of it is
+  the host and which is not.
+
+- **`stitch()` does not merge `capture_clock`.** Each part's own
+  `<segment>.seg.timeline.json` carries its own measurement and is graded
+  against this harness's, per part — but the merged envelope has no such field,
+  so a consumer of a stitched `demo.mp4` has nothing to correct with. The
+  harness works around it by keeping each part's clock and laying them on the
+  merged video itself; a reader of the artifact cannot. `stitching.py` is
+  outside the change that added the field. Tracked in
+  [#225](https://github.com/rogvid/skills/issues/225).
+
+- **~~`--web-only` still goes red when the capture loses more than 0.75 s, and
+  the bars were not widened to stop it.~~ Diagnosed and fixed** — the cause was
+  the host's wall clock and it is now measured and subtracted, per probe
+  ([#215](https://github.com/rogvid/skills/issues/215)). The measurement that
+  led there is kept below because it is what the fix was checked against, and
+  because "bimodal, and not load" is the reading that mattered.
   [#209](https://github.com/rogvid/skills/issues/209) asked whether the
   caption-timing bars measure something real that load breaks, or an artefact
   of the harness's own timing. Measured, four `--web-only` runs on this box,
@@ -1769,10 +1842,20 @@ knows is missing is worse than one that is openly absent.
   measurement that could not be made. The drift message no longer names a
   cause it cannot tell apart from the other one.
 
-  So `--web-only` on a box where the capture loses that window is still red,
-  and now it is red about something it can state. What nothing here grades is
-  *why* the capture loses it with the ticker running —
-  [#215](https://github.com/rogvid/skills/issues/215).
+  **What it turned out to be.** Playwright's driver, instrumented to log every
+  screencast frame, caught two consecutive frames 84 ms apart on the monotonic
+  clock and **711 ms backwards** on Chromium's. Chromium's frame timestamps are
+  the host's wall clock; a separate sampler that never opens a browser shows
+  that clock stepping -0.75 to -0.81 s every 32.2 s on this box, at the same
+  instants and the same sizes to the tenth of a millisecond. Seven takes of one
+  storyboard: the four whose window contained a step encoded 0.78 s less video
+  than the three that did not, to within 12 ms. The bars are now on the
+  residual after that is subtracted, and the residual is 20-140 ms on an idle
+  box. Six consecutive `--web-only` runs afterwards: **6/6 clean on the timing
+  bars**, three of them with a step inside the take and one of those between
+  the two probes — the shape that made the drift bar unusable. The two runs
+  that went red went red on the spotlight windows, at loads 1.7 and 3.1, which
+  is [#78](https://github.com/rogvid/skills/issues/78) and not this.
 - **Nothing reads the caption text off the video.** The timing check proves the
   caption *band* changed when `timeline.json` says it did; that the words are
   the right words is a DOM assertion (`check_caption`) taken at record time.
@@ -1800,12 +1883,20 @@ knows is missing is worse than one that is openly absent.
   frames only inside long beats — is vacuous today and says so where it is
   written. The mechanism is graded directly instead (see **Review frames**),
   which is what stops the vacuity from being total.
-- **The wall-clock regression cannot be fault-injected.** The recorders time
-  beats with `time.monotonic()`; using `time.time()` only misreports when the
-  system clock actually steps, which no assertion here can provoke. It is not
-  hypothetical — a WSL2 box was measured stepping 573 ms backwards inside 8 s,
-  which is how the bug was found — but a pass does not prove the fix is still
-  in place. Reading the diff does.
+- **Half the wall-clock class can now be fault-injected, and half still
+  cannot.** The half that can: everything the recorder *does* about a stepping
+  host — `_CaptureClock`'s sampler, its floor, the sign it records, the field
+  it writes and the warning it prints — is graded by `tests/unit`'s
+  `CaptureClock` over a **scripted** clock, and by four `tests/smoke-inject`
+  entries that break the recorder while `tests/smoke` watches a real one. None
+  of those depends on the box's clock actually stepping.
+
+  The half that cannot: that the recorders *pace* on `time.monotonic()` rather
+  than `time.time()`. Swapping them back only misreports when the system clock
+  steps during a take, which no assertion here can provoke — it can only wait
+  for it. On the box this was written on that wait is 32 s, which is why the
+  bug was found at all; on a machine with a well-behaved clock a pass proves
+  nothing about it. Reading the diff still does.
 - **Issue attribution is bounded, not exact.** Playwright's sync API delivers
   page events only while it is inside a call, so the recorder pumps every
   100 ms during a hold and refuses to attribute an event to a beat that has not

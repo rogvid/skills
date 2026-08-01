@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -434,6 +435,130 @@ def _clock_epoch_ms(value: str) -> int:
     return int(parsed.timestamp() * 1000)
 
 
+# -- the clock the video is on (issues #18, #215) -----------------------------
+#
+# Everything this package times is `time.monotonic()`. **The video is not on
+# that clock**, and until this was measured nothing said so.
+#
+# Playwright records by acking Chromium's `Page.screencastFrame`, and the only
+# clock a frame carries is that event's `metadata.timestamp` — which the
+# protocol defines as `Network.TimeSinceEpoch`, i.e. the host's *wall* clock.
+# Playwright's `FfmpegVideoRecorder` turns it straight into the frame's
+# position in the webm (`frameNumber = (ts - firstFrameTs) * 25`). So the
+# video's clock is CLOCK_REALTIME and the beat log's is CLOCK_MONOTONIC, and
+# on a host whose wall clock *steps* the two part company by exactly the size
+# of the step, at exactly the instant of it.
+#
+# Measured on the WSL2 box this was found on (Chromium 151.0.7922.34,
+# Playwright 1.62.0), with the driver instrumented to log every frame:
+#
+#   ARRIVE 1146491075.755  ts=1785603308090.391   two consecutive screencast
+#   ARRIVE 1146491159.407  ts=1785603307379.542   frames, 84 ms apart on the
+#                                                 monotonic clock and 711 ms
+#                                                 *backwards* on Chromium's
+#
+# That host steps -0.75 to -0.81 s every 32.2 s, like a metronome, which in a
+# 19 s take is a coin flip — and is why the same storyboard loses ~0.8 s of
+# video on some runs and none on others with nothing else different. Seven
+# takes of one storyboard with this sampler beside them: the four whose window
+# contained a step encoded 0.78 s less video than the three that did not, to
+# within 12 ms, every time. An idle page does not do this — 30 s of a take
+# with nothing painting at all, seven screencast frames in total, lost nothing
+# but the one step.
+#
+# None of that is fixable here. The clock is the host's, the timestamp is the
+# protocol's, and the recorder cannot re-stamp a frame it never sees. What it
+# can do is **measure the same clock Chromium reads**, which needs no browser
+# at all, and write the result next to the beats — so a consumer holding a
+# beat at `t_start` can work out that the beat really sits at
+# `t_start + (sum of the steps before it)` in the video, instead of
+# discovering it as an unexplained 0.8 s.
+class _CaptureClock:
+    """CLOCK_REALTIME against CLOCK_MONOTONIC, for the life of one capture.
+
+    A daemon thread, because the storyboard is blocking in Playwright calls
+    for the whole take and a step has to be seen when it happens. It touches
+    nothing but `time` and its own list.
+    """
+
+    # A step is instantaneous, so this bounds only *where* it gets reported,
+    # and 20 ms is inside the 40 ms one frame of the 25 fps encode covers —
+    # under the resolution anything reading the answer has.
+    INTERVAL_S = 0.02
+    # Under this a reading is the scheduling gap between the two `time` calls,
+    # not a step. Measured idle: below 0.4 ms, four orders under a real one.
+    MIN_STEP_S = 0.005
+    # ...and how much has to have accumulated before the recorder says so out
+    # loud. One frame of the encode: below that the video and the log still
+    # agree about which frame a beat is on.
+    WARN_S = 0.04
+
+    def __init__(self) -> None:
+        self.steps: list[dict] = []
+        self._t0 = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self, t0: float) -> None:
+        self._t0 = t0
+        self._thread = threading.Thread(
+            target=self._run, name="demo-video-clock", daemon=True
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        previous = time.time() - time.monotonic()
+        while not self._stop.is_set():
+            offset = time.time() - time.monotonic()
+            delta = offset - previous
+            if abs(delta) >= self.MIN_STEP_S:
+                self.steps.append(
+                    {
+                        "t": round(time.monotonic() - self._t0, 3),
+                        "delta": round(delta, 4),
+                    }
+                )
+            previous = offset
+            self._stop.wait(self.INTERVAL_S)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    @property
+    def total(self) -> float:
+        return sum(step["delta"] for step in self.steps)
+
+    def report(self) -> dict:
+        return {
+            "steps": list(self.steps),
+            "total": round(self.total, 4),
+            "sample_interval": self.INTERVAL_S,
+            "min_step": self.MIN_STEP_S,
+        }
+
+    def warning(self) -> str | None:
+        """What to tell the author, or None when the two clocks agreed."""
+        if abs(self.total) < self.WARN_S:
+            return None
+        when = ", ".join(
+            f"{step['delta'] * 1000:+.0f} ms at {step['t']:.1f}s"
+            for step in self.steps
+        )
+        return (
+            f"demo-video: WARNING — this host's wall clock stepped while the "
+            f"take was recording ({when}; {self.total * 1000:+.0f} ms in "
+            f"total). Chromium stamps every screencast frame with that clock, "
+            f"so demo.mp4 is {abs(self.total):.2f}s "
+            f"{'shorter' if self.total < 0 else 'longer'} than the take's own "
+            f"wall time and every beat after the step sits that far "
+            f"{'ahead of' if self.total < 0 else 'behind'} the frame it names. "
+            f"timeline.json records it as `capture_clock`; issues #18 and #215."
+        )
+
+
 def _env(name: str, default: str | None = None) -> str | None:
     """A DEMO_VIDEO_-prefixed environment variable, or the default."""
     value = os.environ.get(f"DEMO_VIDEO_{name}", "").strip()
@@ -731,6 +856,9 @@ class _DemoBase:
         # over- or under-run by the size of the step.
         self._line_end = 0.0  # when the current line stops speaking
         self._t0 = 0.0  # when video capture started
+        # ...and the one clock in here that is *not* monotonic, because the
+        # video is on it and nothing else can reach it. See _CaptureClock.
+        self._capture_clock = _CaptureClock()
         self.page: Page = None  # type: ignore[assignment]
         # The beat log (see "beat timeline" above) and the caption currently
         # on screen, which every beat is stamped with.
@@ -914,6 +1042,9 @@ class _DemoBase:
             # the medium's setup takes (~250 ms for the web recorder's
             # window-frame render, and it is not a constant).
             self._t0 = time.monotonic()
+            # Started with `_t0` and stopped with the capture, so its window is
+            # exactly the window the screencast was stamping frames in.
+            self._capture_clock.start(self._t0)
             # Before _start(), so the very first navigation is watched too —
             # a page that throws on load is the whole point of this.
             self._watch_page(self.page)
@@ -925,6 +1056,7 @@ class _DemoBase:
         except Exception:
             # __exit__ never runs when __enter__ raises — don't leak the
             # Playwright driver (typical cause: chromium not installed).
+            self._capture_clock.stop()
             try:
                 self._stop()
             except Exception:
@@ -1002,6 +1134,13 @@ class _DemoBase:
         convert_error: BaseException | None = None
         video = self.page.video
         self._context.close()
+        # The screencast has stopped stamping frames, so the window this
+        # sampler had to cover is closed. Stopping it any later would attribute
+        # a step taken during conversion to the recording (issue #215).
+        self._capture_clock.stop()
+        clock_warning = self._capture_clock.warning()
+        if clock_warning:
+            print(clock_warning, file=sys.stderr)
         webm = Path(video.path()) if video else None
         self._browser.close()
         self._pw.stop()
@@ -1961,6 +2100,14 @@ take with fewer beats than the last one would otherwise leave the
             # grows a quoted string
             # later must not be the one place the mask does not reach.
             "content": self._content,
+            # The clock demo.mp4 is actually on, and the only field here that
+            # is not a reading of `time.monotonic()` (issues #18, #215). See
+            # _CaptureClock: Chromium stamps every screencast frame with the
+            # host's wall clock, so a host that steps it moves the video out
+            # from under the beats by exactly that much. `steps` is empty on
+            # a host that did not step, which is the healthy answer and is
+            # *not* the same as the key being absent.
+            "capture_clock": self._capture_clock.report(),
             # Built from the *scrubbed* beats, not from `self._beats`, so a
             # still path or a caption that the mask reached is masked here too
             # rather than reappearing in the coverage table (issue #12).
