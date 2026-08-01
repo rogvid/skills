@@ -2010,7 +2010,9 @@ class HostClock:
         out by their real durations, so that shortening is already in the
         offset. Adding it again to a later part's beats would over-correct by
         a whole step. For a single take there are no boundaries and this is
-        the whole list.
+        the whole list. The half a boundary cannot express — a step sampled
+        *after* its own part's last frame, which sits past the next part's
+        boundary and is nobody's — is kept out of the list by `joined_clock`.
 
         Hand-written here rather than shared with the recorder: the two have
         to be able to disagree, or `capture_clock` is not being graded.
@@ -2032,11 +2034,33 @@ def joined_clock(parts: list[tuple[HostClock, float]]) -> HostClock:
     `parts` is (that capture's clock, where its video starts in the joined
     one). Nothing is mutated: each part keeps its own clock, because that is
     what grades that part's own `capture_clock` and its own `.seg.mp4`.
+
+    **A step past the end of its own part's video is dropped**, and that is the
+    whole of what `before()`'s boundaries cannot express. Each watcher runs for
+    its part's whole `with` block, which outlives the frames: the encode, the
+    conversion and the timeline write all happen after the last one. A step
+    landing in that tail moved nothing — the next capture's first frame starts
+    its own clock, which is `record_segments`' own reason for one watcher per
+    segment — but on the joined clock it sits past the next part's boundary,
+    and `before()` keys on time, so it would be handed to that part's beats.
+
+    Measured, on the run that found it: a -876 ms step at 7.2 s of a part whose
+    video is 6.88 s put the closing caption's search window 876 ms away from the
+    frame, and the arm went red about something untrue. The same caption, in the
+    same file, was timed to -20 ms by `check_merge_offset` — which corrects from
+    the stitched `timeline.json`, where the recorder had stopped sampling before
+    the step and the merge attributes what is left per capture (issue #225).
+    Nothing is dropped from the *part's own* clock, which still grades that
+    part's `capture_clock` over the window both watchers cover.
     """
     joined = HostClock()
     joined._t0 = 0.0
+    ends = [offset for _clock, offset in parts[1:]] + [None]
     joined.raw = [
-        (at + offset, delta) for clock, offset in parts for at, delta in clock.steps
+        (at + offset, delta)
+        for (clock, offset), end in zip(parts, ends, strict=True)
+        for at, delta in clock.steps
+        if end is None or at + offset < end
     ]
     joined.boundaries = [offset for _clock, offset in parts]
     return joined
@@ -2150,6 +2174,206 @@ def check_capture_clock(
             ]
     print(f"smoke: {label} capture_clock agrees with the harness ({clock.describe()})")
     return []
+
+
+def merged_clock_correction(record: object, beat: dict) -> float:
+    """What a reader of a stitched `timeline.json` **alone** corrects a beat by.
+
+    Hand-written from the envelope's documentation in `timeline.py`, never
+    imported from `stitching.py`: a reader assembled out of the merge's own
+    code agrees with that code whatever it says, which is the catalogue's
+    "check that shares the bug's blind spot". The documented rule is the steps
+    of *this beat's own capture*, up to this beat — not the running total, and
+    not an earlier part's, whose lost wall time is already in the offsets the
+    merge laid the parts out by.
+    """
+    if not isinstance(record, dict):
+        return 0.0
+    t_start = beat.get("t_start")
+    if not isinstance(t_start, (int, float)):
+        return 0.0
+    total = 0.0
+    for step in record.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        at, delta = step.get("t"), step.get("delta")
+        if not isinstance(at, (int, float)) or not isinstance(delta, (int, float)):
+            continue
+        if step.get("segment") == beat.get("segment") and at <= float(t_start):
+            total += float(delta)
+    return total
+
+
+def check_merged_capture_clock(
+    out_dir: Path, parts: list[tuple[str, HostClock, float, object]]
+) -> list[str]:
+    """A stitched demo's own answer to "where in the video is this beat" (#225).
+
+    Graded off `demo.mp4`'s `timeline.json` and nothing else, because that is
+    all a consumer has: `stitch()` removes the parts and their beat logs, so a
+    measurement that only ever reached a `<segment>.seg.timeline.json` is one
+    nobody downstream will read. `parts` is (name, that capture's clock, where
+    its video starts in the stitched one, that part's own record as its log
+    held it before the merge) — the offsets taken with ffprobe off the parts
+    rather than read out of the file being graded.
+
+    The last claim is the measured one: for every beat, what a reader
+    reconstructs from the merged record has to be what this harness measured on
+    that beat's *own* capture — which includes a step in an earlier part
+    correcting nothing here, the half a merge gets wrong by accumulating (see
+    `joined_clock`). It says nothing on a host whose wall clock never steps, so
+    the merge's arithmetic is *also* graded directly, on a scripted clock, by
+    `MergedCaptureClock` in `tests/unit`. Everything above it holds on any host.
+
+    A beat that starts within `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S` of a step is
+    skipped and counted, not graded: two samplers on their own 20 ms grids do
+    not both know which side of that beat the step fell on, and widening the
+    bar to a step's width instead would leave it grading nothing.
+    """
+    path = out_dir / "timeline.json"
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"segments: timeline.json could not be read for capture_clock: {exc}"]
+    # Before the merged record, and whether or not there is one: that field
+    # goes null the moment any part is missing its own, and the parts that
+    # *were* measured must not go with it. Graded against each segment's log as
+    # it stood on disk before the merge, so a record that arrives empty, or
+    # belonging to the other part, fails the same way.
+    failures: list[str] = []
+    carried = doc.get("segments")
+    if not isinstance(carried, list) or len(carried) != len(parts):
+        return [
+            f"segments: the stitched timeline.json's `segments` is {carried!r}, "
+            f"expected one record per part — the per-part clocks live there and "
+            f"nothing below can be attributed without them"
+        ]
+    for (name, _clock, _offset, own), kept in zip(parts, carried, strict=True):
+        if kept.get("capture_clock") != own:
+            failures.append(
+                f"segments: the merged `segments` record for {name} carries "
+                f"capture_clock {kept.get('capture_clock')!r}, but "
+                f"{name}.seg.timeline.json measured {own!r}. That record is what "
+                f"is left to read when the merged one goes null, and a stitched "
+                f"demo that lost one part's clock must not lose the parts that "
+                f"were measured (issue #225)"
+            )
+    record = doc.get("capture_clock")
+    if not isinstance(record, dict):
+        return failures + [
+            f"segments: the stitched timeline.json has no merged `capture_clock` "
+            f"record ({record!r}). stitch() takes the parts and their beat logs "
+            f"away with it, so what is left is a beat log on the monotonic "
+            f"clock, a video on the host's wall clock, and nothing to reconcile "
+            f"them with (issues #18, #215, #225)"
+        ]
+    steps, total = record.get("steps"), record.get("total")
+    if not isinstance(steps, list) or not isinstance(total, (int, float)):
+        return failures + [
+            f"segments: the merged `capture_clock` is steps={steps!r}, "
+            f"total={total!r} — a reader correcting a beat timestamp with that "
+            f"gets nothing"
+        ]
+    summed = sum(float(s.get("delta", 0.0)) for s in steps if isinstance(s, dict))
+    if abs(summed - float(total)) > 0.001:
+        failures.append(
+            f"segments: the merged capture_clock.total is {total!r} but its own "
+            f"steps sum to {summed:+.4f} — the merged field disagrees with "
+            f"itself, and a consumer reading only the total corrects by a "
+            f"different amount from one reading the steps"
+        )
+    wanted = [round(offset, 3) for _name, _clock, offset, _own in parts]
+    boundaries = record.get("boundaries")
+    if (
+        not isinstance(boundaries, list)
+        or len(boundaries) != len(wanted)
+        or any(
+            not isinstance(b, (int, float))
+            or abs(float(b) - w) > SEGMENT_OFFSET_TOLERANCE_S
+            for b, w in zip(boundaries, wanted, strict=False)
+        )
+    ):
+        failures.append(
+            f"segments: the merged capture_clock says its captures start at "
+            f"{boundaries!r}; ffprobe puts them at {wanted!r}. Those are what "
+            f"tell a reader which steps apply to which beats, and a merged "
+            f"record whose captures all start at zero hands the first "
+            f"segment's steps to the second segment's beats — over-correcting "
+            f"every one of them by a whole step (issue #225)"
+        )
+    names = {name for name, _clock, _offset, _own in parts}
+    stray = [
+        step
+        for step in steps
+        if not isinstance(step, dict) or step.get("segment") not in names
+    ]
+    if stray:
+        failures.append(
+            f"segments: {len(stray)} of {len(steps)} merged capture_clock "
+            f"step(s) name no capture of this demo ({stray[:2]!r}; the parts "
+            f"are {sorted(names)}). A step is sampled for as long as its "
+            f"capture runs, which is longer than the video that capture "
+            f"produced, so a step's merged timestamp can fall past the next "
+            f"part's boundary — which capture measured it is the only "
+            f"attribution a reader can trust"
+        )
+
+    unresolvable = 0
+    for name, clock, offset, _own in parts:
+        # Both this harness's steps and the record's, on this part's own clock:
+        # a beat that starts within a sampler's reach of a step is one the two
+        # watchers genuinely cannot agree about — they are on their own 20 ms
+        # grids, so which *side* of the beat the step fell on is not a fact
+        # either of them has. Skipped rather than absorbed into a wider bar,
+        # because a bar wide enough for a whole step grades nothing at all: the
+        # beats after a step are still 0.78 s apart from the beats before it,
+        # and those are what carry the claim.
+        near = [at for at, _delta in clock.steps] + [
+            float(step["t"]) - offset
+            for step in steps
+            if isinstance(step, dict)
+            and step.get("segment") == name
+            and isinstance(step.get("t"), (int, float))
+        ]
+        for beat in doc.get("beats") or []:
+            if beat.get("segment") != name or not isinstance(
+                beat.get("t_start"), (int, float)
+            ):
+                continue
+            local = float(beat["t_start"]) - offset
+            if any(
+                abs(at - local) <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S for at in near
+            ):
+                unresolvable += 1
+                continue
+            measured = clock.before(local)
+            read = merged_clock_correction(record, beat)
+            if abs(measured - read) > MAX_CLOCK_RECORD_DISAGREEMENT_S:
+                failures.append(
+                    f"segments: beat {beat.get('index')} of {name} is logged at "
+                    f"{float(beat['t_start']):.2f}s, and a reader with only the "
+                    f"stitched timeline.json would place it {read * 1000:+.0f} "
+                    f"ms from there in demo.mp4 — this harness watched that "
+                    f"capture's own wall clock and makes it "
+                    f"{measured * 1000:+.0f} ms ({clock.describe()}). The "
+                    f"merged record is the only thing a consumer has, and a "
+                    f"step belongs to the capture that measured it: an earlier "
+                    f"part's is already in this part's offset (issue #225)"
+                )
+                break
+    if not failures:
+        print(
+            f"smoke: segments the stitched timeline.json places every beat on "
+            f"its own capture's clock ({len(steps)} step(s) merged, boundaries "
+            f"{boundaries}"
+            + (
+                f", {unresolvable} beat(s) too close to a step for the two "
+                f"samplers to resolve)"
+                if unresolvable
+                else ")"
+            )
+        )
+    return failures
 
 
 _CAPTION_JS = """() => {
@@ -8426,20 +8650,31 @@ def check_merge_offset(
             if segment_clock and isinstance(alone.get("t_start"), (int, float))
             else 0.0
         )
-        for what, media, t_start in (
-            ("in its own segment", part, alone.get("t_start")),
-            ("in the stitched demo", demo, stitched.get("t_start")),
+        # The stitched reading corrects with the **artifact's** own answer,
+        # rebuilt from the merged timeline.json alone, where the part's
+        # reading corrects with this harness's. That asymmetry is the point of
+        # issue #225: `stitch()` deletes the parts, so a consumer has only the
+        # merged record, and the differential below is what says the two agree.
+        # On a host whose clock never stepped both are zero and this measures
+        # exactly what it measured before — the merge's offset arithmetic.
+        merged_shift = merged_clock_correction(
+            json.loads(merged_json.read_text()).get("capture_clock"), stitched
+        )
+        for what, media, t_start, correction in (
+            ("in its own segment", part, alone.get("t_start"), shift),
+            ("in the stitched demo", demo, stitched.get("t_start"), merged_shift),
         ):
             if not isinstance(t_start, (int, float)):
                 readings.clear()
                 failures.append(f"segments: {name}'s probe has no t_start {what}")
                 break
-            # One shift for both readings, taken on this segment's own
-            # capture clock: `t_start` differs between the two files by the
-            # merge offset, but the frames are the same frames and the steps
-            # that moved them are this segment's either way.
+            # The same frames, moved by the same steps — this segment's, not
+            # the demo's running total. What differs between the two readings
+            # is *who says so*: the part is corrected by this harness's own
+            # measurement, the stitched demo by what its merged timeline.json
+            # tells a reader who has nothing else (issue #225).
             seen_at, note = caption_appearance_s(
-                "segments", media, band, float(t_start) + shift
+                "segments", media, band, float(t_start) + correction
             )
             if seen_at is None:
                 readings.clear()
@@ -8448,7 +8683,7 @@ def check_merge_offset(
                     f"({media.name}) — {note}"
                 )
                 break
-            readings[what] = seen_at - float(t_start) - shift
+            readings[what] = seen_at - float(t_start) - correction
         if len(readings) != 2:
             continue
 
@@ -8462,8 +8697,10 @@ def check_merge_offset(
                 f"away from the frame it names, past the "
                 f"{MAX_MERGE_OFFSET_ERROR_S * 1000:.0f} ms bar. Both readings are "
                 f"of the same frames, so capture loss (issue #18) cancels here "
-                f"and this is stitch()'s offset arithmetic for {name}: it must "
-                f"be the parts' real ffprobe durations, in order."
+                f"and what is left is what the merged artifact says about "
+                f"{name}: its offset, which must be the parts' real ffprobe "
+                f"durations in order, and the merged `capture_clock` the "
+                f"stitched reading above was corrected by (issue #225)."
             )
             continue
         # The other half, per capture: this segment's own video against this
@@ -8608,6 +8845,27 @@ def stitch_segments(
             "segments: re-stitching the same parts produced different beats — "
             "the merge is not a function of what is on disk, so a re-stitch "
             "after re-recording one segment cannot be trusted"
+        )
+
+    # What a consumer of the stitched artifact can do about the clock its
+    # video is on — graded here, after the parts and their own logs are gone,
+    # because that is the state a reader of demo.mp4 finds it in (issue #225).
+    # The offsets are the ffprobe durations measured above, before the merge,
+    # not the ones the file being graded wrote down.
+    if clocks:
+        offsets: list[float] = []
+        running = 0.0
+        for probed in durations:
+            offsets.append(running)
+            running += probed
+        failures += check_merged_capture_clock(
+            out_dir,
+            [
+                (name, clock, offset, doc.get("capture_clock"))
+                for name, clock, offset, doc in zip(
+                    SEGMENT_NAMES, clocks, offsets, segment_docs, strict=True
+                )
+            ],
         )
 
     # -- every field of the records the merge wrote, against its sources ------

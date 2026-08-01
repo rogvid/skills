@@ -448,6 +448,69 @@ INJECTIONS = [
         sites=("check_timeline",),
         must_contain=("with the host's wall-clock steps already taken",),
     ),
+    # `stitch()` takes the parts and their beat logs away with it, so a
+    # measurement that only ever reached a `<segment>.seg.timeline.json` is one
+    # no consumer of `demo.mp4` will ever read (issue #225). These three break
+    # the *merge* and are caught on any host, stepping clock or not: what they
+    # remove is the record's structure, not its values.
+    Injection(
+        name="the stitched demo carries no merged clock at all",
+        module="stitching.py",
+        old='        "capture_clock": _merge_capture_clock(docs, records),',
+        new='        "capture_clock_unmerged": _merge_capture_clock(docs, records),',
+        arm="--segments-only",
+        sites=("check_merged_capture_clock",),
+        must_contain=("has no merged `capture_clock` ",),
+    ),
+    Injection(
+        # Every capture starting at zero, which is what a single take's record
+        # says — so a reader hands the first segment's steps to the second
+        # segment's beats and over-corrects every one of them by a whole step.
+        name="the merged clock puts every capture boundary at the start of the demo",
+        module="stitching.py",
+        old='        "boundaries": [record["offset"] for record in records],',
+        new='        "boundaries": [0.0 for record in records],',
+        arm="--segments-only",
+        sites=("check_merged_capture_clock",),
+        must_contain=("tell a reader which steps apply to which beats",),
+    ),
+    Injection(
+        # A step belonging to nobody. A step outlives the video its capture
+        # produced, so its timestamp cannot be the attribution — the segment
+        # is, and a reader handed one without a segment cannot place it.
+        #
+        # A step is *added* rather than an existing one stripped of its
+        # segment, and that is the difference between an entry that grades
+        # something and one that grades the box: this arm records ~30 s and
+        # the host's wall clock steps once every 32 s, so stripping the
+        # attribution off the merged steps is a no-op on the runs where there
+        # are none. It was written that way first and the arm passed against
+        # it — the catalogue's environment-agreeing assertion, caught by this
+        # manifest rather than by a reviewer. Its delta is 0.0 so the record
+        # still totals its own steps: exactly one fault, and the failure that
+        # must fire is the attribution one.
+        name="the merged clock carries a step belonging to no capture",
+        module="stitching.py",
+        old='        "steps": steps,',
+        new='        "steps": steps + [{"t": 1.0, "delta": 0.0, "segment": None}],',
+        arm="--segments-only",
+        sites=("check_merged_capture_clock",),
+        must_contain=("name no capture of this demo",),
+    ),
+    Injection(
+        # The merged record goes null the moment one part is missing its own,
+        # and this is what is left to read when it does — per part, on that
+        # part's own clock. Graded against the segment's log as it was on disk
+        # before the merge, so a record that arrives empty or belonging to the
+        # other part fails the same way.
+        name="a part's own clock never reaches the merged segment records",
+        module="stitching.py",
+        old='                "capture_clock": doc.get("capture_clock"),',
+        new='                "capture_clock": None,',
+        arm="--segments-only",
+        sites=("check_merged_capture_clock",),
+        must_contain=("is left to read when the merged one goes null",),
+    ),
     # -- the beat log and the review sheet (issues #8/#22), 29 s an entry ------
     #
     # `check_timeline` and `check_beat_frames` grade *a* take, not specifically

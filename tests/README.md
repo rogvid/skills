@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~37 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~39 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -181,7 +181,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 38 entries, ~37 min
+tests/smoke-inject                # all 42 entries, ~39 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1521,7 +1521,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-38 entries, 12 arms, ~37.2 min of takes
+42 entries, 12 arms, ~39.1 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1554,7 +1554,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--segments-only` | 6 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; or the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)) |
+| `--segments-only` | 10 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
@@ -1563,7 +1563,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **19 of `tests/smoke`'s 38 check functions have no entry**, and the harness
+- **19 of `tests/smoke`'s 39 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1818,14 +1818,50 @@ knows is missing is worse than one that is openly absent.
   time, and it is red about something true and now says which part of it is
   the host and which is not.
 
-- **`stitch()` does not merge `capture_clock`.** Each part's own
-  `<segment>.seg.timeline.json` carries its own measurement and is graded
-  against this harness's, per part — but the merged envelope has no such field,
-  so a consumer of a stitched `demo.mp4` has nothing to correct with. The
-  harness works around it by keeping each part's clock and laying them on the
-  merged video itself; a reader of the artifact cannot. `stitching.py` is
-  outside the change that added the field. Tracked in
-  [#225](https://github.com/rogvid/skills/issues/225).
+- **~~`stitch()` does not merge `capture_clock`.~~ Fixed**
+  ([#225](https://github.com/rogvid/skills/issues/225)). The merged envelope
+  now carries every part's steps moved onto the stitched clock by that part's
+  ffprobe offset, each naming the `segment` that measured it, plus the capture
+  `boundaries` — so `check_merge_offset`'s stitched reading is corrected from
+  the artifact alone while its per-part reading is corrected from this
+  harness's own measurement, and the differential between them is the claim.
+  What remains true of the *measured* half: **on a host whose wall clock never
+  steps, every step list is empty and the per-beat agreement in
+  `check_merged_capture_clock` compares nothing to nothing.** That is the
+  environment-agreeing shape, and it is why the merge's arithmetic — the
+  offsets, the per-capture attribution, and the rule that a step in an earlier
+  part must not correct a later part's beats — is graded on a *scripted* clock
+  by `MergedCaptureClock` in `tests/unit`, where five injections cost 0.2 s
+  each. What this arm adds on any host is the structure a reader needs:
+  the field exists, totals its own steps, names its captures, and puts their
+  boundaries where ffprobe puts them.
+
+  **One entry had to be rewritten for exactly that reason, and the manifest is
+  what caught it.** The injection for "a step that names no capture" first
+  stripped the `segment` off every merged step — which is a no-op on a run
+  where the clock never stepped, and the arm passed against it. It now *adds* a
+  step nobody measured, with a `delta` of 0.0 so the record still totals its
+  own steps: one fault, on any host.
+
+  **The harness had the bug it was the reference for.** `joined_clock()` laid
+  every part's steps onto the merged clock, including the ones its watcher
+  sampled *after* that part's last frame — the encode, the conversion and the
+  timeline write all run inside the `with`, and a step there sits past the next
+  part's boundary. `before()` keys on time, so it handed those to the next
+  part's beats. Measured on the run that found it: a -876 ms step at 7.2 s of a
+  part whose video is 6.88 s moved the closing caption's search window 876 ms
+  off the frame and failed `--segments-only` about something untrue — while the
+  *same* caption in the *same* file timed to -20 ms through
+  `check_merge_offset`, which corrects from the merged `timeline.json`, where
+  the recorder had already stopped sampling and the merge attributes per
+  capture. `joined_clock()` now drops a step that lands past its own part's
+  video; each part's own clock is untouched.
+
+  One more beat is ungraded per step: a
+  beat starting within `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S` of one is skipped
+  and counted in the arm's output, because two samplers on their own 20 ms
+  grids do not both know which side of that beat the step fell on — and the
+  alternative, a bar as wide as a step, would grade nothing.
 
 - **~~`--web-only` still goes red when the capture loses more than 0.75 s, and
   the bars were not widened to stop it.~~ Diagnosed and fixed** — the cause was

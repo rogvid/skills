@@ -46,11 +46,42 @@ from .markdown import _fmt_t, _md_cell
 #                          On a merged demo each value is the one every segment
 #                          agrees on, or null where they disagree — the
 #                          per-segment truth is in `segments`.
+#   capture_clock dict?  — the clock `media` is on, which is **not** the clock
+#                          `beats` are on. Chromium stamps every screencast
+#                          frame with the host's *wall* clock; the beat log is
+#                          `time.monotonic()`. So the recorder samples the
+#                          difference for the take's whole life and writes down
+#                          every step it saw: `steps` (each `t`, seconds into
+#                          the take, and `delta`, seconds the wall clock
+#                          jumped), `total`, `sample_interval` and `min_step`
+#                          (the sampler's own settings; the smallest jump it
+#                          calls a step). An empty `steps` means the clock held
+#                          still, which is a different answer from the field
+#                          being absent. **A beat the log puts at `t` sits at
+#                          `t + (the steps before it)` in the video** —
+#                          reference/limits.md has the measurement.
+#                          On a merged demo (`stitch`) every part's steps are
+#                          here, moved onto the stitched clock by that part's
+#                          `offset`, and each step also carries the `segment`
+#                          it was measured in. **That `segment` is the
+#                          attribution to trust**, not the timestamp: a step is
+#                          sampled for as long as the capture runs, which is
+#                          longer than the video it produced, so a step's `t`
+#                          can fall past the next part's `boundaries` entry.
+#                          The correction for a beat is the steps of *its own*
+#                          segment up to its `t_start` — never `total`, and
+#                          never an earlier part's, whose loss is already in
+#                          the offsets. `boundaries` (merged demos only) is
+#                          where each capture starts on the stitched clock.
+#                          **Null** on a merged demo any of whose parts carried
+#                          no usable record: a partial answer here would say a
+#                          part nobody measured held still.
 #   segments      list?   — merged demos only (`stitch`): one record per part,
 #                          in order, each `segment`, `media`, `duration`
 #                          (ffprobe), `offset` (where it starts in `media`),
-#                          `beats`, `recorder`, `determinism`. Absent from a
-#                          timeline a single take wrote.
+#                          `beats`, `recorder`, `determinism`, `content` and
+#                          that part's own `capture_clock`, on its own clock.
+#                          Absent from a timeline a single take wrote.
 #   content       dict?  — what the *picture* turned out to be, measured off
 #                          the encoded mp4 over the region the app occupies:
 #                          `measured` (bool), `note` (why not, when it is

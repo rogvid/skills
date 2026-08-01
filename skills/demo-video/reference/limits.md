@@ -110,7 +110,13 @@ restored at 250 ms after being deleted in
 [#217](https://github.com/rogvid/skills/issues/217).
 
 What to do: prefer `timeline.json`'s `capture_clock`, which records every step
-with its offset and size, and correct with it. Failing that, read a review
+with its offset and size, and correct with it. On a **stitched** demo the same
+field carries every part's steps, each naming the `segment` it was measured in:
+correct a beat with the steps of *its own* segment up to its `t_start`, never
+with `total` and never with an earlier part's — that part's lost wall time is
+already in the offset `stitch()` laid it out by, and applying it twice moves the
+beat by a whole extra step ([#225](https://github.com/rogvid/skills/issues/225)).
+Failing all that, read a review
 frame as *around* its beat, do not build anything that needs a beat timestamp
 to be exact to the frame, and when a frame and its caption disagree by a
 fraction of a second, suspect the capture before the
