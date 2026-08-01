@@ -23,12 +23,12 @@ function visibleTickets() {
     (t) =>
       (activeStatus === "all" || t.status === activeStatus) &&
       (term === "" ||
-        t.title.toLowerCase().includes(term) ||
-        t.id.toLowerCase().includes(term) ||
         // The requester is searchable *and* rendered on the row below. A match
         // on a field the queue does not show is indistinguishable from a bug:
         // the viewer sees a row survive a term that appears nowhere on it.
-        t.requester.toLowerCase().includes(term))
+        t.requester.toLowerCase().includes(term) ||
+        t.title.toLowerCase().includes(term) ||
+        t.id.toLowerCase().includes(term))
   );
 }
 
