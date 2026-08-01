@@ -29,9 +29,16 @@ jobs:
         with:
           enable-cache: true
 
-      # The guards on the pin itself: that RUFF_VERSION above is the only one,
-      # that tests/lint reads it rather than remembering a version, and that no
-      # workflow reaches ruff any other way. Runs no ruff and costs nothing.
+      # The guards on the pin: that RUFF_VERSION above is the only one, that
+      # tests/lint reads it rather than remembering a version, and that no
+      # workflow reaches ruff any other way.
+      #
+      # And the guards on the *file set*, which the pin says nothing about
+      # (#219): this plants a throwaway checkout where agent worktrees land,
+      # plus a control file where nothing is ignored, and requires the first to
+      # move nothing and the second to move exactly one file. It also requires
+      # every PEP 723 executable in the tree to be inside what ruff reads, which
+      # is what `examples/*/test` was not (#212). Four cached ruff runs, ~0.3 s.
       - name: tests/lint --self-test
         run: tests/lint --self-test
 
@@ -39,7 +46,12 @@ jobs:
       # so `tests/lint` locally is this step, at this version. Running ruff
       # here by hand instead would be a second pin; issue #189 is what that
       # cost, and tests/lint --self-test above refuses it.
-      - name: ruff check + ruff format --check
+      #
+      # This step also compiles every ```python fence in the tracked Markdown.
+      # ruff cannot: its checker does not read `.md` at any version, and its
+      # formatter reads a fence without validating it — `def f(:` comes back
+      # "1 file already formatted", exit 0 (#211).
+      - name: ruff check + ruff format --check + doc fences
         run: tests/lint --github
 
       # shellcheck comes from PyPI rather than apt so this is the same binary
