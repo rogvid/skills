@@ -91,16 +91,11 @@ MIN_PY_FENCES = 5
 # so the list can only shrink. Keys are (repo-relative path, the fence body
 # exactly as it appears after the fence's own indent is stripped), so editing
 # the fence at all takes it back out of the waiver and into the check.
-KNOWN_FRAGMENTS: dict[tuple[str, str], str] = {
-    (
-        "skills/demo-video/reference/determinism.md",
-        "with Recorder(out_dir, deterministic=True) as rec:"
-        "   # or DEMO_VIDEO_DETERMINISTIC=1",
-    ): (
-        "a one-line signature figure: a `with` header with no body, which no "
-        "Python parses. Adding `    ...` under it would close this (#211)"
-    ),
-}
+# Empty, and that is the intended state. A waiver here says "this fence is not
+# Python and never will be"; the only entry it ever held was a `with` header
+# missing its body, which was a defect rather than a figure (#222). A waiver on
+# a fence that compiles is itself refused, so an entry cannot outlive its cause.
+KNOWN_FRAGMENTS: dict[tuple[str, str], str] = {}
 
 # Where an agent worktree lands, and what --self-test plants there. The name is
 # this script's own so cleanup can never reach a real one.
