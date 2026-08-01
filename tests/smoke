@@ -1286,14 +1286,30 @@ MIN_SPOTLIGHT_CLEAR_S = 0.45
 #
 # `TerminalRecorder.__enter__` starts capturing before a storyboard can paint
 # anything, so a segment whose first statement was `interlude()` opened on
-# ~290 ms of empty terminal — measured on the reference demo, part2 starting at
-# 37.76 s and the card painting at 38.05 s. `TerminalRecorder(interlude="…")`
-# raises the card from an init script instead, before the page has a frame.
+# ~0.30 s of empty terminal — six frames of it at the head of the reference
+# demo's part2. `TerminalRecorder(interlude="…")` raises the card from an init
+# script instead, before the page has a frame.
 #
-# Graded on frames, because the acceptance criterion is about frames: *no
-# bare-terminal frames before the card*. A timestamp comparison is a proxy for
-# that and would still pass on a card that was painted on time and drawn
-# transparent.
+# **The timeline gap is not that measurement, and does not discriminate it.**
+# #110 wrote the defect down as part2's offset against the interlude beat's
+# timestamp (37.76 s against 38.05 s), and #206 restated that gap as the way
+# to grade the fix without watching. Measured on one box, same storyboard, one
+# line apart, before and after the fix
+# ([#207](https://github.com/rogvid/skills/issues/207)): the gap read 0.358 s
+# before and 0.365 s after, while the first part2 frame went 226.5 (bare) to
+# 25.8 (card) and the six bare frames went to none. The gap is
+# `TerminalRecorder`'s setup cost — `_t0` is set before `_start()`, which goes
+# to about:blank, injects xterm.js, opens the PTY and waits for the first
+# prompt before `_open_on_card` runs — so the first beat lands ~0.36 s into
+# the segment either way, and the proposed check would have graded the fixed
+# take as marginally worse. What the fix changed is that all of that now
+# happens *behind* an opaque card: the pixels, not the clock.
+#
+# So this is graded on frames, because the acceptance criterion is about
+# frames: *no bare-terminal frames before the card*. A timestamp comparison is
+# blind in both directions — it passes on a card painted on time and drawn
+# transparent, and it says nothing about a card painted late, because a beat's
+# timestamp is when the recorder logged the card, not when a viewer saw it.
 #
 # The discriminator is one corner of the frame, outside the terminal window:
 #

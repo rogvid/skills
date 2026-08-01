@@ -128,13 +128,22 @@ _TERM_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
 # -- opening on a card (issue #110) ------------------------------------------
 #
 # A terminal segment that opens with `interlude()` shows a flash of bare
-# terminal first, and the gap is structural rather than a pacing mistake:
+# terminal first, and it is structural rather than a pacing mistake:
 # `__enter__` starts Chromium's screencast when it creates the page, and a
 # storyboard cannot paint anything before its own first statement. Measured on
-# the reference demo: the segment's first frame at 37.76 s, the card at
-# 38.05 s, and an empty window with a lone prompt in between. The web recorder
-# does not show it only because it has nothing on screen until `goto()` — there
-# is no "before" to flash.
+# the reference demo: six frames — ~0.30 s — of an empty window with a lone
+# prompt at the head of part2. The web recorder does not show it only because
+# it has nothing on screen until `goto()` — there is no "before" to flash.
+#
+# Measured in *frames*, and not in the timeline, which is where #110 first
+# wrote it down (part2's offset at 37.76 s against the interlude beat at
+# 38.05 s). That gap is this recorder's own setup cost — `_t0` is set before
+# `_start()`, which goes to about:blank, injects xterm.js, opens the PTY and
+# waits for the first prompt before `_open_on_card` runs — so it survives the
+# fix: 0.358 s before and 0.365 s after, on the same storyboard one line
+# apart, while the first part2 frame went 226.5 (bare) to 25.8 (card). See
+# issue #207. A beat's timestamp says when the card was *logged*; only the
+# pixels say when it was up.
 #
 # So the card stops being something a storyboard has to remember to do first
 # and becomes a property of the recorder: `TerminalRecorder(interlude="…")`

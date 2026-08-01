@@ -1204,6 +1204,34 @@ The recorder has no fade-in path (the element is appended already opaque, so no
 transition can run), but the suite is relying on setup cost for that and would
 not notice if it changed.
 
+**The corner is the discriminator; the timeline gap is not, and it was written
+down twice as though it were.** [#110](https://github.com/rogvid/skills/issues/110)
+measured the flash as part2's offset against the interlude beat's timestamp
+(37.76 s against 38.05 s), and
+[#206](https://github.com/rogvid/skills/issues/206) restated that gap as the
+measurement that would let the fix be graded without watching — *"the gap
+should be absent rather than merely smaller"*. It is neither.
+[#207](https://github.com/rogvid/skills/issues/207) measured both takes of the
+same storyboard, one line apart, on one box:
+
+| | before the fix | after |
+|---|---:|---:|
+| timeline gap | 0.358 s | 0.365 s |
+| corner luma, first part2 frame | 226.5 (bare) | 25.8 (card) |
+| bare-terminal frames before the card | 6 (0.30 s) | 0 |
+
+The defect is gone and the gap moved **+7 ms the wrong way**, so the proposed
+check would have reported the fixed take as marginally worse. The gap is
+`TerminalRecorder`'s setup cost, not the flash: `_t0` is set before `_start()`,
+which goes to `about:blank`, injects xterm.js, opens the PTY and waits for the
+first prompt before it raises the card, so the first beat lands ~0.36 s into
+the segment either way. A beat's timestamp says when the card was *logged*;
+only the pixels say when it was up. The corner sweep discriminates it 226 → 26
+at the boundary frame, across four re-records including one under load. This is
+recorded here because nothing asserts on that gap today, and a number written
+into two closed issues as *the* check is the kind that becomes an assertion
+later — one that would look green forever.
+
 ### What a web take opens on (issue #119)
 
 The third defect in this file found by a human watching, and the most plausible-
@@ -1842,6 +1870,32 @@ knows is missing is worse than one that is openly absent.
   cursor. `check_parked_pointer` cannot catch it — the determinism storyboard
   parks after `Recorder.goto()`, which waits for `load`. Tracked with its
   measurement in [#230](https://github.com/rogvid/skills/issues/230).
+
+- **Nothing grades the opening frame of a demo anybody ships.**
+  `check_opening_card` sweeps the corner of `terminal-opening/`, a take this
+  suite records itself, so what passes is a claim about the *recorder*.
+  `examples/ticket-queue/demos/2026-07-26-status-filter` — the take
+  [#110](https://github.com/rogvid/skills/issues/110) and
+  [#206](https://github.com/rogvid/skills/issues/206) were reported against —
+  is graded by a person watching, and always has been: demo directories commit
+  `record.py`, `timeline.json`, `timeline.md` and `images/` but never
+  `demo.mp4` or its `.seg.mp4` parts, so no committed artifact carries the
+  first frame of part2. Three human sightings of the same flash is what that
+  costs. **The timeline gap does not stand in for it** — see the
+  `terminal-opening/` section above, and
+  [#207](https://github.com/rogvid/skills/issues/207) for the two takes it was
+  measured on. What would close it is the same corner strip read off the live
+  `#__term_win` box at *record* time, on the segment's own first frame, written
+  into the take's report where a reviewer reads a number instead of squinting
+  — card `<= 60` mean luma, bare `>= 150`, the constants `check_opening_card`
+  already uses. That is
+  [#235](https://github.com/rogvid/skills/issues/235). Separately, the sweep
+  itself has no `tests/smoke-inject` entry — it is in the ungraded roster
+  above, it was fault-injected by hand when it was written, and since
+  [#61](https://github.com/rogvid/skills/issues/61) the per-push
+  `--polish-only` run is its only exercise in the repo (see **Why the four
+  middle arms stayed on the push**, which is the measurement that kept it
+  there).
 
 - **Nothing calls the ElevenLabs API.** The narration take grades everything a
   cache hit reaches — the key, the pacing, the mix — and by construction never
