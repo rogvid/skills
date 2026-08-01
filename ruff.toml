@@ -24,6 +24,7 @@ extend-include = [
     "skills/*/scripts/*",  # every skill's PEP 723 executables
     "examples/*/serve",    # the example app's PEP 723 executables
     "examples/*/tickets",
+    "examples/*/test",     # …and the suite that grades it (#212)
 ]
 
 [lint]

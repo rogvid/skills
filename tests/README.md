@@ -41,7 +41,8 @@ tests/
 ├── smoke-inject       # proves smoke's assertions can still fail (~35 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
-├── lint               # ruff, at exactly the version ci.yml pins (~0.3 s)
+├── lint               # ruff at the version ci.yml pins, over the files CI
+│                      #   sees, plus the docs' python fences (~0.3 s)
 └── fixture/
     └── index.html     # the app smoke records: static, dependency-free, deterministic
 ```
@@ -76,7 +77,8 @@ tests/unit                        # the browser-free half of the recorder
 tests/unit --fault-inject         # break each thing an assertion watches
 tests/ci-unit                     # the CI workflow's three helper scripts
 tests/ci-unit --fault-inject
-tests/lint                        # ruff check + ruff format --check, as CI runs them
+tests/lint                        # ruff check + ruff format --check + doc fences
+tests/lint --self-test            # prove all three grade something
 ```
 
 **Lint with `tests/lint`, not with `uvx ruff`.** They are not the same command.
@@ -90,6 +92,26 @@ and one pin. Change the pin and the local command changes with it;
 reaches ruff any other way.
 [#189](https://github.com/rogvid/skills/issues/189) is what this cost before.
 
+**One pin is not one question, though — the file set is the other half.** With
+agent worktrees un-ignored under the repo root, `tests/lint` read **657** files
+where CI read 13, and the 644 extra were copies of this repo at other commits;
+a red run then named files on other branches, and the diagnosis came only from
+noticing that 657 is not 13
+([#219](https://github.com/rogvid/skills/issues/219)). `--self-test` grades
+that by **planting**, not by reading config: a throwaway checkout goes in at
+`.claude/worktrees/`, carrying this repo's own `ruff.toml` the way a real
+worktree does, and the file set must not move — while a control `.py` at the
+repo root, where nothing is ignored, must move it by exactly one. The control
+is what stops "nothing appeared" from meaning "nothing was measured". Asserting
+`.gitignore` contains `.claude/` would have graded a string, and said nothing
+about the next tool with its own ignore semantics.
+
+The same guard asks the question in the other direction: **every PEP 723
+executable in the tree must be inside that file set**, read off the shebangs
+rather than off `ruff.toml`. `examples/ticket-queue/test` — 416 lines, the gate
+on the queue's search — was outside `extend-include` and therefore unlinted
+until [#212](https://github.com/rogvid/skills/issues/212).
+
 **The pin is 0.16.1, and `ruff.toml` excludes `*.md` from the formatter**
 ([#192](https://github.com/rogvid/skills/issues/192)). From 0.16 ruff's
 formatter reads Python out of Markdown code fences — its checker still does
@@ -100,11 +122,32 @@ and the reformat measured at 0.16.1 ragged out two columns of deliberately
 aligned trailing comments and spent the last line of `SKILL.md`'s 600-line
 budget on a blank one. What the exclusion gives up is **only layout**: the
 formatter does not validate a fence either way — hand it ```` ```python ````
-followed by `def f(:` and it prints "1 file already formatted" and exits 0. That
-nothing checks a documentation example parses is
-[#211](https://github.com/rogvid/skills/issues/211), and predates this. The
+followed by `def f(:` and it prints "1 file already formatted" and exits 0. The
 reasoning is written at the exclusion in `ruff.toml`, which is the file a reader
 lands in.
+
+**So `tests/lint` compiles the fences itself**
+([#211](https://github.com/rogvid/skills/issues/211)). A parse check, not a
+lint: the fences legitimately name things that do not exist here (`rec`, `OUT`,
+`mytool`), so `ruff check` semantics would be wrong even if ruff read Markdown.
+It walks the tracked `*.md` — 21 files, 39 fences — and `compile()`s the 10
+whose info string says `python`/`py`/`python3`. The other 29 are skipped **by
+language and counted out loud** (`sh` 11, none 8, `json` 5, `yaml` 2, `bash` 2,
+`html` 1), because a checker that silently skipped everything reports the same
+clean line a healthy tree does; `MIN_PY_FENCES` is the floor that fires if the
+walker stops finding fences at all.
+
+A fence's own indent is stripped before it is compiled, so a block inside a
+list item is graded as the Python it renders as. Two things that look like
+fences and are not — a run of backticks written inline in a sentence, and a
+four-backtick block quoting a three-backtick one — open nothing, and each has a
+case in `--self-test` that fails if it starts to.
+
+`KNOWN_FRAGMENTS` in `tests/lint` waives the figures that are deliberately not
+whole Python — today exactly one, a `with` header with no body in
+`reference/determinism.md`. It is a waiver list graded like one: an entry whose
+fence has vanished, or whose fence now compiles, **fails**, so it can only
+shrink.
 
 Then the recorder itself:
 

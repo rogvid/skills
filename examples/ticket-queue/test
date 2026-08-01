@@ -78,9 +78,9 @@ def setUpModule() -> None:  # noqa: N802  (unittest naming)
         try:
             with urllib.request.urlopen(f"{BASE_URL}/api/tickets", timeout=1):
                 break
-        except (urllib.error.URLError, ConnectionError, OSError):
+        except (urllib.error.URLError, ConnectionError, OSError) as exc:
             if time.monotonic() > deadline:
-                raise RuntimeError(f"serve never answered on {BASE_URL}")
+                raise RuntimeError(f"serve never answered on {BASE_URL}") from exc
             time.sleep(0.05)
     _playwright = sync_playwright().start()
     _browser = _playwright.chromium.launch()
@@ -122,7 +122,9 @@ class QueuePage(unittest.TestCase):
 
     def row_text(self, ticket_id: str) -> str:
         """Everything a person can read on one row (hidden text excluded)."""
-        return self.page.locator(f'#ticket-list .ticket[data-id="{ticket_id}"]').inner_text()
+        return self.page.locator(
+            f'#ticket-list .ticket[data-id="{ticket_id}"]'
+        ).inner_text()
 
     def search(self, term: str) -> None:
         box = self.page.locator("#queue-search")
@@ -317,9 +319,7 @@ INJECTIONS = [
         "web/app.js",
         "headingEl.textContent = `Support queue (${shown.length})`;",
         "headingEl.textContent = `Support queue (${tickets.length})`;",
-        [
-            "QueuePage.test_search_and_the_status_filter_combine_and_the_heading_agrees"
-        ],
+        ["QueuePage.test_search_and_the_status_filter_combine_and_the_heading_agrees"],
     ),
     (
         "the placeholder goes back to naming only the title and the id",

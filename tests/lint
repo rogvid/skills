@@ -3,11 +3,12 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Ruff, at exactly the version CI pins (issue #189).
+"""Ruff at exactly the version CI pins, over exactly the files CI sees (#189).
 
-    tests/lint                # ruff check + ruff format --check, from the root
+    tests/lint                # ruff check + ruff format --check + doc fences
     tests/lint --github       # ...with GitHub annotations; what ci.yml runs
-    tests/lint --self-test    # prove the pin is live and single-sourced (0 s)
+    tests/lint --self-test    # prove the pin, the file set and the fence
+                              #   checker are live rather than decorative
 
 **Why this file exists rather than a line in a README.** `.github/workflows/
 ci.yml` pins ruff and runs it as `uv run --with "ruff==$RUFF_VERSION" ruff …`.
@@ -22,12 +23,31 @@ this script reads it out of that file as text. CI runs this script too, so
 there is one command and one version. Changing `RUFF_VERSION` changes what a
 local `tests/lint` runs — that is the measurement issue #189 asked for, and
 `--self-test` is what keeps it true.
+
+**A version is only half of "the same question".** The other half is the file
+set, and it drifted the same way: with agent worktrees un-ignored under the
+repo root, this command read **657** files where CI read 13, and the 644 extra
+were copies of this repo at other commits (#219). A red run then pointed at
+files on other branches. `--self-test` grades that behaviourally — it plants a
+throwaway checkout where agent worktrees actually land and requires the file
+set not to move — rather than asserting a string is in `.gitignore`, because
+the next tool with its own ignore semantics is not covered by a string in a
+file. It also requires every PEP 723 executable in the tree to be *in* that
+set, which is the check `examples/*/test` went four months without (#212).
+
+**And ruff reads no documentation.** Its formatter parses Python out of
+Markdown fences from 0.16 but never validates one — hand it ```python followed
+by `def f(:` and it prints "1 file already formatted" and exits 0 — and its
+checker does not look at `.md` at any version. So the examples an agent copies
+out of a SKILL.md were the one Python in this repo nothing parsed (#211).
+`check_fences()` compiles them.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +63,73 @@ PIN = re.compile(r'^\s*RUFF_VERSION:\s*"([^"]+)"\s*$', re.MULTILINE)
 # A workflow running ruff by hand instead of through this script: the exact
 # drift #189 is about, since such a step carries its own version.
 INLINE_RUFF = re.compile(r"^\s*run:.*\bruff\b.*$", re.MULTILINE)
+
+# An opening code fence: up to three spaces of indent (CommonMark), three or
+# more backticks or tildes, then the info string. The info string may not
+# contain a backtick, which is what keeps inline ``` ```python ``` in prose
+# from opening a block.
+FENCE_OPEN = re.compile(r"^(?P<indent> {0,3})(?P<ticks>`{3,}|~{3,})(?P<info>[^`\n]*)$")
+
+# Info strings whose contents this file claims to be Python. Everything else —
+# sh, json, yaml, html, and a fence with no language at all — is skipped by
+# language and *counted*, so "nothing was checked" cannot look like a pass.
+PY_LANGS = frozenset({"python", "py", "python3"})
+
+# The tree measured 9 compiling fences across 21 markdown files when this was
+# written. The floor is a control, not a target: a fence walker that stopped
+# matching (a renamed directory, a `git ls-files` that returned nothing, a
+# regex that stopped opening blocks) reports zero failures just as happily as a
+# healthy tree does, and this is what tells the two apart.
+MIN_PY_FENCES = 5
+
+# Fences that are deliberately not whole Python, each with the reason. A
+# figure showing a call's shape — a `with` header with nothing under it — is
+# legitimate documentation and no parser accepts it.
+#
+# This is a waiver list and it is graded like one: an entry whose fence has
+# vanished, or whose fence now compiles, **fails** rather than being ignored,
+# so the list can only shrink. Keys are (repo-relative path, the fence body
+# exactly as it appears after the fence's own indent is stripped), so editing
+# the fence at all takes it back out of the waiver and into the check.
+KNOWN_FRAGMENTS: dict[tuple[str, str], str] = {
+    (
+        "skills/demo-video/reference/determinism.md",
+        "with Recorder(out_dir, deterministic=True) as rec:"
+        "   # or DEMO_VIDEO_DETERMINISTIC=1",
+    ): (
+        "a one-line signature figure: a `with` header with no body, which no "
+        "Python parses. Adding `    ...` under it would close this (#211)"
+    ),
+}
+
+# Where an agent worktree lands, and what --self-test plants there. The name is
+# this script's own so cleanup can never reach a real one.
+PROBE_CHECKOUT = REPO / ".claude" / "worktrees" / "_tests-lint-file-set-probe"
+
+# The control: a file at a path nothing ignores. If planting it does not move
+# the measurement, the measurement is dead and the guard below grades nothing.
+PROBE_CONTROL = REPO / "_tests-lint-file-set-probe.py"
+
+# Badly formatted on purpose: a copy that got walked would fail `ruff format
+# --check` as well as showing up in the file set, which is the shape #219 took.
+PROBE_PY = "import os,sys\nx = [\n    1\n]\n"
+PROBE_SCRIPT = "#!/usr/bin/env -S uv run --script\n" + PROBE_PY
+
+# What the stray checkout contains: a plain `.py`, which any Python tool finds
+# without being told, and one extension-less executable per `extend-include`
+# pattern — which are found only because the checkout carries a copy of
+# `ruff.toml` too, exactly as a real agent worktree does. That copy is why #219
+# measured 657 files rather than 21 stray `.py` files: each worktree teaches
+# ruff its own include list, relative to itself.
+PROBE_FILES = {
+    "stray.py": PROBE_PY,
+    "tests/lint": PROBE_SCRIPT,
+    "tests/unit": PROBE_SCRIPT,
+    ".github/scripts/probe": PROBE_SCRIPT,
+    "skills/demo-video/scripts/probe": PROBE_SCRIPT,
+    "examples/ticket-queue/serve": PROBE_SCRIPT,
+    "examples/ticket-queue/test": PROBE_SCRIPT,
+}
 
 
 class Refused(Exception):
@@ -74,6 +161,230 @@ def ruff(version: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+# --- the file set -----------------------------------------------------------
+
+
+def relative(path: str) -> str:
+    """A path ruff printed, as this repository names it."""
+    try:
+        return str(Path(path).resolve().relative_to(REPO))
+    except ValueError:
+        return path
+
+
+def ruff_file_set(version: str) -> set[str]:
+    """Every file `ruff check .` would read, by name — not merely how many.
+
+    `--show-files` is what makes this a claim about the *set*: a stray checkout
+    that added a file while a real one disappeared would leave any count alone.
+    """
+    done = ruff(version, "check", "--show-files", ".")
+    if done.returncode != 0:
+        raise Refused(f"ruff check --show-files failed: {done.stderr.strip()[:200]}")
+    return {relative(line) for line in done.stdout.splitlines() if line.strip()}
+
+
+def format_file_count(version: str) -> int:
+    """How many files `ruff format --check .` read.
+
+    The formatter has its own exclusions (`ruff.toml`'s `[format] exclude`), so
+    it is a second file set rather than a view of the first, and it is the one
+    #219 was measured on: 657 files where CI read 13.
+    """
+    done = ruff(version, "format", "--check", ".")
+    text = done.stdout + done.stderr
+    # Both halves of "1 file would be reformatted, 13 files already formatted",
+    # which ruff prints on one line — anchoring to the start of a line reads
+    # the first number and silently drops the rest of the tree.
+    counts = re.findall(
+        r"(\d+) files? (?:would be reformatted|already formatted)", text
+    )
+    if not counts:
+        raise Refused(
+            "ruff format --check printed no file count, so there is nothing to "
+            f"compare: {text.strip()[:200]!r}"
+        )
+    return sum(int(n) for n in counts)
+
+
+def tracked(*patterns: str) -> list[str]:
+    """Files git is tracking here. Untracked scratch is nobody's lint budget."""
+    done = subprocess.run(
+        ["git", "ls-files", "-z", "--", *patterns],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+    )
+    if done.returncode != 0:
+        raise Refused(f"git ls-files failed: {done.stderr.strip()[:200]}")
+    return sorted(p for p in done.stdout.split("\0") if p)
+
+
+def pep723_scripts() -> list[str]:
+    """Every executable this repo ships as a PEP 723 uv script.
+
+    Read off the shebang rather than off `ruff.toml`, deliberately: a list
+    derived from the config could not disagree with the config, and disagreeing
+    with it is the entire job. `examples/*/test` was invisible for exactly as
+    long as nothing asked this question (#212).
+    """
+    found = []
+    for rel in tracked():
+        path = REPO / rel
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            first = handle.readline(200).decode("utf-8", "replace").strip()
+        if first.startswith("#!") and "uv run" in first and "--script" in first:
+            found.append(rel)
+    return found
+
+
+def clear_probes() -> None:
+    """Remove anything a previous --self-test left behind. Named paths only."""
+    if PROBE_CHECKOUT.name != "_tests-lint-file-set-probe":  # pragma: no cover
+        raise Refused("the probe path is not this script's own; refusing to delete")
+    shutil.rmtree(PROBE_CHECKOUT, ignore_errors=True)
+    PROBE_CONTROL.unlink(missing_ok=True)
+    for parent in (PROBE_CHECKOUT.parent, PROBE_CHECKOUT.parent.parent):
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+
+
+def plant_probes() -> None:
+    """A throwaway checkout where agent worktrees land, and a control beside it."""
+    files = dict(PROBE_FILES)
+    # The real config, copied in rather than re-stated: a checkout of this repo
+    # has this repo's ruff.toml, and a probe carrying a stale copy would stop
+    # being representative the moment `extend-include` changed.
+    files["ruff.toml"] = (REPO / "ruff.toml").read_text(encoding="utf-8")
+    for rel, body in files.items():
+        target = PROBE_CHECKOUT / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    PROBE_CONTROL.write_text(PROBE_PY, encoding="utf-8")
+
+
+# --- Python in the documentation --------------------------------------------
+
+
+def fences(text: str) -> list[tuple[int, str, str]]:
+    """Every fenced code block: (1-based opening line, language, body).
+
+    The fence's own indent is stripped from its body, so a block inside a list
+    item is the Python it renders as rather than an "unexpected indent".
+    """
+    found: list[tuple[int, str, str]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        opened = FENCE_OPEN.match(lines[i])
+        if not opened:
+            i += 1
+            continue
+        indent, ticks = opened.group("indent"), opened.group("ticks")
+        # Only a run of the same character, at least as long, closes it — which
+        # is what lets a ````-fenced block quote a ```-fenced one.
+        closes = re.compile(rf"^ {{0,3}}{re.escape(ticks[0])}{{{len(ticks)},}}[ \t]*$")
+        body: list[str] = []
+        j = i + 1
+        while j < len(lines) and not closes.match(lines[j]):
+            line = lines[j]
+            cut = 0
+            while cut < len(indent) and line[cut : cut + 1] == " ":
+                cut += 1
+            body.append(line[cut:])
+            j += 1
+        info = opened.group("info").strip()
+        found.append((i + 1, info.split()[0].lower() if info else "", "\n".join(body)))
+        i = j + 1
+    return found
+
+
+def check_fences(github: bool = False) -> int:
+    """Compile every Python fence in the tracked Markdown. Returns failures.
+
+    Not a lint: the fences legitimately name things that do not exist here
+    (`rec`, `OUT`, `mytool`), so `ruff check` semantics would be wrong even if
+    ruff read Markdown. The claim is only that a reader who copies the figure
+    gets something Python can parse.
+    """
+    counted: dict[str, int] = {}
+    compiled = 0
+    waived: set[tuple[str, str]] = set()
+    problems: list[tuple[str, int, str]] = []
+
+    for rel in tracked("*.md"):
+        path = REPO / rel
+        if path.is_symlink():  # CLAUDE.md -> AGENTS.md; one document, once
+            continue
+        for line, lang, body in fences(path.read_text(encoding="utf-8")):
+            if lang not in PY_LANGS:
+                counted[lang or "(none)"] = counted.get(lang or "(none)", 0) + 1
+                continue
+            key = (rel, body.strip())
+            reason = KNOWN_FRAGMENTS.get(key)
+            try:
+                compile(body, rel, "exec")
+            except SyntaxError as exc:
+                if reason is None:
+                    at = line + (exc.lineno or 1)
+                    problems.append((rel, at, f"{exc.msg} (```python at line {line})"))
+                else:
+                    waived.add(key)
+                continue
+            if reason is not None:
+                waived.add(key)
+                problems.append(
+                    (
+                        rel,
+                        line,
+                        "this fence compiles now — delete its KNOWN_FRAGMENTS entry",
+                    )
+                )
+                continue
+            compiled += 1
+
+    for path_and_body in KNOWN_FRAGMENTS:
+        if path_and_body not in waived:
+            problems.append(
+                (
+                    path_and_body[0],
+                    1,
+                    "KNOWN_FRAGMENTS waives a fence this file no longer contains "
+                    "— delete the entry",
+                )
+            )
+
+    # The control. Every line above reports an absence, and an absence holds
+    # perfectly over an empty haystack: a walker that found no fences at all
+    # prints the same "0 problems" a healthy tree does.
+    if compiled < MIN_PY_FENCES:
+        problems.append(
+            (
+                "tests/lint",
+                1,
+                f"only {compiled} python fence(s) compiled, under the {MIN_PY_FENCES} "
+                f"floor — this reads as a fence walker that stopped finding fences, "
+                f"not as documentation that has none",
+            )
+        )
+
+    skipped = ", ".join(f"{lang} {n}" for lang, n in sorted(counted.items()))
+    print(
+        f"docs: {compiled} python fence(s) parse"
+        + (f", {len(waived)} waived" if waived else "")
+        + f"; {sum(counted.values())} fence(s) skipped by language ({skipped})"
+    )
+    for rel, line, message in problems:
+        if github:
+            print(f"::error file={rel},line={line}::{message}")
+        print(f"docs: {rel}:{line}: {message}", file=sys.stderr)
+    if problems:
+        print(f"lint: {len(problems)} documentation fence problem(s)")
+    return len(problems)
+
+
 def run(github: bool) -> int:
     version = pinned_version(CI.read_text(encoding="utf-8"))
     print(f"lint: ruff {version}, pinned by .github/workflows/ci.yml")
@@ -103,11 +414,175 @@ def run(github: bool) -> int:
         if done.returncode != 0:
             failed += 1
             print(f"lint: {label} failed")
+
+    # The half ruff cannot answer: a Markdown fence is invisible to `ruff
+    # check` at every version, and the formatter reads one without validating
+    # it (#211). Run last so its one summary line is not lost above ruff's.
+    failed += 1 if check_fences(github) else 0
     return 1 if failed else 0
 
 
+def file_set_guard(version: str) -> int:
+    """Does this command read CI's files? Graded by planting, not by reading.
+
+    The version pin and the file set are two different ways for `tests/lint`
+    to answer a question CI is not asking, and only the first had a guard: on
+    the box where #219 was found this read 657 files against CI's 13, because
+    agent worktrees under the repo root were not ignored.
+
+    Asserting `.gitignore` contains `.claude/` would grade a string. This
+    plants a checkout where those worktrees actually land, and a control file
+    where nothing ignores anything, and reads the file set back out of ruff —
+    so whatever mechanism does the ignoring, and whichever tool grows its own,
+    the claim under test stays "the stray copy is not in what CI lints".
+    """
+    bad = 0
+    clear_probes()
+    before_files = ruff_file_set(version)
+    before_format = format_file_count(version)
+    try:
+        plant_probes()
+        after_files = ruff_file_set(version)
+        after_format = format_file_count(version)
+    finally:
+        clear_probes()
+
+    control = relative(str(PROBE_CONTROL))
+    appeared = after_files - before_files
+    vanished = before_files - after_files
+
+    # The control first: everything below is "nothing appeared", which is what
+    # a measurement that cannot see anything also reports.
+    if control in appeared:
+        print(f"OK       planting {control} moves the file set — the probe is live")
+    else:
+        bad += 1
+        print(
+            f"DEAD     planting {control} did not change what ruff reads "
+            f"({len(before_files)} files before, {len(after_files)} after), so "
+            f"nothing below is being measured"
+        )
+
+    strays = sorted(appeared - {control}) + sorted(vanished)
+    if strays:
+        bad += 1
+        print(
+            f"WORKTREE a throwaway checkout at "
+            f"{relative(str(PROBE_CHECKOUT))} changed the file set by "
+            f"{len(strays)} file(s) — `tests/lint` is not reading CI's tree "
+            f"(#219): {', '.join(strays[:4])}"
+        )
+    else:
+        print(
+            f"OK       ruff reads {len(before_files)} file(s) here, and the "
+            f"{len(PROBE_FILES) + 1} file(s) of a checkout planted under the "
+            f"repo root (its own ruff.toml included) add none of them"
+        )
+
+    if after_format == before_format + 1:
+        print(
+            f"OK       ruff format reads {before_format} file(s), and the same "
+            f"checkout adds none of them either"
+        )
+    else:
+        bad += 1
+        print(
+            f"WORKTREE ruff format read {before_format} file(s) before the "
+            f"probe and {after_format} after, expected {before_format + 1} — "
+            f"the formatter has its own excludes, so either it is walking the "
+            f"checkout or the control above never landed"
+        )
+
+    # The other direction, and #212's whole story: a file set that is stable is
+    # not yet a file set that is *complete*. `examples/*/test` was outside
+    # `extend-include` for as long as nothing asked.
+    scripts = pep723_scripts()
+    missing = [s for s in scripts if s not in before_files]
+    if missing:
+        bad += 1
+        print(
+            f"UNLINTED {len(missing)} of {len(scripts)} PEP 723 executable(s) are "
+            f"outside what ruff reads — add them to ruff.toml's extend-include "
+            f"(#212): {', '.join(missing)}"
+        )
+    else:
+        print(
+            f"OK       every one of the {len(scripts)} PEP 723 executable(s) in "
+            f"the tree is inside that set"
+        )
+    return bad
+
+
+def fence_guard() -> int:
+    """Prove the fence checker can fail, and on what.
+
+    ruff's formatter reads a `def f(:` fence and prints "1 file already
+    formatted"; a checker that inherited that blindness would pass this tree
+    just as quietly. So the checker is run against documents whose answers are
+    known, including several that are deliberately *not* Python.
+
+    Each case fixes **two** numbers, how many Python fences the document has
+    and how many of them fail, because the first is what stops the second from
+    being satisfied by finding nothing. The last two cases exist only for that
+    reason: each hides a broken fence inside something that must not open a
+    block, and then puts a real, healthy Python fence after it — a walker that
+    swallowed the document reports "0 problems" on the first number alone.
+    """
+    bad = 0
+    good = "```python\nx = 1\n```\n"
+    cases = (
+        ("a fence that does not parse", "```python\ndef f(:\n    pass\n```\n", 1, 1),
+        ("a fence that does", "```python\ndef f():\n    pass\n```\n", 1, 0),
+        (
+            "a fence indented inside a list item",
+            '- like so:\n\n  ```python\n  rec.caption("hi")\n  rec.hold()\n  ```\n',
+            1,
+            0,
+        ),
+        (
+            "shell that would not parse as Python",
+            "```sh\nfor f in *; do echo $f; done\n```\n",
+            0,
+            0,
+        ),
+        ("a fence with no language at all", "```\ndef f(:\n```\n", 0, 0),
+        (
+            "a broken fence quoted inside a ````-fenced block",
+            "````\n```python\ndef f(:\n```\n````\n\n" + good,
+            1,
+            0,
+        ),
+        (
+            "a ```python written inline in a sentence",
+            "hand it ```` ```python ```` followed by `def f(:` and see\n\n" + good,
+            1,
+            0,
+        ),
+    )
+    for what, document, expect_py, expect_bad in cases:
+        python = [body for _line, lang, body in fences(document) if lang in PY_LANGS]
+        found = sum(1 for body in python if not _compiles(body))
+        if (len(python), found) == (expect_py, expect_bad):
+            print(f"{'CATCHES ' if expect_bad else 'SKIPS   '} {what}")
+        else:
+            bad += 1
+            print(
+                f"BLIND    {what}: {len(python)} python fence(s) and {found} "
+                f"problem(s), expected {expect_py} and {expect_bad}"
+            )
+    return bad
+
+
+def _compiles(body: str) -> bool:
+    try:
+        compile(body, "<fence>", "exec")
+    except SyntaxError:
+        return False
+    return True
+
+
 def self_test() -> int:
-    """The guards that keep the pin from becoming decorative. Runs no ruff."""
+    """The guards that keep the pin from becoming decorative."""
     bad = 0
 
     # 1. The pin is readable from the file CI reads it from.
@@ -169,10 +644,24 @@ def self_test() -> int:
     if not bad:
         print("OK       every workflow reaches ruff through tests/lint")
 
+    # 5. The file set is CI's too, not this working copy's — the half of "the
+    #    same command" that #189's guards do not reach (#219, #212). This is
+    #    the only part of --self-test that runs ruff: four invocations of a
+    #    resolved-and-cached ruff, measured at 0.05 s each.
+    if version:
+        try:
+            bad += file_set_guard(version)
+        except Refused as exc:
+            bad += 1
+            print(f"BROKEN   the file set could not be measured: {exc}")
+
+    # 6. The documentation checker can fail, and only for the right reason.
+    bad += fence_guard()
+
     if bad:
-        print(f"\n{bad} guard(s) did not hold: the pin cannot be trusted.")
+        print(f"\n{bad} guard(s) did not hold: this command cannot be trusted.")
         return 1
-    print("\nOne pin, one command: tests/lint runs exactly what CI runs.")
+    print("\nOne pin, one file set, one command: tests/lint runs exactly what CI runs.")
     return 0
 
 
@@ -182,7 +671,9 @@ def main() -> int:
         "--github", action="store_true", help="GitHub annotations (what ci.yml runs)"
     )
     parser.add_argument(
-        "--self-test", action="store_true", help="prove the pin is live and singular"
+        "--self-test",
+        action="store_true",
+        help="prove the pin, the file set and the fence checker are live",
     )
     args = parser.parse_args()
     if args.self_test:
