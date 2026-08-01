@@ -502,13 +502,28 @@ _CURSOR_BOX_JS = """() => {
 # number into the wrong place.
 RESTING_POINTER = (-40, -40)
 
-# Three takes, and the number is the assertion's error bar rather than taste.
-# With the guard removed, Chromium's load-time mousemove moved the dot in 14 of
-# 16 takes measured on this box; the two that stayed parked received no
-# mousemove at all. One take would therefore miss the regression about one time
-# in eight and three miss it about one time in five hundred — and the run that
-# would have missed it is the run whose premise guard below refuses instead, so
-# what is left is an honest "this arm proved nothing today", never a pass.
+# The position the recorder's overlay seeds its remembered pointer with, and
+# where a fresh page's pointer sits. The load-time `mousemove` Chromium
+# dispatches lands here, repeating a position the overlay has already been told
+# about, and dropping it is the whole of #202's rule — so this is the number
+# the control in `run_resting_pointer` looks for.
+#
+# Hardcoded rather than imported from `web.py`, deliberately: a control that
+# read the seed out of the code under test would agree with a recorder that
+# seeded it anywhere at all, including somewhere no browser ever sends an
+# event to.
+CURSOR_SEED = (0, 0)
+
+# Three takes, and the number is the control's error bar rather than taste.
+# Measured on this box, Chromium 151.0.7922.34: 13 of 15 takes received the
+# load-time mousemove and 2 received none at all. So one take would be unable
+# to grade the rule about one time in eight, and three about one time in five
+# hundred — and the run that cannot grade it refuses below rather than passing.
+#
+# It is a real refusal and it has been seen: the rebase onto #202 hit exactly
+# that run, all three takes empty. Raising this to 4 would buy an order of
+# magnitude for 5 s, and it is not done here only because the arm's cost is
+# written down in `tests/smoke-inject` and `tests/README.md`. See #205.
 RESTING_TAKES = 3
 RESTING_SHOT = "01-resting"
 RESTING_SETTLE_S = 1.0
@@ -517,12 +532,18 @@ RESTING_SETTLE_S = 1.0
 # place before the document exists. That is not fussiness: the only mousemove
 # this storyboard gets is the one Chromium dispatches while the page is
 # loading, and a listener added after `goto()` returns counts zero of them
-# (measured, 0 events over 10 takes, against exactly one — at (0, 0), with
-# `movementX` and `movementY` both 0 — over 10 takes when installed here).
+# (measured, 0 events over 10 takes, against exactly one — at (0, 0) — over 16
+# takes when installed here).
 #
-# It exists for the control in `run_resting_pointer`: "the dot is parked" is
-# also true of a take the browser never sent an event to, and a check that
-# cannot tell those two apart grades the machine rather than the recorder.
+# **Positions are logged and graded; the deltas are logged and not graded**,
+# and that distinction is issue #202. `movementX`/`movementY` for the *first*
+# mouse event in a page is a build detail — `web.py`'s own table has Chromium
+# 147 reporting 0, 0 for a park at (60, 640) where 136 and 151 report 60, 640 —
+# so a control keyed on "the deltas are zero" is the reading #202 took out of
+# the product, left behind in the harness. On a build that reports a non-zero
+# delta for the settle event it would refuse a take that did receive one, which
+# is a false "this arm could not grade it". They stay in the log because a
+# refusal that prints them is what identified this in the first place.
 _MOVE_LOG_JS = """
 (() => {
   window.__smokeMoves = [];
@@ -7959,18 +7980,37 @@ def run_resting_pointer(out_root: Path) -> list[str]:
             failures += takes[label].problems
 
     # -- the control ---------------------------------------------------------
-    settled = {
-        name: [m for m in take.moves if m[2] == 0 and m[3] == 0]
-        for name, take in takes.items()
+    #
+    # Two refusals, not one, because "the browser sent nothing" and "the
+    # browser sent something this arm is not about" are different reports and
+    # only the first is a property of the machine. Both are failures: an arm
+    # that could not grade the rule has to say so, and a green run saying it in
+    # a print nobody reads is how the boundary goes back to being somebody's
+    # memory.
+    seen = {name: take.moves for name, take in takes.items()}
+    repeats = {
+        name: [m for m in moves if (m[0], m[1]) == CURSOR_SEED]
+        for name, moves in seen.items()
     }
-    if not any(settled.values()):
+    if not any(seen.values()):
         return failures + [
-            f"resting-pointer: not one of the {RESTING_TAKES} takes saw a "
-            f"mousemove reporting no movement, so nothing in this arm "
-            f"exercised the guard it exists to grade — the dot being parked "
-            f"is true of a page the browser never sent an event to. Every "
-            f"mousemove seen: "
-            f"{ {name: take.moves for name, take in takes.items()}!r}"
+            f"resting-pointer: none of the {RESTING_TAKES} takes saw a "
+            f"mousemove at all, so this arm could not grade the rule it exists "
+            f"for — the dot being parked is equally true of a page the browser "
+            f"never sent an event to. That is the machine, not the recorder: "
+            f"Chromium dispatches this event on a load and 2 takes in 15 do "
+            f"not get one on the build this was measured on. Re-run "
+            f"--pointer-only; if it keeps happening the build has stopped "
+            f"sending it and #205 is where that is recorded."
+        ]
+    if not any(repeats.values()):
+        return failures + [
+            f"resting-pointer: the takes saw mousemove(s) {seen!r}, and not "
+            f"one of them repeats the {CURSOR_SEED} the recorder's overlay "
+            f"seeds its remembered pointer with — so nothing here exercised "
+            f"the guard that drops a move to a position the pointer was "
+            f"already at, which is the rule (#202) this arm grades. A take "
+            f"whose only events are real moves says nothing about it."
         ]
 
     # -- the stills ----------------------------------------------------------
@@ -8012,7 +8052,8 @@ def run_resting_pointer(out_root: Path) -> list[str]:
             f"smoke: resting-pointer {RESTING_TAKES} takes that place no "
             f"pointer leave the dot at {RESTING_POINTER} and reproduce "
             f"{RESTING_SHOT}.png byte for byte "
-            f"({sum(len(v) for v in settled.values())} no-movement mousemove(s) "
+            f"({sum(len(v) for v in repeats.values())} mousemove(s) repeating "
+            f"{CURSOR_SEED} "
             f"delivered across them)"
         )
     return failures
