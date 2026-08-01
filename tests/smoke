@@ -1523,6 +1523,28 @@ EVIDENCE_BLOAT_JS = """(n) => {
   document.body.appendChild(box);
 }""".replace("__ID__", EVIDENCE_BLOAT_ID)
 
+# What `check_evidence` must be able to read out of *this* take's evidence, in
+# the same (verb, target, present, absent) shape `WEB_EVIDENCE` uses.
+#
+# Its reason for existing is cost rather than a new claim. `check_evidence`
+# carries issue #9's acceptance criterion, and until #197 the only arms that
+# reached it were `--web-only` (123 s) and `--terminal-only` (186 s); this take
+# is 7 s and already writes evidence for nine beats.
+#
+# Every fact here is one the storyboard puts on screen at a *known* beat and
+# not before: `#smoke-source` and `#smoke-bloat` are injected mid-take, so a
+# recorder that captured the page once and stamped that capture onto every
+# beat has each of them missing from the beat that showed it. `absent` is left
+# empty on purpose — nothing this storyboard shows is later taken away, and
+# `check_evidence`'s absent-message says the value "belongs to an earlier state
+# of the page", which is the wrong sentence about a fact that belongs to a
+# later one.
+EVIDENCE_TAKE_FACTS = [
+    ("wait_for", EVIDENCE_ATTR_TARGET, [EVIDENCE_RENDERED_TEXT], []),
+    ("spotlight", f"#{EVIDENCE_SOURCE_ID}", [EVIDENCE_SOURCE_RENDERED], []),
+    ("spotlight", f"#{EVIDENCE_BLOAT_ID}", ["bloat row 0"], []),
+]
+
 
 class _StoryboardFailed(RuntimeError):
     """What a storyboard raises when a sync verb gives up.
@@ -6703,6 +6725,7 @@ def check_evidence(
     out_dir: Path,
     expected: list[tuple[str, str, list[str], list[str]]],
     scope: tuple[str, str, str] | None = None,
+    segment: str | None = None,
 ) -> list[str]:
     """Issue #9's acceptance criterion, made concrete.
 
@@ -6712,22 +6735,36 @@ def check_evidence(
     values, labels, table rows, command output — have to be readable in the
     evidence for the beat that showed them, and the values the *previous*
     screen showed have to be gone.
+
+    `segment` names the segment the take recorded under, so this function can
+    grade a segmented take's evidence as well as a whole demo's. That is what
+    puts it on `--evidence-only`, 7 s, instead of only on the 123 s and 186 s
+    arms that record the two graded takes (issue #197).
     """
-    beats, docs, failures = evidence_docs(label, out_dir)
+    beats, docs, failures = evidence_docs(label, out_dir, segment=segment)
     if not docs:
         return failures
 
+    prefix = f"{segment}.seg." if segment else ""
     for position, (beat, doc) in enumerate(zip(beats, docs, strict=False)):
-        where = f"{label}: {EVIDENCE_DIR_NAME}/beat-{position:02d}.json"
+        where = f"{label}: {EVIDENCE_DIR_NAME}/{prefix}beat-{position:02d}.json"
         if doc.get("schema") != EVIDENCE_SCHEMA_EXPECTED:
             failures.append(
                 f"{where} says schema {doc.get('schema')!r}, expected "
                 f"{EVIDENCE_SCHEMA_EXPECTED!r}"
             )
-        if doc.get("segment") is not None:
-            failures.append(f"{where} claims segment {doc.get('segment')!r}")
-        if doc.get("media") != "demo.mp4":
-            failures.append(f"{where} describes media {doc.get('media')!r}")
+        if doc.get("segment") != segment:
+            failures.append(
+                f"{where} claims segment {doc.get('segment')!r}, expected {segment!r}"
+            )
+        # Computed here rather than read off the take, for the same reason the
+        # evidence filename is: a name taken from the file being graded agrees
+        # with whatever the file says.
+        media = f"{segment}.seg.mp4" if segment else "demo.mp4"
+        if doc.get("media") != media:
+            failures.append(
+                f"{where} describes media {doc.get('media')!r}, expected {media!r}"
+            )
         # The embedded beat has to be *this* beat. Without it every file could
         # hold the same screen and every fact below would still be found
         # somewhere.
@@ -8310,9 +8347,20 @@ def run_evidence(out_root: Path) -> list[str]:
             f"evidence for all the others."
         )
 
+    # Issue #9's acceptance criterion, on the arm that can afford to grade it
+    # (#197). `check_evidence` owns the envelope, the per-beat stamping, the
+    # pointer/orphan pairing and "the facts that beat showed are readable in
+    # that beat's file"; everything below this call is about the *content* of
+    # four particular beats and is this take's own job.
+    failures += check_evidence(
+        label, out_dir, EVIDENCE_TAKE_FACTS, segment=EVIDENCE_SEGMENT
+    )
+
     beats, docs, problems = evidence_docs(label, out_dir, segment=EVIDENCE_SEGMENT)
-    failures += problems
-    if not docs:
+    # `problems` are already in `failures` — `check_evidence` above called the
+    # same helper — so they are not appended a second time. A broken pointer is
+    # one finding, not two.
+    if problems or not docs:
         return failures
     pauses = [
         (i, doc)
@@ -9653,6 +9701,12 @@ def main() -> int:
         help="record only the two short takes that strict=True must refuse (issue #3)",
     )
     parser.add_argument(
+        "--issues-only",
+        action="store_true",
+        help="record only the broken-page and failing-command takes, which is "
+        "what check_issues grades (issue #197)",
+    )
+    parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         help="run even when another suite holds the machine lock. The timing "
@@ -9688,6 +9742,7 @@ def main() -> int:
             ("--overlay-only", args.overlay_only),
             ("--coverage-only", args.coverage_only),
             ("--strict-only", args.strict_only),
+            ("--issues-only", args.issues_only),
         )
         if on
     ]
@@ -9775,7 +9830,13 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # recorder's beat record is running --web-only.
     if only in (None, "--web-only", "--coverage-only"):
         failures += run_coverage(out_root)
-    if only in (None, "--web-only"):
+    # What the recorder saw behind the pixels (`check_issues`). Reachable from
+    # --issues-only as well as from the medium flags, and that split is the
+    # point: these two takes record in well under a minute between them, and
+    # were reachable only from arms costing 123 s and 186 s. An assertion is
+    # only as gradeable as its cheapest arm — `--strict-only` is the worked
+    # example, and issue #197 is where this one is written down with numbers.
+    if only in (None, "--web-only", "--issues-only"):
         failures += run_web_problems(out_root)
     # The two takes strict=True must refuse. Reachable on their own as well as
     # from the medium flags, because they are the cheapest graded takes in this
@@ -9792,8 +9853,12 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # is running one of the two.
     if only in (None, "--web-only", "--narration-only"):
         failures += run_narration(out_root)
-    if only in (None, "--terminal-only"):
+    if only in (None, "--terminal-only", "--issues-only"):
         failures += run_terminal_problems(out_root)
+    # Not on --issues-only: `run_terminal_race` manufactures its condition with
+    # a shell that sleeps before exec'ing, and its assertions are its own —
+    # `check_issues` never sees this take.
+    if only in (None, "--terminal-only"):
         failures += run_terminal_race(out_root)
     if only in (None, "--terminal-only", "--strict-only"):
         failures += run_strict_terminal(out_root)

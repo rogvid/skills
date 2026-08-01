@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~32 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~35 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff, at exactly the version ci.yml pins (~0.3 s)
@@ -93,6 +93,9 @@ tests/smoke --content-only        # just the pair that grades whether a
 tests/smoke --overlay-only        # just the light-interlude pair (#162/#163)
 tests/smoke --coverage-only       # just the acceptance-criterion take (#12)
 tests/smoke --strict-only         # just the two takes strict=True must refuse
+tests/smoke --issues-only         # just the broken page and the failing
+                                  #   commands, which is what check_issues
+                                  #   grades (issue #197)
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -104,7 +107,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 25 entries, ~32 min
+tests/smoke-inject                # all 30 entries, ~35 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1327,6 +1330,7 @@ are what changed that, and they are now load-bearing rather than a convenience.
 | `--narration-only` | 8 s |
 | `--strict-only` | 13 s |
 | `--determinism-only` | 19 s |
+| `--issues-only` | 26 s |
 | `--polish-only` | 26 s |
 | `--segments-only` | 29 s |
 | `--overlay-only` | 31 s |
@@ -1334,7 +1338,30 @@ are what changed that, and they are now load-bearing rather than a convenience.
 | `--web-only` | 123 s |
 | `--content-only` | 148 s |
 | `--terminal-only` | 186 s |
-| the whole suite | 622 s |
+| the whole suite | 427 s |
+
+That whole-suite reading includes a 15 s arm the same branch dropped before
+merge (#210), so the tree as it stands is nearer 410 s. It is left as measured
+rather than corrected by subtraction — a number nobody has read off a stopwatch
+is how this row came to say 622 s.
+
+The per-arm figures are the calibration this manifest was built on. The
+whole-suite row is a fresh reading taken while
+[#197](https://github.com/rogvid/skills/issues/197) split the arms below, and
+it replaces a **622 s** that had been sitting here wrong: `--web-only` and
+`--terminal-only` are disjoint and re-measured at 133 s and 187 s on the same
+run, which with the determinism, segments, failure and pointer arms accounts
+for the whole 427 s to within a few seconds. Nothing got faster; the old number
+was never checked, which is the same reason every figure in **What it covers**
+below is now read back out of this file rather than maintained by hand. The
+per-arm rows were spot-checked in the same session and held (`--segments-only`
+28 s, `--evidence-only` 6 s); `--web-only`'s 123 s is the one that has drifted,
+and it is left as-is rather than churned on a single reading.
+
+**What that ratio means for what runs per push**: the two medium arms are 75%
+of the suite, and neither is reducible — `check_caption` and `check_beat_frames`
+are pixel measurements. What #197 changed is that they are no longer the *only*
+way to reach the claims that do not need pixels.
 
 `--strict-only` was added *for* this file. The two takes `strict=True` must
 refuse record in thirteen seconds between them, and were reachable only from
@@ -1374,7 +1401,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-25 entries, 7 arms, ~31.9 min of takes
+30 entries, 10 arms, ~34.9 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1396,6 +1423,9 @@ paragraph whose job is to say what this manifest does not cover.
 | `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
+| `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
+| `--segments-only` | 2 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); or every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins |
+| `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
 | `--web-only` | 6 | the form verbs lie about what they did: `press` logging a key it never sent or returning before the page saw it, `clear` selecting without deleting or emptying the field between two frames, either of them driving the page and writing no beat |
@@ -1403,21 +1433,50 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **22 of `tests/smoke`'s 35 check functions have no entry**, and the harness
+- **19 of `tests/smoke`'s 35 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
-  leaving the boundary to somebody's memory. Every check function this bullet
-  names in backticks is checked against that list too, not just the count —
-  one of them stayed written here as uncovered for as long as it had six
-  entries aimed at it, and a count would never have said so. The large ones
-  are there for cost:
-  `check_take`, `check_timeline`, `check_beat_frames`, `check_issues`
-  and `check_caption` live on `--web-only`/`--terminal-only`
-  (123 s and 186 s an injection), and `check_determinism`, `check_merge_offset`
-  and the narration pair each carry their own arm nobody has aimed an entry at
-  yet. Adding one is cheap in effort and expensive in wall clock; that trade is
-  the thing to think about, not the count, and
-  [#173](https://github.com/rogvid/skills/issues/173) is where it is written
-  down with the numbers.
+  leaving the boundary to somebody's memory.
+
+  **`ungraded` is not the same as graded by nothing**, and by
+  [#196](https://github.com/rogvid/skills/issues/196) that difference had grown
+  to most of the list: after [#195](https://github.com/rogvid/skills/issues/195)
+  the browser-free half of several of these is certified in `tests/unit`, where
+  an injection costs 0.2 s. A reader who followed the run's closing line here
+  and concluded that nothing watched them was reading a document written before
+  that. So the roster below answers per function, and it is read back out of
+  this file as text and compared against the manifest **both ways** by
+  `--self-test`: a name missing from it is a reader sent to a table their
+  function is not in, and a name in it that has an entry is the older mistake —
+  one check function stayed written here as uncovered for as long as it had six
+  entries aimed at it, and a count would never have said so.
+
+  | ungraded check function | what carries its browser-free claims |
+  |---|---|
+  | `check_take` | `ContentRect` — the rect the picture half is scored over, exactly, on all four numbers (#135/#195). The artifact half — the files exist, are this run's, and are not repeats of one another — is genuinely ungraded |
+  | `check_content_healthy` | `ContentRect`, same six tests: the trim reaches the caption bar on both media, does not eat the app, and never comes back zero-sized |
+  | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
+  | `check_healthy` | `TakeIssues` — `test_an_app_talking_is_not_an_app_failing` and the HTTP bar graded at 400 rather than inside it are the over-reporting direction, off the browser. That a real page under `strict=True` produces none of them is this suite's |
+  | `check_verb_classification` | `VerbClassification` — every classified verb is one a recorder logs, and every verb a recorder logs is classified, with the set size asserted first so neither holds vacuously |
+  | `check_determinism` | genuinely ungraded. It reads the clock, the locale and the motion setting *out of the page*, which is the whole point of it — a constructor that stored the flag and never wired it up satisfies anything asserted on the Python side |
+  | `check_merge_offset` | genuinely ungraded. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half |
+  | `check_opening_gap` | `OpeningWarning` — `held: null` against `held: 0.0`, and the blank floor that keeps the warning readable |
+  | `check_opening` | genuinely ungraded — the first frame of a web take, measured in pixels (#119) |
+  | `check_opening_card` | genuinely ungraded — three statements about one sweep of one corner of a frame (#110) |
+  | `check_spotlight_transitions` | genuinely ungraded — the shape of the spotlight's exit, sampled frame by frame (#111) |
+  | `check_narration_pacing` | genuinely ungraded. `TtsKey` covers the cache key a clip is stored under, not the beat spacing this measures |
+  | `check_narration_audio` | genuinely ungraded — mean dBFS over stretches of the mp4 |
+  | `_check_video` | genuinely ungraded — ffprobe against the file the take wrote |
+  | `_check_occlusion` | genuinely ungraded — PSNR between two moments of a recording |
+  | `_check_frame_captions` | genuinely ungraded — the caption band of frame N read against the hand-written storyboard |
+  | `_check_stale_frames` | genuinely ungraded. `FailureCleanup` is the same shape for the failure dump, not for `frames/` |
+  | `_check_segment_refusal` | genuinely ungraded — an unmerged segment's document, graded against the frames a recorder did not write |
+  | `_check_scene_fallback` | genuinely ungraded — measured straight off `demo.mp4`, because no beat in either storyboard is long enough to provoke it |
+
+  What is left in that list is there for cost or for pixels, and the two are
+  different problems. #197 took the cost half as far as it goes for now: the
+  claims that only needed *a* take rather than the long one moved to
+  `--issues-only` (26 s), `--segments-only` (29 s) and `--evidence-only` (7 s).
+  What did not move is what needs a picture, and no arm makes that cheaper.
 - **It does not find assertions nobody wrote.** Every entry names a message
   that already exists. A behaviour with no check at all is invisible here —
   that is [#103](https://github.com/rogvid/skills/issues/103)'s shape and still
@@ -1470,6 +1529,22 @@ exactly where `--strict-only` came from.
 
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
+
+- **The take-level sentence both cursor fixes were accepted on is ungraded.**
+  [#186](https://github.com/rogvid/skills/issues/186) and
+  [#202](https://github.com/rogvid/skills/issues/202) were accepted on "two
+  takes of a storyboard that never moves the pointer produce byte-identical
+  stills". `tests/unit`'s `CursorMotion` grades the *rule* against event shapes
+  measured off three Chromium builds; the determinism arm parks the pointer
+  before anything is photographed and is structurally blind to it. An arm was
+  built for it and removed before merge, because the only event that exercises
+  the guard in such a take — the `mousemove` Chromium dispatches at load — is
+  delivered only when the page's `load` event fires inside 22 ms: 7 of 7 takes
+  under that bar received it, 0 of 9 over it, and the reviewer's box saw 0 of
+  12. Not machine load (7/9 loaded against 8/9 idle) and not listener timing
+  (installed at `readyState: 'loading'`, 7.2-8.4 ms, 16 of 16). The full
+  measurement, and the one route that might still work, are in
+  [#210](https://github.com/rogvid/skills/issues/210).
 
 - **Nothing calls the ElevenLabs API.** The narration take grades everything a
   cache hit reaches — the key, the pacing, the mix — and by construction never
