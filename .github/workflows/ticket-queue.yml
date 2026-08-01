@@ -55,6 +55,13 @@ jobs:
   test:
     name: examples/ticket-queue/test
     runs-on: ubuntu-latest
+    # A bound on a hang, not a budget. Measured on this runner: 2m08s end to end
+    # for a green run (installs included), and the one failure mode this is for
+    # is a browser that never answers, where the suite's own 20 s server deadline
+    # and Playwright's 30 s default would already have fired. Seven times the
+    # observed cost, because being wrong in the tight direction here costs a
+    # verdict and being wrong in the loose direction costs runner minutes nobody
+    # notices.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
