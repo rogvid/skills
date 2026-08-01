@@ -126,4 +126,9 @@ no matter what this section does:
   ([#186](https://github.com/rogvid/skills/issues/186)): it followed the
   movement-free `mousemove` Chromium dispatches at load, so a storyboard that
   never touched the pointer got an 18 px dot in the corner of about half its
-  takes. It is now drawn only once the pointer actually moves.
+  takes. It is now drawn only once the pointer is somewhere it has not been:
+  the overlay remembers the position it was last told about, starting from
+  `(0, 0)` where a fresh page's pointer sits, and ignores an event that repeats
+  it. One consequence worth knowing: a pointer verb that lands on exactly
+  `(0, 0)` draws no cursor, because "moved to the origin" and "never moved" are
+  the same state as far as the page can tell — move somewhere else first.
