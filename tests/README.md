@@ -1434,10 +1434,18 @@ rather than remembered:
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
-plus one clean baseline per arm — not a stopwatch reading. The last measured
-end-to-end pair, 16.3 and 16.4 minutes, was taken when the manifest held
-sixteen entries and is not comparable; nobody has sat through the current one,
-and the nightly job's budget is set from the estimate.
+plus one clean baseline per arm — not a stopwatch reading. It has now been
+measured against a real run:
+[30705025900](https://github.com/rogvid/skills/actions/runs/30705025900), a
+`workflow_dispatch` of the nightly on main, took **41m23s** end to end, of which
+**40.3 minutes** was `tests/smoke-inject` itself and about a minute was the
+checkout and the ffmpeg and Chromium installs. So a CI runner costs about
+**1.16x** the estimate above; the 25-entry manifest, measured the same way on
+2026-08-01, gives 1.09x. `.github/workflows/smoke-inject.yml` sets its
+`timeout-minutes` from that measurement and says so
+([#191](https://github.com/rogvid/skills/issues/191)) — the 45 it replaced came
+from a rule that assumed 2x and would have predicted ~71 minutes for a manifest
+that costs 41.
 
 Every number in this section is read back out of this file and compared against
 the manifest by `tests/smoke-inject --self-test`, which runs on every push. It

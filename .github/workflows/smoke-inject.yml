@@ -3,10 +3,11 @@ name: smoke-inject
 # The executed half of the fault-injection rule for `tests/smoke` (issue #136).
 #
 # **Why this is not a job in ci.yml.** Every entry in the manifest records a
-# real take, and the manifest measures ~14 minutes on a developer box against
+# real take, and the manifest measures **40.3 minutes on a CI runner** against
 # ~10 for `tests/smoke` itself — CI already pays that once per push, and paying
-# it twice more would make every pull request wait on a check that answers a
-# question nobody asked in that pull request: "can the smoke suite still fail?"
+# it four times more would make every pull request wait on a check that answers
+# a question nobody asked in that pull request: "can the smoke suite still
+# fail?"
 # That question needs an answer regularly, not per-commit, because what rots is
 # the *assertion*, and assertions rot on the timescale of weeks.
 #
@@ -42,10 +43,35 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'fault-inject')
     runs-on: ubuntu-latest
-    # ~14 min measured on a 16-core developer box; CI's smoke job runs about
-    # twice as slow as the same box, so this is that doubled with room for the
-    # ffmpeg and Chromium installs.
-    timeout-minutes: 45
+    # **Measured here, not derived.** `workflow_dispatch` run 30705025900 on
+    # main, 2026-08-01, at the 30-entry manifest:
+    #
+    #   job wall clock          41m23s   (15:01:56 -> 15:43:19)
+    #   checkout + uv + ffmpeg + Chromium + --self-test    ~61 s
+    #   tests/smoke-inject      40.3 min  (the script's own figure)
+    #
+    # `tests/smoke-inject --list` estimates ~34.9 min of takes on a developer
+    # box, so **CI runs this manifest at about 1.16x a developer box** — not the
+    # 2x this file used to assume. The 25-entry run of 2026-08-01 06:42 gives
+    # the second point: 34m50s in the step against a ~31.9 min estimate, 1.09x.
+    # The old rule (estimate, doubled, plus install room) predicts ~71 minutes
+    # for the manifest that actually costs 41; it was wrong in the direction
+    # that looks safe, which is why the 45 it produced survived unnoticed while
+    # the manifest grew underneath it.
+    #
+    # It was also nearly breached. 41m23s against 45 is **8% of headroom** — one
+    # slow runner from a job that reports no verdict at all, which is the worst
+    # outcome for the one thing that says whether the smoke suite can still
+    # fail.
+    #
+    # 60 is the measured 41m23s with ~45% headroom. The headroom is for runner
+    # variance, not for growth: the two measured CI-vs-estimate factors differ
+    # by 6% between runs, and this covers many times that. It does leave room
+    # for the manifest to reach roughly 50 minutes of takes before the timeout
+    # is the binding constraint — and #190's `--self-test` fails a push when the
+    # *documented* figure drifts, which is the signal to come back and measure
+    # again rather than to nudge this number.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
