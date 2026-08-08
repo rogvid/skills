@@ -480,14 +480,56 @@ INJECTIONS = [
         sites=("check_capture_clock",),
         must_contain=("is not measuring the clock",),
     ),
+    # -- what the record says about its own coverage (issue #247) ------------
+    #
+    # These three are the ones that would have caught #245 four weeks earlier,
+    # and none of them depends on the box's clock stepping — they break the
+    # *coverage claim*, which every take makes on every host. `--segments-only`
+    # is the arm because it is the cheap one that already records and stitches.
+    Injection(
+        # The claim removed. A record with no `measured` flag is one a
+        # consumer corrects a beat timestamp with and cannot check, which is
+        # the state the field was in for the whole of #245.
+        name="the recorded clock stops saying whether it watched the take",
+        module="core.py",
+        old='            "measured": ok,',
+        new='            "measured_unstated": ok,',
+        arm="--segments-only",
+        sites=("check_capture_clock", "_check_clock_coverage"),
+        must_contain=("has no `measured` flag",),
+    ),
+    Injection(
+        # The flag says one thing and the number it is derived from says
+        # another. A consumer reads the flag; nothing but this reads both.
+        name="the recorded clock claims it watched a take its own gap says it missed",
+        module="core.py",
+        old='            "max_gap": round(self.max_gap, 4),',
+        new='            "max_gap": round(self.max_gap + 1.0, 4),',
+        arm="--segments-only",
+        sites=("check_capture_clock", "_check_clock_coverage"),
+        must_contain=("The flag and the number that decides it disagree",),
+    ),
+    Injection(
+        # The other direction, and the one that would go unnoticed forever
+        # because silence looks safe: the recorder refuses to report on a
+        # host that was perfectly watchable. Every consumer of every take is
+        # then told nothing, and no bar anywhere moves.
+        name="the recorder refuses to report a clock it could have measured",
+        module="core.py",
+        old="    MAX_GAP_S = 0.25",
+        new="    MAX_GAP_S = 0.0",
+        arm="--segments-only",
+        sites=("check_capture_clock", "_check_clock_coverage"),
+        must_contain=("The host was watchable and the recorder did not watch",),
+    ),
     Injection(
         # The total and the steps it is a total of, disagreeing. A consumer
         # reading only `total` and one reading only `steps` then correct a
         # beat by different amounts, and neither can tell.
         name="the recorded clock total stops being the total of its own steps",
         module="core.py",
-        old='            "total": round(self.total, 4),',
-        new='            "total": round(self.total + 0.5, 4),',
+        old='            "total": round(self.total, 4) if ok else None,',
+        new='            "total": round(self.total + 0.5, 4) if ok else None,',
         arm="--segments-only",
         sites=("check_capture_clock",),
         must_contain=("the field disagrees with itself",),

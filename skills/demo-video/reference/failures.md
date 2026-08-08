@@ -147,11 +147,17 @@ holding back, so the dump is of the screen the recording ends on.
 complete demo — it stops where the storyboard did, and it does not diagnose
 the crash.
 
-**Timestamps are wall-clock offsets, and the video can drift under them.**
-Chromium's screencast emits a frame when the page paints and nothing pads the
-gap when it does not, so an idle stretch costs the recording ~0.6 s of wall
-time and every frame after it lands that much earlier than the timestamps say.
-The beat log itself is good to ~100–200 ms of the frame it describes; the drift
-is the capture's, and it shows up as `duration` being shorter than the take
-really was. Tracked in [issue #18](https://github.com/rogvid/skills/issues/18)
-— read it before relying on a beat timestamp to extract a frame.
+**Timestamps are monotonic offsets, and the video runs on a different clock.**
+Beat timestamps are `time.monotonic()`; `demo.mp4` is on the host's **wall**
+clock, because that is what Chromium stamps every screencast frame with. On a
+host whose wall clock moves during a take, every frame after the move lands
+that much earlier than the timestamps say. (An earlier version of this
+paragraph blamed idle stretches — a screencast emitting no frames when nothing
+paints. That was measured and is not what happens; see `limits.md`.) The beat
+log itself is good to ~100–200 ms of the frame it describes on a host whose
+clock holds still. `timeline.json`'s `capture_clock` records the movement, and
+`capture_clock.measured` says whether the recorder could watch for it at all.
+Tracked in [#18](https://github.com/rogvid/skills/issues/18),
+[#215](https://github.com/rogvid/skills/issues/215) and
+[#247](https://github.com/rogvid/skills/issues/247) — read them before relying
+on a beat timestamp to extract a frame.

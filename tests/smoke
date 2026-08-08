@@ -862,6 +862,19 @@ MAX_CLOCK_STEP_TIME_DISAGREEMENT_S = 0.25
 # code being graded agrees with that code no matter what it says.
 HOST_CLOCK_MIN_STEP_S = 0.005
 
+# The widest this harness's own sampler may leave between two readings before
+# its reading of the take stops meaning anything. Same reasoning and same
+# number as `_CaptureClock.MAX_GAP_S`, hand-written here rather than imported
+# for the reason above — and it is here at all because in issue #247 *this
+# watcher had the recorder's bug*, exactly, down to the line: both slept on
+# `threading.Event.wait`, whose deadline on the interpreter `uv` installs is
+# an absolute CLOCK_REALTIME instant, so both were trapped by the clock they
+# were sampling and both agreed on the same wrong answer. `check_capture_clock`
+# passed throughout. That is the catalogue's "check that shares the bug's
+# blind spot", and structural independence — a different file, no import — did
+# nothing about it, which is precisely what the catalogue says to expect.
+HOST_CLOCK_MAX_GAP_S = 0.25
+
 # The rate the window is sampled at (the recorders encode at 25 fps, so this is
 # every frame and the measurement quantises to 40 ms), and how far past the
 # beat it runs.
@@ -1944,13 +1957,26 @@ class Beats:
 # Chromium timestamps every screencast frame with the host's *wall* clock, and
 # Playwright turns that timestamp straight into the frame's position in the
 # webm. The beat log is `time.monotonic()`. On a host that steps its wall
-# clock — a WSL2 box was measured stepping -0.75 to -0.81 s **every 32.2 s**,
-# which in a 19 s take is a coin flip — the two clocks part company by exactly
-# the size of the step, at exactly the instant of it, and every reading of
-# "how far has the video slid under the beat log" inherits it.
+# clock the two part company by exactly the size of the step, at exactly the
+# instant of it, and every reading of "how far has the video slid under the
+# beat log" inherits it.
+#
+# **How big and how often is a property of the sick host, not of this
+# recorder, and nothing here may be tuned to either.** #215 measured one WSL2
+# box at -0.75 to -0.81 s every 32.2 s; on 2026-08-08 the same box was a
+# +10.1 s pulse 40-230 ms wide every 5.509 s, leaving -0.50 s behind each
+# time, because CLOCK_MONOTONIC was running +10.01 % fast (NTP-checked;
+# `adjtimex tick = 11000`) and something was re-stepping the wall clock to
+# undo it. Same shape, different settings, four months apart.
+#
+# That the video really is on that clock was checked against the encode
+# (issue #247): six takes, seven caption transitions each read off `demo.mp4`
+# by luma, compared with the beat log. Uncorrected, the video was up to
+# **-1.50 s** from the log by 13.5 s into the take; corrected by a correctly
+# sampled wall clock, all 38 transitions landed within **101 ms**.
 #
 # So this harness measures the same clock, itself, around every recorded take,
-# and subtracts it before grading. Three things about that are deliberate:
+# and subtracts it before grading. Four things about that are deliberate:
 #
 #   * **It is measured, not assumed.** Nothing here is tuned to 0.8 s or to
 #     32 s; a host that never steps produces an empty list and every bar below
@@ -1962,6 +1988,12 @@ class Beats:
 #   * **It runs in this process**, not the recorder's, and watches a clock the
 #     recorder cannot influence. The two readings agreeing is therefore a
 #     claim about the recorder, not a tautology.
+#   * **...and none of the three saved it**, which is why the fourth exists:
+#     `covered` below. Both samplers slept on `Event.wait`, both were trapped
+#     by the pulse (see HOST_CLOCK_MAX_GAP_S), both reported `total: +9.09 s`
+#     on takes whose clock had moved **-2.00 s**, and this file's assertion
+#     that they agree passed on every one. A reading that cannot say how well
+#     it covered the take is not a reading, and neither sampler could.
 class HostClock:
     """CLOCK_REALTIME against CLOCK_MONOTONIC, sampled for a take's lifetime.
 
@@ -1979,6 +2011,10 @@ class HostClock:
 
     def __init__(self) -> None:
         self.raw: list[tuple[float, float]] = []  # (absolute monotonic, delta)
+        # The widest interval this sampler left between two readings, and how
+        # many it took. See `covered`.
+        self.max_gap = 0.0
+        self.samples = 0
         self._t0: float | None = None
         # Where one capture ends and the next begins, on this clock. Empty for
         # a take recorded in one piece; on a stitched demo it is where each
@@ -1990,13 +2026,35 @@ class HostClock:
 
     def _run(self) -> None:
         previous = time.time() - time.monotonic()
+        last = time.monotonic()
         while not self._stop.is_set():
+            now = time.monotonic()
+            self.max_gap = max(self.max_gap, now - last)
+            last = now
+            self.samples += 1
             offset = time.time() - time.monotonic()
             delta = offset - previous
             if abs(delta) >= HOST_CLOCK_MIN_STEP_S:
-                self.raw.append((time.monotonic(), delta))
+                self.raw.append((now, delta))
             previous = offset
-            self._stop.wait(self.INTERVAL_S)
+            # **`time.sleep`, never `self._stop.wait`** — see
+            # HOST_CLOCK_MAX_GAP_S. `Event.wait`'s deadline is CLOCK_REALTIME
+            # on this interpreter, so sleeping on it inside a wall-clock
+            # sampler makes the sampler a function of the thing it measures.
+            time.sleep(self.INTERVAL_S)
+
+    @property
+    def covered(self) -> bool:
+        """Did this sampler stay close enough to its interval to be believed?
+
+        Nothing below may correct with an uncovered reading. A step is found
+        by differencing consecutive samples, so a watcher that was away for
+        seconds cannot say whether the clock moved inside the gap — and
+        subtracting a number nobody watched moves a search window *away* from
+        the frame it is looking for, which is how issue #245's runs went red
+        about something untrue.
+        """
+        return self.samples > 1 and self.max_gap <= HOST_CLOCK_MAX_GAP_S
 
     def rebase(self, t0: float) -> None:
         """Put the steps on this take's own clock — `t0` is its frame zero."""
@@ -2071,6 +2129,10 @@ def joined_clock(parts: list[tuple[HostClock, float]]) -> HostClock:
     """
     joined = HostClock()
     joined._t0 = 0.0
+    # Coverage joins as the *worst* part's, so a joined clock is only believed
+    # when every watcher that fed it kept its interval — see `covered`.
+    joined.max_gap = max((clock.max_gap for clock, _o in parts), default=0.0)
+    joined.samples = min((clock.samples for clock, _o in parts), default=0)
     ends = [offset for _clock, offset in parts[1:]] + [None]
     joined.raw = [
         (at + offset, delta)
@@ -2098,6 +2160,75 @@ def watch_wall_clock() -> Iterator[HostClock]:
         clock._thread.join(timeout=1.0)
 
 
+def _check_clock_coverage(
+    label: str, name: str, record: dict, clock: HostClock
+) -> list[str]:
+    """Does `capture_clock` say honestly how well it watched the take?
+
+    Three claims, and the first is the one that had to be added (issue #247):
+
+    1. the record **states** its coverage at all — `measured` is a bool and
+       `max_gap` is a number. A record with no coverage claim is a record that
+       can be wrong by ten seconds and say nothing;
+    2. `measured` **agrees with its own `max_gap`** against the recorder's own
+       published limit, so the flag cannot be true while the number that
+       decides it says otherwise;
+    3. `measured` **agrees with this harness's independent coverage**. This is
+       the cross-check that does not share a mechanism: two samplers in two
+       processes both stalling on the same take is a real possibility (a
+       loaded box), but one stalling for seconds while the other kept a 20 ms
+       interval means the stalled one is broken rather than the box is busy.
+    """
+    stated = record.get("measured")
+    gap = record.get("max_gap")
+    limit = record.get("max_gap_limit")
+    if not isinstance(stated, bool):
+        return [
+            f"{label}: {name}'s capture_clock has no `measured` flag "
+            f"({stated!r}). A wall-clock record that cannot say whether it "
+            f"watched the take is one a consumer corrects a beat timestamp "
+            f"with and cannot check (issue #247)"
+        ]
+    numeric = (
+        isinstance(gap, (int, float))
+        and not isinstance(gap, bool)
+        and isinstance(limit, (int, float))
+        and not isinstance(limit, bool)
+    )
+    if not numeric:
+        return [
+            f"{label}: {name}'s capture_clock states max_gap={gap!r} against "
+            f"limit={limit!r} — the two numbers `measured` is derived from, "
+            f"and without them the flag is an assertion rather than a "
+            f"measurement"
+        ]
+    if stated != (gap <= limit):
+        return [
+            f"{label}: {name}'s capture_clock says measured={stated} while "
+            f"its own max_gap is {gap:.3f}s against a {limit:.3f}s limit. The "
+            f"flag and the number that decides it disagree, and the flag is "
+            f"what a consumer reads"
+        ]
+    if stated and not clock.covered:
+        return [
+            f"{label}: {name}'s capture_clock claims it measured this take "
+            f"(max_gap {gap:.3f}s) while this harness's own sampler was away "
+            f"for up to {clock.max_gap:.3f}s over the same take. One of the "
+            f"two was not watching, and the recorder's is the one whose "
+            f"number ships in the artifact"
+        ]
+    if not stated and clock.covered:
+        return [
+            f"{label}: {name}'s capture_clock refuses to report (max_gap "
+            f"{gap:.3f}s, limit {limit:.3f}s) on a take this harness sampled "
+            f"cleanly (max gap {clock.max_gap:.3f}s, {clock.samples} "
+            f"samples). The host was watchable and the recorder did not watch "
+            f"it, so every consumer of this take is told nothing when there "
+            f"was something to say"
+        ]
+    return []
+
+
 def check_capture_clock(
     label: str, out_dir: Path, clock: HostClock, name: str = "timeline.json"
 ) -> list[str]:
@@ -2114,6 +2245,13 @@ def check_capture_clock(
     not cover the same seconds — this one keeps running through conversion,
     which the capture is not part of — so a step out there is neither's error
     and is reported rather than graded.
+
+    **Coverage is graded before content** (issue #247). The version of this
+    function that only compared totals passed on takes where both samplers
+    reported `+9.09 s` against a truth of `-2.00 s`, because both were trapped
+    by the same clock and therefore agreed. What that could not have caught,
+    this can: `measured` false when this watcher covered the take, or
+    `measured` true when the recorder's own `max_gap` says it did not.
     """
     path = out_dir / name
     try:
@@ -2128,6 +2266,19 @@ def check_capture_clock(
             f"(issues #18, #215); without this field nothing downstream can "
             f"tell a stepped clock from a recorder that mis-stamped a beat"
         ]
+    problems = _check_clock_coverage(label, name, record, clock)
+    if problems:
+        return problems
+    if record.get("measured") is not True:
+        # Honest, and nothing further is gradeable: the recorder is saying it
+        # could not watch the clock, and it has already been checked above
+        # that this harness could not either.
+        print(
+            f"smoke: {label} capture_clock says it could not measure this "
+            f"take ({record.get('note')}) — and neither could this harness "
+            f"(max gap {clock.max_gap:.2f}s). Nothing to compare"
+        )
+        return []
     reported = record.get("total")
     if not isinstance(reported, (int, float)):
         return [
@@ -2275,6 +2426,23 @@ def check_merged_capture_clock(
                 f"were measured (issue #225)"
             )
     record = doc.get("capture_clock")
+    # A part that could not watch its own clock is the one case where a null
+    # merged record is the *right* answer rather than a lost one — see
+    # `_merge_capture_clock`. Say which part, and stop: there is nothing here
+    # to attribute (issue #247).
+    unmeasured = [
+        name
+        for name, _clock, _offset, own in parts
+        if not isinstance(own, dict) or own.get("measured") is not True
+    ]
+    if unmeasured and record is None:
+        print(
+            f"smoke: segments the merged capture_clock is null because "
+            f"{', '.join(unmeasured)} could not measure its own wall clock — "
+            f"which is the merge refusing to say a part nobody watched held "
+            f"still"
+        )
+        return failures
     if not isinstance(record, dict):
         return failures + [
             f"segments: the stitched timeline.json has no merged `capture_clock` "
@@ -2283,6 +2451,15 @@ def check_merged_capture_clock(
             f"clock, a video on the host's wall clock, and nothing to reconcile "
             f"them with (issues #18, #215, #225)"
         ]
+    if unmeasured:
+        failures.append(
+            f"segments: the merged capture_clock reports "
+            f"measured={record.get('measured')!r} while "
+            f"{', '.join(unmeasured)} could not measure its own clock. A "
+            f"merged record that folds an unwatched part into a total reads "
+            f"as 'that part's clock held still', which nobody established "
+            f"(issue #247)"
+        )
     steps, total = record.get("steps"), record.get("total")
     if not isinstance(steps, list) or not isinstance(total, (int, float)):
         return failures + [
@@ -5981,6 +6158,24 @@ def check_timeline(
     # The video is on that clock and the beats are not (issue #215), so every
     # comparison between the two below goes through this. Absent a reading the
     # correction is zero and every bar is what it was.
+    #
+    # **An uncovered reading is worse than no reading**, and this is where
+    # issue #245's runs went red about something untrue: a watcher that was
+    # away for seconds still hands out a `before()`, and subtracting it moved
+    # the caption search window 1.26 s away from the caption. So an uncovered
+    # clock is refused here, loudly, rather than used or silently zeroed —
+    # zeroing it would grade the take against a bar it no longer meets and
+    # blame the recorder for the harness's own blind spot.
+    if clock is not None and not clock.covered:
+        failures.append(
+            f"{label}: this harness's own wall-clock watcher was away for up "
+            f"to {clock.max_gap:.2f}s (limit {HOST_CLOCK_MAX_GAP_S:.2f}s, "
+            f"{clock.samples} samples), so it cannot say where the video sat "
+            f"under the beat log for this take. Nothing below is corrected "
+            f"and nothing below is graded on alignment. This is the harness "
+            f"refusing to measure, not the recorder failing (issue #247)"
+        )
+        clock = None
     stepped = clock.before if clock is not None else (lambda _t: 0.0)
     mp4 = out_dir / "demo.mp4"
     duration = doc.get("duration")

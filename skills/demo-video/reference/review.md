@@ -20,14 +20,22 @@ They are aligned to **beats, not to a clock**. The old advice was
 static one twice. Each frame is taken at its beat's **midpoint** — `t_start` is
 0% into the caption bar's fade and before the verb has done anything.
 
-**How accurate that aim is, honestly.** The beat log is wall-clock; the video
-is whatever Chromium's screencast managed to record, and it drops wall time
-during idle stretches ([#18](https://github.com/rogvid/skills/issues/18)). So a
-frame cut at a beat's midpoint shows a moment slightly *ahead* of that beat in
-the demo's own story — measured at **80–200 ms** on instrumented takes, and up
-to the **~0.7 s** of browser start-up no test code can cover, on a take that
-loses that window whole (about 1 in 12, which is why `tests/smoke` bounds this
-direction at 750 ms). The practical consequence: for a beat comfortably longer
+**How accurate that aim is, honestly.** The beat log is `time.monotonic()`;
+the video is on the host's **wall** clock, because that is what Chromium
+stamps every screencast frame with
+([#18](https://github.com/rogvid/skills/issues/18),
+[#215](https://github.com/rogvid/skills/issues/215)). (It is *not* dropped
+idle time — that explanation was measured and retracted; see
+`limits.md`.) So a frame cut at a beat's midpoint shows a moment slightly
+*ahead* of that beat in the demo's own story — measured at **80–200 ms** on
+instrumented takes with a steady host clock, and by however much the host's
+wall clock moved during the take on one that does not: **1.50 s** by 13.5 s
+into a take on the WSL2 box of
+[#247](https://github.com/rogvid/skills/issues/247), with no fixed bound. The
+size is in `timeline.json`'s `capture_clock`, and nothing in the recorder
+applies it to these frames yet
+([#229](https://github.com/rogvid/skills/issues/229)). The practical
+consequence: for a beat comfortably longer
 than that, the frame is of that beat; **for a beat shorter than the drift — a
 bare `shot()`, a `wait_for()` that returned immediately — the frame can be of
 the beat after it.** `tests/smoke` measures exactly this and shows it: with the

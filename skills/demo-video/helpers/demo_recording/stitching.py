@@ -77,11 +77,19 @@ def _merge_capture_clock(docs: list[dict], records: list[dict]) -> dict | None:
     that quietly treated a missing one as "the clock held still" would state,
     in an artifact somebody corrects timestamps with, that a part nobody
     measured was measured — and `total` would be short by whatever it stepped.
+
+    **A part whose own record says `measured: false` is exactly that case**,
+    and it is the one that looks harmless: its `steps` is a well-formed empty
+    list, so a merge that only checked the shape would fold "nobody watched
+    this part" into a stitched record indistinguishable from "this part's
+    clock held still" (issue #247).
     """
     steps: list[dict] = []
     for doc, record in zip(docs, records, strict=True):
         clock = doc.get("capture_clock")
-        listed = clock.get("steps") if isinstance(clock, dict) else None
+        if not isinstance(clock, dict) or clock.get("measured") is not True:
+            return None
+        listed = clock.get("steps")
         if not isinstance(listed, list):
             return None
         for step in listed:
@@ -100,7 +108,12 @@ def _merge_capture_clock(docs: list[dict], records: list[dict]) -> dict | None:
                 {**step, "t": at, "delta": float(delta), "segment": record["segment"]}
             )
     clocks = [doc.get("capture_clock") or {} for doc in docs]
+    gaps = [c.get("max_gap") for c in clocks]
     return {
+        # True by construction: every part was checked above, and a merge is
+        # refused outright when any of them was not measured.
+        "measured": True,
+        "note": None,
         "steps": steps,
         # The sum across the whole recording session, which is **not** the
         # correction for any single beat — see above. It is here because a
@@ -108,6 +121,14 @@ def _merge_capture_clock(docs: list[dict], records: list[dict]) -> dict | None:
         "total": round(sum(step["delta"] for step in steps), 4),
         "sample_interval": _common([c.get("sample_interval") for c in clocks]),
         "min_step": _common([c.get("min_step") for c in clocks]),
+        # The worst coverage any part managed, not an average: a stitched
+        # record is only as believable as its shakiest capture.
+        "max_gap": max(
+            (g for g in gaps if isinstance(g, (int, float))
+             and not isinstance(g, bool)),
+            default=None,
+        ),
+        "max_gap_limit": _common([c.get("max_gap_limit") for c in clocks]),
         "boundaries": [record["offset"] for record in records],
     }
 

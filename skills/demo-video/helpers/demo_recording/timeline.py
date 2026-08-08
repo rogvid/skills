@@ -51,14 +51,29 @@ from .markdown import _fmt_t, _md_cell
 #                          frame with the host's *wall* clock; the beat log is
 #                          `time.monotonic()`. So the recorder samples the
 #                          difference for the take's whole life and writes down
-#                          every step it saw: `steps` (each `t`, seconds into
-#                          the take, and `delta`, seconds the wall clock
-#                          jumped), `total`, `sample_interval` and `min_step`
-#                          (the sampler's own settings; the smallest jump it
-#                          calls a step). An empty `steps` means the clock held
-#                          still, which is a different answer from the field
-#                          being absent. **A beat the log puts at `t` sits at
+#                          every step it saw: `measured` (bool — see below),
+#                          `note` (why not, when it is false), `steps` (each
+#                          `t`, seconds into the take, and `delta`, seconds
+#                          the wall clock jumped), `total`, `sample_interval`
+#                          and `min_step` (the sampler's own settings; the
+#                          smallest jump it calls a step), and `max_gap` /
+#                          `max_gap_limit` (the widest interval the sampler
+#                          actually left between two readings, and the bound
+#                          over which it refuses to answer).
+#                          **Read `measured` first.** When it is false,
+#                          `steps` is empty and `total` is null on purpose:
+#                          the sampler was away long enough that it cannot say
+#                          when — or whether — the clock moved, and a consumer
+#                          correcting a beat with a number nobody watched is
+#                          the failure this field grew a flag to prevent
+#                          (issue #247). An empty `steps` with `measured` true
+#                          means the clock held still, which is a different
+#                          answer again from the field being absent.
+#                          **A beat the log puts at `t` sits at
 #                          `t + (the steps before it)` in the video** —
+#                          measured against the encode over six takes and 38
+#                          caption transitions, residual under 101 ms where
+#                          the uncorrected log was out by up to 1.50 s.
 #                          reference/limits.md has the measurement.
 #                          On a merged demo (`stitch`) every part's steps are
 #                          here, moved onto the stitched clock by that part's
