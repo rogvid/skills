@@ -3792,10 +3792,12 @@ class CursorMotion(unittest.TestCase):
         # `attach` that was nothing at all. Nothing replaces it either: the
         # pointer is already where the storyboard put it, so the browser has
         # no reason to report it again, and the dot sits at the stylesheet's
-        # off-screen park for the rest of the document. Reachable through the
-        # escape hatch SKILL.md documents, `goto(..., wait_until="commit")`
-        # followed by `page.mouse.move`, which is what #202's determinism arm
-        # drives the pointer with.
+        # off-screen park for the rest of the document. Reachable only by
+        # combining `goto(..., wait_until="commit")` with a raw
+        # `page.mouse.move`, and neither of those two is documented — what
+        # SKILL.md documents is `rec.page` itself, as the escape hatch. #202's
+        # determinism arm uses the raw move but parks *after* `Recorder.goto()`,
+        # which waits for `load`, so that arm never reaches this.
         #
         # So the subscription is established while the init script is
         # evaluated, and the element it writes to is created there too; only

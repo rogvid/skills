@@ -124,8 +124,9 @@ _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 # `mousemove` dispatched before that used to be delivered to no handler at
 # all. Nothing replaces it: the pointer is where it was asked to be, the
 # browser has no reason to say so again, and the dot stays at the stylesheet's
-# off-screen park for the rest of the document. Reachable through the escape
-# hatch `SKILL.md` documents:
+# off-screen park for the rest of the document. Reachable only by combining
+# two `rec.page` calls, neither of which `SKILL.md` or `reference/` documents —
+# what they document is the escape hatch itself, `rec.page`:
 #
 #     rec.page.goto(url, wait_until="commit")   # Recorder.goto waits for load
 #     rec.page.mouse.move(60, 640)
