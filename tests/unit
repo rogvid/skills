@@ -4755,6 +4755,143 @@ class MergedCaptureClock(unittest.TestCase):
 # Fault injection
 # --------------------------------------------------------------------------
 
+
+class _StubWatcher:
+    """Enough of `tests/smoke`'s `HostClock` for its coverage cross-check.
+
+    Hand-written rather than constructed from the real class: what is being
+    graded is `_check_clock_coverage`'s reading of a watcher, and a stub is
+    the only way to present it with the one state a real watcher on a healthy
+    box will not produce — having been away for five seconds.
+    """
+
+    def __init__(self, max_gap: float, samples: int = 900) -> None:
+        self.max_gap = max_gap
+        self.samples = samples
+
+    @property
+    def covered(self) -> bool:
+        return self.samples > 1 and self.max_gap <= 0.25
+
+
+class ClockCoverageCheck(unittest.TestCase):
+    """`tests/smoke`'s guard on whether the record watched the take (#247).
+
+    This lives here rather than in `tests/smoke-inject` for a reason worth
+    stating: the arm that runs `check_capture_clock` is `--segments-only`, and
+    on the WSL2 box #247 was measured on that arm's **clean baseline** is red
+    — the host's +10 s pulses land in the encode and cost the take its tail.
+    `smoke-inject` refuses to grade an injection whose baseline already fails,
+    correctly, so the three entries added to the manifest for this guard could
+    not be run there on that box. `_check_clock_coverage` is a pure function of
+    a record and a watcher, so it can be run here, on any box, in 0.2 s.
+    """
+
+    def setUp(self):
+        self.check = _smoke_module()._check_clock_coverage
+
+    def one(self, problems: list) -> str:
+        """The single complaint these cases must produce.
+
+        Asserted rather than unpacked, so a guard that stopped firing reads as
+        'reported nothing' in the failure output instead of as a ValueError
+        from a tuple assignment — which is what `--fault-inject` showed the
+        first version of these doing.
+        """
+        self.assertEqual(len(problems), 1, f"expected one complaint, got {problems!r}")
+        return problems[0]
+
+    def record(self, **over) -> dict:
+        base = {
+            "measured": True,
+            "note": None,
+            "steps": [],
+            "total": 0.0,
+            "sample_interval": 0.02,
+            "min_step": 0.005,
+            "max_gap": 0.021,
+            "max_gap_limit": 0.25,
+        }
+        base.update(over)
+        return base
+
+    def test_a_watched_take_and_a_watching_harness_agree_silently(self):
+        # The control. Without it every assertion below is satisfied by a
+        # check that complains about everything.
+        self.assertEqual(
+            self.check("web", "timeline.json", self.record(), _StubWatcher(0.021)),
+            [],
+        )
+
+    def test_a_record_with_no_coverage_claim_is_refused(self):
+        problem = self.one(
+            self.check(
+                "web", "timeline.json", self.record(measured=None), _StubWatcher(0.021)
+            )
+        )
+        self.assertIn("no `measured` flag", problem)
+
+    def test_a_record_whose_coverage_numbers_are_missing_is_refused(self):
+        problem = self.one(
+            self.check(
+                "web", "timeline.json", self.record(max_gap=None), _StubWatcher(0.021)
+            )
+        )
+        self.assertIn("the two numbers `measured` is derived from", problem)
+
+    def test_a_flag_that_contradicts_its_own_gap_is_refused(self):
+        # The shape the trapped sampler would have shipped if it had measured
+        # its gap and then ignored it.
+        problem = self.one(
+            self.check(
+                "web", "timeline.json", self.record(max_gap=5.5), _StubWatcher(0.021)
+            )
+        )
+        self.assertIn("The flag and the number that decides it disagree", problem)
+
+    def test_a_recorder_that_watched_nothing_while_the_harness_watched_is_refused(self):
+        # Both samplers stalling on a loaded box is real; one stalling for
+        # 5.5 s while the other kept a 20 ms interval is not the box.
+        problem = self.one(
+            self.check(
+                "web",
+                "timeline.json",
+                self.record(measured=True),
+                _StubWatcher(5.5),
+            )
+        )
+        self.assertIn("One of the", problem)
+        self.assertIn("two was not watching", problem)
+
+    def test_a_recorder_that_refused_on_a_watchable_host_is_refused(self):
+        # The direction that looks like safety and is not: silence, on a host
+        # there was something to say about.
+        problem = self.one(
+            self.check(
+                "web",
+                "timeline.json",
+                self.record(measured=False, max_gap=5.5, note="away"),
+                _StubWatcher(0.021),
+            )
+        )
+        self.assertIn("The host was watchable and the recorder did not watch", problem)
+
+    def test_both_samplers_away_is_reported_as_neither_watching(self):
+        # Not a failure: a genuinely loaded box, where the honest answer is
+        # that nobody measured this take and both records say so.
+        self.assertEqual(
+            self.check(
+                "web",
+                "timeline.json",
+                self.record(measured=False, max_gap=5.5, note="away"),
+                _StubWatcher(5.5),
+            ),
+            [],
+        )
+
+
+# --------------------------------------------------------------------------
+
 # Issue #203, as the overlay shipped before it was fixed and after it was.
 # Nothing below is rewritten by hand: the two are the same region of
 # `_CURSOR_JS` — from the dot's creation to its insertion — in the two orders,
@@ -4998,6 +5135,62 @@ INJECTIONS = [
         [
             "MergedCaptureClock."
             "test_a_part_that_could_not_watch_its_clock_makes_the_merged_record_null",
+        ],
+    ),
+    # -- and the harness's own reading of that claim (issue #247) ------------
+    #
+    # `tests/smoke-inject` carries three entries aimed at these, and on the box
+    # #247 was measured on they cannot be run: `--segments-only`'s clean
+    # baseline is red there, so the harness refuses to grade anything aimed at
+    # that arm. These break the same guard where it costs 0.2 s and needs no
+    # browser.
+    (
+        # The guard stops reading the flag at all, so a record that says
+        # nothing about its own coverage passes — the state the field was in
+        # throughout #245.
+        "smoke stops checking whether the record says it watched the take",
+        "tests/smoke",
+        "    if not isinstance(stated, bool):",
+        "    if False:",
+        [
+            "ClockCoverageCheck.test_a_record_with_no_coverage_claim_is_refused",
+        ],
+    ),
+    (
+        # The flag is read and the number behind it is not, so `measured: true`
+        # over a five-second gap sails through — which is exactly what the
+        # trapped sampler would have shipped.
+        "smoke stops checking the flag against the gap it is derived from",
+        "tests/smoke",
+        "    if stated != (gap <= limit):",
+        "    if False:",
+        [
+            "ClockCoverageCheck.test_a_flag_that_contradicts_its_own_gap_is_refused",
+        ],
+    ),
+    (
+        # The cross-check between the two watchers dropped. Two samplers that
+        # fail the same way still agree, so this is the one comparison that is
+        # not a tautology — and the one whose absence let #245 run.
+        "smoke stops comparing the record's coverage against its own watcher's",
+        "tests/smoke",
+        "    if stated and not clock.covered:",
+        "    if False:",
+        [
+            "ClockCoverageCheck."
+            "test_a_recorder_that_watched_nothing_while_the_harness_watched_is_refused",
+        ],
+    ),
+    (
+        # Silence accepted. A recorder that reports nothing on every take
+        # changes no bar anywhere, which is why this direction needs its own
+        # guard rather than being the safe default.
+        "smoke accepts a recorder that refuses to report on a watchable host",
+        "tests/smoke",
+        "    if not stated and clock.covered:",
+        "    if False:",
+        [
+            "ClockCoverageCheck.test_a_recorder_that_refused_on_a_watchable_host_is_refused",
         ],
     ),
     (

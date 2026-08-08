@@ -2054,6 +2054,33 @@ knows is missing is worse than one that is openly absent.
   edges, so the cumulative sum still telescopes correctly), but it cannot tell
   a consumer that the encoder padded. Nothing grades that yet.
 
+- **`--segments-only` is red on that WSL2 box, before and after #247, and its
+  three new injections therefore could not be run there.** Measured both ways
+  on 2026-08-09, same host, same arm, one after the other:
+
+  - `origin/main` @ `3c71130`: FAILED, 5 problems. Its own artifact carried
+    the bug — the recorder warned `+10105 ms in total` and "demo.mp4 is 10.11s
+    longer than the take's own wall time" for a take whose clock had moved
+    **−501 ms**, and `check_capture_clock` caught *that* one only because this
+    harness's watcher happened not to be trapped on the same run.
+  - this branch: FAILED too, and differently — on run 1 the take's video
+    genuinely lost its tail (frozen from 6.56 s to 17.88 s, part2's content
+    never encoded) and on run 2 the beat-time coverage floor, from a ~9.5 s
+    stall inside the storyboard. Both runs printed `capture_clock agrees with
+    the harness` for **both** parts, with honest paired pulse edges and totals
+    of −0.49/−0.49 and −0.51/−1.00.
+
+  So the arm is red for host reasons either way, and `smoke-inject` — rightly
+  — refuses to grade an injection whose clean baseline already fails. The
+  three `--segments-only` entries added for the coverage claim are registered
+  and match the tree, and **on this box they have not been run**. What was run
+  instead: `_check_clock_coverage` is a pure function of a record and a
+  watcher, so `ClockCoverageCheck` in `tests/unit` exercises all four of its
+  branches plus a control, and four `tests/unit` injections break each branch
+  in `tests/smoke` itself and were seen failing. That is a weaker claim than
+  the arm passing — it does not prove the guard is *reached* on a real take —
+  and it is the strongest one this host allows.
+
 - **The terminal arm loses roughly a second more than its host clock explains,
   and nothing here knows why.** The correction is exact on the web arm — six
   consecutive `--web-only` runs after it, residual 20-140 ms, three of them
