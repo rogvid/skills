@@ -217,6 +217,22 @@ rather than hiding, which is the direction you want.
 nearly free to satisfy and says almost nothing. Assert that output K
 corresponds to input K.
 
+**The faithful transformation of an untrusted input.** A check that proves code
+applies its record correctly, when the open question is whether the record
+describes the world. A change corrected each review frame's seek by the
+wall-clock steps the recorder had measured; five fault injections graded that
+arithmetic against a scripted record and all five were caught. The record was
+an aliased sample of a clock oscillating faster than the sampler, the video
+never followed it, and the correction moved frames *away* from their beats —
+caught only by the one check that read pixels. Note where this would have
+landed: on CI the clock is steady, every take reports no step, the correction
+is a no-op, and all five injections still pass. Green there was guaranteed and
+meaningless.
+*Detect:* ask what the assertion would say if the input were pure noise. If it
+would still pass, it grades the transformation and not the claim — something
+in the suite has to compare the output against the world rather than against
+the input.
+
 ## Working the loop
 
 1. **Author** states the acceptance criterion, implements, and fault-injects
