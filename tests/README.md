@@ -1963,6 +1963,50 @@ knows is missing is worse than one that is openly absent.
   [#18](https://github.com/rogvid/skills/issues/18) is that boundary, and it
   matters most to [#8](https://github.com/rogvid/skills/issues/8).
 
+- **…and the correction above rests on a premise that did not reproduce on
+  2026-08-08.** `capture_clock` and `HostClock` both sample
+  `time.time() - time.monotonic()` every 20 ms and call a change a step. On a
+  host whose wall clock *oscillates faster than that*, what they record is an
+  aliased fragment of the oscillation, and the video does not follow it.
+  Measured on `main` @ `bae7f74`, on the same Playwright 1.62.0 / Chromium
+  151.0.7922.34 [#215](https://github.com/rogvid/skills/issues/215) used —
+  a standalone sampler, no browser, 180 s, **66 events in 33 identical pairs**:
+  `time.time()` jumps **+10.08 to +10.36 s and returns −10.58 to −10.60 s about
+  60 ms later, every ~5.5 s**, with `d_monotonic` a steady 20 ms throughout. A
+  take competing with Playwright catches a fragment of that ~60 ms pulse, which
+  is why `capture_clock` reports a single step of −1.72 to −1.81 s and never
+  the ±10 s edges an idle sampler sees.
+
+  What the video did about it: eight `--segments-only` runs, four with a
+  recorded step, the closing caption's onset read off `demo.mp4` against
+  `timeline.json`. Stepped runs **0, +20, −70, −60 ms**; step-free runs **0,
+  +40, +10, +20 ms**; durations 14.44–14.52 s either way. Runs whose step
+  landed *six seconds before* the caption still put the caption within 20 ms of
+  the log, where the documented consequence predicts 1.7 s — 43 frames. One
+  excursion did reach the video and is the exception that explains the rule: a
+  run whose record held two **+10.36 s** steps encoded a 24.96 s demo, part2 at
+  18.32 s against a usual 7.9 s, with the closing caption +10.25 s past the
+  log. That pulse lasted long enough for Chromium to stamp frames across it;
+  the aliased fragments are not pulses at all.
+
+  **So this harness subtracts a number that means nothing, and goes red about
+  it.** Six `--segments-only` runs on `main`: the four with no recorded step
+  passed, and **both runs with one failed** — the caption search window centred
+  at `3.07 − 1.771 = 1.30 s` while the caption sat at 2.56 s, where a step-free
+  run puts it, reported as "the window is already centred on where the host's
+  measured wall-clock steps put this beat in the video, so this slide is
+  something else". The bars were not widened for it, and should not be: a bar
+  that absorbs an arbitrary aliased offset grades nothing.
+
+  It is also why [#229](https://github.com/rogvid/skills/issues/229) is not
+  buildable yet. Correcting a review frame's seek with the record was
+  implemented and measured: **three of those four stepped runs then failed
+  `_check_frame_captions`**, with `beat-12.png` cut at 10.53 s instead of
+  12.27 s and showing the screen before its caption arrived — the correction
+  making the review sheet wrong, caught by the one check that reads pixels
+  rather than timestamps. Not landed. The whole measurement, and what would
+  settle it, is [#245](https://github.com/rogvid/skills/issues/245).
+
 - **The terminal arm loses roughly a second more than its host clock explains,
   and nothing here knows why.** The correction is exact on the web arm — six
   consecutive `--web-only` runs after it, residual 20-140 ms, three of them
