@@ -183,7 +183,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 45 entries, ~40 min
+tests/smoke-inject                # all 46 entries, ~40 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1671,7 +1671,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-45 entries, 12 arms, ~39.5 min of takes
+46 entries, 12 arms, ~40.0 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1704,7 +1704,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--segments-only` | 10 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)) |
+| `--segments-only` | 11 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the frames stop being cut on the clock `demo.mp4` is on, so a stepped host moves every one of them ~20 frames off the beat it is named for ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |

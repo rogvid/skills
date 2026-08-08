@@ -592,6 +592,42 @@ INJECTIONS = [
         must_contain=("within its own segment, and unlike `index` a merge must not ",),
     ),
     Injection(
+        # Issue #229: the recorder measured the host's wall-clock steps, wrote
+        # them into `capture_clock`, merged them across the stitch — and then
+        # cut every review frame as though the video were on the beat log's
+        # clock. On the box of #215 that is 0.78 s, ~20 frames at 25 fps, in
+        # the one artifact a reviewer of this skill ever looks at.
+        #
+        # **A step is added rather than the correction removed, and that is
+        # what makes this entry grade something on any host.** Deleting the
+        # correction is a no-op wherever the wall clock does not step, so the
+        # arm would pass against a recorder that ignores the record entirely —
+        # the catalogue's environment-agreeing assertion, and the same trap
+        # `the merged clock carries a step belonging to no capture` above was
+        # written into first. Instead the recorder is made to report a step
+        # nobody measured, at t=0 so it bears on every beat: a recorder that
+        # applies its record then cuts every frame 500 ms from where this
+        # harness — which watched the real clock and saw nothing — puts it,
+        # and a recorder that ignores its record cuts them where they were and
+        # this entry goes unnoticed. That is the property being graded, and it
+        # is graded the same way on a stepping host and a steady one.
+        #
+        # `check_capture_clock` fires too, on the same phantom step, and that
+        # is not a substitute: it grades the *record*, and the frames were
+        # already wrong while the record was right.
+        name="the review frames are cut without the clock the video is on",
+        module="core.py",
+        old="    def start(self, t0: float) -> None:\n        self._t0 = t0\n",
+        new=(
+            "    def start(self, t0: float) -> None:\n"
+            "        self._t0 = t0\n"
+            '        self.steps.append({"t": 0.0, "delta": -0.5})\n'
+        ),
+        arm="--segments-only",
+        sites=("check_beat_frames",),
+        must_contain=("moment the sheet numbers it for",),
+    ),
+    Injection(
         # Every review frame is cut at its beat's *start* instead of its
         # midpoint. frames.json still lists one frame per beat, each frame is
         # still faithfully the second it claims, and the sheet still embeds all
@@ -600,8 +636,8 @@ INJECTIONS = [
         # instant `frames.py`'s own header says is the wrong one.
         name="every review frame is cut at the start of its beat, not its midpoint",
         module="frames.py",
-        old="        middle = min(max((float(t_start) + float(t_end)) / 2, 0.0), last)",
-        new="        middle = min(max(float(t_start), 0.0), last)",
+        old="        middle = seek(beat, (float(t_start) + float(t_end)) / 2)",
+        new="        middle = seek(beat, float(t_start))",
         arm="--segments-only",
         sites=("check_beat_frames",),
         must_contain=("moment the sheet numbers it for",),

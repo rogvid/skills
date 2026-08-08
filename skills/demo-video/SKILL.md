@@ -95,9 +95,9 @@ behind every one, are in [reference/limits.md](reference/limits.md).
 - **A frame is aimed at a beat, not stamped with one.** Chromium stamps frames
   with the host's **wall** clock, the beat log uses a monotonic one, so on a
   host whose clock steps an event lands earlier in `demo.mp4` — by the step,
-  once per step (0.75–0.81 s every 32.2 s on one WSL2 box). **No fixed bound
-  holds**; a longer demo accumulates more. `timeline.json`'s `capture_clock`
-  records each one: correct with it, or read a frame as *around* its beat.
+  once per step (0.75–0.81 s every 32.2 s on one WSL2 box). `frames/` is now
+  cut with `timeline.json`'s `capture_clock` and `timeline.md` says when the
+  clock stepped; a beat time *you* scrub to yourself is still uncorrected.
 - **Sixty seconds buys about twenty screens.** At the pacing floors below, a
   demo shows roughly one new screen every 3 s — 69% of a real 61.2 s take was
   a picture already shown. A feature spanning two surfaces does not fit the

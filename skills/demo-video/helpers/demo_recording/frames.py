@@ -31,6 +31,16 @@ from .timeline import timeline_paths
 # it is before the verb has done anything. The midpoint is inside the beat by
 # construction, which is what `t_end` is on the record for.
 #
+# That midpoint is a *beat log* instant, and the seek is a *video* one. The two
+# are on different clocks — the log on `time.monotonic()`, the video on the
+# host's wall clock, which some hosts step by 0.75-0.81 s at a time (issues
+# #18, #215) — so the seek is the midpoint plus what `capture_clock` says the
+# clock had done by then. `capture_clock_shift` is that arithmetic and issue
+# #229 is why it is here: the recorder measured the steps, wrote them down,
+# and then cut every frame as though it had not. At 25 fps a 0.78 s step is
+# ~20 frames, and since nobody reviewing through this skill watches the video,
+# a frame cut 20 frames early *is* the demo to its reviewer.
+#
 # **These frames carry no caption, and that is deliberate.** The obvious next
 # step is to print each frame under the line that was on screen when its beat
 # ran, and it is not sound: the beat log and the video are on different clocks
@@ -84,6 +94,54 @@ SCENE_MAX_EXTRA = 3
 # Keep the last frame inside the file: an -ss exactly at the duration decodes
 # nothing.
 _FRAME_EDGE_S = 0.05
+
+
+def capture_clock_shift(record: object, beat: dict, at: float) -> float:
+    """Where `at`, an instant of the beat log, really sits in `media` (#229).
+
+    The beat log is `time.monotonic()` and Chromium stamps every screencast
+    frame with the host's *wall* clock, so a host that steps its clock moves
+    the two apart by the size of the step, at the instant of it (issues #18,
+    #215). The recorder measures that and writes it down as `capture_clock`;
+    this is the arithmetic that turns the record into a seek. Returns seconds
+    to **add** to `at` — negative for a clock that went backwards, which is the
+    direction that takes wall time out of the video.
+
+    Two rules, both from the envelope documentation in `timeline.py`:
+
+    * **only the steps up to `at`.** A step after the instant being seeked to
+      moved the frames after it, not this one.
+    * **on a merged demo, only this beat's own capture's steps.** A step is
+      sampled for as long as its capture runs, which is longer than the video
+      that capture produced, so a step's merged `t` can fall past the next
+      part's boundary — the `segment` a step names is the attribution, never
+      its timestamp. And an earlier part's step must not be applied at all:
+      `stitch()` lays the parts out by their *measured* durations, so what that
+      part lost is already in the later parts' offsets, and adding it again
+      would over-correct by a whole step. A step that names no segment is a
+      single take's, where every step is this take's.
+
+    Returns 0.0 for a document with no usable record, which is what a take
+    recorded before the field existed, and a merge that refused to guess at a
+    part nobody measured, both leave behind. That is the old behaviour: a frame
+    read as *around* its beat rather than at it.
+    """
+    if not isinstance(record, dict):
+        return 0.0
+    total = 0.0
+    for step in record.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        t, delta = step.get("t"), step.get("delta")
+        if not isinstance(t, (int, float)) or isinstance(t, bool):
+            continue
+        if not isinstance(delta, (int, float)) or isinstance(delta, bool):
+            continue
+        if "segment" in step and step["segment"] != beat.get("segment"):
+            continue
+        if float(t) <= at:
+            total += float(delta)
+    return total
 
 
 def frames_paths(out_dir: Path | str) -> tuple[Path, Path, Path]:
@@ -142,9 +200,11 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     """Write one review frame per beat, and an index to read them in order.
 
     Reads the timeline the take just wrote (or `doc`), extracts
-    `frames/beat-NN.png` at each beat's midpoint, and writes `frames/frames.md`
-    for a reviewer and `frames/frames.json` for a tool. Neither says anything
-    about what is *in* a frame — see the section header.
+    `frames/beat-NN.png` at each beat's midpoint — *in the video*, which is the
+    log's midpoint corrected by that beat's own `capture_clock` steps — and
+    writes `frames/frames.md` for a reviewer and `frames/frames.json` for a
+    tool. Neither says anything about what is *in* a frame — see the section
+    header.
 
     Returns the manifest. Safe to re-run: it is a pure function of the mp4 and
     the timeline, so a demo whose frames were deleted can get them back without
@@ -199,6 +259,14 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             duration = float(beats[-1].get("t_end") or 0.0)
     last = max(0.0, float(duration) - _FRAME_EDGE_S)
 
+    # The clock `mp4` is on, which is not the clock `beats` are on. Every seek
+    # below goes through it — see `capture_clock_shift` and issue #229.
+    record = doc.get("capture_clock")
+
+    def seek(beat: dict, at: float) -> float:
+        """A beat-log instant as a place to seek `mp4`, inside the file."""
+        return min(max(at + capture_clock_shift(record, beat, at), 0.0), last)
+
     planned: list[dict] = []
     for beat in beats:
         t_start, t_end = beat.get("t_start"), beat.get("t_end")
@@ -206,7 +274,7 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             continue
         if not isinstance(t_end, (int, float)) or t_end < t_start:
             t_end = t_start
-        middle = min(max((float(t_start) + float(t_end)) / 2, 0.0), last)
+        middle = seek(beat, (float(t_start) + float(t_end)) / 2)
         index = int(beat.get("index", len(planned)))
         planned.append({
             "file": f"beat-{index:02d}.png",
@@ -219,7 +287,10 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # a load finishing inside a long hold is invisible to it.
         if float(t_end) - float(t_start) < SCENE_MIN_SPAN_S:
             continue
-        window = (min(float(t_start), last), min(float(t_end), last))
+        # Corrected at both ends, for the same reason the midpoint is: an
+        # uncorrected window searches seconds of the video the beat never ran
+        # in, and the times it returns are already video times.
+        window = (seek(beat, float(t_start)), seek(beat, float(t_end)))
         for n, cut in enumerate(scene_times(mp4, *window), 1):
             planned.append({
                 "file": f"beat-{index:02d}-scene-{n}.png",

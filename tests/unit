@@ -92,6 +92,7 @@ from demo_recording.failure import (  # noqa: E402
     render_failure_marker,
     render_failure_md,
 )
+from demo_recording.frames import capture_clock_shift  # noqa: E402
 from demo_recording.markdown import _fmt_t, _md_cell  # noqa: E402
 from demo_recording.narration import (  # noqa: E402
     TTS_KEY_CHARS,
@@ -4632,6 +4633,233 @@ class MergedCaptureClock(unittest.TestCase):
         self.assertIsNone(mixed["capture_clock"]["sample_interval"])
 
 
+class FrameSeekCorrection(unittest.TestCase):
+    """The seek a review frame is cut at, against the record (#229).
+
+    `write_beat_frames` used to seek `demo.mp4` at the beat log's own midpoint,
+    on a host where the two clocks had already parted — 0.78 s, ~20 frames at
+    25 fps, in the one artifact a reviewer of this skill actually looks at.
+    This is the arithmetic that fixed it, driven by **scripted** records for
+    the reason `MergedCaptureClock` gives: a box either steps its clock or it
+    does not, and a case that only bites on the ones that do grades the box.
+
+    Every expectation below is a hand-written number rather than a second
+    implementation of the rule. `tests/smoke --segments-only` is where the
+    frames on disk are checked to have actually moved, against a clock that
+    harness measured itself.
+    """
+
+    def take(self, *steps: tuple[float, float]) -> dict:
+        """A single take's record: no step names a segment, because none can."""
+        return {
+            "steps": [{"t": t, "delta": d} for t, d in steps],
+            "total": round(sum(d for _, d in steps), 4),
+            "sample_interval": 0.02,
+            "min_step": 0.005,
+        }
+
+    def merged(self, *steps: tuple[float, float, str]) -> dict:
+        return {
+            "steps": [{"t": t, "delta": d, "segment": s} for t, d, s in steps],
+            "total": round(sum(d for _, d, _ in steps), 4),
+            "boundaries": [0.0, 7.5],
+        }
+
+    def test_a_step_before_the_instant_moves_the_seek_by_its_size(self):
+        record = self.take((1.5, -0.78))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), -0.78, places=4
+        )
+
+    def test_a_step_after_the_instant_does_not_move_it(self):
+        # It moved the frames after it. A seek corrected by a step that had
+        # not happened yet lands as far the *other* way as no correction at
+        # all, which is worse than the bug this replaced.
+        record = self.take((4.0, -0.78))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), 0.0
+        )
+
+    def test_a_step_exactly_at_the_instant_counts(self):
+        # The documented rule is "the steps up to `t`", and reference/limits.md
+        # and tests/smoke's own hand-written reader both read `<=`. A boundary
+        # nobody pins is a boundary two consumers will disagree about.
+        record = self.take((3.05, -0.78))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), -0.78, places=4
+        )
+
+    def test_steps_before_the_instant_accumulate(self):
+        record = self.take((1.5, -0.78), (33.0, -0.8), (65.0, -0.79))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "hold", 40.0), 40.0), -1.58, places=4
+        )
+
+    def test_a_forward_step_moves_the_seek_the_other_way(self):
+        record = self.take((1.5, 0.78))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), 0.78, places=4
+        )
+
+    def test_a_merged_beat_is_corrected_by_its_own_captures_steps(self):
+        record = self.merged((1.5, -0.78, "part1"), (9.0, -0.8, "part2"))
+        here = beat(4, "click", 9.5, segment="part2")
+        self.assertAlmostEqual(capture_clock_shift(record, here, 9.6), -0.8, places=4)
+
+    def test_an_earlier_parts_step_never_reaches_a_later_parts_frame(self):
+        """The one that is easy to get wrong, and the reason for the segment.
+
+        `stitch()` lays the parts out by their *measured* durations, so what
+        part one lost is already in part two's offset. Applying it again puts
+        every frame of part two a whole step from the beat it is named for.
+        """
+        record = self.merged((1.5, -0.78, "part1"))
+        here = beat(4, "click", 9.5, segment="part2")
+        self.assertAlmostEqual(capture_clock_shift(record, here, 9.6), 0.0)
+
+    def test_a_step_sampled_past_the_next_boundary_stays_with_its_own_part(self):
+        # A capture keeps sampling after its last frame, so a step measured in
+        # part one can carry a merged `t` past where part two starts. Keying on
+        # time would hand it to part two's frames; the segment is the
+        # attribution, and part one has no beat that late to claim it either.
+        record = self.merged((8.0, -0.8, "part1"))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(4, "click", 9.5, segment="part2"), 9.6),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(1, "click", 6.0, segment="part1"), 6.1),
+            0.0,
+        )
+
+    def test_a_single_takes_steps_apply_whatever_the_beat_says_about_segments(self):
+        # A single take's steps name no segment because there is only one
+        # capture; its beats carry `segment: null`. A rule that required the
+        # two to match would leave every single take uncorrected, which is
+        # every take this skill records outside `record_segments`.
+        record = self.take((1.5, -0.78))
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), -0.78, places=4
+        )
+
+    def test_a_take_with_no_record_is_seeked_where_it_always_was(self):
+        # A take recorded before the field existed, and a merged demo that
+        # refused to guess at a part nobody measured, both arrive here as
+        # None. Refusing to correct is the honest answer; inventing a zero
+        # correction and refusing to correct are the same seek.
+        for record in (None, {}, {"steps": None}, "capture_clock"):
+            self.assertAlmostEqual(
+                capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), 0.0
+            )
+
+    def test_a_malformed_step_is_skipped_and_the_rest_still_apply(self):
+        record = {
+            "steps": [
+                {"t": "1.5", "delta": -0.78},
+                {"t": 1.6, "delta": None},
+                {"t": 1.7},
+                "not a step",
+                {"t": 1.8, "delta": -0.8},
+            ]
+        }
+        self.assertAlmostEqual(
+            capture_clock_shift(record, beat(0, "caption", 3.0), 3.05), -0.8, places=4
+        )
+
+
+class CaptureClockMd(unittest.TestCase):
+    """What `timeline.md` says about the clock its own timestamps are not on.
+
+    The recorder warns about a stepped clock on stderr, at exit — minutes and
+    several thousand lines before anybody opens the sheet, and never at all for
+    a reader handed the artifact afterwards. Issue #229: a table of times that
+    are not the video's times, with nothing beside it saying so, is a document
+    that misleads a reader who does everything right.
+    """
+
+    TABLE = "| # | start | end |"
+
+    def doc(self, record: object, **over: object) -> str:
+        return render_timeline_md(
+            envelope(
+                capture_clock=record,
+                beats=[beat(0, "caption", 1.0), beat(1, "click", 12.0)],
+                **over,
+            )
+        )
+
+    def test_a_stepped_clock_is_stated_with_its_total(self):
+        text = self.doc({"steps": [{"t": 3.0, "delta": -0.78}], "total": -0.78})
+        self.assertIn("-780 ms", text)
+        self.assertIn("0.78s shorter", text)
+
+    def test_every_step_is_named_with_its_offset(self):
+        text = self.doc(
+            {"steps": [{"t": 3.0, "delta": -0.78}, {"t": 35.2, "delta": -0.8}]}
+        )
+        self.assertIn("-780 ms at 3.0s", text)
+        self.assertIn("-800 ms at 35.2s", text)
+
+    def test_it_sits_above_the_timestamps_it_is_about(self):
+        # A caveat a reader meets *after* the numbers is a caveat they have
+        # already been misled by.
+        text = self.doc({"steps": [{"t": 3.0, "delta": -0.78}], "total": -0.78})
+        self.assertLess(text.index("-780 ms"), text.index(self.TABLE))
+
+    def test_a_forward_step_says_the_video_is_longer(self):
+        # The direction is the whole content of the sentence: a reader told
+        # "shorter" about a video that came out long goes looking for frames
+        # that are not missing.
+        text = self.doc({"steps": [{"t": 3.0, "delta": 0.78}], "total": 0.78})
+        self.assertIn("longer", text)
+        self.assertNotIn("shorter", text)
+
+    def test_a_clock_that_held_still_says_nothing(self):
+        text = self.doc({"steps": [], "total": 0.0})
+        self.assertNotIn("wall clock stepped", text)
+
+    def test_a_take_with_no_record_says_nothing(self):
+        # Including a merged demo that refused to guess at a part nobody
+        # measured. There is nothing to report that would not be a guess.
+        for record in (None, {}, "capture_clock"):
+            self.assertNotIn("wall clock stepped", self.doc(record))
+
+    def test_two_steps_that_cancel_are_still_reported(self):
+        # Keyed on the steps, not on the total: a clock that went back 0.78 s
+        # and forward again moved every beat between the two, and a paragraph
+        # that appears only for a non-zero total would say nothing about it.
+        text = self.doc(
+            {
+                "steps": [{"t": 3.0, "delta": -0.78}, {"t": 9.0, "delta": 0.78}],
+                "total": 0.0,
+            }
+        )
+        self.assertIn("-780 ms at 3.0s", text)
+        self.assertIn("+780 ms at 9.0s", text)
+
+    def test_a_merged_step_names_the_capture_that_measured_it(self):
+        text = self.doc(
+            {
+                "steps": [{"t": 9.0, "delta": -0.8, "segment": "part2"}],
+                "total": -0.8,
+                "boundaries": [0.0, 7.5],
+            }
+        )
+        self.assertIn("-800 ms at 9.0s (`part2`)", text)
+
+    def test_a_long_list_of_steps_is_elided_and_the_total_is_not(self):
+        # A take on the box of #215 steps every 32.2 s. The count and the
+        # total stay exact; only the list is cut, and it says it was.
+        steps = [{"t": 32.2 * n, "delta": -0.8} for n in range(1, 10)]
+        text = self.doc({"steps": steps, "total": -7.2})
+        self.assertIn("…and 3 more", text)
+        self.assertIn("-7200 ms", text)
+
+    def test_a_malformed_step_does_not_reach_the_page(self):
+        text = self.doc({"steps": [{"t": None, "delta": -0.78}], "total": -0.78})
+        self.assertNotIn("wall clock stepped", text)
+
+
 # --------------------------------------------------------------------------
 # Fault injection
 # --------------------------------------------------------------------------
@@ -4832,6 +5060,72 @@ INJECTIONS = [
         [
             "MergedCaptureClock.test_a_part_that_measured_nothing_keeps_its_own_record_in_segments",
         ],
+    ),
+    (
+        # A frame seeked with a step that had not happened when the beat ran.
+        # The correction is applied, the record is right, and every frame is
+        # moved by the *next* step instead of by the ones before it — as far
+        # the other way as no correction at all (issue #229).
+        "a frame is corrected by the steps that came after it",
+        "frames.py",
+        "        if float(t) <= at:",
+        "        if True:",
+        [
+            "FrameSeekCorrection.test_a_step_after_the_instant_does_not_move_it",
+        ],
+    ),
+    (
+        # The correction with its sign flipped. Everything is still applied to
+        # the right frames, in the right order, twice as far in the wrong
+        # direction — 40 frames at 25 fps for one step of the box in #215.
+        "the seek correction is applied backwards",
+        "frames.py",
+        "            total += float(delta)",
+        "            total -= float(delta)",
+        [
+            "FrameSeekCorrection.test_a_step_before_the_instant_moves_the_seek_by_its_size",
+            "FrameSeekCorrection.test_a_forward_step_moves_the_seek_the_other_way",
+            "FrameSeekCorrection.test_a_merged_beat_is_corrected_by_its_own_captures_steps",
+        ],
+    ),
+    (
+        # Every step applied to every part's frames. `stitch()` already laid
+        # the parts out by their measured durations, so part one's loss is in
+        # part two's offset — applying it again moves every frame of part two
+        # by a whole extra step, which is worse than not correcting at all.
+        "a merged frame is corrected by every part's steps, not its own part's",
+        "frames.py",
+        '        if "segment" in step and step["segment"] != beat.get("segment"):',
+        "        if False:",
+        [
+            "FrameSeekCorrection.test_an_earlier_parts_step_never_reaches_a_later_parts_frame",
+            "FrameSeekCorrection.test_a_step_sampled_past_the_next_boundary_stays_with_its_own_part",
+        ],
+    ),
+    (
+        # The state everything was in before #229 on the reading side: the
+        # step is measured, written down, merged across a stitch — and the
+        # document a human opens says nothing about it, so the beat times in
+        # the table read as times in the video.
+        "timeline.md stops saying the clock its timestamps are not on stepped",
+        "timeline.py",
+        "    if not steps:\n        return []",
+        "    if True:\n        return []",
+        [
+            "CaptureClockMd.test_a_stepped_clock_is_stated_with_its_total",
+            "CaptureClockMd.test_every_step_is_named_with_its_offset",
+            "CaptureClockMd.test_two_steps_that_cancel_are_still_reported",
+        ],
+    ),
+    (
+        # The direction dropped. A reader told the video came out short when
+        # it came out long goes looking for frames that are not missing —
+        # the same break `CaptureClock`'s own warning is graded against.
+        "timeline.md says the video came out short whichever way the clock went",
+        "timeline.py",
+        "f\"{abs(total):.2f}s {'shorter' if total < 0 else 'longer'} than the \"",
+        'f"{abs(total):.2f}s shorter than the "',
+        ["CaptureClockMd.test_a_forward_step_says_the_video_is_longer"],
     ),
     (
         "coverage accumulates criteria from the tags instead of the declaration",

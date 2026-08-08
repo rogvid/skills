@@ -59,7 +59,11 @@ from .markdown import _fmt_t, _md_cell
 #                          still, which is a different answer from the field
 #                          being absent. **A beat the log puts at `t` sits at
 #                          `t + (the steps before it)` in the video** —
-#                          reference/limits.md has the measurement.
+#                          reference/limits.md has the measurement, and
+#                          `frames.capture_clock_shift` is this package's own
+#                          implementation of that sentence: every review frame
+#                          is seeked with it, and `render_timeline_md` says so
+#                          above the beat table (issue #229).
 #                          On a merged demo (`stitch`) every part's steps are
 #                          here, moved onto the stitched clock by that part's
 #                          `offset`, and each step also carries the `segment`
@@ -343,6 +347,12 @@ MAX_ISSUES = 200
 PUMP_INTERVAL_S = 0.1
 ATTRIBUTION_SLACK_S = 0.5
 
+# How many wall-clock steps timeline.md names before it says "and N more". A
+# take on the WSL2 box of #215 steps every 32.2 s, so a long one accumulates
+# them; the count and the total are always exact, and the list is what gets
+# elided. Six keeps the paragraph one screen wide.
+_CLOCK_STEPS_SHOWN = 6
+
 
 class StrictTakeFailed(RuntimeError):
     """A strict take finished, but recorded a problem it refuses to pass.
@@ -450,6 +460,63 @@ def _coverage_md(coverage: object) -> list[str]:
     return out
 
 
+def _capture_clock_md(record: object) -> list[str]:
+    """What the video's own clock did, printed beside the times it moved (#229).
+
+    The recorder says this on stderr as the take exits — thousands of lines
+    before anybody opens this file, and never at all for a reader handed the
+    artifact afterwards. The beat times below are `time.monotonic()` and
+    `media` is stamped with the host's wall clock, so a host that stepped its
+    clock parted the two and **every timestamp in the table under this
+    paragraph inherits it**. That is what puts it here rather than in a
+    footnote: a table of times that are not the video's times, with nothing
+    saying so, is the artifact-lies shape.
+
+    Silent when the clock held still and when there is no record at all. Those
+    are different answers — an empty `steps` is a measurement — but neither is
+    something to caveat a table with, and a merged demo that refused to guess
+    at a part nobody measured (`capture_clock: null`) has nothing to report
+    that would not be a guess.
+
+    Keyed on `steps` rather than on `total`: two steps that cancel total zero
+    and still moved the beats between them.
+    """
+    if not isinstance(record, dict):
+        return []
+    steps = [
+        step
+        for step in record.get("steps") or []
+        if isinstance(step, dict)
+        and isinstance(step.get("t"), (int, float))
+        and isinstance(step.get("delta"), (int, float))
+    ]
+    if not steps:
+        return []
+    total = sum(float(step["delta"]) for step in steps)
+    listed = ", ".join(
+        f"{float(step['delta']) * 1000:+.0f} ms at {float(step['t']):.1f}s"
+        + (f" (`{_md_cell(step['segment'])}`)" if step.get("segment") else "")
+        for step in steps[:_CLOCK_STEPS_SHOWN]
+    )
+    if len(steps) > _CLOCK_STEPS_SHOWN:
+        listed += f", …and {len(steps) - _CLOCK_STEPS_SHOWN} more"
+    return [
+        f"**This host's wall clock stepped {total * 1000:+.0f} ms while "
+        f"the recording ran, so the times in the table below are not the "
+        f"times in the video.** Chromium stamps every screencast frame with "
+        f"that clock and these beats are on `time.monotonic()`, which is why "
+        f"the two can part company at all: the recording came out "
+        f"{abs(total):.2f}s {'shorter' if total < 0 else 'longer'} than the "
+        f"take's own wall time, and a beat this table puts at `t` sits at `t` "
+        f"plus its own capture's steps up to `t`. The steps were {listed}. "
+        f"`capture_clock` in timeline.json is the record, and the review "
+        f"frames in `frames/` are already cut with it "
+        f"([#18](https://github.com/rogvid/skills/issues/18), "
+        f"[#215](https://github.com/rogvid/skills/issues/215)).",
+        "",
+    ]
+
+
 def render_timeline_md(doc: dict) -> str:
     """Render a timeline document as markdown, stills embedded.
 
@@ -537,6 +604,11 @@ def render_timeline_md(doc: dict) -> str:
     # scrolls past 28 beats first has already formed the impression the
     # coverage report exists to test (issue #12).
     out += _coverage_md(doc.get("coverage"))
+    # Immediately above the table, and not in a section of its own: what it
+    # says is that the two columns after it are on a clock the video is not on,
+    # and a caveat a reader meets after the numbers is a caveat they have
+    # already been misled by (issue #229).
+    out += _capture_clock_md(doc.get("capture_clock"))
     # The exit column only exists when something in this take has one — a web
     # timeline would otherwise carry an empty column on every row. A `run` beat
     # whose status could not be read shows "?" rather than blank, so the

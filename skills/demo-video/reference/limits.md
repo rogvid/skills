@@ -109,14 +109,20 @@ rather than by widening a bar, which is why `MAX_SKEW_DRIFT_S` could be
 restored at 250 ms after being deleted in
 [#217](https://github.com/rogvid/skills/issues/217).
 
-What to do: prefer `timeline.json`'s `capture_clock`, which records every step
-with its offset and size, and correct with it. On a **stitched** demo the same
+What to do, if you are reading a timestamp yourself: prefer `timeline.json`'s
+`capture_clock`, which records every step with its offset and size, and correct
+with it. The two consumers inside this skill already do —
+`frames/beat-NN.png` is seeked with it and `timeline.md` names every step above
+the beat table ([#229](https://github.com/rogvid/skills/issues/229)), so what
+is left uncorrected is a time *you* take out of the table and scrub to. On a
+**stitched** demo the same
 field carries every part's steps, each naming the `segment` it was measured in:
 correct a beat with the steps of *its own* segment up to its `t_start`, never
 with `total` and never with an earlier part's — that part's lost wall time is
 already in the offset `stitch()` laid it out by, and applying it twice moves the
 beat by a whole extra step ([#225](https://github.com/rogvid/skills/issues/225)).
-Failing all that, read a review
+Failing all that — a take recorded before the field existed, or a stitched demo
+one of whose parts carried no record — read a review
 frame as *around* its beat, do not build anything that needs a beat timestamp
 to be exact to the frame, and when a frame and its caption disagree by a
 fraction of a second, suspect the capture before the

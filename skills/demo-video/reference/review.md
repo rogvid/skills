@@ -20,9 +20,15 @@ They are aligned to **beats, not to a clock**. The old advice was
 static one twice. Each frame is taken at its beat's **midpoint** — `t_start` is
 0% into the caption bar's fade and before the verb has done anything.
 
-**How accurate that aim is, honestly.** The beat log is wall-clock; the video
-is whatever Chromium's screencast managed to record, and it drops wall time
-during idle stretches ([#18](https://github.com/rogvid/skills/issues/18)). So a
+**How accurate that aim is, honestly.** The midpoint is an instant of the beat
+log, and the seek is an instant of the video; the two are on different clocks.
+The part of that gap the recorder can *measure* — a host stepping its wall
+clock, 0.75–0.81 s at a time on the box of
+[#215](https://github.com/rogvid/skills/issues/215) — is taken out of the seek
+before the frame is cut, using that take's own `capture_clock`
+([#229](https://github.com/rogvid/skills/issues/229)). What is left is the part
+nothing measures: the video is whatever Chromium's screencast managed to
+record, so a
 frame cut at a beat's midpoint shows a moment slightly *ahead* of that beat in
 the demo's own story — measured at **80–200 ms** on instrumented takes, and up
 to the **~0.7 s** of browser start-up no test code can cover, on a take that
