@@ -457,14 +457,25 @@ def _clock_epoch_ms(value: str) -> int:
 #                                                 monotonic clock and 711 ms
 #                                                 *backwards* on Chromium's
 #
-# That host steps -0.75 to -0.81 s every 32.2 s, like a metronome, which in a
-# 19 s take is a coin flip — and is why the same storyboard loses ~0.8 s of
-# video on some runs and none on others with nothing else different. Seven
-# takes of one storyboard with this sampler beside them: the four whose window
-# contained a step encoded 0.78 s less video than the three that did not, to
-# within 12 ms, every time. An idle page does not do this — 30 s of a take
-# with nothing painting at all, seven screencast frames in total, lost nothing
-# but the one step.
+# **What that host does, re-measured on 2026-08-08** (issue #247; the numbers
+# below are this file's own, taken with a 1 ms sampler over 300 s, and they
+# replace the "-0.75 to -0.81 s every 32.2 s" this comment used to state as a
+# constant). The wall clock is a **rectangular pulse train**: the offset jumps
+# +10.03 to +10.10 s, holds flat for 40-230 ms, then falls 10.53-10.60 s, and
+# lands 0.43-0.56 s *below* where it started. Period 5.509 s (5.500-5.517
+# across 55 pulses), and between pulses the offset is flat to under 10 us.
+# CLOCK_REALTIME_COARSE moves with it, so this is the kernel's timekeeper
+# being written, not a vDSO read glitch.
+#
+# The permanent part of that is a **rate error, not a metronome**: against an
+# NTP server over 90 s, CLOCK_MONOTONIC ran +10.01 % fast and CLOCK_REALTIME
+# kept true time to -0.40 %, and `adjtimex` reports `tick = 11000` — the
+# kernel's +10 % clamp. Something (Hyper-V/`systemd-timesyncd` on WSL2) is
+# re-stepping the wall clock every 5.5 s to undo a monotonic clock that is
+# running fast. **So the size and the period are properties of one sick host
+# on one day, not of this recorder** — #215's 0.78 s every 32.2 s and this
+# 0.50 s every 5.5 s are the same shape at different settings. Nothing here
+# may be tuned to either.
 #
 # None of that is fixable here. The clock is the host's, the timestamp is the
 # protocol's, and the recorder cannot re-stamp a frame it never sees. What it
@@ -473,6 +484,15 @@ def _clock_epoch_ms(value: str) -> int:
 # beat at `t_start` can work out that the beat really sits at
 # `t_start + (sum of the steps before it)` in the video, instead of
 # discovering it as an unexplained 0.8 s.
+#
+# **That correction was verified against the encode, and it is exact.** Six
+# takes, seven caption transitions each, the transitions read off `demo.mp4`'s
+# pixels and compared with the beat log: uncorrected, the video ran up to
+# 1.50 s ahead of the log by 13.5 s into the take; corrected by a *correctly
+# sampled* wall-clock offset, every one of the 38 transitions landed within
+# 101 ms, and within 40 ms at the caption-on edges (a caption fade takes two
+# frames to cross, which is the other 60). #245 read the same field as noise;
+# it was not the field, it was the sampler — see `INTERVAL_S` below.
 class _CaptureClock:
     """CLOCK_REALTIME against CLOCK_MONOTONIC, for the life of one capture.
 
@@ -484,6 +504,28 @@ class _CaptureClock:
     # A step is instantaneous, so this bounds only *where* it gets reported,
     # and 20 ms is inside the 40 ms one frame of the 25 fps encode covers —
     # under the resolution anything reading the answer has.
+    #
+    # **The sleep between samples must not be timed on the clock being
+    # sampled, and `threading.Event.wait` is** (issue #247, and this cost a
+    # whole issue's worth of wrong diagnosis). On the interpreter `uv`
+    # installs — CPython 3.13.11 from python-build-standalone, built against
+    # a glibc without `sem_clockwait` — a lock acquire with a timeout falls
+    # back to `sem_timedwait`, whose deadline is an absolute CLOCK_REALTIME
+    # instant. So a sampler that happens to call `wait()` while the host's
+    # +10 s pulse is up has set a deadline 10 s in the future, the pulse ends,
+    # and it sleeps until the wall clock climbs back — which on this host is
+    # the *next* pulse, 5.5 s later. Measured directly: 81 waits of 20 ms in
+    # 25 s instead of ~1140, five of them 5.44-5.49 s long, every one entered
+    # with the offset elevated.
+    #
+    # Once trapped the sampler is phase-locked into the pulses and every
+    # sample it takes from then on is taken *inside* one, so it reports the
+    # top of the transient it exists to reject. Eight idle 20 s runs of the
+    # old loop against a 1 ms reference: `total` wrong by +10.59 to +10.60 s,
+    # every time. Six recorded takes: `total` +9.09 s where the truth was
+    # -2.00 s. `time.sleep` is `clock_nanosleep(CLOCK_MONOTONIC)` and is not
+    # affected; `stop()` therefore costs up to one interval of latency, which
+    # is the whole price.
     INTERVAL_S = 0.02
     # Under this a reading is the scheduling gap between the two `time` calls,
     # not a step. Measured idle: below 0.4 ms, four orders under a real one.
@@ -492,15 +534,32 @@ class _CaptureClock:
     # loud. One frame of the encode: below that the video and the log still
     # agree about which frame a beat is on.
     WARN_S = 0.04
+    # **The record only means anything if the sampler kept its interval.** A
+    # step is found by differencing consecutive samples, so a sampler that was
+    # away for a second cannot say when — or whether — the clock moved inside
+    # it, and a consumer summing `steps` before a beat would be adding up
+    # something nobody watched. So the widest gap between samples is measured
+    # and reported, and over this bound the record refuses to answer instead
+    # of guessing. 250 ms is 12x the nominal interval, and 22x under the
+    # 5.5 s the trapped sampler above produced: the two populations are an
+    # order of magnitude apart, not a comfortable margin.
+    MAX_GAP_S = 0.25
 
     def __init__(self) -> None:
         self.steps: list[dict] = []
+        # The widest interval between two consecutive samples, and how many
+        # were taken. Both are the sampler grading its own coverage; see
+        # MAX_GAP_S.
+        self.max_gap = 0.0
+        self.samples = 0
         self._t0 = 0.0
+        self._started = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self, t0: float) -> None:
         self._t0 = t0
+        self._started = True
         self._thread = threading.Thread(
             target=self._run, name="demo-video-clock", daemon=True
         )
@@ -508,18 +567,24 @@ class _CaptureClock:
 
     def _run(self) -> None:
         previous = time.time() - time.monotonic()
+        last = time.monotonic()
         while not self._stop.is_set():
+            now = time.monotonic()
+            self.max_gap = max(self.max_gap, now - last)
+            last = now
+            self.samples += 1
             offset = time.time() - time.monotonic()
             delta = offset - previous
             if abs(delta) >= self.MIN_STEP_S:
                 self.steps.append(
                     {
-                        "t": round(time.monotonic() - self._t0, 3),
+                        "t": round(now - self._t0, 3),
                         "delta": round(delta, 4),
                     }
                 )
             previous = offset
-            self._stop.wait(self.INTERVAL_S)
+            # Not `self._stop.wait(...)` — see INTERVAL_S.
+            time.sleep(self.INTERVAL_S)
 
     def stop(self) -> None:
         self._stop.set()
@@ -531,16 +596,57 @@ class _CaptureClock:
     def total(self) -> float:
         return sum(step["delta"] for step in self.steps)
 
+    @property
+    def measured(self) -> bool:
+        """Did the sampler cover the take closely enough to be believed?"""
+        return self._started and self.samples > 1 and self.max_gap <= self.MAX_GAP_S
+
+    def note(self) -> str | None:
+        """Why the record is refusing to answer, or None when it is not."""
+        if self.measured:
+            return None
+        if not self._started or self.samples <= 1:
+            return (
+                "the wall-clock sampler never ran, so nothing here knows "
+                "whether the video's clock moved under the beat log"
+            )
+        return (
+            f"the wall-clock sampler was away for up to {self.max_gap:.2f}s "
+            f"against its {self.INTERVAL_S:.2f}s interval, so it cannot say "
+            f"when — or whether — the clock moved inside that gap. Reporting "
+            f"nothing rather than a total nobody watched (issue #247)"
+        )
+
     def report(self) -> dict:
+        """The `capture_clock` envelope field. See timeline.py for the schema.
+
+        `measured` first, and `steps`/`total` empty and null when it is false:
+        a consumer that reaches straight for `total` gets `None` and fails
+        loudly, rather than correcting a beat by a number the sampler did not
+        see. Same shape as `content`, for the same reason.
+        """
+        ok = self.measured
         return {
-            "steps": list(self.steps),
-            "total": round(self.total, 4),
+            "measured": ok,
+            "note": self.note(),
+            "steps": list(self.steps) if ok else [],
+            "total": round(self.total, 4) if ok else None,
             "sample_interval": self.INTERVAL_S,
             "min_step": self.MIN_STEP_S,
+            "max_gap": round(self.max_gap, 4),
+            "max_gap_limit": self.MAX_GAP_S,
         }
 
     def warning(self) -> str | None:
         """What to tell the author, or None when the two clocks agreed."""
+        if not self.measured:
+            return (
+                f"demo-video: WARNING — this take's wall clock could not be "
+                f"measured: {self.note()}. demo.mp4 is on the host's wall "
+                f"clock and the beat log is on the monotonic one, so if they "
+                f"parted company during the take, nothing in timeline.json "
+                f"can tell you by how much. `capture_clock.measured` is false."
+            )
         if abs(self.total) < self.WARN_S:
             return None
         when = ", ".join(
@@ -555,7 +661,8 @@ class _CaptureClock:
             f"{'shorter' if self.total < 0 else 'longer'} than the take's own "
             f"wall time and every beat after the step sits that far "
             f"{'ahead of' if self.total < 0 else 'behind'} the frame it names. "
-            f"timeline.json records it as `capture_clock`; issues #18 and #215."
+            f"timeline.json records it as `capture_clock`; issues #18, #215, "
+            f"#247."
         )
 
 

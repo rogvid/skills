@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~40 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~41 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -183,7 +183,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 45 entries, ~40 min
+tests/smoke-inject                # all 48 entries, ~41 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1671,7 +1671,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-45 entries, 12 arms, ~39.5 min of takes
+48 entries, 12 arms, ~41.0 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1704,7 +1704,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--segments-only` | 10 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)) |
+| `--segments-only` | 13 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
@@ -1713,7 +1713,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 39 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 40 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1989,10 +1989,13 @@ knows is missing is worse than one that is openly absent.
   frame with the host's *wall* clock and Playwright turns that into the frame's
   position in the webm; the beat log is `time.monotonic()`. A host that steps
   its wall clock therefore takes that much wall time out of `demo.mp4` and
-  leaves the log where it was. The box this was found on steps **-0.75 to
-  -0.81 s every 32.2 s**, which is a coin flip inside a 19 s take and is the
-  whole of the bimodality
-  [#215](https://github.com/rogvid/skills/issues/215) reported.
+  leaves the log where it was. The box this was found on stepped **-0.75 to
+  -0.81 s every 32.2 s** in April, which is a coin flip inside a 19 s take and
+  is the whole of the bimodality
+  [#215](https://github.com/rogvid/skills/issues/215) reported — and **-0.50 s
+  every 5.5 s** when it was re-measured in August
+  ([#247](https://github.com/rogvid/skills/issues/247)). Same shape, different
+  settings. Nothing here is tuned to either number.
 
   What is fixed: the recorder measures the same clock and writes it into
   `timeline.json` as `capture_clock`, warns on the way out, and this harness
@@ -2007,49 +2010,49 @@ knows is missing is worse than one that is openly absent.
   [#18](https://github.com/rogvid/skills/issues/18) is that boundary, and it
   matters most to [#8](https://github.com/rogvid/skills/issues/8).
 
-- **…and the correction above rests on a premise that did not reproduce on
-  2026-08-08.** `capture_clock` and `HostClock` both sample
-  `time.time() - time.monotonic()` every 20 ms and call a change a step. On a
-  host whose wall clock *oscillates faster than that*, what they record is an
-  aliased fragment of the oscillation, and the video does not follow it.
-  Measured on `main` @ `bae7f74`, on the same Playwright 1.62.0 / Chromium
-  151.0.7922.34 [#215](https://github.com/rogvid/skills/issues/215) used —
-  a standalone sampler, no browser, 180 s, **66 events in 33 identical pairs**:
-  `time.time()` jumps **+10.08 to +10.36 s and returns −10.58 to −10.60 s about
-  60 ms later, every ~5.5 s**, with `d_monotonic` a steady 20 ms throughout. A
-  take competing with Playwright catches a fragment of that ~60 ms pulse, which
-  is why `capture_clock` reports a single step of −1.72 to −1.81 s and never
-  the ±10 s edges an idle sampler sees.
+- **~~…and the correction above rests on a premise that did not reproduce on
+  2026-08-08.~~ Retracted; the premise holds and the *sampler* was broken**
+  ([#247](https://github.com/rogvid/skills/issues/247)). The entry that stood
+  here read the field as an aliased fragment of an oscillation the video did
+  not follow. Both halves of that are wrong, and the way it went wrong is
+  worth keeping:
 
-  What the video did about it: eight `--segments-only` runs, four with a
-  recorded step, the closing caption's onset read off `demo.mp4` against
-  `timeline.json`. Stepped runs **0, +20, −70, −60 ms**; step-free runs **0,
-  +40, +10, +20 ms**; durations 14.44–14.52 s either way. Runs whose step
-  landed *six seconds before* the caption still put the caption within 20 ms of
-  the log, where the documented consequence predicts 1.7 s — 43 frames. One
-  excursion did reach the video and is the exception that explains the rule: a
-  run whose record held two **+10.36 s** steps encoded a 24.96 s demo, part2 at
-  18.32 s against a usual 7.9 s, with the closing caption +10.25 s past the
-  log. That pulse lasted long enough for Chromium to stamp frames across it;
-  the aliased fragments are not pulses at all.
+  - **It is not aliasing.** The waveform, at 1 ms over 300 s, is a
+    *rectangular* pulse: the offset jumps +10.03 to +10.10 s, holds flat for
+    40–230 ms, falls 10.53–10.60 s, and lands 0.43–0.56 s below where it
+    started, every 5.509 s. Sub-sampling that 1 ms record at 20 ms — the rate
+    `capture_clock` uses — recovers **110 of 110 edges** and a total within
+    2 % of the truth. A 20 ms sampler is entirely adequate to this waveform.
+  - **The sampler was captured by the clock it was sampling.** Both
+    `_CaptureClock` and `HostClock` slept on `threading.Event.wait`, whose
+    deadline on the interpreter `uv` installs (CPython 3.13.11 from
+    python-build-standalone, built without `sem_clockwait`) is an absolute
+    `CLOCK_REALTIME` instant. Measured directly: 81 waits of 20 ms in 25 s
+    instead of ~1140, five of them **5.44–5.49 s** long, every one entered
+    while the +10 s pulse was up. A sampler that reads the clock inside a
+    pulse sleeps until the wall clock climbs back — the *next* pulse — and is
+    then phase-locked, sampling only ever inside pulses. Eight idle 20 s runs
+    of the old loop against a 1 ms reference: `total` wrong by **+10.59 to
+    +10.60 s**, every time. Six recorded takes: `total` **+9.09 s** where the
+    truth was **−2.00 s**.
+  - **The video does follow the wall clock.** Six takes, seven caption
+    transitions each, located by luma straight off `demo.mp4`: uncorrected,
+    the video was up to **−1.50 s** from the beat log by 13.5 s in; corrected
+    by a correctly sampled offset, **all 38 landed within 101 ms**, and within
+    40 ms at the caption-on edges.
+  - **And this file's own check could not catch it**, because `HostClock` had
+    the recorder's bug line for line. Two samplers, two processes, no shared
+    import — and they agreed on `+9.09 s` because they failed the same way.
+    That is the catalogue's *check that shares the bug's blind spot*, and it
+    is the reason `covered` / `max_gap` now exist on both sides: a reading
+    that cannot state how well it covered the take is not a reading.
 
-  **So this harness subtracts a number that means nothing, and goes red about
-  it.** Six `--segments-only` runs on `main`: the four with no recorded step
-  passed, and **both runs with one failed** — the caption search window centred
-  at `3.07 − 1.771 = 1.30 s` while the caption sat at 2.56 s, where a step-free
-  run puts it, reported as "the window is already centred on where the host's
-  measured wall-clock steps put this beat in the video, so this slide is
-  something else". The bars were not widened for it, and should not be: a bar
-  that absorbs an arbitrary aliased offset grades nothing.
-
-  It is also why [#229](https://github.com/rogvid/skills/issues/229) is not
-  buildable yet. Correcting a review frame's seek with the record was
-  implemented and measured: **three of those four stepped runs then failed
-  `_check_frame_captions`**, with `beat-12.png` cut at 10.53 s instead of
-  12.27 s and showing the screen before its caption arrived — the correction
-  making the review sheet wrong, caught by the one check that reads pixels
-  rather than timestamps. Not landed. The whole measurement, and what would
-  settle it, is [#245](https://github.com/rogvid/skills/issues/245).
+  What is left of the earlier entry is one real limit, restated: **a frame
+  stamped inside the ~50 ms pulse inflates the encode and costs the tail.**
+  Two of the six takes above encoded 17.2 s instead of 13.96 s and lost their
+  last three transitions. `capture_clock` records the pulse honestly (both
+  edges, so the cumulative sum still telescopes correctly), but it cannot tell
+  a consumer that the encoder padded. Nothing grades that yet.
 
 - **The terminal arm loses roughly a second more than its host clock explains,
   and nothing here knows why.** The correction is exact on the web arm — six
@@ -2181,9 +2184,12 @@ knows is missing is worse than one that is openly absent.
   **What it turned out to be.** Playwright's driver, instrumented to log every
   screencast frame, caught two consecutive frames 84 ms apart on the monotonic
   clock and **711 ms backwards** on Chromium's. Chromium's frame timestamps are
-  the host's wall clock; a separate sampler that never opens a browser shows
-  that clock stepping -0.75 to -0.81 s every 32.2 s on this box, at the same
-  instants and the same sizes to the tenth of a millisecond. Seven takes of one
+  the host's wall clock; a separate sampler that never opens a browser showed
+  that clock stepping -0.75 to -0.81 s every 32.2 s on this box **on the day
+  that was measured**, at the same instants and the same sizes to the tenth of
+  a millisecond. (Four months later the same box was doing -0.50 s every
+  5.5 s. The size and the period are the host's; only the shape is stable.
+  See [#247](https://github.com/rogvid/skills/issues/247).) Seven takes of one
   storyboard: the four whose window contained a step encoded 0.78 s less video
   than the three that did not, to within 12 ms. The bars are now on the
   residual after that is subtracted, and the residual is 20-140 ms on an idle

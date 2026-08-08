@@ -4316,32 +4316,51 @@ class _ScriptedTime:
     def time(self) -> float:
         return self.mono + self.offsets[min(self.index, len(self.offsets) - 1)]
 
+    def sleep(self, _seconds: float) -> None:
+        """One sampling interval, driven by the sampler's own sleep.
+
+        The sampler sleeps on `time.sleep` rather than on its stop Event, and
+        for a reason a scripted clock has to respect rather than paper over:
+        `Event.wait`'s deadline is CLOCK_REALTIME on the interpreter `uv`
+        installs, which made the real sampler a function of the clock it was
+        sampling (issue #247). Advancing here, and `_ScriptedStop` counting
+        down separately, keeps this harness honest about which call does
+        which job.
+        """
+        self.index += 1
+        self.mono += self.step_by if self.step_by is not None else self.interval
+
+    step_by: float | None = None
+
 
 class _ScriptedStop:
-    """Stands in for the sampler's stop Event, driving `_ScriptedTime`."""
+    """Stands in for the sampler's stop Event, counting the samples out."""
 
-    def __init__(self, clock: _ScriptedTime, samples: int) -> None:
-        self.clock = clock
+    def __init__(self, samples: int) -> None:
         self.left = samples
 
     def is_set(self) -> bool:
-        return self.left <= 0
+        self.left -= 1
+        return self.left < 0
 
     def set(self) -> None:
-        self.left = 0
-
-    def wait(self, _timeout: float) -> None:
-        self.left -= 1
-        self.clock.index += 1
-        self.clock.mono += self.clock.interval
+        self.left = -1
 
 
-def sampled(offsets: list[float]) -> _CaptureClock:
-    """Run the capture-clock sampler over a scripted wall clock."""
+def sampled(offsets: list[float], step_by: float | None = None) -> _CaptureClock:
+    """Run the capture-clock sampler over a scripted wall clock.
+
+    `step_by` is how much monotonic time each sleep really costs — the
+    sampler's own coverage measurement, and the thing that decides whether the
+    record it produces is allowed to claim anything at all. Left None it is
+    the nominal interval, i.e. a sampler that kept up.
+    """
     clock = _CaptureClock()
     fake = _ScriptedTime(offsets)
+    fake.step_by = step_by
     clock._t0 = fake.mono
-    clock._stop = _ScriptedStop(fake, len(offsets))  # type: ignore[assignment]
+    clock._started = True
+    clock._stop = _ScriptedStop(len(offsets))  # type: ignore[assignment]
     real = core_module.time
     core_module.time = fake  # type: ignore[assignment]
     try:
@@ -4461,9 +4480,76 @@ class CaptureClock(unittest.TestCase):
         # "the clock held still" from "nobody looked" has to assume the worst
         # of every timeline ever written.
         rec = recorder(self)
+        rec._capture_clock = sampled([0.0] * 6)
         doc = rec._timeline_doc()
+        self.assertIs(doc["capture_clock"]["measured"], True)
         self.assertEqual(doc["capture_clock"]["steps"], [])
         self.assertEqual(doc["capture_clock"]["total"], 0.0)
+
+    # -- and the third answer, which is the one that had to be added ---------
+    #
+    # "The clock held still", "nobody looked" and "somebody looked and cannot
+    # vouch for what they saw" are three different things, and issue #247 is
+    # what the third one costs when it is reported as the first. The real
+    # sampler slept on `threading.Event.wait`, whose deadline is CLOCK_REALTIME
+    # on the interpreter `uv` installs, so a sampler that read the clock during
+    # one of the host's +10 s pulses slept until the wall clock climbed back —
+    # 5.5 s on that box — and was phase-locked into the pulses from then on.
+    # It reported `total: +9.09 s` on takes whose clock had moved -2.00 s, and
+    # the whole of what was missing was a record able to say "my samples were
+    # 5.5 s apart, do not correct anything with this".
+
+    def test_a_sampler_that_kept_its_interval_is_believed(self):
+        clock = sampled([0.0] * 4 + [-0.5] * 4)
+        self.assertTrue(clock.measured)
+        self.assertIsNone(clock.note())
+        report = clock.report()
+        self.assertIs(report["measured"], True)
+        self.assertAlmostEqual(report["total"], -0.5, places=4)
+        self.assertEqual(len(report["steps"]), 1)
+        # Hand-written, not read off MAX_GAP_S: a gap of one nominal interval
+        # is what a sampler that kept up leaves, whatever the bound says.
+        self.assertLess(report["max_gap"], 0.05)
+
+    def test_a_sampler_that_was_away_refuses_to_report(self):
+        # Same wall clock, same step. The only difference is that each sleep
+        # really cost 5.5 s — which is exactly the trapped sampler's shape,
+        # and it must not produce a usable-looking record.
+        clock = sampled([0.0] * 4 + [-0.5] * 4, step_by=5.5)
+        self.assertFalse(clock.measured)
+        report = clock.report()
+        self.assertIs(report["measured"], False)
+        self.assertIsNone(report["total"])
+        self.assertEqual(report["steps"], [])
+        self.assertGreater(report["max_gap"], 5.0)
+        note = report["note"]
+        assert note is not None
+        self.assertIn("away for up to", note)
+
+    def test_an_unmeasured_take_says_so_to_the_author(self):
+        # Not silence: an author whose host could not be watched has to be
+        # told, because it is the one condition under which the timestamps in
+        # front of them carry no correction at all.
+        warning = sampled([0.0] * 4 + [-0.5] * 4, step_by=5.5).warning()
+        assert warning is not None
+        self.assertIn("could not be measured", warning)
+        self.assertIn("measured` is false", warning)
+
+    def test_a_sampler_that_never_ran_is_not_a_steady_clock(self):
+        clock = _CaptureClock()
+        self.assertFalse(clock.measured)
+        self.assertIsNone(clock.report()["total"])
+        note = clock.note()
+        assert note is not None
+        self.assertIn("never ran", note)
+
+    def test_the_take_of_an_unwatchable_clock_carries_the_refusal(self):
+        rec = recorder(self)
+        rec._capture_clock = sampled([0.0] * 4 + [-0.5] * 4, step_by=5.5)
+        record = rec._timeline_doc()["capture_clock"]
+        self.assertIs(record["measured"], False)
+        self.assertIsNone(record["total"])
+        self.assertEqual(record["steps"], [])
 
 
 def merged_of(clocks: list[object], durations: list[float]) -> dict:
@@ -4535,13 +4621,22 @@ class MergedCaptureClock(unittest.TestCase):
     graded against a real measurement.
     """
 
-    def clock(self, *steps: tuple[float, float], interval: float = 0.02) -> dict:
+    def clock(
+        self,
+        *steps: tuple[float, float],
+        interval: float = 0.02,
+        measured: bool = True,
+    ) -> dict:
         """One part's own record: (seconds into that part, size of the step)."""
         return {
+            "measured": measured,
+            "note": None if measured else "the sampler was away",
             "steps": [{"t": t, "delta": delta} for t, delta in steps],
             "total": round(sum(delta for _, delta in steps), 4),
             "sample_interval": interval,
             "min_step": 0.005,
+            "max_gap": 0.021 if measured else 5.5,
+            "max_gap_limit": 0.25,
         }
 
     def test_each_parts_steps_are_moved_onto_the_stitched_clock(self):
@@ -4622,6 +4717,30 @@ class MergedCaptureClock(unittest.TestCase):
         doc = merged_of([self.clock((1.5, -0.78)), None], [7.5, 6.0])
         self.assertEqual(doc["segments"][0]["capture_clock"]["total"], -0.78)
         self.assertIsNone(doc["segments"][1]["capture_clock"])
+
+    def test_a_part_that_could_not_watch_its_clock_makes_the_merged_record_null(self):
+        # The case that looks harmless and is not (issue #247): this part's
+        # record is *well formed* — `steps` is a list, `total` is a number —
+        # and the only thing wrong with it is that it says so itself, in
+        # `measured`. A merge that checked the shape and not the flag folds
+        # "nobody watched this part" into a stitched total that reads exactly
+        # like "this part's clock held still".
+        unwatched = self.clock(measured=False)
+        self.assertIsInstance(unwatched["steps"], list)
+        doc = merged_of([self.clock((1.5, -0.78)), unwatched], [7.5, 6.0])
+        self.assertIsNone(doc["capture_clock"])
+        # ...and it must not cost the part that *was* measured its own record.
+        self.assertAlmostEqual(
+            doc["segments"][0]["capture_clock"]["total"], -0.78, places=4
+        )
+
+    def test_a_merged_record_states_the_worst_coverage_any_part_managed(self):
+        # Not the average and not the first: a stitched record is only as
+        # believable as its shakiest capture, and `max_gap` is what a consumer
+        # checks the merged `measured` against.
+        doc = merged_of([self.clock(), self.clock()], [7.5, 6.0])
+        self.assertIs(doc["capture_clock"]["measured"], True)
+        self.assertAlmostEqual(doc["capture_clock"]["max_gap"], 0.021, places=4)
 
     def test_the_samplers_settings_survive_agreement_and_null_on_a_disagreement(self):
         # Same rule as `determinism`: a value every part agrees on is that
@@ -4725,8 +4844,8 @@ INJECTIONS = [
         # for as long as the take lasts.
         "every sample after a step is recorded as another step",
         "core.py",
-        "            previous = offset\n            self._stop.wait(self.INTERVAL_S)",
-        "            self._stop.wait(self.INTERVAL_S)",
+        "            previous = offset\n            # Not `self._stop.wait",
+        "            # Not `self._stop.wait",
         [
             "CaptureClock.test_a_backwards_step_is_recorded_once_with_its_size_and_time",
             "CaptureClock.test_two_steps_in_one_take_accumulate",
@@ -4804,12 +4923,81 @@ INJECTIONS = [
         # short by whatever the unmeasured part stepped, and nothing in the
         # document says so — the artifact-lies shape, in the one field whose
         # whole job is correcting other fields.
+        # Aimed at the *missing-record* guard rather than at the `steps`
+        # shape check below it: since #247 the shape check is dominated —
+        # a part with no record at all never reaches it — and an injection
+        # into a dominated guard proves nothing, which is how this one was
+        # found (`--fault-inject` reported it unnoticed the moment the
+        # `measured` guard landed above it).
         "a part that measured no clock is merged as a part whose clock held still",
         "stitching.py",
-        "        if not isinstance(listed, list):\n            return None",
-        "        if not isinstance(listed, list):\n            listed = []",
+        '        if not isinstance(clock, dict) or clock.get("measured") is not True:'
+        "\n            return None",
+        "        if not isinstance(clock, dict):"
+        '\n            clock = {"measured": True, "steps": []}',
         [
             "MergedCaptureClock.test_a_part_that_measured_nothing_makes_the_merged_record_null",
+        ],
+    ),
+    # -- the coverage the record states about itself (issue #247) ------------
+    #
+    # Four entries, and between them they are the whole of what stopped #245
+    # from being caught: a sampler that could not say how badly it had been
+    # away, and a record that shipped its numbers anyway.
+    (
+        # The coverage measurement removed. `max_gap` then reads 0.0 on every
+        # take, `measured` is true on every take, and a sampler that woke up
+        # once every 5.5 s produces a record indistinguishable from one that
+        # kept a 20 ms interval — which is exactly the artifact #245 read as
+        # noise.
+        "the sampler stops measuring how far apart its own samples were",
+        "core.py",
+        "            self.max_gap = max(self.max_gap, now - last)",
+        "            self.max_gap = max(self.max_gap, 0.0)",
+        [
+            "CaptureClock.test_a_sampler_that_was_away_refuses_to_report",
+            "CaptureClock.test_the_take_of_an_unwatchable_clock_carries_the_refusal",
+        ],
+    ),
+    (
+        # The bound widened past the failure it exists to catch — the
+        # catalogue's ungraded constant, aimed at the one constant in this
+        # class that had no test at all until now. 100 s admits the 5.5 s
+        # trapped sampler and everything worse.
+        "the coverage bound is widened past the sampler stall it exists to catch",
+        "core.py",
+        "    MAX_GAP_S = 0.25",
+        "    MAX_GAP_S = 100.0",
+        [
+            "CaptureClock.test_a_sampler_that_was_away_refuses_to_report",
+            "CaptureClock.test_an_unmeasured_take_says_so_to_the_author",
+        ],
+    ),
+    (
+        # The flag is set honestly and the numbers ship regardless. A consumer
+        # that reaches straight for `total` — which is every consumer that has
+        # not read the schema note — corrects a beat by a figure nobody
+        # watched, and gets no error doing it.
+        "an unmeasured record ships its total anyway",
+        "core.py",
+        '            "total": round(self.total, 4) if ok else None,',
+        '            "total": round(self.total, 4),',
+        [
+            "CaptureClock.test_a_sampler_that_was_away_refuses_to_report",
+            "CaptureClock.test_the_take_of_an_unwatchable_clock_carries_the_refusal",
+        ],
+    ),
+    (
+        # The merge checks the *shape* of each part's record and not its own
+        # verdict on itself. The unmeasured part's `steps` is a well-formed
+        # empty list, so this reads as "that part's clock held still".
+        "the merge folds a part that could not watch its clock into the total",
+        "stitching.py",
+        '        if not isinstance(clock, dict) or clock.get("measured") is not True:',
+        "        if not isinstance(clock, dict):",
+        [
+            "MergedCaptureClock."
+            "test_a_part_that_could_not_watch_its_clock_makes_the_merged_record_null",
         ],
     ),
     (

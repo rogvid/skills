@@ -88,13 +88,35 @@ produced seven frames and came back the full 30 s. The evidence that looked
 like idle loss was six samples of the clock step, and the ticker both
 storyboards inject was credited with preventing something it does not affect.
 
-Measured on one WSL2 host: **−0.75 to −0.81 s every 32.2 s**, confirmed by a
-sampler that opens no browser and by a patched Playwright driver that caught
-two consecutive frames 84 ms apart on the monotonic clock and 711 ms backwards
-on Chromium's. Seven takes of one storyboard: the four whose window contained a
-step encoded 0.78 s less video than the three that did not, to within 12 ms.
-A 19 s take against a 32.2 s interval is a coin flip, which is exactly the
-bimodality [#209](https://github.com/rogvid/skills/issues/209) measured.
+Measured on one WSL2 host in April: **−0.75 to −0.81 s every 32.2 s**,
+confirmed by a sampler that opens no browser and by a patched Playwright driver
+that caught two consecutive frames 84 ms apart on the monotonic clock and
+711 ms backwards on Chromium's. Seven takes of one storyboard: the four whose
+window contained a step encoded 0.78 s less video than the three that did not,
+to within 12 ms. A 19 s take against a 32.2 s interval is a coin flip, which is
+exactly the bimodality
+[#209](https://github.com/rogvid/skills/issues/209) measured.
+
+**Do not read those two numbers as constants.** The same host, re-measured on
+2026-08-08 with a 1 ms sampler over 300 s, was doing something else entirely
+([#247](https://github.com/rogvid/skills/issues/247)): a **+10.03 to +10.10 s
+rectangular pulse, 40–230 ms wide, every 5.509 s**, each one leaving the offset
+0.43–0.56 s lower than it found it. `CLOCK_REALTIME_COARSE` moved with it, so
+the kernel's timekeeper was being written, not a clock read glitching. The
+permanent part of it is a **rate error, not a metronome**: against NTP over
+90 s, `CLOCK_MONOTONIC` ran **+10.01 % fast** while `CLOCK_REALTIME` kept true
+time to −0.40 %, and `adjtimex` reported `tick = 11000` — the kernel's +10 %
+clamp. Something on the host (Hyper-V / `systemd-timesyncd` under WSL2) was
+re-stepping the wall clock every 5.5 s to undo a monotonic clock running fast.
+Same shape as April's, different size and period. **The recorder is not tuned
+to either, and nothing you build on top of it should be.**
+
+**The correction is exact when the record is.** Six takes, seven caption
+transitions each, transitions located by luma straight off `demo.mp4` and
+compared with the beat log: uncorrected, the video was up to **−1.50 s** from
+the log by 13.5 s into the take; corrected by the wall-clock offset before each
+beat, all 38 landed within **101 ms**, and within 40 ms at the caption-on edges
+(a caption fade takes two frames to cross, which is the rest).
 
 The suite's bars are asymmetric because the two directions have different
 causes: `MAX_LOG_EARLY_S = 0.25` for the log running ahead of the frame
@@ -110,7 +132,20 @@ restored at 250 ms after being deleted in
 [#217](https://github.com/rogvid/skills/issues/217).
 
 What to do: prefer `timeline.json`'s `capture_clock`, which records every step
-with its offset and size, and correct with it. On a **stitched** demo the same
+with its offset and size, and correct with it — **after checking
+`capture_clock.measured`**. That flag is false when the recorder's sampler
+could not keep its interval, and then `steps` is empty and `total` is `null`
+on purpose: a record that says "I did not watch this" is the one thing worth
+more than a number that might be wrong. `max_gap` and `max_gap_limit` are the
+measurement behind the flag. This exists because the sampler *was* wrong once,
+silently, for a whole issue: it slept on `threading.Event.wait`, whose deadline
+on the interpreter `uv` installs is an absolute `CLOCK_REALTIME` instant, so a
+sampler that read the clock during one of those +10 s pulses set a deadline
+10 s ahead, slept until the wall clock climbed back, and from then on only ever
+sampled *inside* the pulses. It reported `total: +9.09 s` on takes whose clock
+had moved −2.00 s. Nothing downstream could tell.
+
+On a **stitched** demo the same
 field carries every part's steps, each naming the `segment` it was measured in:
 correct a beat with the steps of *its own* segment up to its `t_start`, never
 with `total` and never with an earlier part's — that part's lost wall time is
