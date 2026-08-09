@@ -1561,6 +1561,32 @@ NARRATION_LINES = (
 NARRATION_LOUD_DBFS = -60.0
 NARRATION_QUIET_DBFS = -80.0
 NARRATION_WINDOW_S = 0.4
+
+# Reading the clips back **out of the encoded file**, which is the half of
+# issue #226's acceptance criterion the repo did not have. A window that is
+# loud somewhere inside a line says the mix happened; it does not say where.
+#
+# `silencedetect` at this floor splits the track into the stretches that carry
+# a clip and the stretches that do not, and the complement of the silences is
+# the set of onsets. The floor sits in the 66 dB gap the two bars above were
+# measured across (-25 dBFS inside a line, -91 before one), so it is nowhere
+# near either population; `d` is short enough to keep the 0.3 s clip and long
+# enough that a gap between two words could not split one.
+NARRATION_SILENCE_DBFS = -50.0
+NARRATION_SILENCE_MIN_S = 0.08
+# How far a clip's onset in the file may sit from where it was supposed to go.
+# Measured over this arm's own take: the two clips came back at 0.963016s and
+# 3.228000s against a mix aimed at 0.963s and 3.228s — **sub-millisecond**, so
+# the bar is set for a decoder boundary rather than for the arithmetic. The
+# error it exists to catch is 0.70-1.50 s (issues #18, #229): three orders of
+# magnitude above the residual and one below the defect, rather than a
+# comfortable-looking margin between the two.
+NARRATION_ONSET_TOLERANCE_S = 0.12
+# ...and how far a clip's *length* in the file may sit from the clip's own.
+# The clips are tones of a known duration, so a mix that overlapped two of
+# them, or truncated one, changes this and not the onset. Measured on the same
+# take: 1.600s and 0.300s against the 1.6s and 0.3s this file seeded.
+NARRATION_SPAN_TOLERANCE_S = 0.15
 # What `stitch()`'s lossless concat requires of every segment's audio, and the
 # reason `_convert` pins the format rather than letting amix decide: mono TTS
 # clips would otherwise yield a mono track that `-c copy` cannot join with the
@@ -9716,7 +9742,62 @@ def mean_dbfs(mp4: Path, start: float, seconds: float) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def record_narration(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
+def loud_spans(mp4: Path, duration: float) -> list[tuple[float, float]] | None:
+    """(start, end) of every stretch of `mp4` that carries audio.
+
+    Read off the encoded file with `silencedetect` and complemented here, so
+    what comes back is where a clip really is rather than where anything says
+    it is. `None` when ffmpeg produced no silence report at all — a
+    measurement that failed is not a file with no audio in it, and the two
+    must not arrive as the same answer.
+
+    **`-v info`, deliberately.** `silencedetect` writes through ffmpeg's
+    logger at INFO level, and `-v error` throws it away — which would make
+    this function return "one span covering the whole file" on every take,
+    silently, forever.
+    """
+    done = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "info",
+            "-i",
+            str(mp4),
+            "-af",
+            f"silencedetect=n={NARRATION_SILENCE_DBFS}dB:d={NARRATION_SILENCE_MIN_S}",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    starts = [float(m) for m in re.findall(r"silence_start:\s*(-?[\d.]+)", done.stderr)]
+    ends = [float(m) for m in re.findall(r"silence_end:\s*(-?[\d.]+)", done.stderr)]
+    if not starts and not ends:
+        return None
+    # Every silence as a closed interval, then the gaps between them. A file
+    # that opens loud has no `silence_start` at 0; one that ends loud has a
+    # trailing `silence_start` with no `silence_end`, which closes at the
+    # duration.
+    silences = [
+        (start, ends[i] if i < len(ends) else duration)
+        for i, start in enumerate(starts)
+    ]
+    spans: list[tuple[float, float]] = []
+    at = 0.0
+    for start, end in silences:
+        if start - at > NARRATION_SILENCE_MIN_S:
+            spans.append((round(at, 3), round(start, 3)))
+        at = max(at, end)
+    if duration - at > NARRATION_SILENCE_MIN_S:
+        spans.append((round(at, 3), round(duration, 3)))
+    return spans
+
+
+def record_narration(
+    out_dir: Path, base_url: str, clock: HostClock
+) -> tuple[list[str], dict]:
     """A take that really narrates, from a cache seeded before it starts."""
     from demo_recording import Recorder, narration
 
@@ -9741,6 +9822,12 @@ def record_narration(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
     os.environ["ELEVENLABS_API_KEY"] = NARRATION_KEY
     try:
         with Recorder(out_dir, base_url=base_url, speech=True, strict=True) as rec:
+            # This harness's own wall-clock reading, put on the take's clock.
+            # The mix is corrected by the recorder's `capture_clock` (issue
+            # #226), so grading the audio against that record would grade the
+            # recorder against itself; `clock.before()` is measured in this
+            # process, by code that shares nothing with the recorder's.
+            clock.rebase(rec._t0)  # see HostClock
             b.expect("constructing with speech=True", rec._speech, True)
             rec.goto("/")
             rec.wait_for("#kpi-rev")
@@ -9825,7 +9912,138 @@ def check_narration_pacing(out_dir: Path) -> list[str]:
     return failures
 
 
-def check_narration_audio(out_dir: Path, lines: list) -> list[str]:
+def check_narration_placement(
+    out_dir: Path, lines: list, clock: HostClock
+) -> list[str]:
+    """Each clip is where it belongs **in the video**, read off the file (#226).
+
+    `check_narration_audio` below asks whether the mix happened. This asks
+    where it landed, and the difference is the whole of issue #226: a clip
+    delayed by the offset the beat log recorded is on `time.monotonic()`, the
+    video it is mixed into is stamped with the host's wall clock, and on a host
+    that steps that clock the voice trails the caption it belongs to for the
+    rest of the take — measured at +0.70 s on every line of one take (#18).
+
+    Three claims, and none of them is the recorder agreeing with itself:
+
+    1. the take's own `_lines` are what `timeline.json`'s `narration` says it
+       was given, line for line;
+    2. every `at` in that record is where **this harness's** wall-clock reading
+       puts that instant in the video. `clock.before()` is sampled in this
+       process by code the recorder cannot reach, so a recorder that stopped
+       correcting, or corrected by the wrong number, disagrees with it;
+    3. every clip's onset **in the encoded audio** is at that same
+       independently-derived second, and every clip's span is as long as the
+       tone this file seeded. Measured with `silencedetect` off the finished
+       mp4, so nothing in this claim is computed from what the recorder wrote
+       down — a record and a mix that agree with each other and not with the
+       world fail claim 3 while satisfying claim 2, and the reverse.
+
+    **What this cannot say on a steady host**, and it is stated rather than
+    implied: where the wall clock does not step, `clock.before()` is zero, the
+    correction is zero, and claims 2 and 3 hold identically for a mix that
+    never corrected anything. The arithmetic of the correction is graded in
+    `tests/unit` (`NarrationMix`) against scripted records; what this adds is
+    that the clip really is in the file at the second the record names.
+    """
+    label = "narration"
+    failures: list[str] = []
+    mp4 = out_dir / "demo.mp4"
+    if not lines:
+        return [f"{label}: the recorder logged no narration lines"]
+    try:
+        doc = json.loads((out_dir / "timeline.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"{label}: timeline.json could not be read: {exc}"]
+    record = doc.get("narration")
+    if not isinstance(record, dict) or not isinstance(record.get("lines"), list):
+        return [
+            f"{label}: timeline.json carries no `narration` record "
+            f"({record!r}) on a take that spoke {len(lines)} line(s) — the "
+            f"audio is the one artifact a reader cannot check against "
+            f"anything else, so where it went has to be written down (#226)"
+        ]
+    logged = record["lines"]
+    if len(logged) != len(lines):
+        return [
+            f"{label}: timeline.json records {len(logged)} narration line(s) "
+            f"and the recorder mixed {len(lines)}"
+        ]
+
+    # (1) and (2). `before()` is this file's own correction, hand-written
+    # against the documented rule and sampled by this process's watcher.
+    expected: list[float] = []
+    for n, ((off, _clip), line) in enumerate(zip(lines, logged, strict=True)):
+        if abs(float(line.get("t", -1)) - float(off)) > 0.002:
+            failures.append(
+                f"{label}: timeline.json says line {n} was logged at "
+                f"{line.get('t')!r}s, the recorder logged it at {off:.3f}s — "
+                f"the record describes a mix of some other take's lines"
+            )
+        want = max(0.0, float(off) + clock.before(float(off)))
+        expected.append(want)
+        if abs(float(line.get("at", -1)) - want) > NARRATION_ONSET_TOLERANCE_S:
+            failures.append(
+                f"{label}: timeline.json puts line {n} at {line.get('at')!r}s "
+                f"of demo.mp4; this harness's own wall-clock reading puts the "
+                f"{off:.3f}s instant at {want:.3f}s ({clock.describe()}). The "
+                f"recorder and an independent sampler disagree about where "
+                f"the voice should be (issue #226)"
+            )
+
+    # (3). Nothing below reads the recorder's record — the file is the witness.
+    duration = doc.get("duration")
+    if not isinstance(duration, (int, float)):
+        return failures + [
+            f"{label}: timeline.json states duration={duration!r}, so there is "
+            f"no length to complement the silences against"
+        ]
+    spans = loud_spans(mp4, float(duration))
+    if spans is None:
+        return failures + [
+            f"{label}: ffmpeg reported no silence measurement for demo.mp4 at "
+            f"all — the measurement failed, which is not the same as a track "
+            f"with nothing in it"
+        ]
+    if len(spans) != len(lines):
+        return failures + [
+            f"{label}: demo.mp4 carries {len(spans)} stretch(es) of audio "
+            f"{spans} for {len(lines)} spoken line(s). Either two clips were "
+            f"mixed on top of each other or one is missing, and every window "
+            f"assertion in this arm can pass on both"
+        ]
+    if len(lines) != len(NARRATION_LINES):
+        return failures + [
+            f"{label}: the take spoke {len(lines)} line(s) and this file "
+            f"seeded {len(NARRATION_LINES)}, so there is no known clip length "
+            f"to measure the stretches in the file against"
+        ]
+    # The clip lengths this file seeded, in the order the storyboard speaks
+    # them — not probed back off the clips, which would ask the same question
+    # of the same files the recorder mixed.
+    wanted_spans = [seconds for _text, seconds in NARRATION_LINES]
+    for n, ((start, end), want, wanted_span) in enumerate(
+        zip(spans, expected, wanted_spans, strict=True)
+    ):
+        if abs(start - want) > NARRATION_ONSET_TOLERANCE_S:
+            failures.append(
+                f"{label}: line {n}'s audio starts at {start:.3f}s of "
+                f"demo.mp4, {(start - want) * 1000:+.0f} ms from the "
+                f"{want:.3f}s it belongs at, over the "
+                f"{NARRATION_ONSET_TOLERANCE_S * 1000:.0f} ms this grades. "
+                f"The voice is that far from the caption it was spoken for "
+                f"(issue #226)"
+            )
+        if abs((end - start) - wanted_span) > NARRATION_SPAN_TOLERANCE_S:
+            failures.append(
+                f"{label}: line {n} occupies {end - start:.3f}s of demo.mp4 "
+                f"against a {wanted_span:.3f}s clip — the onset is right and "
+                f"the clip is not what was mixed there"
+            )
+    return failures
+
+
+def check_narration_audio(out_dir: Path, lines: list, clock: HostClock) -> list[str]:
     """The mp4 carries audio where a line is, and silence where none is."""
     label = "narration"
     failures: list[str] = []
@@ -9867,14 +10085,16 @@ def check_narration_audio(out_dir: Path, lines: list) -> list[str]:
                 f"-c copy and cannot join streams that disagree"
             )
 
-    # The first line's offset, as the recorder logged it. Measured from the
-    # recorder's own `_lines` rather than from the beat log, because that list
-    # is what `_convert` turns into `adelay` values — grading the mix against
-    # anything else would grade agreement between two records instead of
-    # whether the audio is where the recorder said it put it.
+    # Where the first line is in the *video*. Measured from the recorder's own
+    # `_lines` — that list is what `_convert` turns into `adelay` values —
+    # plus this harness's own wall-clock reading, because the mix is on the
+    # video's clock and the log is not (issue #226). `before()` is zero on a
+    # host that did not step, so on a healthy box this is the offset it always
+    # was; on one that did, aiming this window at the raw offset would measure
+    # a stretch the clip had already left and report silence.
     if not lines:
         return failures + [f"{label}: the recorder logged no narration lines"]
-    first_offset = float(lines[0][0])
+    first_offset = max(0.0, float(lines[0][0]) + clock.before(float(lines[0][0])))
 
     loud = mean_dbfs(mp4, first_offset + 0.1, NARRATION_WINDOW_S)
     if loud is None:
@@ -9923,7 +10143,13 @@ def run_narration(out_root: Path) -> list[str]:
     out_dir = fresh_take_dir(out_root, "narration")
     with fixture_server() as base_url:
         try:
-            problems, info = record_narration(out_dir, base_url)
+            # The host's wall clock, watched for exactly as long as the take
+            # records. demo.mp4 is on that clock, the beat log is not, and
+            # since #226 the *audio* is on it too — so where a clip belongs is
+            # a question this watcher has to answer independently of the
+            # recorder's own record.
+            with watch_wall_clock() as clock:
+                problems, info = record_narration(out_dir, base_url, clock)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"narration: Recorder raised {type(exc).__name__}: {exc}"]
     mp4 = out_dir / "demo.mp4"
@@ -9932,7 +10158,8 @@ def run_narration(out_root: Path) -> list[str]:
     failures = (
         problems
         + check_narration_pacing(out_dir)
-        + check_narration_audio(out_dir, info["lines"])
+        + check_narration_audio(out_dir, info["lines"], clock)
+        + check_narration_placement(out_dir, info["lines"], clock)
         + check_healthy("narration", out_dir)
         + check_overlay_cleared("narration", out_dir)
     )
@@ -9941,7 +10168,9 @@ def run_narration(out_root: Path) -> list[str]:
         print(
             f"smoke: narration ok ({len(info['lines'])} lines spoken from a "
             f"seeded cache at {offsets}, no key sent, audio present where a "
-            f"line is and silent before the first)"
+            f"line is and silent before the first, every clip's onset within "
+            f"{NARRATION_ONSET_TOLERANCE_S * 1000:.0f} ms of where the record "
+            f"says it went; {clock.describe()})"
         )
     return failures
 

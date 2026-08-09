@@ -105,8 +105,9 @@ from .markdown import _fmt_t, _md_cell
 #   segments      list?   — merged demos only (`stitch`): one record per part,
 #                          in order, each `segment`, `media`, `duration`
 #                          (ffprobe), `offset` (where it starts in `media`),
-#                          `beats`, `recorder`, `determinism`, `content` and
-#                          that part's own `capture_clock`, on its own clock.
+#                          `beats`, `recorder`, `determinism`, `content`,
+#                          `narration` and that part's own `capture_clock`,
+#                          the last two on its own clock.
 #                          Absent from a timeline a single take wrote.
 #   content       dict?  — what the *picture* turned out to be, measured off
 #                          the encoded mp4 over the region the app occupies:
@@ -133,6 +134,27 @@ from .markdown import _fmt_t, _md_cell
 #                          `held` means the frames at the start of the video
 #                          are not frames the recording captured; see "the
 #                          blank opening".
+#   narration     dict?  — **null** on a take that mixed no speech into
+#                          `media` — narration off, no lines, or no mp4
+#                          encoded. Otherwise, where each spoken line's audio
+#                          was actually put: `lines`, one record per clip in
+#                          the order they were mixed, each `t` (the beat-log
+#                          instant the line appeared, `time.monotonic()`) and
+#                          `at` (where that instant is in `media`, which is
+#                          what the mix used as its `adelay`); plus
+#                          `clock_correction`, the same `applied` / `total` /
+#                          `steps` / `note` state `capture_clock_correction`
+#                          returns. The audio rides the *video's* clock
+#                          because it is inside the video, so `at` is `t`
+#                          corrected the same way a review frame's seek is
+#                          (issue #226) — and the state is here so a reader
+#                          can tell a mix that was corrected from one that
+#                          fell back to the raw offset because nobody watched
+#                          the clock. On a merged demo every part's lines are
+#                          here, moved onto the stitched clock by that part's
+#                          `offset` and each naming its own `segment`, and
+#                          `clock_correction.applied` is true only if every
+#                          part that narrated corrected its own mix.
 #   coverage      dict?  — **null** unless the take was recorded against a
 #                          ticket (`Recorder(criteria={...})`). What the
 #                          storyboard *claimed*, never what it proved:
@@ -557,6 +579,34 @@ def capture_clock_correction(
     }
 
 
+def capture_clock_shift(record: object) -> tuple[Callable[[float], float], dict]:
+    """(shift, state) for a capture that is still the only one there is.
+
+    `capture_clock_correction` above reads a finished timeline, where a step is
+    attributed to the segment it was measured in and a beat is matched against
+    it. A take mixing its **own** audio has no such question to answer: one
+    capture is running, every step in the record is that capture's, and the
+    steps do not name a segment until `stitch()` gives them one. So the rule
+    collapses to "how far had the wall clock stepped by `t`", and it is read
+    through the same function rather than re-derived — the two must not be able
+    to drift apart, because `frames/` and the audio track of the same demo have
+    to describe the same video.
+
+    `shift(t)` is the seconds to add to the beat-log instant `t`; `state` is the
+    same three-state record `capture_clock_correction` returns, and the caller
+    is expected to put it in an artifact rather than swallow it.
+    """
+    correct, state = capture_clock_correction({"capture_clock": record})
+
+    def shift(t: float) -> float:
+        # The empty beat is the point: a single capture's steps carry no
+        # segment and neither does this, so every step in the record is this
+        # instant's to be corrected by.
+        return correct({}, t)
+
+    return shift, state
+
+
 def _capture_clock_md(state: dict) -> list[str]:
     """What `timeline.md` says about the clock its own timestamps are on.
 
@@ -588,6 +638,53 @@ def _capture_clock_md(state: dict) -> list[str]:
         f"`timeline.json`'s `capture_clock` carries every step and the capture "
         f"it was measured in; `frames/frames.md` says whether the review "
         f"frames were cut with it applied.",
+        "",
+    ]
+
+
+def _narration_md(narration: object) -> list[str]:
+    """What `timeline.md` says about where the spoken lines ended up.
+
+    Same shape of statement as `_capture_clock_md`, and silent for the same
+    reason on the same take: a watched clock that held still put every line
+    exactly where the log says, and a line on every timeline is a line nobody
+    reads. It speaks in the two cases where that is not what happened — the
+    clock stepped and the mix followed it, or nobody watched and the mix could
+    only use the raw offset. The second is the one that matters here: the audio
+    is *audible* evidence, and a listener who hears the voice drift away from
+    the caption has no other way to find out that nothing knew by how much.
+    """
+    if not isinstance(narration, dict):
+        return []
+    lines = narration.get("lines") or []
+    # `clock` rather than `state`, which is what `_capture_clock_md` above
+    # calls its own: two identical guard lines in one file are two lines a
+    # fault injection cannot tell apart, and the harness refuses an anchor
+    # that matches twice rather than proving the wrong one.
+    clock = narration.get("clock_correction")
+    if not lines or not isinstance(clock, dict):
+        return []
+    if not clock.get("applied"):
+        return [
+            f"**The {len(lines)} spoken line(s) were mixed at their beat-log "
+            f"offsets, uncorrected**: {clock.get('note')}. The audio sits "
+            f"inside the video and therefore on the video's clock, so if the "
+            f"host's wall clock stepped while this was recording the voice is "
+            f"that far from the caption it belongs to — and nothing here knows "
+            f"whether it did.",
+            "",
+        ]
+    # On the count, never the total — two steps that cancel move every line
+    # mixed between them. Same argument as `_capture_clock_md`.
+    if not clock.get("steps"):
+        return []
+    return [
+        f"**The {len(lines)} spoken line(s) were mixed where the host's "
+        f"stepped clock puts them in the video**, not at the beat-log offsets "
+        f"in the table below: each line's `at` in `timeline.json`'s "
+        f"`narration` is its `t` plus the steps its own capture recorded "
+        f"before that instant. Without it the voice would trail the caption "
+        f"by the size of the step for the rest of the take (issue #226).",
         "",
     ]
 
@@ -770,6 +867,13 @@ def render_timeline_md(doc: dict) -> str:
     # loud. The recorder warns about the same thing on stderr, minutes and
     # several thousand lines before anybody opens this file (issue #229).
     out += _capture_clock_md(capture_clock_correction(doc)[1])
+    # Directly under it, because it is the same statement about a different
+    # artifact: the row's timestamp is on the beat log, and so was the audio
+    # until the mix corrected it. Read off `narration` rather than recomputed
+    # from `capture_clock` — what belongs here is what the mix *did*, and a
+    # paragraph derived from the record would keep claiming a correction if
+    # the mix ever stopped applying one.
+    out += _narration_md(doc.get("narration"))
     # The exit column only exists when something in this take has one — a web
     # timeline would otherwise carry an empty column on every row. A `run` beat
     # whose status could not be read shows "?" rather than blank, so the

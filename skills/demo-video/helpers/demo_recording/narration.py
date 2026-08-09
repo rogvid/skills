@@ -19,7 +19,10 @@ import json
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
+
+from .timeline import capture_clock_shift
 
 # How long to wait between retries, and how many. Free-tier keys get 429
 # "system_busy" under load, and any network can blip mid-recording — losing a
@@ -55,6 +58,60 @@ TTS_KEY_SEP = "|"
 # milliseconds against a dead socket, instead of putting a fabricated
 # credential on the wire to a third party to find out.
 TTS_API_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
+
+
+# -- putting a clip where its line is, in the video ---------------------------
+#
+# A line is logged at `time.monotonic() - _t0`, and the video it is mixed into
+# is stamped with the host's *wall* clock — Chromium's screencast is, and the
+# encode inherits it. So on a host that steps that clock the two part company by
+# the size of the step, and `adelay` at the raw offset leaves the voice where it
+# was while the picture moved: issue #18's second comment measured **+0.70 s of
+# lag on all three lines** of a take that stalled in its run-up, against +0.11
+# to +0.14 s in a clean one, and that 0.70 s is a wall-clock step. Unlike every
+# other consequence of the two clocks, this one is *audible* — the viewer hears
+# the narration drift off the caption it belongs to (issue #226).
+#
+# The recorder measures those steps for the life of the capture, so the fix is
+# arithmetic and not estimation: mix at `t + (the steps recorded before t)`.
+#
+# Two properties of that rule are worth stating because both were paid for:
+#
+#   * **it is indexed by the instant being converted**, which here is each
+#     line's own offset. The same rule read once per beat left every instant in
+#     a beat's first half uncorrected — roughly half of a take's wall time —
+#     and that was the blocking defect in the review-frame version of this
+#     (#253);
+#   * **`measured` is read before `steps`.** A record that could not watch the
+#     clock reports an empty step list too, so a reader that only looked at
+#     `steps` cannot tell "the clock held still" from "nobody knows". Zero is
+#     still the number applied — there is no other — but it is a fallback and
+#     not a correction, and `mix_plan` hands its caller the state to say so.
+
+
+def mix_plan(
+    offsets: Sequence[float], record: object
+) -> tuple[list[dict], dict]:
+    """Where each narration line goes in the encoded media. -> (lines, state)
+
+    `offsets` are the beat-log instants the lines appeared at, in the order
+    they were spoken; `record` is the take's `capture_clock`. Each returned
+    line carries `t` (what was logged) and `at` (where that instant is in the
+    video, and what the mix delays the clip by). `state` is the three-state
+    clock record — see the section above; a caller that drops it publishes a
+    demo whose audio placement cannot be told from a guess.
+
+    `at` never goes below zero. A backward step larger than a line's own offset
+    puts that instant before the video's first frame — the wall time it
+    occupied is genuinely not in the file — and `adelay` has no way to express
+    it, so the clip starts at the top of the track and the take is that much
+    out for that one line.
+    """
+    shift, state = capture_clock_shift(record)
+    return [
+        {"t": round(float(off), 3), "at": round(max(0.0, float(off) + shift(off)), 3)}
+        for off in offsets
+    ], state
 
 
 def _tts_key(text: str, voice_id: str, model_id: str) -> str:
