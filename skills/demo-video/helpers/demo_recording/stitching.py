@@ -151,7 +151,7 @@ def _merge_narration(docs: list[dict], records: list[dict]) -> dict | None:
     refuse a correction two narrated ones really applied.
     """
     lines: list[dict] = []
-    applied = True
+    refused: list[str] = []
     note: str | None = None
     steps = 0
     total = 0.0
@@ -176,10 +176,11 @@ def _merge_narration(docs: list[dict], records: list[dict]) -> dict | None:
             steps += int(state.get("steps") or 0)
             total += float(state.get("total") or 0.0)
         else:
-            applied = False
+            refused.append(str(record["segment"]))
             note = note or state.get("note")
     if not narrating:
         return None
+    applied = not refused
     return {
         "lines": lines,
         "clock_correction": {
@@ -189,12 +190,19 @@ def _merge_narration(docs: list[dict], records: list[dict]) -> dict | None:
             "applied": applied,
             "total": round(total, 4) if applied else None,
             "steps": steps if applied else 0,
+            # ...but *how much* of the demo that is, said rather than left to
+            # the reader. The flag above is all-or-nothing on purpose; without
+            # these two `timeline.md` prints "the 3 spoken lines were mixed
+            # uncorrected" over a demo where two of them were corrected, which
+            # is pessimistic and still not what happened. Absent from a single
+            # take's record, which has no parts to count.
+            "parts": narrating,
+            "parts_uncorrected": len(refused),
             "note": None
             if applied
             else (
-                note
-                or "a part of this demo mixed its narration at the beat-log "
-                "offsets, uncorrected"
+                f"{', '.join(refused)} mixed its narration at the beat-log "
+                f"offsets, uncorrected" + (f" — {note}" if note else "")
             ),
         },
     }

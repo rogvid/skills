@@ -249,15 +249,19 @@ INJECTIONS = [
     # first one. What moves is *where* it is, which is the thing a listener
     # notices and no window can see.
     Injection(
-        # The mix 150 ms from where the take's own record says it put the clip.
-        # Smaller than the 0.4 s window either bar measures, so both keep
-        # passing; large enough that the voice is visibly off its caption.
-        name="every narration clip is mixed 150 ms from where the record says",
+        # The mix 250 ms from where the take's own record says it put the clip.
+        # Still well inside the 0.4 s window either dBFS bar measures, so both
+        # keep passing; twice the onset bar, rather than sitting on it. The
+        # boundary was measured on this box during review — 110 ms passes
+        # clean, 150 ms fails, and the usable window is (120 ms, ~400 ms),
+        # above which the clip leaves the loud window and the other bar starts
+        # answering instead. 250 ms is the middle of it.
+        name="every narration clip is mixed 250 ms from where the record says",
         module="core.py",
         old="                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}"
         ':all=1[a{i}]"',
         new="                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))"
-        ' + 150}:all=1[a{i}]"',
+        ' + 250}:all=1[a{i}]"',
         arm="--narration-only",
         sites=("check_narration_placement",),
         must_contain=("voice is that far from the caption it was spoken for",),

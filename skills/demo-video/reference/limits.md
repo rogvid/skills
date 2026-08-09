@@ -133,15 +133,21 @@ rather than by widening a bar, which is why `MAX_SKEW_DRIFT_S` could be
 restored at 250 ms after being deleted in
 [#217](https://github.com/rogvid/skills/issues/217).
 
-Two things in the recorder already apply this for you, and reading them as
+Three things in the recorder already apply this for you, and reading them as
 uncorrected is the way to get it wrong twice
 ([#229](https://github.com/rogvid/skills/issues/229)): **the review frames
 under `frames/` are cut on the video's clock**, midpoint plus that beat's own
 capture's steps before *that midpoint* (the rule is indexed by the instant you
 are converting, not by the beat — a step inside a beat's first half moves its
-frame), and `frames/frames.md` says which of the three cases the take was; and `timeline.md` says above its beat table when the clock
-stepped and by how much. `timeline.json`'s beat timestamps are untouched — they
-are the log, and the log is `time.monotonic()`.
+frame), and `frames/frames.md` says which of the three cases the take was;
+**every narration clip is mixed on the video's clock too**
+([#226](https://github.com/rogvid/skills/issues/226)) — `timeline.json`'s
+`narration.lines` gives each spoken line's `t` (the beat log's instant) beside
+its `at` (where the clip really is in `media`, which is `t` corrected by the
+same rule and never below zero), with `narration.clock_correction` saying which
+of the three cases applied; and `timeline.md` says above its beat table when the
+clock stepped and by how much, and what that meant for the audio. `timeline.json`'s beat
+timestamps are untouched — they are the log, and the log is `time.monotonic()`.
 
 What to do everywhere else: prefer `timeline.json`'s `capture_clock`, which
 records every step with its offset and size, and correct with it — **after

@@ -101,17 +101,25 @@ def mix_plan(
     clock record — see the section above; a caller that drops it publishes a
     demo whose audio placement cannot be told from a guess.
 
-    `at` never goes below zero. A backward step larger than a line's own offset
-    puts that instant before the video's first frame — the wall time it
-    occupied is genuinely not in the file — and `adelay` has no way to express
-    it, so the clip starts at the top of the track and the take is that much
-    out for that one line.
+    `at` never goes below zero, and **a line that hit that floor says so**. A
+    backward step larger than a line's own offset puts that instant before the
+    video's first frame — the wall time it occupied is genuinely not in the
+    file — and `adelay` has no way to express a negative delay, so the clip
+    starts at the top of the track. That line's `at` is then *not* its `t` plus
+    the steps before it, which is what every other line's is and what the
+    artifact says about all of them; `clamped` carries the seconds of
+    correction the start of the file swallowed, and is absent from the lines
+    that got the whole of theirs.
     """
     shift, state = capture_clock_shift(record)
-    return [
-        {"t": round(float(off), 3), "at": round(max(0.0, float(off) + shift(off)), 3)}
-        for off in offsets
-    ], state
+    lines = []
+    for off in offsets:
+        want = float(off) + shift(off)
+        line = {"t": round(float(off), 3), "at": round(max(0.0, want), 3)}
+        if want < 0:
+            line["clamped"] = round(-want, 3)
+        lines.append(line)
+    return lines, state
 
 
 def _tts_key(text: str, voice_id: str, model_id: str) -> str:

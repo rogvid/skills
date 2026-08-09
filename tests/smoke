@@ -9795,6 +9795,37 @@ def loud_spans(mp4: Path, duration: float) -> list[tuple[float, float]] | None:
     return spans
 
 
+def expected_loud_spans(
+    starts: list[float], lengths: list[float], gap: float = NARRATION_SILENCE_MIN_S
+) -> list[tuple[float, float]]:
+    """Where the clips should be audible in the mix, overlaps merged.
+
+    **Not one span per clip**, and the difference is the phenomenon this arm
+    exists for. A backward wall-clock step shortens the *video* and not the
+    *audio*: the recorder waited line 0's clip out in monotonic time, but the
+    seconds the step deleted are not in the file to wait through, so a mix
+    corrected onto the video's clock can start line 1 while line 0 is still
+    playing. The two then sum into one continuous stretch, which is what
+    `silencedetect` reports and therefore what this has to predict.
+
+    Measured on a real stepped take of this arm, 2026-08-09: a −1.073 s step at
+    2.214 s put line 1's onset at 2.228 s, inside line 0's 1.028–2.628 s clip,
+    and `demo.mp4` carried **one** stretch for two lines. A model of "two lines,
+    two stretches" fails that take — the correction was right and the harness
+    was wrong, which is the direction that costs a real defect its diagnosis.
+
+    Written as a pure function so `tests/unit` can grade the overlap case,
+    which no box produces on demand.
+    """
+    spans: list[tuple[float, float]] = []
+    for start, length in sorted(zip(starts, lengths, strict=True)):
+        if spans and start - spans[-1][1] <= gap:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], start + length))
+        else:
+            spans.append((start, start + length))
+    return [(round(a, 3), round(b, 3)) for a, b in spans]
+
+
 def record_narration(
     out_dir: Path, base_url: str, clock: HostClock
 ) -> tuple[list[str], dict]:
@@ -9951,6 +9982,23 @@ def check_narration_placement(
     mp4 = out_dir / "demo.mp4"
     if not lines:
         return [f"{label}: the recorder logged no narration lines"]
+    # **An uncovered reading is worse than no reading**, the same refusal
+    # `check_timeline` makes and for the same reason (issue #245): a watcher
+    # that was away for seconds still hands out a `before()`, and grading the
+    # audio against it would report a voice 1.26 s out of place on a mix that
+    # is exactly where it belongs. Refused loudly, and nothing below is graded
+    # on alignment — this is the harness declining to measure, not the
+    # recorder failing. `check_capture_clock` is what catches the other half,
+    # where *both* samplers stall and agree with each other (issue #247).
+    if not clock.covered:
+        return failures + [
+            f"{label}: this harness's own wall-clock watcher was away for up "
+            f"to {clock.max_gap:.2f}s (limit {HOST_CLOCK_MAX_GAP_S:.2f}s, "
+            f"{clock.samples} samples), so it cannot say where in the video a "
+            f"spoken line belongs. Nothing about the mix's placement is graded "
+            f"for this take. This is the harness refusing to measure, not the "
+            f"recorder failing (issue #247)"
+        ]
     try:
         doc = json.loads((out_dir / "timeline.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -10005,25 +10053,28 @@ def check_narration_placement(
             f"all — the measurement failed, which is not the same as a track "
             f"with nothing in it"
         ]
-    if len(spans) != len(lines):
-        return failures + [
-            f"{label}: demo.mp4 carries {len(spans)} stretch(es) of audio "
-            f"{spans} for {len(lines)} spoken line(s). Either two clips were "
-            f"mixed on top of each other or one is missing, and every window "
-            f"assertion in this arm can pass on both"
-        ]
     if len(lines) != len(NARRATION_LINES):
         return failures + [
             f"{label}: the take spoke {len(lines)} line(s) and this file "
             f"seeded {len(NARRATION_LINES)}, so there is no known clip length "
             f"to measure the stretches in the file against"
         ]
-    # The clip lengths this file seeded, in the order the storyboard speaks
-    # them — not probed back off the clips, which would ask the same question
-    # of the same files the recorder mixed.
-    wanted_spans = [seconds for _text, seconds in NARRATION_LINES]
-    for n, ((start, end), want, wanted_span) in enumerate(
-        zip(spans, expected, wanted_spans, strict=True)
+    # Where the clips should be audible: the seconds this harness derived
+    # above, each carrying the length of the tone **this file** seeded — not
+    # probed back off the clips, which would ask the same question of the same
+    # files the recorder mixed. Overlaps merged, because a corrected mix on a
+    # stepped host really does produce them; see `expected_loud_spans`.
+    wanted = expected_loud_spans(expected, [s for _text, s in NARRATION_LINES])
+    if len(spans) != len(wanted):
+        return failures + [
+            f"{label}: demo.mp4 carries {len(spans)} stretch(es) of audio "
+            f"{spans} where the {len(lines)} spoken line(s) should make "
+            f"{len(wanted)} {wanted}. Either two clips were mixed on top of "
+            f"each other or one is missing, and every window assertion in this "
+            f"arm can pass on both"
+        ]
+    for n, ((start, end), (want, want_end)) in enumerate(
+        zip(spans, wanted, strict=True)
     ):
         if abs(start - want) > NARRATION_ONSET_TOLERANCE_S:
             failures.append(
@@ -10034,11 +10085,12 @@ def check_narration_placement(
                 f"The voice is that far from the caption it was spoken for "
                 f"(issue #226)"
             )
-        if abs((end - start) - wanted_span) > NARRATION_SPAN_TOLERANCE_S:
+        if abs(end - want_end) > NARRATION_SPAN_TOLERANCE_S:
             failures.append(
-                f"{label}: line {n} occupies {end - start:.3f}s of demo.mp4 "
-                f"against a {wanted_span:.3f}s clip — the onset is right and "
-                f"the clip is not what was mixed there"
+                f"{label}: line {n}'s audio ends at {end:.3f}s of demo.mp4 "
+                f"against the {want_end:.3f}s a {want_end - want:.3f}s clip "
+                f"started there should reach — the onset is right and what was "
+                f"mixed at it is not the clip"
             )
     return failures
 
@@ -10094,6 +10146,16 @@ def check_narration_audio(out_dir: Path, lines: list, clock: HostClock) -> list[
     # a stretch the clip had already left and report silence.
     if not lines:
         return failures + [f"{label}: the recorder logged no narration lines"]
+    # Same refusal as `check_narration_placement`, for the same reason: an
+    # uncovered watcher's `before()` would aim this window at a second nobody
+    # measured, and report silence on a mix that is exactly where it belongs.
+    if not clock.covered:
+        return failures + [
+            f"{label}: this harness's own wall-clock watcher was away for up "
+            f"to {clock.max_gap:.2f}s ({clock.samples} samples), so the window "
+            f"this measures the first line in cannot be aimed. The stream "
+            f"shape above is still graded; the mix is not (issue #247)"
+        ]
     first_offset = max(0.0, float(lines[0][0]) + clock.before(float(lines[0][0])))
 
     loud = mean_dbfs(mp4, first_offset + 0.1, NARRATION_WINDOW_S)
@@ -10160,6 +10222,14 @@ def run_narration(out_root: Path) -> list[str]:
         + check_narration_pacing(out_dir)
         + check_narration_audio(out_dir, info["lines"], clock)
         + check_narration_placement(out_dir, info["lines"], clock)
+        # The other half of the coverage question, and the one neither check
+        # above can ask: they refuse when *this* watcher was away, which leaves
+        # the case where both samplers stalled, both reported nothing, and
+        # agreed (issue #247). This is the cross-check that grades the
+        # recorder's own `capture_clock` against this harness's — and since
+        # #226 that record is what the audio's placement is derived from, so
+        # the arm that mixes speech is a place it belongs.
+        + check_capture_clock("narration", out_dir, clock)
         + check_healthy("narration", out_dir)
         + check_overlay_cleared("narration", out_dir)
     )

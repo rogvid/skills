@@ -150,11 +150,20 @@ from .markdown import _fmt_t, _md_cell
 #                          (issue #226) — and the state is here so a reader
 #                          can tell a mix that was corrected from one that
 #                          fell back to the raw offset because nobody watched
-#                          the clock. On a merged demo every part's lines are
-#                          here, moved onto the stitched clock by that part's
-#                          `offset` and each naming its own `segment`, and
-#                          `clock_correction.applied` is true only if every
-#                          part that narrated corrected its own mix.
+#                          the clock. A line also carries `clamped` — **only
+#                          when it has one** — being the seconds of correction
+#                          that could not be applied because the result was
+#                          negative: `at` is 0.0 there, `adelay` cannot express
+#                          a negative delay, and that line alone is *not* `t`
+#                          plus the steps before it. On a merged demo every
+#                          part's lines are here, moved onto the stitched clock
+#                          by that part's `offset` and each naming its own
+#                          `segment`; `clock_correction.applied` is true only
+#                          if every part that narrated corrected its own mix,
+#                          and `parts` / `parts_uncorrected` (merged demos
+#                          only) say how many of them that verdict is about,
+#                          so a demo where one part of three could not correct
+#                          is not reported as a demo where none could.
 #   coverage      dict?  — **null** unless the take was recorded against a
 #                          ticket (`Recorder(criteria={...})`). What the
 #                          storyboard *claimed*, never what it proved:
@@ -653,6 +662,16 @@ def _narration_md(narration: object) -> list[str]:
     only use the raw offset. The second is the one that matters here: the audio
     is *audible* evidence, and a listener who hears the voice drift away from
     the caption has no other way to find out that nothing knew by how much.
+
+    Two qualifications are printed rather than left to be inferred, because
+    both make the headline sentence false for *some* of the lines and a reader
+    correcting by hand would be corrected twice:
+
+      * a line whose correction hit the zero floor (`clamped`) did not move by
+        the steps before it — it moved by as much of them as the start of the
+        file left room for;
+      * on a stitched demo where only some narrating parts could correct, the
+        refusal is stated as **k of m segments** rather than as the whole demo.
     """
     if not isinstance(narration, dict):
         return []
@@ -665,8 +684,18 @@ def _narration_md(narration: object) -> list[str]:
     if not lines or not isinstance(clock, dict):
         return []
     if not clock.get("applied"):
+        # A merged record knows how much of the demo it is talking about; a
+        # single take's is the whole of it. Saying "the 3 spoken lines were
+        # mixed uncorrected" over a demo where two of them were is pessimistic
+        # rather than dangerous, but it is still not what happened.
+        refused, parts = clock.get("parts_uncorrected"), clock.get("parts")
+        whose = (
+            f"the lines of {refused} of this demo's {parts} narrated segment(s)"
+            if refused and parts
+            else f"the {len(lines)} spoken line(s)"
+        )
         return [
-            f"**The {len(lines)} spoken line(s) were mixed at their beat-log "
+            f"**{whose[0].upper()}{whose[1:]} were mixed at their beat-log "
             f"offsets, uncorrected**: {clock.get('note')}. The audio sits "
             f"inside the video and therefore on the video's clock, so if the "
             f"host's wall clock stepped while this was recording the voice is "
@@ -678,13 +707,27 @@ def _narration_md(narration: object) -> list[str]:
     # mixed between them. Same argument as `_capture_clock_md`.
     if not clock.get("steps"):
         return []
+    # ...and the lines the floor caught, which the sentence below is otherwise
+    # untrue for. Reachable only here: an uncorrected mix shifts nothing, so
+    # nothing it produces can go negative.
+    clamped = [line for line in lines if line.get("clamped")]
+    tail = (
+        f" **{len(clamped)} of them could not be moved the whole way**: the "
+        f"steps before that line were larger than the line's own offset, so "
+        f"the wall time it occupied is not in the video at all and `adelay` "
+        f"cannot express a negative delay. Those clips start at the top of the "
+        f"track, their `at` is 0.0, and `clamped` is how many seconds of the "
+        f"correction the start of the file swallowed."
+        if clamped
+        else ""
+    )
     return [
         f"**The {len(lines)} spoken line(s) were mixed where the host's "
         f"stepped clock puts them in the video**, not at the beat-log offsets "
         f"in the table below: each line's `at` in `timeline.json`'s "
         f"`narration` is its `t` plus the steps its own capture recorded "
         f"before that instant. Without it the voice would trail the caption "
-        f"by the size of the step for the rest of the take (issue #226).",
+        f"by the size of the step for the rest of the take (issue #226).{tail}",
         "",
     ]
 
