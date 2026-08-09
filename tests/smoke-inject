@@ -477,8 +477,18 @@ INJECTIONS = [
             '        self.steps.append({"t": 1.0, "delta": -0.5})\n'
         ),
         arm="--segments-only",
-        sites=("check_capture_clock",),
-        must_contain=("is not measuring the clock",),
+        # Two assertions on one break since #229: the record is checked
+        # against this harness's own watcher, and the *review sheet* is cut
+        # with that record — so a step nobody measured moves every frame after
+        # 1.0s half a second away from the beat it is named for. The second
+        # site is what proves the frame placement is graded against an
+        # independent measurement rather than against the artifact that
+        # produced it.
+        sites=("check_capture_clock", "check_beat_frames"),
+        must_contain=(
+            "is not measuring the clock",
+            "the frame is not the moment the sheet numbers it for",
+        ),
     ),
     # -- what the record says about its own coverage (issue #247) ------------
     #
@@ -642,11 +652,31 @@ INJECTIONS = [
         # instant `frames.py`'s own header says is the wrong one.
         name="every review frame is cut at the start of its beat, not its midpoint",
         module="frames.py",
-        old="        middle = min(max((float(t_start) + float(t_end)) / 2, 0.0), last)",
-        new="        middle = min(max(float(t_start), 0.0), last)",
+        old=(
+            "        middle = min(max((float(t_start) + float(t_end)) / 2 + slid, "
+            "0.0), last)"
+        ),
+        new="        middle = min(max(float(t_start) + slid, 0.0), last)",
         arm="--segments-only",
         sites=("check_beat_frames",),
-        must_contain=("moment the sheet numbers it for",),
+        must_contain=("the frame is not the moment the sheet numbers it for",),
+    ),
+    Injection(
+        # The sheet stops saying which clock its frames were cut on. Every
+        # frame is in exactly the same place and every other claim about the
+        # directory holds; what is gone is the sentence that tells a reviewer
+        # whether the timestamps were corrected for the host's wall clock or
+        # cut on the raw beat log — two documents that look identical and are
+        # up to seconds apart (issue #229). This is the half of #229 that is
+        # gradeable on a host whose clock never steps, where the corrected
+        # instant and the uncorrected one are the same number.
+        name="the review sheet stops saying which clock its frames were cut on",
+        module="frames.py",
+        old='    manifest["clock_correction"] = clock',
+        new='    manifest["clock_correction"] = None',
+        arm="--segments-only",
+        sites=("check_beat_frames",),
+        must_contain=("says nothing about the clock its frames ",),
     ),
     # -- what a beat's evidence says was on screen (issue #9), 7 s an entry ----
     Injection(

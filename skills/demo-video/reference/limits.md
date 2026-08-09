@@ -133,9 +133,18 @@ rather than by widening a bar, which is why `MAX_SKEW_DRIFT_S` could be
 restored at 250 ms after being deleted in
 [#217](https://github.com/rogvid/skills/issues/217).
 
-What to do: prefer `timeline.json`'s `capture_clock`, which records every step
-with its offset and size, and correct with it — **after checking
-`capture_clock.measured`**. That flag is false when the recorder's sampler
+Two things in the recorder already apply this for you, and reading them as
+uncorrected is the way to get it wrong twice
+([#229](https://github.com/rogvid/skills/issues/229)): **the review frames
+under `frames/` are cut on the video's clock**, midpoint plus that beat's own
+capture's steps before it, and `frames/frames.md` says which of the three
+cases the take was; and `timeline.md` says above its beat table when the clock
+stepped and by how much. `timeline.json`'s beat timestamps are untouched — they
+are the log, and the log is `time.monotonic()`.
+
+What to do everywhere else: prefer `timeline.json`'s `capture_clock`, which
+records every step with its offset and size, and correct with it — **after
+checking `capture_clock.measured`**. That flag is false when the recorder's sampler
 could not keep its interval, and then `steps` is empty and `total` is `null`
 on purpose: a record that says "I did not watch this" is the one thing worth
 more than a number that might be wrong. `max_gap` and `max_gap_limit` are the

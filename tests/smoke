@@ -6569,11 +6569,18 @@ def check_beat_frames(
         hand-written beat list rather than against the recorder's own idea of
         how many beats there were;
       * **each frame is the moment it says it is** — its timestamp is the
-        beat's midpoint computed here from `timeline.json`, and the PNG is
-        byte-identical to that second cut out of `demo.mp4` again. Only
+        beat's midpoint computed here from `timeline.json`, moved onto the
+        video's clock by *this harness's own* wall-clock watcher (issue #229),
+        and the PNG is byte-identical to that second cut out of `demo.mp4`
+        again. Only
         together: the first without the second passes a manifest that says the
         right time over the wrong picture, and the second without the first
         passes a frame faithfully cut from the wrong second;
+      * **the sheet says which clock it cut them on.** On a host that never
+        steps its clock the corrected instant and the uncorrected one are the
+        same number, so the bullet above cannot tell a recorder that applies
+        the record from one that ignores it. What it can tell is whether the
+        sheet *claims* a correction it could not compute;
       * **the sheet leaks no storyboard.** `frames.md` goes to a context-free
         reviewer who is asked what story the pictures tell. A caption, a verb
         or a selector printed beside a frame answers that for them, and the
@@ -6645,11 +6652,21 @@ def check_beat_frames(
             )
 
     # -- each frame is the moment it says it is ------------------------------
+    #
+    # The beat's midpoint is on the beat log's clock and the seek is on the
+    # video's, so the instant to expect is the midpoint **plus what the host's
+    # wall clock did before it** (issue #229). That correction is taken from
+    # *this harness's own* watcher, never from the take's `capture_clock`: the
+    # recorder cut the frames with its own record, and grading a record against
+    # itself passes on whatever number it wrote.
     doc = json.loads((out_dir / "timeline.json").read_text())
     beats = {b.get("index"): b for b in doc.get("beats") or []}
     mp4 = out_dir / "demo.mp4"
     duration = float(doc.get("duration") or 0.0)
+    stepped = clock.before if clock is not None else (lambda _t: 0.0)
+    step_times = [at for at, _delta in (clock.steps if clock is not None else [])]
     measured = 0
+    ungraded = 0
     for frame in listed:
         beat = beats.get(frame.get("beat"))
         png = frames_dir / str(frame.get("file"))
@@ -6657,12 +6674,26 @@ def check_beat_frames(
             continue
         middle = (float(beat["t_start"]) + float(beat["t_end"])) / 2
         at = float(frame["t"])
-        if abs(at - middle) > MAX_FRAME_PLACEMENT_S and at < duration - 0.2:
+        # A midpoint sitting on top of a step is not placement-gradeable: the
+        # two samplers are on their own 20 ms grids and do not both know which
+        # side of it the beat fell on, and a bar as wide as a step would grade
+        # nothing. Counted out loud rather than dropped silently — and the
+        # byte comparison below still runs on every frame.
+        on_a_step = any(
+            abs(middle - when) <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S
+            for when in step_times
+        )
+        want = middle + stepped(middle)
+        if on_a_step:
+            ungraded += 1
+        elif abs(at - want) > MAX_FRAME_PLACEMENT_S and at < duration - 0.2:
             failures.append(
                 f"{label}: {frame.get('file')} was taken at {at:.3f}s, but beat "
                 f"{frame.get('beat')} runs {beat['t_start']}-{beat['t_end']}s "
-                f"and its midpoint is {middle:.3f}s — the frame is not the "
-                f"moment the sheet numbers it for"
+                f"and its midpoint sits at {want:.3f}s in the video "
+                f"({middle:.3f}s on the beat log, {stepped(middle):+.3f}s of "
+                f"wall clock before it) — "
+                f"the frame is not the moment the sheet numbers it for"
             )
         if not mp4.is_file() or not duration:
             continue
@@ -6680,6 +6711,38 @@ def check_beat_frames(
             f"compared against demo.mp4 — the rest went ungraded, which is not "
             f"the same as passing"
         )
+
+    # -- and the sheet says which clock it cut them on -----------------------
+    #
+    # The one half of #229 that is gradeable on a host whose clock never steps.
+    # There the corrected instant and the uncorrected one are the same number,
+    # so nothing above can tell them apart — but "a correction was applied" and
+    # "nobody could compute one" are still two different sentences, and a sheet
+    # that let them look alike would be claiming an accuracy nobody measured.
+    stated = manifest.get("clock_correction")
+    if not isinstance(stated, dict):
+        failures.append(
+            f"{label}: frames.json says nothing about the clock its frames "
+            f"were cut on — a reviewer reading these timestamps cannot tell a "
+            f"sheet corrected for the host's wall clock from one cut on the "
+            f"raw beat log, and they are up to seconds apart"
+        )
+    elif clock is not None and clock.covered and not stated.get("applied"):
+        failures.append(
+            f"{label}: the sheet says its frames were cut uncorrected "
+            f"({stated.get('note')}) on a take this harness watched to within "
+            f"{clock.max_gap:.3f}s — the recorder had a record to cut them "
+            f"with and did not use it"
+        )
+    elif isinstance(stated, dict) and md_path.is_file():
+        said = md_path.read_text()
+        if "wall clock" not in said:
+            failures.append(
+                f"{label}: frames.md never mentions the wall clock, so the "
+                f"sheet a reviewer is handed states nothing about which clock "
+                f"its timestamps are on (frames.json says applied="
+                f"{stated.get('applied')!r})"
+            )
 
     # -- the sheet carries no storyboard -------------------------------------
     if not md_path.is_file():
@@ -6727,9 +6790,23 @@ def check_beat_frames(
     failures += _check_scene_fallback(label, out_dir, doc)
 
     if not failures:
+        cut = (
+            "on the beat log, uncorrected"
+            if not (isinstance(stated, dict) and stated.get("applied"))
+            else f"{stated.get('total'):+.2f}s of wall clock applied"
+            if stated.get("total")
+            else "on a wall clock that was watched and held still"
+        )
         print(
             f"smoke: {label} frames/ ok ({len(listed)} beat frames, each "
-            f"byte-identical to the demo.mp4 frame it claims to be)"
+            f"byte-identical to the demo.mp4 frame it claims to be; cut {cut}"
+            + (
+                f", {ungraded} not placement-graded within "
+                f"{MAX_CLOCK_STEP_TIME_DISAGREEMENT_S}s of a step"
+                if ungraded
+                else ""
+            )
+            + ")"
         )
     return failures
 
@@ -6801,9 +6878,11 @@ def _check_frame_captions(
         if not png.is_file():
             continue
         # Where the frame was cut, and where it actually sits in the story.
-        # The extractor seeks demo.mp4 at the beat's midpoint on the *log's*
-        # clock and the video is on the host's, so on a take whose host clock
-        # stepped those are two different moments (issue #215) — and a caption
+        # The extractor seeks demo.mp4 at the beat's midpoint moved onto the
+        # video's clock by the take's own record (issue #229) — and where that
+        # record could not answer, at the bare midpoint. Either way the two
+        # accounts of where the frame sits can differ by the residual between
+        # this watcher and the recorder's (issue #215) — and a caption
         # change *between* them is exactly the case where the sheet's label and
         # the picture disagree and neither is wrong. Grade a frame only when
         # the whole interval between the two accounts of where it is clears

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .content import media_duration
 from .markdown import _fmt_t, _md_cell
-from .timeline import timeline_paths
+from .timeline import capture_clock_correction, timeline_paths
 
 # -- beat-aligned review frames ----------------------------------------------
 #
@@ -61,6 +61,21 @@ from .timeline import timeline_paths
 # sheet handed to a **context-free** reviewer who is asked what story the
 # pictures tell; a `click('#refresh')` in the margin answers the question for
 # them.
+#
+# **The midpoint is a beat-log instant, and the seek is a video one.** Those
+# are two different clocks: the log is `time.monotonic()`, the video is stamped
+# with the host's wall clock, and a host that steps that clock parts them by
+# the size of the step. So every cut below is the midpoint **plus the steps the
+# beat's own capture recorded before it**, read out of the timeline's
+# `capture_clock` by `capture_clock_correction` — measured at up to 1.50 s of
+# error uncorrected on the WSL2 box of #247, which at 25 fps is ~37 frames of a
+# sheet that *is* the demo as far as a reviewer is concerned (issue #229).
+#
+# When the record cannot supply that number — no field, or a sampler that says
+# it could not watch — the cut falls back to the bare midpoint, and the
+# manifest and the sheet say so in as many words. Zero is the only number
+# available there, but it is a fallback and not a correction, and a sheet that
+# let the two look alike would be claiming an accuracy nobody measured.
 FRAMES_DIRNAME = "frames"
 FRAMES_SCHEMA = 1
 
@@ -142,8 +157,11 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     """Write one review frame per beat, and an index to read them in order.
 
     Reads the timeline the take just wrote (or `doc`), extracts
-    `frames/beat-NN.png` at each beat's midpoint, and writes `frames/frames.md`
-    for a reviewer and `frames/frames.json` for a tool. Neither says anything
+    `frames/beat-NN.png` at each beat's midpoint **on the video's clock** — the
+    midpoint plus that beat's own capture's recorded wall-clock steps, or the
+    bare midpoint with the reason stated when the record cannot say (see the
+    section header) — and writes `frames/frames.md` for a reviewer and
+    `frames/frames.json` for a tool. Neither says anything
     about what is *in* a frame — see the section header.
 
     Returns the manifest. Safe to re-run: it is a pure function of the mp4 and
@@ -175,6 +193,10 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         "duration": doc.get("duration"),
         "recorder": doc.get("recorder"),
         "frames": [],
+        # Filled in below, once there is a sheet for it to describe: whether
+        # these frames were cut on the video's clock or on the beat log's, and
+        # why not when they were not. Null on a manifest that wrote no frames.
+        "clock_correction": None,
         "skipped": None,
     }
     if doc.get("segment"):
@@ -199,6 +221,9 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             duration = float(beats[-1].get("t_end") or 0.0)
     last = max(0.0, float(duration) - _FRAME_EDGE_S)
 
+    correct, clock = capture_clock_correction(doc)
+    manifest["clock_correction"] = clock
+
     planned: list[dict] = []
     for beat in beats:
         t_start, t_end = beat.get("t_start"), beat.get("t_end")
@@ -206,7 +231,11 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             continue
         if not isinstance(t_end, (int, float)) or t_end < t_start:
             t_end = t_start
-        middle = min(max((float(t_start) + float(t_end)) / 2, 0.0), last)
+        # Onto the video's clock before anything is clamped: the correction is
+        # what puts the beat where the frames are, and clamping first would
+        # aim at the end of a file the beat does not reach.
+        slid = correct(beat)
+        middle = min(max((float(t_start) + float(t_end)) / 2 + slid, 0.0), last)
         index = int(beat.get("index", len(planned)))
         planned.append({
             "file": f"beat-{index:02d}.png",
@@ -219,7 +248,13 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # a load finishing inside a long hold is invisible to it.
         if float(t_end) - float(t_start) < SCENE_MIN_SPAN_S:
             continue
-        window = (min(float(t_start), last), min(float(t_end), last))
+        # The same slide, for the same reason: this window is a search through
+        # the video, so it has to be the beat's span *in the video*. Left on
+        # the log's clock it would scan a stretch the beat had already left.
+        window = (
+            min(max(float(t_start) + slid, 0.0), last),
+            min(max(float(t_end) + slid, 0.0), last),
+        )
         for n, cut in enumerate(scene_times(mp4, *window), 1):
             planned.append({
                 "file": f"beat-{index:02d}-scene-{n}.png",
@@ -256,10 +291,14 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             )
     manifest["frames"] = written
     # How far the video is *known* to have slid under the beat log, as a floor
-    # rather than a correction. A beat that ends after the video does can only
-    # mean capture loss (issue #18); it is usually zero, and when it is not it
-    # is the one number that says how stale a frame's aim may be.
-    over = float(beats[-1].get("t_end") or 0.0) - float(duration)
+    # rather than a correction: a beat that ends after the video does is wall
+    # time that never reached the file (issue #18). Measured against the last
+    # beat's **corrected** end, because a recorded wall-clock step already
+    # explains that much of the gap and is already applied above — reporting it
+    # here too would tell a reviewer their frames may be stale by the very
+    # amount they were just moved by.
+    tail = beats[-1]
+    over = float(tail.get("t_end") or 0.0) + correct(tail) - float(duration)
     manifest["capture_loss_at_least"] = round(max(0.0, over), 3)
     json_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     md_path.write_text(render_frames_md(manifest))
@@ -298,6 +337,47 @@ def write_beat_frames(out_dir: Path | str, doc: dict, where: str) -> dict | None
         f"wrote {frames_paths(out_dir)[0]} ({len(manifest['frames'])} review frames)"
     )
     return manifest
+
+
+def _clock_md(clock: object) -> list[str]:
+    """What the sheet says about the clock its frames were cut on.
+
+    Three sentences for three states, and the reason all three are printed
+    rather than only the interesting one: a reviewer cannot tell a frame cut
+    with the host's steps applied from one cut without them by looking at it.
+    Saying nothing on the fallback would leave the sheet reading exactly like
+    a corrected one — which is the confidently-wrong artifact this whole field
+    exists to avoid, and it is why "the clock was watched and held still" is
+    also stated out loud instead of being inferred from silence.
+    """
+    if not isinstance(clock, dict):
+        return []
+    if not clock.get("applied"):
+        return [
+            f"**These frames were cut on the beat log, uncorrected**: "
+            f"{clock.get('note')}. The video is on the host's wall clock and "
+            f"the beat log is not, so if that clock stepped during this take "
+            f"every frame after the step is of a moment that much later in the "
+            f"demo — and nothing here knows by how much.",
+            "",
+        ]
+    total = clock.get("total") or 0.0
+    if not total:
+        return [
+            "The host's wall clock was watched for the length of this take and "
+            "did not step, so each frame is at its beat's midpoint.",
+            "",
+        ]
+    return [
+        f"**The host's wall clock stepped {total:+.2f}s while this was "
+        f"recorded**, over {clock.get('steps')} step(s), and the video is on "
+        f"that clock. Each frame below was therefore cut at its beat's "
+        f"midpoint **plus the steps its own capture recorded before it**, not "
+        f"at the midpoint itself — the timestamps in the table are where the "
+        f"frames came out of the video. `timeline.json`'s `capture_clock` has "
+        f"the steps.",
+        "",
+    ]
 
 
 def render_frames_md(manifest: dict) -> str:
@@ -341,6 +421,7 @@ def render_frames_md(manifest: dict) -> str:
     ]
     if manifest.get("skipped"):
         return "\n".join(out + [f"No frames were written: {manifest['skipped']}.", ""])
+    out += _clock_md(manifest.get("clock_correction"))
     loss = manifest.get("capture_loss_at_least") or 0.0
     if loss > 0.05:
         out += [

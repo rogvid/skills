@@ -17,8 +17,9 @@ machine.
 
 They are aligned to **beats, not to a clock**. The old advice was
 `ffmpeg -vf fps=1/3`, which misses a short beat entirely and photographs a long
-static one twice. Each frame is taken at its beat's **midpoint** — `t_start` is
-0% into the caption bar's fade and before the verb has done anything.
+static one twice. Each frame is taken at its beat's **midpoint**, moved onto
+the video's own clock (below) — `t_start` is 0% into the caption bar's fade and
+before the verb has done anything.
 
 **How accurate that aim is, honestly.** The beat log is `time.monotonic()`;
 the video is on the host's **wall** clock, because that is what Chromium
@@ -31,11 +32,25 @@ idle time — that explanation was measured and retracted; see
 instrumented takes with a steady host clock, and by however much the host's
 wall clock moved during the take on one that does not: **1.50 s** by 13.5 s
 into a take on the WSL2 box of
-[#247](https://github.com/rogvid/skills/issues/247), with no fixed bound. The
-size is in `timeline.json`'s `capture_clock`, and nothing in the recorder
-applies it to these frames yet
-([#229](https://github.com/rogvid/skills/issues/229)). The practical
-consequence: for a beat comfortably longer
+[#247](https://github.com/rogvid/skills/issues/247), with no fixed bound.
+
+**The second of those two is corrected, and the first is not**
+([#229](https://github.com/rogvid/skills/issues/229)). Each frame is cut at
+its beat's midpoint **plus the wall-clock steps its own capture recorded
+before it**, read out of `timeline.json`'s `capture_clock`; corrected that way,
+38 caption transitions over six takes landed within 101 ms of the log where the
+uncorrected cut was out by up to 1.50 s. The timestamps in `frames.json` and
+`frames.md` are **already on the video's clock** — do not apply
+`capture_clock` to them a second time.
+
+`frames.md` says which of the three cases the take was, because a corrected
+sheet and an uncorrected one are otherwise the same document: the clock
+stepped and the frames were moved, the clock was watched and held still, or
+**nothing could be corrected** — no record, or a sampler that says it could
+not watch (`capture_clock.measured` false). In that last case the frames are
+cut on the raw beat log and the sheet says so; treat their aim as unbounded.
+
+The practical consequence, for what is left: for a beat comfortably longer
 than that, the frame is of that beat; **for a beat shorter than the drift — a
 bare `shot()`, a `wait_for()` that returned immediately — the frame can be of
 the beat after it.** `tests/smoke` measures exactly this and shows it: with the

@@ -183,7 +183,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 48 entries, ~41 min
+tests/smoke-inject                # all 49 entries, ~41 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -661,10 +661,16 @@ recorder claims, and it deliberately claims very little:
   off-by-one name fails without a pixel being read. Every file on disk is named
   by the manifest and vice versa.
 - **Each frame is the moment it says it is.** Two halves, and only together.
-  Its timestamp must be its beat's midpoint, computed *here* from
-  `timeline.json` — not imported from the recorder, because a check that
-  re-derives its expectation from the constants it is grading moves whenever
-  they do. And the PNG must be that frame: the harness **cuts the same second
+  Its timestamp must be its beat's midpoint **moved onto the video's clock by
+  this harness's own wall-clock watcher** ([#229](https://github.com/rogvid/skills/issues/229)),
+  computed *here* from
+  `timeline.json` — not imported from the recorder, and not corrected with the
+  take's own `capture_clock`, because a check that re-derives its expectation
+  from the numbers it is grading passes on whatever they say. A beat whose
+  midpoint sits within `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S` of a step is not
+  placement-graded and is counted in the arm's output: two samplers on their
+  own 20 ms grids do not both know which side of a step a beat fell on.
+  And the PNG must be that frame: the harness **cuts the same second
   out of `demo.mp4` again and compares the bytes**. 56 of 56 identical across
   the three graded takes — 23 web, 18 terminal, and 15 off the stitched
   `segments/` demo; one frame away (40 ms) is already a different file.
@@ -676,6 +682,15 @@ recorder claims, and it deliberately claims very little:
   filtered table and a refreshed one are mostly the same white page). A
   threshold loose enough to absorb the first cannot see the second — measured,
   by injecting exactly that and watching it pass.
+- **The sheet says which clock it cut them on.** On a host whose clock never
+  steps the corrected instant and the uncorrected one are the same number, so
+  nothing above can tell a recorder that applies `capture_clock` from one that
+  ignores it — but "a correction was applied" and "nobody could compute one"
+  are still two different sentences over identical timestamps. `frames.json`
+  must carry the answer, `frames.md` must say it in words, and a sheet that
+  reports no correction on a take *this harness* watched to within its own
+  interval is a failure. One `smoke-inject` entry breaks each half.
+
 - **The sheet leaks no storyboard.** `frames.md` goes to a *context-free*
   reviewer who is asked what story the pictures tell. It is searched for every
   caption in `WEB_CAPTIONS`/`TERMINAL_CAPTIONS` and every selector in the beat
@@ -1671,7 +1686,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-48 entries, 12 arms, ~41.0 min of takes
+49 entries, 12 arms, ~41.4 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1704,7 +1719,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--segments-only` | 13 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
+| `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
@@ -1999,16 +2014,30 @@ knows is missing is worse than one that is openly absent.
 
   What is fixed: the recorder measures the same clock and writes it into
   `timeline.json` as `capture_clock`, warns on the way out, and this harness
-  measures it independently and subtracts it before grading. What is **not**
-  fixed: a real demo's `timeline.json` still carries timestamps on a clock the
-  video is not on — a consumer has to apply `capture_clock` itself, and
-  nothing in the recorder does it for them. So a frame extracted at a beat
-  timestamp can still show the wrong moment, and narration still inherits the
-  lag because audio is mixed at wall-clock offsets while pixels ride the
-  screencast — measured at +0.70 s and now correctable from `capture_clock`,
-  which is [#226](https://github.com/rogvid/skills/issues/226). What is left of
+  measures it independently and subtracts it before grading. Since
+  [#229](https://github.com/rogvid/skills/issues/229) the recorder also
+  *applies* it where it owns the consumer — the review frames are cut on the
+  video's clock, and both `frames.md` and `timeline.md` say when the clock
+  stepped — so a reader of those two artifacts is no longer on their own.
+
+  What is **not** fixed: a real demo's `timeline.json` still carries beat
+  timestamps on a clock the video is not on, because that is what the log is,
+  and anything else reading them has to apply the field itself. Narration
+  still inherits the lag, because audio is mixed at wall-clock offsets while
+  pixels ride the screencast — measured at +0.70 s and now correctable from
+  `capture_clock`, which is
+  [#226](https://github.com/rogvid/skills/issues/226). What is left of
   [#18](https://github.com/rogvid/skills/issues/18) is that boundary, and it
   matters most to [#8](https://github.com/rogvid/skills/issues/8).
+
+  **And on a host whose clock never steps, the correction is a no-op** — a
+  corrected cut and an uncorrected one are the same number, so no arm of this
+  suite can tell them apart there. The arithmetic is graded on a *scripted*
+  record by `FrameClockCorrection` in `tests/unit`, where six injections cost
+  0.2 s each; what `--segments-only` adds on any host is that the sheet states
+  which of the three cases it was, and that a step the recorder invents moves
+  the frames and is caught by a placement check reading this harness's own
+  watcher.
 
 - **~~…and the correction above rests on a premise that did not reproduce on
   2026-08-08.~~ Retracted; the premise holds and the *sampler* was broken**
@@ -2080,6 +2109,18 @@ knows is missing is worse than one that is openly absent.
   in `tests/smoke` itself and were seen failing. That is a weaker claim than
   the arm passing — it does not prove the guard is *reached* on a real take —
   and it is the strongest one this host allows.
+
+  **Re-measured on 2026-08-09 while #229 was implemented, and it was green.**
+  Same box, same arm, `--segments-only` clean: **PASSED in 37 s**, with
+  `capture_clock agrees with the harness (the host's wall clock did not step
+  during this take)` for both parts and 0 merged steps. The host's 5.5 s pulse
+  was simply not running on that reading. That does not retract the entry
+  above — the arm was red twice earlier the same day, and a box that is red
+  when its clock steps and green when it does not is exactly the bimodality
+  #215 reported — but it does mean the three coverage entries, and #229's two,
+  are runnable here when the host is quiet, and #229's two were run and caught.
+  Treat a green `--segments-only` on this box as a reading of the host as much
+  as of the recorder.
 
 - **The terminal arm loses roughly a second more than its host clock explains,
   and nothing here knows why.** The correction is exact on the web arm — six
