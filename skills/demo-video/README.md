@@ -62,6 +62,14 @@ and a real terminal session (voice on):
   Opt-in because a stopped clock changes what a debounce, a token check or an
   elapsed-time bar does, usually without saying so; `reference/determinism.md`
   shows the five shapes that break and what the recorder cannot pin at all.
+- **A refusal to record against production** — the host a take is pointed at
+  is classified at construction, before a browser opens: loopback passes, a
+  private or internal host needs `allow_private=True`, and a public one is
+  refused with no option that permits it. It is a target classifier and
+  nothing more — there is no masking, no scrubbing and no redaction anywhere
+  in this skill, deliberately, and `SKILL.md` opens with why. The same rules
+  run as `scripts/demo-target-guard` in CI, over the workflow's configuration
+  and each storyboard's source text.
 - **Spoken narration (optional)** — with `ELEVENLABS_API_KEY` set, every
   caption line is synthesized via ElevenLabs and mixed onto the mp4 at the
   moment it appears. Clips are cached; pacing self-adjusts so speech is
@@ -106,7 +114,8 @@ win over env vars.
 | Variable | Sets | Default |
 |---|---|---|
 | `DEMO_VIDEO_OUT_DIR` | where demo files land | — |
-| `DEMO_VIDEO_BASE_URL` | app under demo | `http://localhost:8000` |
+| `DEMO_VIDEO_BASE_URL` | app under demo — classified before the browser opens | `http://localhost:8000` |
+| `DEMO_VIDEO_ALLOW_PRIVATE` | permit a private/internal target (`1`/`0`); no public equivalent exists | **off** |
 | `DEMO_VIDEO_ACCENT_RGB` | cursor/spotlight color, `"235,110,20"` | orange |
 | `DEMO_VIDEO_TERMINAL_TITLE` | web terminal-card title | `terminal` |
 | `DEMO_VIDEO_TERMINAL_PROMPT` | prompt (web card, and `TerminalRecorder` PS1) | `$ ` web / `❯ ` terminal |
@@ -139,6 +148,9 @@ demo-video/
 │   ├── narration.md               #   ElevenLabs speech
 │   └── ci.md                      #   recording on a pull request
 ├── README.md                      # this file — humans read this
+├── ensure.sh                      # installs uv, restores exec bits — run once
+├── scripts/
+│   └── demo-target-guard          # the target classifier, on the command line
 └── helpers/
     ├── demo_recording/            # package: the recorders, and what reads their output
     │   ├── __init__.py            #   exports Recorder, TerminalRecorder, stitch,
@@ -150,6 +162,7 @@ demo-video/
     │   │                          #      no Playwright, no ffmpeg import, importable
     │   │                          #      and unit-testable on its own. tests/unit
     │   │                          #      grades it in 0.07 s; tests/smoke the rest.
+    │   ├── target.py              #   what host a take may be pointed at
     │   ├── timeline.py            #   the beat log: schema and its two renderings
     │   ├── coverage.py            #   acceptance criteria, and what claimed them
     │   ├── content.py             #   whether the picture showed anything

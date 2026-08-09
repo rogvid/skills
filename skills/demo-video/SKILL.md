@@ -30,8 +30,11 @@ works almost always is worse than none, because it is what persuades somebody
 it is safe to point the recorder at production. The absence is the stronger
 guarantee ([#138](https://github.com/rogvid/skills/issues/138)).
 
-Recording in CI is the ordinary case and is secret-free by construction: the
-workflow refuses to record against a public host at all.
+**The recorder refuses a public target, in CI and on your machine.** Both
+recorders classify `base_url` at construction, before a browser opens:
+loopback passes, a private host needs `allow_private=True`, a public one is
+refused and no option permits it. CI runs the same classifier over
+`extra-env` and each storyboard's source ([reference/ci.md](reference/ci.md)).
 
 ## Overview
 
@@ -136,10 +139,12 @@ read them all up front, and do not skip one the text tells you to open.
 
 ## Setup (once per project)
 
-1. **Check for `uv` first**: run `uv --version`. If it is missing, STOP
-   and tell the user to install it (https://docs.astral.sh/uv/) —
-   storyboards are single-file uv scripts and cannot run without it. Do
-   not fall back to pip or a project venv.
+1. **Check for `uv` first**: run `uv --version`; if it is missing, run
+   `bash <this skill's directory>/ensure.sh`, which installs it and restores
+   the exec bits on `scripts/` (idempotent — every path in this file is
+   relative to the skill's own directory, not your cwd). Storyboards are
+   single-file uv scripts and cannot run without uv; do not fall back to pip
+   or a project venv.
 2. **`ffmpeg`** (which includes `ffprobe`) must be on PATH. **Chromium**
    once per machine: `uv run --with playwright playwright install chromium`
    (on a fresh Linux box add `--with-deps` for system libraries). If a
@@ -153,10 +158,8 @@ read them all up front, and do not skip one the text tells you to open.
 4. **Set project defaults in env** (see Configuration) or pass them as
    `Recorder(...)` parameters per storyboard.
 
-Nothing is copied into the project: storyboards import the recorder from
-this skill's folder, so the skill must be installed (project-level
-`.claude/skills/` or user-level `~/.claude/skills/`) wherever demos are
-re-recorded.
+Nothing is copied into the project: storyboards import the recorder from this
+skill's folder, so it must be installed wherever demos are re-recorded.
 
 ## Storyboard template
 
@@ -209,7 +212,8 @@ three it is not the variable lowercased, so do not infer it:
 | Variable | Sets (parameter — what it does) | Default |
 |---|---|---|
 | `DEMO_VIDEO_OUT_DIR` | `out_dir` — where demo files land | — (required one way or the other) |
-| `DEMO_VIDEO_BASE_URL` | `base_url` — app under demo | `http://localhost:8000` |
+| `DEMO_VIDEO_BASE_URL` | `base_url` — app under demo. Classified before the browser opens; a public host is refused | `http://localhost:8000` |
+| `DEMO_VIDEO_ALLOW_PRIVATE` | `allow_private` — permit a private/internal target (`1`/`0`). There is no equivalent for a public one | off |
 | `DEMO_VIDEO_ACCENT_RGB` | `accent_rgb` — cursor/spotlight color, `"235,110,20"` | orange |
 | `DEMO_VIDEO_TERMINAL_TITLE` | `terminal_title` — web `terminal()` card title | `terminal` |
 | `DEMO_VIDEO_TERMINAL_PROMPT` | `terminal_prompt` — prompt string: web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
@@ -510,13 +514,9 @@ return.
    says so in the same column that says the mp4 is not committed.
 
    **`evidence/` is not committed either, and for a stronger reason than the
-   mp4.** It is regenerated wholesale on every take, so it would churn
-   completely on each re-record and diff as noise — but the deciding argument
-   is that it is greppable plaintext of a real app's DOM and terminal, which
-   is precisely what a git history should not carry permanently and cannot be
-   made to forget afterwards. It is a per-take artifact for the reviewer
-   looking at *this* recording, like the mp4. `timeline.md` is what a reader
-   six months from now gets.
+   mp4** — it is greppable plaintext of a real app's DOM, and `timeline.md` is
+   what a reader six months from now gets
+   ([reference/review.md](reference/review.md)).
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has
@@ -583,8 +583,8 @@ return.
 ## Sharing this skill
 
 The skill is self-contained: this file, the `reference/` directory it links
-into, the `helpers/demo_recording/` package, the vendored
-`helpers/assets/xterm/` terminal assets, and `README.md`. Install it with the `skills` CLI — into the current project:
+into, the `helpers/demo_recording/` package, `scripts/` with `ensure.sh`, the
+vendored `helpers/assets/xterm/` terminal assets, and `README.md`. Install it with the `skills` CLI — into the current project:
 
 ```sh
 npx skills add https://github.com/rogvid/skills/tree/main/skills/demo-video

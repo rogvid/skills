@@ -79,3 +79,22 @@ browser opens: loopback always passes, a private or internal host needs
 input that permits it**. That is a static check on configuration and source
 text, not an egress control: a storyboard that computes its URL at run time is
 invisible to it.
+
+**The classifier is the skill's, not the workflow's, and CI is not the only
+place it runs.** The rules live in `helpers/demo_recording/target.py`, which
+both recorders apply in `__init__` — so a storyboard run by hand refuses a
+public `base_url` too, with no browser started and nothing recorded. The
+workflow's pre-check is a command-line front door onto the same module:
+
+```sh
+bash <skill-dir>/ensure.sh          # once per session
+<skill-dir>/scripts/demo-target-guard \
+    --url "$DEMO_VIDEO_BASE_URL" --scan demos/x/record.py
+```
+
+It exits 2 and names the offending URL on stderr. Run it yourself before
+pointing a storyboard at a host you have not recorded against before — it is
+the same verdict the recorder will reach, without paying for a browser first.
+`--allow-private` mirrors `allow-private-network-target`; there is no
+`--allow-public`, and adding one to the workflow would not help, because the
+recorder refuses independently.

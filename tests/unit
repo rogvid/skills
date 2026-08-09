@@ -99,6 +99,7 @@ from demo_recording.narration import (  # noqa: E402
     _tts_key,
 )
 from demo_recording.stitching import _merged_timeline  # noqa: E402
+from demo_recording.target import TargetRefused  # noqa: E402
 from demo_recording.timeline import (  # noqa: E402
     ISSUE_KINDS,
     MAX_ISSUES,
@@ -2481,6 +2482,234 @@ class VendoredAssets(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# What a recorder refuses to be pointed at (target.py)
+# --------------------------------------------------------------------------
+#
+# The pre-check that classified a recording target used to be a CI helper under
+# `.github/scripts/`, so it protected exactly one population: repositories that
+# had adopted *this* repository's workflow. Someone who installed the skill and
+# recorded by hand — the ordinary case — got prose. The rules are
+# `helpers/demo_recording/target.py` now, both recorders apply them in
+# `__init__`, and `scripts/demo-target-guard` is a command-line front door onto
+# the same module.
+#
+# These assertions are written from the **caller's** side. Not one of them
+# imports `classify`: which class a host belongs to is a claim about that
+# function and `tests/ci-unit` grades it. What is graded here is that a
+# recorder *applies* it — at construction, before a browser exists — and that
+# no argument, environment variable or spelling gets a public host through.
+#
+# **What is deliberately not here.** Nothing about what reaches the screen once
+# the answer is "loopback". This is a classifier, not a secret scanner, and the
+# skill's position that there is no masking, no scrubbing and no redaction
+# (#138) is unchanged by it.
+
+# Distinctive enough that finding one in a refusal is not a coincidence.
+TARGET_LOOPBACK = "http://127.0.0.1:8901"
+TARGET_PRIVATE = "http://10.0.0.4:8080"
+TARGET_PUBLIC = "https://tickets.acme.com"
+
+# The variables the guard reads. Pinned rather than inherited wherever a
+# recorder is constructed in this file: a suite whose recorders refuse or allow
+# depending on what is exported into it grades the box (the catalogue's
+# environment-agreeing assertion), and it would do it silently, because a
+# machine with neither variable set behaves exactly as the pin does.
+TARGET_ENV = ("DEMO_VIDEO_BASE_URL", "DEMO_VIDEO_ALLOW_PRIVATE")
+
+
+@contextlib.contextmanager
+def target_env(**overrides: str):
+    """`TARGET_ENV` set to exactly `overrides` and nothing else."""
+    saved = {name: os.environ.get(name) for name in TARGET_ENV}
+    for name in TARGET_ENV:
+        os.environ.pop(name, None)
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+class TargetGuard(unittest.TestCase):
+    def build(self, cls=Recorder, env=None, **settings):
+        """A constructed recorder, no browser, target variables pinned."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # The constructor's advisory notices are for someone recording a take.
+        with target_env(**(env or {})), contextlib.redirect_stderr(io.StringIO()):
+            return cls(tmp.name, speech=False, evidence=False, **settings)
+
+    def test_a_loopback_target_needs_no_opt_in_at_all(self):
+        # The control, and it is not decoration: every assertion below is that
+        # something is *refused*, and all of them would hold for a recorder
+        # that refused every host there is.
+        self.assertEqual(self.build(base_url=TARGET_LOOPBACK).base_url, TARGET_LOOPBACK)
+        self.build(cls=TerminalRecorder, env={"DEMO_VIDEO_BASE_URL": TARGET_LOOPBACK})
+
+    def test_nothing_gets_a_public_target_through(self):
+        # The asymmetry the module exists for: the private opt-in, in either
+        # spelling, does not widen to a public host — and there is no third
+        # spelling to try, which `test_nothing_spells_an_allow_public` grades.
+        for settings, env in (
+            ({}, {}),
+            ({"allow_private": True}, {}),
+            ({}, {"DEMO_VIDEO_ALLOW_PRIVATE": "1"}),
+        ):
+            with self.subTest(settings=settings, env=env):
+                with self.assertRaises(TargetRefused) as caught:
+                    self.build(base_url=TARGET_PUBLIC, env=env, **settings)
+                message = str(caught.exception)
+                self.assertIn(TARGET_PUBLIC, message)
+                # What class it was, and that no option changes the answer —
+                # a refusal that only said "refused" sends a reader looking
+                # for the flag that would have permitted it.
+                self.assertIn("public", message)
+                self.assertIn("no option that permits it", message)
+
+    def test_a_private_target_is_refused_until_it_is_asked_for(self):
+        with self.assertRaises(TargetRefused) as caught:
+            self.build(base_url=TARGET_PRIVATE)
+        message = str(caught.exception)
+        self.assertIn(TARGET_PRIVATE, message)
+        self.assertIn("private", message)
+        # The way out, named in the message. This is the half a refusal
+        # usually omits, and without it the reader's next move is to look for
+        # a way to turn the whole guard off.
+        self.assertIn("allow_private=True", message)
+        self.assertEqual(
+            self.build(base_url=TARGET_PRIVATE, allow_private=True).base_url,
+            TARGET_PRIVATE,
+        )
+        self.assertEqual(
+            self.build(
+                base_url=TARGET_PRIVATE, env={"DEMO_VIDEO_ALLOW_PRIVATE": "1"}
+            ).base_url,
+            TARGET_PRIVATE,
+        )
+
+    def test_the_terminal_recorder_refuses_the_environments_public_target(self):
+        # `TerminalRecorder` takes no `base_url` — it drives a PTY. What it
+        # does share is the environment, and `DEMO_VIDEO_BASE_URL` is how a
+        # runner says which application this take is pointed at: the demo-video
+        # workflow exports it for every storyboard it runs, terminal ones
+        # included. So the shared base classifies it for every medium.
+        with self.assertRaises(TargetRefused) as caught:
+            self.build(cls=TerminalRecorder, env={"DEMO_VIDEO_BASE_URL": TARGET_PUBLIC})
+        self.assertIn(TARGET_PUBLIC, str(caught.exception))
+
+    def test_a_loopback_argument_does_not_launder_a_public_environment(self):
+        # Fail closed, deliberately, and stated because it is the surprising
+        # direction: the environment naming a production host is refused even
+        # when the storyboard overrides it with a loopback one. The two
+        # together describe a take whose author and whose runner disagree
+        # about what is being recorded, and that is not a state to resolve
+        # quietly in favour of the safer-looking one.
+        with self.assertRaises(TargetRefused):
+            self.build(
+                base_url=TARGET_LOOPBACK, env={"DEMO_VIDEO_BASE_URL": TARGET_PUBLIC}
+            )
+
+    def test_the_refusal_lands_before_anything_reaches_a_browser(self):
+        # "Before a browser opens" is readable here rather than assumed: the
+        # stand-in installed at the top of this file raises the moment
+        # `sync_playwright` is called, so entering a *permitted* recorder gets
+        # that far and a refused one never leaves the constructor.
+        permitted = self.build(base_url=TARGET_LOOPBACK)
+        with self.assertRaises(RuntimeError) as reached:
+            permitted.__enter__()
+        self.assertIn("does not start a browser", str(reached.exception))
+        with self.assertRaises(TargetRefused):
+            self.build(base_url=TARGET_PUBLIC)
+
+    def test_nothing_spells_an_allow_public(self):
+        for cls in (_DemoBase, Recorder, TerminalRecorder):
+            named = [
+                p
+                for p in inspect.signature(cls.__init__).parameters
+                if "public" in p.lower()
+            ]
+            self.assertEqual(named, [], f"{cls.__name__} takes {named}")
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((_PKG_PARENT / "demo_recording").glob("*.py"))
+        )
+        read = set(re.findall(r'_env(?:_flag)?\(\s*"([A-Z0-9_]+)"', source))
+        # The haystack, and the control on it: a sweep that matched no
+        # variables at all would make "none of them says PUBLIC" hold over an
+        # empty set, and finding the opt-in that *does* exist proves the
+        # pattern reads the calls this claim is about.
+        self.assertIn("ALLOW_PRIVATE", read)
+        self.assertEqual(sorted(n for n in read if "PUBLIC" in n), [])
+
+
+# The names a copy of the classification would bring with it. Not a complete
+# description of one — a re-implementation under different names is invisible
+# here, and the identity check below is what covers the shape that has actually
+# happened, a helper quietly growing its own version of a rule.
+TARGET_RULE_MARKERS = ("_PRIVATE_SUFFIXES", "is_loopback", "ipaddress")
+
+# Files under the skill that are not text to sweep.
+_BINARY_SUFFIXES = (".mp4", ".png", ".jpg", ".gif", ".woff", ".woff2")
+
+
+class OneClassifier(unittest.TestCase):
+    """The rules live in one file, and the CLI is a door onto it, not a copy.
+
+    Two copies of a refusal is not a redundancy, it is a thing that can
+    disagree — and the half that disagrees quietly is the shipped one, because
+    CI is what gets watched. Scoped to the skill directory, which is what
+    `npx skills add` carries and what this suite's `--fault-inject` copies.
+    """
+
+    def swept(self):
+        for path in sorted(SKILL_DIR.rglob("*")):
+            if not path.is_file() or path.suffix in _BINARY_SUFFIXES:
+                continue
+            if "assets" in path.parts or "__pycache__" in path.parts:
+                continue
+            yield path, path.read_text(encoding="utf-8", errors="replace")
+
+    def test_the_classification_lives_in_exactly_one_shipped_file(self):
+        owner = SKILL_DIR / "helpers" / "demo_recording" / "target.py"
+        elsewhere, files = [], 0
+        for path, text in self.swept():
+            files += 1
+            if path == owner:
+                continue
+            for marker in TARGET_RULE_MARKERS:
+                if marker in text:
+                    elsewhere.append(f"{path.relative_to(SKILL_DIR)}: {marker}")
+        # The haystack, twice over: the directory was read, and the file that
+        # is supposed to own the rules has all of them. Without the second
+        # half this passes just as well over a skill that classifies nothing.
+        self.assertGreater(files, 10, "the skill directory was not read")
+        owns = [m for m in TARGET_RULE_MARKERS if m in owner.read_text("utf-8")]
+        self.assertEqual(list(TARGET_RULE_MARKERS), owns)
+        self.assertEqual(elsewhere, [], f"a second copy of the rules: {elsewhere}")
+
+    def test_the_shipped_cli_calls_the_package_and_not_a_copy(self):
+        # Identity, not "it imports something from target": a module that
+        # imports the package and then shadows `check` with its own would pass
+        # an import check and refuse nothing.
+        import importlib.machinery
+        import importlib.util
+
+        from demo_recording import target
+
+        path = SKILL_DIR / "scripts" / "demo-target-guard"
+        loader = importlib.machinery.SourceFileLoader("demo_target_guard", str(path))
+        spec = importlib.util.spec_from_loader("demo_target_guard", loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        self.assertIs(module.check, target.check)
+        self.assertIs(module.scan, target.scan)
+
+
+# --------------------------------------------------------------------------
 # The beat log says what was true of the screen (issues #134, #177)
 # --------------------------------------------------------------------------
 #
@@ -2645,7 +2874,10 @@ def recorder(test: unittest.TestCase, cls=WebRec, page=None, **settings):
     # The constructor's advisory notices about determinism and narration are
     # for someone recording a take; several hundred of them would bury this
     # suite's own output, and `--fault-inject` prints a tail of stderr.
-    with contextlib.redirect_stderr(io.StringIO()):
+    # `target_env()` for the same reason `speech` and `evidence` are pinned
+    # below: an exported `DEMO_VIDEO_BASE_URL` naming a public host would make
+    # every recorder in this suite refuse to construct, on that box only.
+    with target_env(), contextlib.redirect_stderr(io.StringIO()):
         rec = cls(
             tmp.name,
             # Pinned, not inherited: speech reads ELEVENLABS_API_KEY and
@@ -5557,6 +5789,86 @@ INJECTIONS = [
         'for name in ("failure.json", "failure.md", "screen.txt", "last-frame.png"):',
         "for name in [p.name for p in directory.iterdir()]:",
         ["FailureCleanup.test_only_the_files_the_dump_writes_are_removed"],
+    ),
+    # -- the target guard ---------------------------------------------------
+    #
+    # Seven breaks, and they are deliberately at different depths, because
+    # "the recorder refuses production" decomposes into claims that can fail
+    # one at a time: the rule itself, each recorder's application of it, the
+    # asymmetry between the two opt-ins, and whether a second copy of any of
+    # it has appeared. A single injection at the rule would go red for all of
+    # them and prove only that something, somewhere, is load-bearing.
+    (
+        "the rule stops refusing a public host",
+        "target.py",
+        '    if kind == PUBLIC:\n        return f"{url} — classified {PUBLIC}: {why}. {PUBLIC_REFUSAL}"',
+        "    if kind == PUBLIC:\n        return None",
+        ["TargetGuard.test_nothing_gets_a_public_target_through"],
+    ),
+    (
+        "the web recorder resolves base_url and never classifies it",
+        "web.py",
+        "        guard_target(self.base_url, self._allow_private)",
+        "        pass  # the argument goes unchecked",
+        [
+            "TargetGuard.test_nothing_gets_a_public_target_through",
+            "TargetGuard.test_a_private_target_is_refused_until_it_is_asked_for",
+        ],
+    ),
+    (
+        "the shared base stops classifying the target the environment names",
+        "core.py",
+        '        guard_target(_env("BASE_URL"), self._allow_private)',
+        "        pass  # the environment goes unchecked",
+        [
+            "TargetGuard.test_the_terminal_recorder_refuses_the_environments_public_target",
+            "TargetGuard.test_a_loopback_argument_does_not_launder_a_public_environment",
+        ],
+    ),
+    (
+        # The asymmetry, from the private side: a guard that assumes the
+        # opt-in still refuses every public host, so nothing above notices.
+        "the private opt-in is assumed rather than asked for",
+        "core.py",
+        "        self._allow_private = bool(allow_private)",
+        "        self._allow_private = True",
+        ["TargetGuard.test_a_private_target_is_refused_until_it_is_asked_for"],
+    ),
+    (
+        "a way to permit a public host appears as a constructor argument",
+        "core.py",
+        "        allow_private: bool | None = None,\n    ) -> None:",
+        "        allow_private: bool | None = None,\n        allow_public: bool | None = None,\n    ) -> None:",
+        ["TargetGuard.test_nothing_spells_an_allow_public"],
+    ),
+    (
+        "the opt-in is read from an environment variable spelled PUBLIC",
+        "core.py",
+        '            allow_private = _env_flag("ALLOW_PRIVATE")',
+        '            allow_private = _env_flag("ALLOW_PUBLIC")',
+        [
+            "TargetGuard.test_nothing_spells_an_allow_public",
+            "TargetGuard.test_a_private_target_is_refused_until_it_is_asked_for",
+        ],
+    ),
+    (
+        # The shape that has actually happened in this repository: a helper
+        # that imports the package and then quietly grows its own version of
+        # one rule. The CLI still runs, still exits 0 on loopback, and refuses
+        # nothing.
+        "the shipped CLI shadows the package's check with a copy of its own",
+        "scripts/demo-target-guard",
+        "from demo_recording.target import check, scan  # noqa: E402",
+        "from demo_recording.target import scan  # noqa: E402\n\n\n"
+        "def check(url, allow_private):\n    return None",
+        ["OneClassifier.test_the_shipped_cli_calls_the_package_and_not_a_copy"],
+    ),
+    (
+        "a second copy of the classification starts growing in the CLI",
+        "scripts/demo-target-guard",
+        "import argparse\nimport sys",
+        "import argparse\nimport ipaddress\nimport sys",
+        ["OneClassifier.test_the_classification_lives_in_exactly_one_shipped_file"],
     ),
     (
         "an internal threshold drifts back onto the package's front door",

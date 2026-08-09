@@ -83,7 +83,7 @@ on:
         description: >-
           Permit a private or internal host (10.x, a container service name,
           *.internal). Public hosts are refused regardless — there is no input
-          that permits one. See .github/scripts/demo-target-guard.
+          that permits one. See skills/demo-video/scripts/demo-target-guard.
         type: boolean
         default: false
       extra-env:
@@ -165,20 +165,30 @@ jobs:
           path: .demo-video-helpers
           persist-credentials: false
 
+      # `skill=` is the demo-video skill directory in the same checkout. The
+      # target guard lives there and not under .github/scripts, because it has
+      # to reach a consumer who installed the skill and records by hand — CI
+      # is not the only place a recording is pointed at a host. This step is
+      # what keeps that a *move* rather than a copy: one file, invoked from
+      # the skill by both the workflow and every storyboard.
       - name: Locate the CI helper scripts
         id: helpers
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$DEMO_DIRS")"
           if [ "$GITHUB_REPOSITORY" = "rogvid/skills" ]; then
-            dir="$GITHUB_WORKSPACE/.github/scripts"
+            root="$GITHUB_WORKSPACE"
             echo "Using the helper scripts from the checkout under test."
           else
-            dir="$GITHUB_WORKSPACE/.demo-video-helpers/.github/scripts"
+            root="$GITHUB_WORKSPACE/.demo-video-helpers"
           fi
+          dir="$root/.github/scripts"
+          skill="$root/skills/demo-video"
           # Packaging and some checkout paths drop the executable bit.
-          chmod +x "$dir"/demo-storyboards "$dir"/demo-target-guard "$dir"/demo-comment
+          chmod +x "$dir"/demo-storyboards "$dir"/demo-comment
+          chmod +x "$skill"/scripts/demo-target-guard
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "skill=$skill" >> "$GITHUB_OUTPUT"
 
       # Before discovery, not after: the helper scripts are PEP 723 executables
       # with a `uv run --script` shebang, so `uv` has to exist before the first
@@ -238,7 +248,7 @@ jobs:
         if: steps.discover.outputs.count != '0'
         working-directory: ${{ inputs.working-directory }}
         env:
-          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          SKILL: ${{ steps.helpers.outputs.skill }}
           BASE_URL: ${{ inputs.base-url }}
           ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}
           EXTRA_ENV: ${{ inputs.extra-env }}
@@ -253,7 +263,7 @@ jobs:
           # its own variable would otherwise route around base-url entirely.
           printf '%s\n' "$EXTRA_ENV" > "$CHANGED.env"
           args+=(--scan "$CHANGED.env")
-          "$SCRIPTS/demo-target-guard" "${args[@]}"
+          "$SKILL/scripts/demo-target-guard" "${args[@]}"
 
       - name: Export the caller's extra environment
         if: steps.discover.outputs.count != '0' && inputs.extra-env != ''

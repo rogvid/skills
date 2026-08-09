@@ -2367,6 +2367,24 @@ knows is missing is worse than one that is openly absent.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
+- **The target guard classifies a configured host, and three things about that
+  are not graded anywhere.** `target.py` is applied by both recorders at
+  construction and by `scripts/demo-target-guard` in CI, and `tests/unit`'s
+  `TargetGuard` and `OneClassifier` plus `tests/ci-unit`'s `Classify`/`Check`/
+  `Scan` grade the rule, its application, and that there is one copy of it.
+  What none of them can see: **(1)** a copy of the rules re-appearing *outside*
+  the skill directory — `OneClassifier` sweeps `SKILL_DIR` only, because
+  `--fault-inject` copies that directory and an assertion reading the real
+  repository from inside a broken copy would grade the wrong tree; **(2)**
+  whether `npx skills add` still carries `scripts/` and `ensure.sh` to a
+  consumer — that is a claim about a third-party CLI's copying rules, checked
+  by installing the skill and running the guard out of the install (it does,
+  measured once, by hand), and nothing re-checks it when that CLI changes;
+  **(3)** anything the take reaches
+  *other than* `base_url` — a page that fetches another origin, a terminal
+  storyboard that curls one, a URL computed at run time. The guard is a static
+  classifier over configuration and source text, not an egress control, and
+  `target.py`'s docstring says so in the same words.
 
 Failures accumulate and print together, each naming the file or interaction and
 the number that was wrong. The process exits non-zero if there is even one, and
