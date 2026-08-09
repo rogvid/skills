@@ -1751,7 +1751,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 41 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 42 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1786,6 +1786,7 @@ paragraph whose job is to say what this manifest does not cover.
   | `_check_stale_frames` | genuinely ungraded. `FailureCleanup` is the same shape for the failure dump, not for `frames/` |
   | `_check_segment_refusal` | genuinely ungraded — an unmerged segment's document, graded against the frames a recorder did not write |
   | `_check_scene_fallback` | genuinely ungraded — measured straight off `demo.mp4`, because no beat in either storyboard is long enough to provoke it |
+  | `_check_unstated_holes` | `HostClockHole` — the whole of it, on a scripted `HostClock`: the complaint, the marker that silences it, the steady-host control and both edge guards (#256). Genuinely ungraded *as a check that runs*: a host that does not step its wall clock produces no hole for it to find, so no arm has ever reached its failure |
 
   **Three rows above are worse off than the rest, and #61 is why.**
   `check_opening`, `check_opening_gap` and `check_verb_classification` are
@@ -2128,7 +2129,7 @@ knows is missing is worse than one that is openly absent.
   **And on a host whose clock never steps, the correction is a no-op** — a
   corrected cut and an uncorrected one are the same number, so no arm of this
   suite can tell them apart there. The arithmetic is graded on a *scripted*
-  record by `FrameClockCorrection` in `tests/unit`, where 21 injections cost
+  record by `FrameClockCorrection` in `tests/unit`, where 22 injections cost
   0.2 s each — the figure is checked against the manifest by
   `StatedInjectionCount`, because it drifted once already — including the one that reads the correction at a beat's
   `t_start` and applies it to the midpoint, which is how #253 shipped its first
@@ -2161,6 +2162,19 @@ knows is missing is worse than one that is openly absent.
   which is why all of it is synthetic; what #256 deliberately did not do is
   question whether the recorded Δ is the width of the hole, which is
   [#259](https://github.com/rogvid/skills/issues/259).
+
+  **And none of #256's harness half has ever been executed against a real
+  take.** `_check_unstated_holes`, the `hole_clause` both placement failures
+  append, and the re-pointed `--segments-only` entry for the frame-cut instant
+  are all **text-verified and unit-verified only**: `--segments-only` is red
+  on this box whenever its clock steps ([#258](https://github.com/rogvid/skills/issues/258)),
+  and `smoke-inject` — rightly — refuses to grade an injection whose clean
+  baseline already fails. "Every entry still matches the tree" says the search
+  strings are current; it does not say the arm ran. What did run is
+  `HostClockHole`, against a scripted `HostClock`, in 0.1 s. That is a weaker
+  claim than the arm passing — it does not prove the check is *reached* on a
+  real take — and it is the strongest one this host allows, which is the same
+  position `ClockCoverageCheck` has been in since #247.
 
 - **~~…and the correction above rests on a premise that did not reproduce on
   2026-08-08.~~ Retracted; the premise holds and the *sampler* was broken**

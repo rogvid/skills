@@ -147,7 +147,15 @@ instant before the gap and marked `no_video`, see below), and
 `narration.lines` gives each spoken line's `t` (the beat log's instant) beside
 its `at` (where the clip really is in `media`, which is `t` corrected by the
 same rule and never below zero), with `narration.clock_correction` saying which
-of the three cases applied; and `timeline.md` says above its beat table when the
+of the three cases applied — a line may also carry `clamped`, the seconds a
+correction lost to the start of the file, but **no record the recorder can
+emit produces one any more**: since
+[#256](https://github.com/rogvid/skills/issues/256) an instant is never placed
+earlier than the step that moved it, and the recorder's sampler starts at frame
+zero, so `at` cannot come out negative. The floor and the field stay because
+`adelay` refuses a negative delay outright and would cost the take its whole
+audio track; read `clamped` as a guard against a malformed record, not as
+something to expect; and `timeline.md` says above its beat table when the
 clock stepped and by how much, and what that meant for the audio. `timeline.json`'s beat
 timestamps are untouched — they are the log, and the log is `time.monotonic()`.
 

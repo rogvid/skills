@@ -5399,6 +5399,26 @@ class FrameClockCorrection(unittest.TestCase):
         # reviewer never reaches.
         self.assertIn("## beat-00 — 5.15s (no video of this beat", sheet)
 
+    def test_a_shortfall_too_small_to_write_down_is_not_called_a_hole(self):
+        """The other side of `no_video`'s key, and `mix_plan` already had it.
+
+        This midpoint is 0.2 ms short of where the video resumes, which is
+        nothing at the three places the manifest writes a second to. Testing
+        the raw float instead of the rounded one publishes
+        `"no_video": 0.0` — a frame documented as being of no moment in the
+        file, over a frame that is exactly where its beat is, in the one key
+        that is supposed to mean the sheet's timestamp cannot be trusted.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((5.151, -1.051)),
+            beats=[beat(0, "caption", 6.1518, t_end=6.2518)],
+        )
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [5.151])
+        self.assertNotIn("no_video", manifest["frames"][0])
+        self.assertNotIn("no video of this beat", render_frames_md(manifest))
+
     def test_a_beat_past_the_hole_still_gets_the_whole_step(self):
         """The control, and the one that stops the fix from being a rollback.
 
@@ -6660,7 +6680,7 @@ class HostClockHole(unittest.TestCase):
 
     def test_a_frame_of_a_deleted_beat_that_says_nothing_is_a_failure(self):
         listed, beats = self.sheet(marked=False)
-        problems = self.smoke.unstated_holes(
+        problems = self.smoke._check_unstated_holes(
             "web", self.clock((5.151, -1.051)), listed, beats
         )
         self.assertEqual(len(problems), 1, f"expected one complaint, got {problems!r}")
@@ -6670,7 +6690,7 @@ class HostClockHole(unittest.TestCase):
     def test_the_same_frame_with_the_marker_passes(self):
         listed, beats = self.sheet(marked=True)
         self.assertEqual(
-            self.smoke.unstated_holes(
+            self.smoke._check_unstated_holes(
                 "web", self.clock((5.151, -1.051)), listed, beats
             ),
             [],
@@ -6682,21 +6702,79 @@ class HostClockHole(unittest.TestCase):
         # `no_video` on every frame of every take.
         listed, beats = self.sheet(marked=False)
         self.assertEqual(
-            self.smoke.unstated_holes("web", self.clock(), listed, beats), []
+            self.smoke._check_unstated_holes("web", self.clock(), listed, beats), []
         )
 
-    def test_a_midpoint_on_the_edge_of_a_hole_is_left_alone(self):
+    def test_a_midpoint_near_the_far_edge_of_a_hole_is_left_alone(self):
         # Two samplers on their own 20 ms grids do not both know which side of
         # an edge an instant fell on, and this check is not the place to find
         # out: this midpoint is 22 ms short of where the video resumes, well
         # under `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S`, and is not graded.
         listed, beats = self.sheet(marked=False, middle=6.18)
         self.assertEqual(
-            self.smoke.unstated_holes(
+            self.smoke._check_unstated_holes(
                 "web", self.clock((5.151, -1.051)), listed, beats
             ),
             [],
         )
+
+    def test_a_midpoint_near_the_step_itself_is_left_alone(self):
+        """The *other* edge, which is a separate branch and was ungraded.
+
+        A midpoint 149 ms after the step is deep inside the hole by the far
+        edge's reckoning — 902 ms of it left to run — so the gap test alone
+        lets it through to a complaint. The two watchers do not agree to
+        within 149 ms about *when* a step landed, which is what
+        `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S` is for everywhere else in this
+        file, so this beat may not have been inside the hole at all.
+        """
+        listed, beats = self.sheet(marked=False, middle=5.3)
+        clock = self.clock((5.151, -1.051))
+        # The guard this is about is the only thing between here and a
+        # complaint: the far-edge test does not fire on this midpoint.
+        self.assertGreater(clock.hole(5.3), 0.25)
+        self.assertEqual(
+            self.smoke._check_unstated_holes("web", clock, listed, beats), []
+        )
+
+    def test_a_beat_with_no_end_is_skipped_rather_than_raising(self):
+        # `beats` comes straight out of `timeline.json`, and a listed frame
+        # whose beat lost its `t_end` reaches here. A harness check that
+        # raises takes the whole arm down over a beat it had nothing to say
+        # about — which is worse than the silence it replaces.
+        listed, beats = self.sheet(marked=False)
+        del beats[0]["t_end"]
+        self.assertEqual(
+            self.smoke._check_unstated_holes(
+                "web", self.clock((5.151, -1.051)), listed, beats
+            ),
+            [],
+        )
+
+    # -- and what its failure text says --------------------------------------
+
+    def test_a_failure_about_an_instant_with_no_video_says_that_much(self):
+        """`hole_clause`, which both placement failures append (issue #256).
+
+        The two messages state "the instant `t` is at `at` in the video", and
+        inside a hole that is false of `at` — it is the last moment the file
+        has. Without this clause a reader is sent to a second `demo.mp4` does
+        not contain and concludes the harness is confused.
+        """
+        clause = self.smoke.hole_clause(self.clock((5.151, -1.051)), 5.633, 5.151)
+        self.assertIn("There is no video of that instant at all", clause)
+        self.assertIn("5.151s is the last moment before a gap", clause)
+        self.assertIn("569 ms later", clause)
+
+    def test_a_failure_about_an_ordinary_instant_adds_nothing(self):
+        # The control. A clause on every placement failure is a clause that
+        # says "there is no video of that instant" about takes on a steady
+        # host, which is the artifact-lies direction of the same fix.
+        self.assertEqual(
+            self.smoke.hole_clause(self.clock((5.151, -1.051)), 6.3, 5.249), ""
+        )
+        self.assertEqual(self.smoke.hole_clause(self.clock(), 6.3, 6.3), "")
+        self.assertEqual(self.smoke.hole_clause(None, 6.3, 6.3), "")
 
 
 # --------------------------------------------------------------------------
@@ -7005,7 +7083,7 @@ INJECTIONS = [
         # before the step rather than of the beat.
         "a frame of a beat with no video is published as an ordinary frame",
         "frames.py",
-        "        if placed.lost:",
+        "        if round(placed.lost, 3):",
         "        if False:",
         [
             "FrameClockCorrection."
@@ -7017,14 +7095,31 @@ INJECTIONS = [
         ],
     ),
     (
+        # ...and the other side of the same key, which `narration.py` has
+        # carried since #226 and this file did not until review: a shortfall
+        # of 0.2 ms, which is nothing at the three places the manifest writes
+        # a second to, published as a beat with no video. The field is
+        # documented as absent when there is nothing to say, and a reader who
+        # trusts that reads a frame as untrustworthy when it is exactly where
+        # its beat is.
+        "a shortfall too small to write down is still called a hole",
+        "frames.py",
+        "        if round(placed.lost, 3):",
+        "        if placed.lost:",
+        [
+            "FrameClockCorrection."
+            "test_a_shortfall_too_small_to_write_down_is_not_called_a_hole"
+        ],
+    ),
+    (
         # ...the manifest keeping the marker and the sheet dropping the
         # paragraph. `frames.md` is what a reviewer is handed; `frames.json` is
         # what a tool reads, and nobody reviewing a demo through this skill
         # opens the JSON.
         "frames.md stops naming the beats the clock deleted",
         "frames.py",
-        "    out += _no_video_md(frames)",
-        "    out += []",
+        "    holed = _no_video_md(frames)",
+        "    holed = []",
         [
             "FrameClockCorrection."
             "test_the_sheet_tells_a_reviewer_that_frame_is_not_of_its_beat"
@@ -7099,6 +7194,40 @@ INJECTIONS = [
         '        if not frame.get("no_video"):',
         "        if False:",
         ["HostClockHole.test_a_frame_of_a_deleted_beat_that_says_nothing_is_a_failure"],
+    ),
+    (
+        # ...and the leniency half of the same check, which review found
+        # ungraded: the guard that leaves a midpoint alone when the two
+        # samplers cannot agree which side of the *step* it fell on. It can
+        # only ever mask a complaint, never invent one, which is exactly why
+        # nothing noticed it was doing nothing.
+        # ...and the guard that keeps it from raising on a beat with no end.
+        # `beats` comes straight out of `timeline.json`, so this is reachable,
+        # and the failure mode is the whole arm dying inside a check that had
+        # nothing to say about that beat.
+        "the harness raises on a beat whose log lost its end",
+        "tests/smoke",
+        '        if not isinstance(beat.get("t_end"), (int, float)):\n            continue',
+        "        if False:\n            continue",
+        ["HostClockHole.test_a_beat_with_no_end_is_skipped_rather_than_raising"],
+    ),
+    (
+        "the harness complains about a midpoint sitting on the step itself",
+        "tests/smoke",
+        "        if gap <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S or near_edge:",
+        "        if gap <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S:",
+        ["HostClockHole.test_a_midpoint_near_the_step_itself_is_left_alone"],
+    ),
+    (
+        # The failure text going back to naming a second the file does not
+        # contain. Both placement checks still fail on the same takes and for
+        # the same reason — what is gone is the sentence that tells the reader
+        # why the second they are being sent to has no frame at it.
+        "a placement failure stops saying the instant has no video",
+        "tests/smoke",
+        "    gap = clock.hole(t) if clock is not None else 0.0",
+        "    gap = 0.0",
+        ["HostClockHole.test_a_failure_about_an_instant_with_no_video_says_that_much"],
     ),
     (
         # The smoke harness back to "one line, one stretch of audio" — the

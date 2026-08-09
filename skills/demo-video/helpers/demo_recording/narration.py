@@ -113,7 +113,13 @@ def mix_plan(
     clock record — see the section above; a caller that drops it publishes a
     demo whose audio placement cannot be told from a guess.
 
-    `at` never goes below zero, and **a line that hit that floor says so**. A
+    `at` never goes below zero, and **a line that hit that floor says so** —
+    though since #256 nothing this recorder writes can hit it: a step's own
+    hole clamps every instant inside it to a moment no earlier than the step,
+    and the sampler's first reading is at frame zero, so only a record from
+    somewhere else (a step timestamped before the capture began) can drive
+    `at` negative. The floor stays for that record, because `adelay` refuses a
+    negative delay and takes the whole audio track with it. A
     backward step larger than a line's own offset puts that instant before this
     capture's first frame — the wall time it occupied is genuinely not in the
     file — and `adelay` has no way to express a negative delay, so the clip

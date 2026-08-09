@@ -183,6 +183,14 @@ from .markdown import _fmt_t, _md_cell
 #                          recorded in one piece, that part's `offset` on a
 #                          stitched demo — **not** 0.0 there), and that line
 #                          alone is *not* `t` plus the steps before it.
+#                          **No record this recorder emits produces a
+#                          `clamped` line any more** (issue #256): an instant
+#                          is never placed earlier than the step that moved
+#                          it, and the sampler starts at frame zero, so `at`
+#                          cannot come out negative. The field and its floor
+#                          stay for a record from somewhere else, because
+#                          `adelay` refuses a negative delay and that costs a
+#                          take its whole audio track rather than one clip.
 #                          A line carries `no_video` — again **only when it
 #                          has one** — when the instant it was spoken at falls
 #                          inside a hole a backward step deleted from the file
@@ -790,7 +798,8 @@ def _narration_md(narration: object) -> list[str]:
 
       * a line whose correction hit the zero floor (`clamped`) did not move by
         the steps before it — it moved by as much of them as the start of the
-        file left room for;
+        file left room for. Unreachable from a record this recorder writes
+        since #256, and kept for one that came from elsewhere;
       * a line the clock stepped *over* (`no_video`) was spoken during wall
         time the file does not contain, so its clip sits at the last moment
         before the gap and not where the steps put it (issue #256);

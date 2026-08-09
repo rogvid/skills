@@ -54,7 +54,12 @@ needed; captions are the narration script.
   carries `no_video`, the seconds until the video resumes
   ([#256](https://github.com/rogvid/skills/issues/256)). `timeline.md` names
   those lines. Correcting them like the rest puts the voice a whole step
-  early, over the caption before the one it is about.
+  early, over the caption before the one it is about. This **replaced** the
+  older case where such a line was pushed to the very start of the track and
+  marked `clamped`: no record the recorder can emit produces a `clamped` line
+  any more, because an instant is never placed earlier than the step that
+  moved it. The floor stays only because `adelay` cannot express a negative
+  delay for a malformed record.
 - **A backward step between two lines can make their clips overlap, and that
   is the correction working.** The step shortens the *video*; it does not
   shorten the clip. The recorder waited line 1 out before starting line 2 in

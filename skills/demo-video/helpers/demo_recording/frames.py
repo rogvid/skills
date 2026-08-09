@@ -296,7 +296,14 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # **Only when there is one**, like narration's `clamped`: a key on
         # every frame is a key nobody reads, and `0.0` beside a frame that is
         # exactly where its beat is would be a hole nobody found.
-        if placed.lost:
+        #
+        # Rounded *before* the test, exactly as `mix_plan` does it and for the
+        # same reason: a midpoint 0.2 ms short of where the video resumes is
+        # inside a hole by less than this record can write down, and
+        # `"no_video": 0.0` beside it says "there is no frame of this beat"
+        # about a frame that is where its beat is. Testing the raw float was
+        # this file's own version of the bug the rounding exists to stop.
+        if round(placed.lost, 3):
             entry["no_video"] = round(placed.lost, 3)
         planned.append(entry)
         # Only for beats long enough to hide an unscripted transition. Beat
@@ -409,7 +416,7 @@ def write_beat_frames(out_dir: Path | str, doc: dict, where: str) -> dict | None
     return manifest
 
 
-def _clock_md(clock: object) -> list[str]:
+def _clock_md(clock: object, holed: bool = False) -> list[str]:
     """What the sheet says about the clock its frames were cut on.
 
     Three sentences for three states, and the reason all three are printed
@@ -419,6 +426,14 @@ def _clock_md(clock: object) -> list[str]:
     a corrected one — which is the confidently-wrong artifact this whole field
     exists to avoid, and it is why "the clock was watched and held still" is
     also stated out loud instead of being inferred from silence.
+
+    `holed` is whether any frame on this sheet is of a beat the clock deleted
+    from the file, and it is a parameter rather than something the paragraph
+    below leaves to `_no_video_md` to correct afterwards: the stepped sentence
+    says flatly that every frame is its midpoint plus the steps before it, and
+    for those frames that is false. A reader who stops at the first paragraph
+    — which is what a headline paragraph is for — would carry away the wrong
+    rule and never reach the correction.
     """
     if not isinstance(clock, dict):
         return []
@@ -445,12 +460,18 @@ def _clock_md(clock: object) -> list[str]:
     return [
         f"**The host's wall clock stepped {clock.get('steps')} time(s) while "
         f"this was recorded** ({clock.get('total') or 0.0:+.2f}s in total), and "
-        f"the video is on that clock. Each frame below was therefore cut at "
-        f"its beat's midpoint **plus the steps its own capture recorded before "
-        f"that instant**, not at the midpoint itself — the timestamps in the "
-        f"table are where the frames came out of the video, and the total "
-        f"above is the correction for none of them individually. "
-        f"`timeline.json`'s `capture_clock` has the steps.",
+        f"the video is on that clock. "
+        + (
+            "Each frame below was therefore cut at "
+            if not holed
+            else "Except for the frames named in the next paragraph, whose "
+            "beats are not in the file at all, each frame below was cut at "
+        )
+        + "its beat's midpoint **plus the steps its own capture recorded "
+        "before that instant**, not at the midpoint itself — the timestamps "
+        "in the table are where the frames came out of the video, and the "
+        "total above is the correction for none of them individually. "
+        "`timeline.json`'s `capture_clock` has the steps.",
         "",
     ]
 
@@ -538,8 +559,9 @@ def render_frames_md(manifest: dict) -> str:
     ]
     if manifest.get("skipped"):
         return "\n".join(out + [f"No frames were written: {manifest['skipped']}.", ""])
-    out += _clock_md(manifest.get("clock_correction"))
-    out += _no_video_md(frames)
+    holed = _no_video_md(frames)
+    out += _clock_md(manifest.get("clock_correction"), bool(holed))
+    out += holed
     swallowed = manifest.get("scene_search_skipped") or []
     if swallowed:
         # Named, not counted: the reader's question is which beat is thinner
