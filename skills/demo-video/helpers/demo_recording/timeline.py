@@ -405,9 +405,11 @@ def timeline_paths(out_dir: Path | str, segment: str | None = None) -> tuple[Pat
 # beat's *start*; a consumer converting the beat's **midpoint** — which is what
 # a review frame is cut at — has to sum the steps before the *midpoint*, or a
 # step landing in the beat's own first half is left out and that frame does not
-# move at all. That is not a corner case: across this repo's three committed
-# demos, 49.2-49.6 % of take wall time lies inside some beat's first half, so
-# roughly one recorded step in two falls there. It was missed the first time
+# move at all. That is not a corner case: **46.9 %, 48.0 % and 48.8 % of each
+# take's `duration`** lies inside some beat's first half over this repo's three
+# committed demos, so roughly one recorded step in two falls there. (Of the
+# beats' own spans it is 50.0 % by construction, which is why the denominator
+# is stated.) It was missed the first time
 # because #250 validated the rule against *caption transitions*, which sit at
 # beat starts — the one instant at which the two readings cannot differ.
 #
@@ -448,6 +450,15 @@ def _usable_steps(doc: dict, record: dict) -> list[dict] | None:
     # directions matter — a merged step with no `segment` and a single take's
     # step that has one both match no beat, so they would correct nothing while
     # the sheet reported a correction.
+    #
+    # **Stated limit, and pre-existing**: this is inexact for one document
+    # shape it never sees — a single *segment*'s own timeline, whose beats do
+    # carry a segment while its steps do not, so `{None}` accepts every step
+    # and `correct` then matches no beat. Nothing reaches it: `beat_frames`
+    # returns `skipped` for a document with a `segment` before it asks for a
+    # correction at all, and `stitch()` re-derives the merged record from the
+    # parts rather than reading one part's. Written down so the next reader
+    # does not have to re-derive that.
     named = {s.get("segment") for s in doc.get("segments") or [] if isinstance(s, dict)}
     allowed = named or {None}
     steps = []

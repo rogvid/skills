@@ -2034,11 +2034,14 @@ knows is missing is worse than one that is openly absent.
   **And on a host whose clock never steps, the correction is a no-op** — a
   corrected cut and an uncorrected one are the same number, so no arm of this
   suite can tell them apart there. The arithmetic is graded on a *scripted*
-  record by `FrameClockCorrection` in `tests/unit`, where ten injections cost
-  0.2 s each — including the one that reads the correction at a beat's
+  record by `FrameClockCorrection` in `tests/unit`, where 15 injections cost
+  0.2 s each — the figure is checked against the manifest by
+  `StatedInjectionCount`, because it drifted once already — including the one that reads the correction at a beat's
   `t_start` and applies it to the midpoint, which is how #253 shipped its first
   round and is a whole step wrong for every step landing in a beat's first
-  half (49.2-49.6 % of take wall time, across the three committed demos); what `--segments-only` adds on any host is that the sheet states
+  half (**46.9 %, 48.0 % and 48.8 % of the take's `duration`** across the three
+  committed demos — half of the beats' own spans by construction, so the
+  denominator is the whole of the claim); what `--segments-only` adds on any host is that the sheet states
   which of the three cases it was, and that a step the recorder invents moves
   the frames and is caught by a placement check reading this harness's own
   watcher.
@@ -2159,6 +2162,15 @@ knows is missing is worse than one that is openly absent.
   frames the defect hits. `FrameClockCorrection` in `tests/unit` is the real
   gate on it, and this is why: an arm that skips the ambiguous frames cannot
   also be the thing that grades them.
+
+  **One margin from those runs is worth writing down rather than leaving in a
+  transcript**: after the fix, beat 9's frame clears the nearest caption change
+  by **0.758 s** against a `FRAME_CAPTION_GUARD_S` of 0.750 s — an 8 ms margin
+  on the guard that decides whether `_check_frame_captions` grades a frame at
+  all. Nothing rests on it in the direction of this change (the frame is
+  excluded either way on that run), and it is not resolved: whether the margin
+  is stable across takes needs a browser and a stepping host at the same time,
+  which no run here has had twice.
 
   Both runs were nonetheless **red**, on `check_merge_offset`'s caption timing
   (+540 ms and +340 ms of *log-ahead* skew, and on the second run a slide past

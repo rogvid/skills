@@ -2120,6 +2120,12 @@ class PublicSurface(unittest.TestCase):
 
 SMOKE = Path(os.environ.get("UNIT_SMOKE", REPO / "tests" / "smoke"))
 
+# `tests/README.md`, overridable for the same reason `SMOKE` is: under
+# `--fault-inject` this file runs from a temp directory, where `REPO` points at
+# nothing. The runner passes the real path, so the figures below stay graded
+# while an injection is in place rather than going quiet exactly then.
+README = Path(os.environ.get("UNIT_README", REPO / "tests" / "README.md"))
+
 # Below this, `tests/smoke` was not parsed — an empty or truncated file makes
 # "nothing is unread" hold trivially, the catalogue's vacuous sweep. It is 271
 # today; this is a floor on "a suite was read", not a bar on its size.
@@ -5256,6 +5262,43 @@ class FrameClockCorrection(unittest.TestCase):
         _manifest, _cuts, windows = self.sheet(doc)
         self.assertEqual(windows, [(1.0, 8.22)])
 
+    def test_a_beat_the_clock_swallowed_loses_its_scene_frames_out_loud(self):
+        """A step bigger than the beat it lands in inverts the search window.
+
+        Per-instant edges are what make this reachable: the start is corrected
+        by nothing and the end by the whole step, so a step larger than the
+        beat's span puts the end before the start and there is no stretch of
+        video left to search. That is honest — the wall time the beat occupied
+        is not in the file — but `scene_times` answers an inverted window with
+        an empty list, so without this the sheet would simply have fewer frames
+        and say nothing. It needs a step over `SCENE_MIN_SPAN_S`, which is this
+        host's 10 s pulse transient.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, -6.0)),
+            beats=[beat(0, "hold", 1.0, t_end=5.0)],
+        )
+        manifest, cuts, windows = self.sheet(doc)
+        self.assertEqual(windows, [], "no window can be searched, so none was")
+        self.assertEqual(manifest["scene_search_skipped"], [0])
+        self.assertEqual(cuts, [0.0])
+        sheet = render_frames_md(manifest)
+        self.assertIn("no extra frames were looked for", sheet)
+
+    def test_a_beat_the_clock_left_alone_reports_no_skipped_search(self):
+        # The control: the same long beat with the step outside it keeps its
+        # window, and the key stays empty rather than being absent or truthy.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((0.5, -0.2)),
+            beats=[beat(0, "hold", 1.0, t_end=5.0)],
+        )
+        manifest, _cuts, windows = self.sheet(doc)
+        self.assertEqual(windows, [(0.8, 4.8)])
+        self.assertEqual(manifest["scene_search_skipped"], [])
+        self.assertNotIn("no extra frames were looked for", render_frames_md(manifest))
+
     def test_a_step_only_moves_the_frames_of_the_capture_that_measured_it(self):
         # Part one losing 0.78 s of wall time is already in part two's offset,
         # because `stitch()` lays the parts out by their measured durations.
@@ -5458,6 +5501,51 @@ class TimelineClockNote(unittest.TestCase):
         text = render_timeline_md(self.doc(clock_record()))
         self.assertNotIn("wall clock stepped", text)
         self.assertNotIn("was not measured", text)
+
+
+class StatedInjectionCount(unittest.TestCase):
+    """The figure `tests/README.md` prints about this file's own manifest.
+
+    It is here because it drifted: the README said "ten injections" while
+    `INJECTIONS` had grown to thirteen naming `FrameClockCorrection`, and
+    nothing anywhere compared the two. `tests/smoke-inject --self-test` grades
+    its own README figures exactly this way — the prose is the claim, the
+    manifest is the truth, and a pattern that stops matching is a failure
+    rather than a pass.
+    """
+
+    CLAIM = re.compile(
+        r"`FrameClockCorrection` in `tests/unit`, where (\d+)\s+injections"
+    )
+
+    def graded_by_frame_clock_correction(self) -> int:
+        return sum(
+            1
+            for _name, _module, _old, _new, tests in INJECTIONS
+            if any(t.startswith("FrameClockCorrection.") for t in tests)
+        )
+
+    def test_the_readme_states_the_number_this_file_actually_carries(self):
+        found = self.CLAIM.search(README.read_text(encoding="utf-8"))
+        # The pattern first: a README reworded past this regex would otherwise
+        # make the comparison below hold over nothing at all.
+        self.assertIsNotNone(
+            found,
+            f"{README} no longer states how many injections grade "
+            f"FrameClockCorrection in the shape this reads — reword the check "
+            f"with the prose, or the figure goes ungraded again",
+        )
+        self.assertEqual(
+            int(found.group(1)),
+            self.graded_by_frame_clock_correction(),
+            "tests/README.md and INJECTIONS disagree about how many "
+            "injections grade the frame-clock correction",
+        )
+
+    def test_the_count_it_grades_is_not_zero(self):
+        # The haystack. Every assertion above is satisfied by a manifest with
+        # no such entries and a README that says so.
+        self.assertGreater(self.graded_by_frame_clock_correction(), 5)
 
 
 # --------------------------------------------------------------------------
@@ -5875,15 +5963,15 @@ INJECTIONS = [
         # left — and they arrive named for it.
         "the scene search window stays on the beat log's clock",
         "frames.py",
-        "        window = (\n"
-        "            min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last),\n"
-        "            min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last),\n"
-        "        )",
-        "        window = (min(float(t_start), last), min(float(t_end), last))",
+        "        lo = min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last)\n"
+        "        hi = min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last)",
+        "        lo = min(float(t_start), last)\n        hi = min(float(t_end), last)",
         [
             "FrameClockCorrection.test_the_scene_search_window_is_the_beats_span_in_the_video",
             "FrameClockCorrection."
             "test_a_scene_window_is_clipped_by_a_step_inside_its_own_beat",
+            "FrameClockCorrection."
+            "test_a_beat_the_clock_swallowed_loses_its_scene_frames_out_loud",
         ],
     ),
     (
@@ -5892,8 +5980,9 @@ INJECTIONS = [
         # window edges and the tail. A step landing in a beat's own first half
         # is then left out, that frame does not move at all — by the whole
         # step — and the sheet says it was corrected. Roughly one recorded step
-        # in two lands there: 49.2-49.6 % of take wall time is inside some
-        # beat's first half across this repo's three committed demos.
+        # in two lands there: 46.9 %, 48.0 % and 48.8 % of the take's
+        # `duration` is inside some beat's first half across this repo's three
+        # committed demos (50.0 % of the beats' own spans, by construction).
         "the correction is read at the beat's start and applied to its midpoint",
         "frames.py",
         "        logged = (float(t_start) + float(t_end)) / 2\n"
@@ -6013,6 +6102,35 @@ INJECTIONS = [
         ],
     ),
     (
+        # The window inverts and the sheet says nothing: `scene_times` answers
+        # an inverted window with an empty list, so the review sheet simply
+        # carries fewer frames than it would on a steady host. A degradation
+        # rather than a lie, which is exactly why it has to be printed —
+        # "the sheet is quietly thinner" is the wrong failure mode for a
+        # document whose whole claim is that it does not mislead.
+        "a beat the clock swallowed loses its scene frames silently",
+        "frames.py",
+        "        if hi <= lo:\n            skipped_scenes.append(index)\n            continue",
+        "        if False:\n            skipped_scenes.append(index)\n            continue",
+        [
+            "FrameClockCorrection."
+            "test_a_beat_the_clock_swallowed_loses_its_scene_frames_out_loud",
+        ],
+    ),
+    (
+        # The drop is recorded and never reaches the reader — the manifest
+        # knows, `frames.md` does not, and `frames.md` is the document a
+        # reviewer is handed.
+        "the sheet stops naming the beat whose scene search was swallowed",
+        "frames.py",
+        '    swallowed = manifest.get("scene_search_skipped") or []',
+        "    swallowed = []",
+        [
+            "FrameClockCorrection."
+            "test_a_beat_the_clock_swallowed_loses_its_scene_frames_out_loud",
+        ],
+    ),
+    (
         # The step is applied to the frames and reported *again* as capture
         # loss, so the sheet moves every frame by 0.78 s and then warns that
         # they may be stale by 0.70 s — the same wall time, counted twice, in
@@ -6064,6 +6182,39 @@ INJECTIONS = [
         '    if not (state.get("total") or 0.0):',
         [
             "TimelineClockNote.test_steps_that_cancel_are_still_named_in_the_timeline",
+        ],
+    ),
+    (
+        # The README's figure for this file's own manifest goes stale — the
+        # exact drift `StatedInjectionCount` exists for, and the reason it
+        # exists is that it had already happened once (ten stated, thirteen
+        # real) with nothing comparing the two.
+        "the README's count of frame-clock injections stops matching the manifest",
+        "tests/unit",
+        # One entry stops naming a `FrameClockCorrection` test, so the manifest
+        # carries one fewer than the README states. Targeted at the manifest
+        # rather than at the check, because a search string that is *also* the
+        # line it replaces occurs twice in this file and the harness refuses it
+        # — which is the exactly-once rule doing its job on its own suite.
+        '            "FrameClockCorrection."\n'
+        '            "test_a_scene_window_is_clipped_by_a_step_inside_its_own_beat",',
+        '            "TimelineClockNote.test_a_watched_clock_that_held_still_adds_nothing",',
+        [
+            "StatedInjectionCount."
+            "test_the_readme_states_the_number_this_file_actually_carries",
+        ],
+    ),
+    (
+        # The claim's own pattern goes stale, so the figure is compared against
+        # nothing and a drifted README reads clean forever — the vacuous sweep,
+        # in the check that exists because a figure drifted.
+        "the README-figure pattern matches nothing, so that check goes vacuous",
+        "tests/unit",
+        'r"`FrameClockCorrection` in `tests/unit`, where (\\d+)\\s+injections"',
+        'r"`FrameClockCorrection` in `tests/unit`, where (\\d{9,})\\s+injections"',
+        [
+            "StatedInjectionCount."
+            "test_the_readme_states_the_number_this_file_actually_carries",
         ],
     ),
     (
@@ -7619,6 +7770,7 @@ def fault_inject() -> int:
                     "UNIT_HELPERS": str(root),
                     "UNIT_SKILL_DIR": str(skill),
                     "UNIT_SMOKE": str(smoke),
+                    "UNIT_README": str(REPO / "tests" / "README.md"),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}

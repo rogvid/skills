@@ -126,17 +126,30 @@ def scene_times(
     # writes through ffmpeg's logger at INFO level, which `-v error` throws
     # away — a silent way for this whole function to always return nothing.
     proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
-         "-i", str(mp4),
-         "-vf", f"select='gt(scene,{threshold})',metadata=print:file=-",
-         "-an", "-f", "null", "-"],
-        capture_output=True, text=True,
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{end - start:.3f}",
+            "-i",
+            str(mp4),
+            "-vf",
+            f"select='gt(scene,{threshold})',metadata=print:file=-",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
     )
     if proc.returncode != 0:
         return []
     times = [
-        start + float(match)
-        for match in re.findall(r"pts_time:([0-9.]+)", proc.stdout)
+        start + float(match) for match in re.findall(r"pts_time:([0-9.]+)", proc.stdout)
     ]
     # The first decoded frame of a seek has nothing before it to be compared
     # with, and ffmpeg scores it 1.0. That is the seek, not a scene change.
@@ -146,8 +159,21 @@ def scene_times(
 def _extract(mp4: Path, at: float, path: Path) -> bool:
     """One frame of `mp4` at `at` seconds, written to `path`."""
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-ss", f"{at:.3f}", "-i", str(mp4),
-         "-frames:v", "1", "-update", "1", str(path)],
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{at:.3f}",
+            "-i",
+            str(mp4),
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+            str(path),
+        ],
         capture_output=True,
     )
     return proc.returncode == 0 and path.is_file()
@@ -225,6 +251,9 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     manifest["clock_correction"] = clock
 
     planned: list[dict] = []
+    # Beats long enough for the unscripted-transition search whose span in the
+    # video turned out to be empty. See where it is appended.
+    skipped_scenes: list[int] = []
     for beat in beats:
         t_start, t_end = beat.get("t_start"), beat.get("t_end")
         if not isinstance(t_start, (int, float)):
@@ -244,12 +273,14 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         logged = (float(t_start) + float(t_end)) / 2
         middle = min(max(logged + correct(beat, logged), 0.0), last)
         index = int(beat.get("index", len(planned)))
-        planned.append({
-            "file": f"beat-{index:02d}.png",
-            "kind": "beat",
-            "beat": index,
-            "t": round(middle, 3),
-        })
+        planned.append(
+            {
+                "file": f"beat-{index:02d}.png",
+                "kind": "beat",
+                "beat": index,
+                "t": round(middle, 3),
+            }
+        )
         # Only for beats long enough to hide an unscripted transition. Beat
         # alignment sees what the storyboard wrote down; a redirect, a toast or
         # a load finishing inside a long hold is invisible to it.
@@ -260,17 +291,27 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # the log's clock it would scan a stretch the beat had already left —
         # and each edge is corrected at its own instant, because a step inside
         # the beat moves its end and not its start.
-        window = (
-            min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last),
-            min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last),
-        )
-        for n, cut in enumerate(scene_times(mp4, *window), 1):
-            planned.append({
-                "file": f"beat-{index:02d}-scene-{n}.png",
-                "kind": "scene",
-                "beat": index,
-                "t": round(cut, 3),
-            })
+        lo = min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last)
+        hi = min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last)
+        # Correcting each edge at its own instant can put the end *before* the
+        # start: a step larger than the beat's span leaves none of that beat's
+        # wall time in the file, and a beat clamped past the end of the video
+        # collapses the same way. There is genuinely nothing to search, and
+        # `scene_times` answers an inverted window with an empty list — so the
+        # only wrong move is to let the sheet quietly carry fewer frames.
+        # Recorded here, printed in frames.md, and named by beat.
+        if hi <= lo:
+            skipped_scenes.append(index)
+            continue
+        for n, cut in enumerate(scene_times(mp4, lo, hi), 1):
+            planned.append(
+                {
+                    "file": f"beat-{index:02d}-scene-{n}.png",
+                    "kind": "scene",
+                    "beat": index,
+                    "t": round(cut, 3),
+                }
+            )
 
     # Take the previous run's sheet off disk before writing this one. A demo
     # whose storyboard lost beats would otherwise leave frames nobody planned
@@ -299,6 +340,7 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
                 file=sys.stderr,
             )
     manifest["frames"] = written
+    manifest["scene_search_skipped"] = skipped_scenes
     # How far the video is *known* to have slid under the beat log, as a floor
     # rather than a correction: a beat that ends after the video does is wall
     # time that never reached the file (issue #18). Measured against the last
@@ -343,9 +385,7 @@ def write_beat_frames(out_dir: Path | str, doc: dict, where: str) -> dict | None
             file=sys.stderr,
         )
         return manifest
-    print(
-        f"wrote {frames_paths(out_dir)[0]} ({len(manifest['frames'])} review frames)"
-    )
+    print(f"wrote {frames_paths(out_dir)[0]} ({len(manifest['frames'])} review frames)")
     return manifest
 
 
@@ -437,6 +477,21 @@ def render_frames_md(manifest: dict) -> str:
     if manifest.get("skipped"):
         return "\n".join(out + [f"No frames were written: {manifest['skipped']}.", ""])
     out += _clock_md(manifest.get("clock_correction"))
+    swallowed = manifest.get("scene_search_skipped") or []
+    if swallowed:
+        # Named, not counted: the reader's question is which beat is thinner
+        # than it looks, and "one beat" does not answer it.
+        beats = ", ".join(f"`beat-{int(i):02d}.png`" for i in swallowed)
+        out += [
+            f"{beats} covers a beat long enough for the recorder to look "
+            f"inside it for a change the storyboard did not script — and the "
+            f"host's wall clock stepped further during that beat than the beat "
+            f"is long, so none of its wall time is in the video and **no extra "
+            f"frames were looked for**. The sheet is that much thinner than it "
+            f"would be on a steady host; nothing is missing from the beat's "
+            f"own frame above.",
+            "",
+        ]
     loss = manifest.get("capture_loss_at_least") or 0.0
     if loss > 0.05:
         out += [
