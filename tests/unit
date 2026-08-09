@@ -6196,8 +6196,14 @@ INJECTIONS = [
         # rather than at the check, because a search string that is *also* the
         # line it replaces occurs twice in this file and the harness refuses it
         # — which is the exactly-once rule doing its job on its own suite.
+        #
+        # It has to be an entry whose **only** FrameClockCorrection name is
+        # this one: the counter asks `any(...)` per entry, so removing one of
+        # two names from the same entry changes nothing. The first version of
+        # this injection did exactly that and `--fault-inject` reported it
+        # unnoticed.
         '            "FrameClockCorrection."\n'
-        '            "test_a_scene_window_is_clipped_by_a_step_inside_its_own_beat",',
+        '            "test_a_step_inside_the_last_beat_is_not_reported_as_capture_loss",',
         '            "TimelineClockNote.test_a_watched_clock_that_held_still_adds_nothing",',
         [
             "StatedInjectionCount."
