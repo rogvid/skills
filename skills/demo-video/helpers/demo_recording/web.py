@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from .content import OPENING_HOLD_LIMIT_S, content_rect, opening_gap
 from .core import _beat_verb, _DemoBase, _env
+from .target import guard_target
 
 # Pastel gradient behind the window — matches the terminal recorder's
 # background so web and terminal demos share one look.
@@ -484,6 +485,7 @@ class Recorder(_DemoBase):
         locale: str | None = None,
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
+        allow_private: bool | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
@@ -492,11 +494,19 @@ class Recorder(_DemoBase):
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
-            criteria=criteria,
+            criteria=criteria, allow_private=allow_private,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")
         ).rstrip("/")
+        # The base checked `DEMO_VIDEO_BASE_URL`; this checks what this take
+        # actually resolved, which is the explicit argument when there is one.
+        # Still before a browser exists — `__enter__` is what launches one.
+        guard_target(
+            self.base_url,
+            self._allow_private,
+            source="this take's base_url",
+        )
         # The recording is composited into a window and scaled down (~0.8),
         # so captions are rendered larger to stay readable in the final mp4.
         self._caption_font_px = 34

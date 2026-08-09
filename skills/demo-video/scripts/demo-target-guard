@@ -1,0 +1,92 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Refuse to record a demo against anything that could be production.
+
+    <skill-dir>/scripts/demo-target-guard --url "$DEMO_VIDEO_BASE_URL" \
+        --scan demos/x/record.py
+
+The classification, and the argument for it, are
+`helpers/demo_recording/target.py` — this file is the command-line front door
+to it and holds no rules of its own. That matters because the same rules run
+twice: here, before a CI job starts a browser, and inside `Recorder` /
+`TerminalRecorder`, at construction, on every machine. A second copy of the
+table would be a second thing to keep true.
+
+Loopback is always allowed, a private or internal host needs `--allow-private`,
+and a public host is refused with no flag that permits it. `--scan` applies the
+same rule to `http(s)://` literals inside a storyboard (or any other file, such
+as a workflow's `extra-env` block), so a hardcoded production URL is refused
+before the browser opens.
+
+Exit status: 0 when everything checked may be recorded against, 2 when
+something may not, and 1 for a usage error.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "helpers"))
+
+from demo_recording.target import check, scan  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--url", action="append", default=[], help="a URL the take will be pointed at"
+    )
+    ap.add_argument(
+        "--scan",
+        action="append",
+        default=[],
+        help="a source file to scan for URL literals",
+    )
+    ap.add_argument(
+        "--allow-private", action="store_true", help="permit private/internal hosts"
+    )
+    args = ap.parse_args(argv)
+
+    problems: list[str] = []
+    checked = 0
+    for url in args.url:
+        if not url.strip():
+            continue
+        checked += 1
+        if (reason := check(url, args.allow_private)) is not None:
+            problems.append(f"target: {reason}")
+
+    for path in args.scan:
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError as exc:
+            problems.append(f"scan: cannot read {path}: {exc}")
+            continue
+        for url in scan(text):
+            checked += 1
+            if (reason := check(url, args.allow_private)) is not None:
+                problems.append(f"{path}: {reason}")
+
+    if problems:
+        print(
+            "Refusing to record. A demo recorded in CI is an outbound artifact.",
+            file=sys.stderr,
+        )
+        for line in problems:
+            print(f"  - {line}", file=sys.stderr)
+        return 2
+
+    print(
+        f"target guard: {checked} URL(s) checked, all loopback"
+        + (" or private" if args.allow_private else "")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

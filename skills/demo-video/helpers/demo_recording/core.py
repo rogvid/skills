@@ -63,6 +63,7 @@ from .failure import (
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
 from .narration import tts_clip
+from .target import guard_target
 from .timeline import (
     ATTRIBUTION_SLACK_S,
     EVIDENCE_DIR,
@@ -877,9 +878,31 @@ class _DemoBase:
         locale: str | None = None,
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
+        allow_private: bool | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
         # > built-in default (see SKILL.md for the variable names).
+        #
+        # **The target is classified before anything else is set up.** A demo
+        # is an outbound artifact and the refusal has to happen while there is
+        # nothing to leak — no browser, no page, no frame. `DEMO_VIDEO_BASE_URL`
+        # is checked for *every* medium, not only the web one: it is how a
+        # runner tells a take which application it is pointed at, and a
+        # terminal storyboard reads it as readily as a web one. The web
+        # recorder additionally checks the `base_url` it actually resolved,
+        # which is where an explicit constructor argument shows up. There is
+        # no `allow_public`, here or anywhere (see `target.py`).
+        if allow_private is None:
+            allow_private = _env_flag("ALLOW_PRIVATE")
+        self._allow_private = bool(allow_private)
+        guard_target(
+            _env("BASE_URL"),
+            self._allow_private,
+            source=(
+                "DEMO_VIDEO_BASE_URL in the environment — unset it, or export "
+                "a target this take may be recorded against"
+            ),
+        )
         out_dir = out_dir or _env("OUT_DIR")
         if out_dir is None:
             raise RuntimeError(
