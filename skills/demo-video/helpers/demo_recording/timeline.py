@@ -105,8 +105,9 @@ from .markdown import _fmt_t, _md_cell
 #   segments      list?   — merged demos only (`stitch`): one record per part,
 #                          in order, each `segment`, `media`, `duration`
 #                          (ffprobe), `offset` (where it starts in `media`),
-#                          `beats`, `recorder`, `determinism`, `content` and
-#                          that part's own `capture_clock`, on its own clock.
+#                          `beats`, `recorder`, `determinism`, `content`,
+#                          `narration` and that part's own `capture_clock`,
+#                          the last two on its own clock.
 #                          Absent from a timeline a single take wrote.
 #   content       dict?  — what the *picture* turned out to be, measured off
 #                          the encoded mp4 over the region the app occupies:
@@ -133,6 +134,40 @@ from .markdown import _fmt_t, _md_cell
 #                          `held` means the frames at the start of the video
 #                          are not frames the recording captured; see "the
 #                          blank opening".
+#   narration     dict?  — **null** on a take that mixed no speech into
+#                          `media` — narration off, no lines, or no mp4
+#                          encoded. Otherwise, where each spoken line's audio
+#                          was actually put: `lines`, one record per clip in
+#                          the order they were mixed, each `t` (the beat-log
+#                          instant the line appeared, `time.monotonic()`) and
+#                          `at` (where that instant is in `media`, which is
+#                          what the mix used as its `adelay`); plus
+#                          `clock_correction`, the same `applied` / `total` /
+#                          `steps` / `note` state `capture_clock_correction`
+#                          returns. The audio rides the *video's* clock
+#                          because it is inside the video, so `at` is `t`
+#                          corrected the same way a review frame's seek is
+#                          (issue #226) — and the state is here so a reader
+#                          can tell a mix that was corrected from one that
+#                          fell back to the raw offset because nobody watched
+#                          the clock. A line also carries `clamped` — **only
+#                          when it has one** — being the seconds of correction
+#                          that could not be applied because the result fell
+#                          before its own capture's first frame: `adelay`
+#                          cannot express a negative delay, so `at` is the
+#                          start of that line's *own capture* (0.0 on a take
+#                          recorded in one piece, that part's `offset` on a
+#                          stitched demo — **not** 0.0 there), and that line
+#                          alone is *not* `t` plus the steps before it.
+#                          On a merged demo every
+#                          part's lines are here, moved onto the stitched clock
+#                          by that part's `offset` and each naming its own
+#                          `segment`; `clock_correction.applied` is true only
+#                          if every part that narrated corrected its own mix,
+#                          and `parts` / `parts_uncorrected` (merged demos
+#                          only) say how many of them that verdict is about,
+#                          so a demo where one part of three could not correct
+#                          is not reported as a demo where none could.
 #   coverage      dict?  — **null** unless the take was recorded against a
 #                          ticket (`Recorder(criteria={...})`). What the
 #                          storyboard *claimed*, never what it proved:
@@ -557,6 +592,34 @@ def capture_clock_correction(
     }
 
 
+def capture_clock_shift(record: object) -> tuple[Callable[[float], float], dict]:
+    """(shift, state) for a capture that is still the only one there is.
+
+    `capture_clock_correction` above reads a finished timeline, where a step is
+    attributed to the segment it was measured in and a beat is matched against
+    it. A take mixing its **own** audio has no such question to answer: one
+    capture is running, every step in the record is that capture's, and the
+    steps do not name a segment until `stitch()` gives them one. So the rule
+    collapses to "how far had the wall clock stepped by `t`", and it is read
+    through the same function rather than re-derived — the two must not be able
+    to drift apart, because `frames/` and the audio track of the same demo have
+    to describe the same video.
+
+    `shift(t)` is the seconds to add to the beat-log instant `t`; `state` is the
+    same three-state record `capture_clock_correction` returns, and the caller
+    is expected to put it in an artifact rather than swallow it.
+    """
+    correct, state = capture_clock_correction({"capture_clock": record})
+
+    def shift(t: float) -> float:
+        # The empty beat is the point: a single capture's steps carry no
+        # segment and neither does this, so every step in the record is this
+        # instant's to be corrected by.
+        return correct({}, t)
+
+    return shift, state
+
+
 def _capture_clock_md(state: dict) -> list[str]:
     """What `timeline.md` says about the clock its own timestamps are on.
 
@@ -588,6 +651,94 @@ def _capture_clock_md(state: dict) -> list[str]:
         f"`timeline.json`'s `capture_clock` carries every step and the capture "
         f"it was measured in; `frames/frames.md` says whether the review "
         f"frames were cut with it applied.",
+        "",
+    ]
+
+
+def _narration_md(narration: object) -> list[str]:
+    """What `timeline.md` says about where the spoken lines ended up.
+
+    Same shape of statement as `_capture_clock_md`, and silent for the same
+    reason on the same take: a watched clock that held still put every line
+    exactly where the log says, and a line on every timeline is a line nobody
+    reads. It speaks in the two cases where that is not what happened — the
+    clock stepped and the mix followed it, or nobody watched and the mix could
+    only use the raw offset. The second is the one that matters here: the audio
+    is *audible* evidence, and a listener who hears the voice drift away from
+    the caption has no other way to find out that nothing knew by how much.
+
+    Two qualifications are printed rather than left to be inferred, because
+    both make the headline sentence false for *some* of the lines and a reader
+    correcting by hand would be corrected twice:
+
+      * a line whose correction hit the zero floor (`clamped`) did not move by
+        the steps before it — it moved by as much of them as the start of the
+        file left room for;
+      * on a stitched demo where only some narrating parts could correct, the
+        refusal is stated as **k of m segments** rather than as the whole demo.
+    """
+    if not isinstance(narration, dict):
+        return []
+    lines = narration.get("lines") or []
+    # `clock` rather than `state`, which is what `_capture_clock_md` above
+    # calls its own: two identical guard lines in one file are two lines a
+    # fault injection cannot tell apart, and the harness refuses an anchor
+    # that matches twice rather than proving the wrong one.
+    clock = narration.get("clock_correction")
+    if not lines or not isinstance(clock, dict):
+        return []
+    if not clock.get("applied"):
+        # A merged record knows how much of the demo it is talking about; a
+        # single take's is the whole of it. Saying "the 3 spoken lines were
+        # mixed uncorrected" over a demo where two of them were is pessimistic
+        # rather than dangerous, but it is still not what happened.
+        refused, parts = clock.get("parts_uncorrected"), clock.get("parts")
+        whose = (
+            f"the lines of {refused} of this demo's {parts} narrated segment(s)"
+            if refused and parts
+            else f"the {len(lines)} spoken line(s)"
+        )
+        return [
+            f"**{whose[0].upper()}{whose[1:]} were mixed at their beat-log "
+            f"offsets, uncorrected**: {clock.get('note')}. The audio sits "
+            f"inside the video and therefore on the video's clock, so if the "
+            f"host's wall clock stepped while this was recording the voice is "
+            f"that far from the caption it belongs to — and nothing here knows "
+            f"whether it did.",
+            "",
+        ]
+    # On the count, never the total — two steps that cancel move every line
+    # mixed between them. Same argument as `_capture_clock_md`.
+    if not clock.get("steps"):
+        return []
+    # ...and the lines the floor caught, which the sentence below is otherwise
+    # untrue for. Reachable only here: an uncorrected mix shifts nothing, so
+    # nothing it produces can go negative.
+    clamped = [line for line in lines if line.get("clamped")]
+    # **"the start of its own capture", never "0.0".** A single take's capture
+    # starts at the top of the file and the two read the same; a stitched
+    # part's starts at that part's `offset`, and a clamped line of part two has
+    # an `at` of 7.5 rather than of zero. Saying 0.0 there is a published
+    # artifact stating a second the clip is not at, on exactly the host this
+    # correction exists for.
+    tail = (
+        f" **{len(clamped)} of them could not be moved the whole way**: the "
+        f"steps before that line were larger than the line's own offset into "
+        f"its capture, so the wall time it occupied is not in the video at all "
+        f"and `adelay` cannot express a negative delay. Those clips start where "
+        f"their own capture does — the top of the file on a take recorded in "
+        f"one piece, that part's `offset` on a stitched demo — and `clamped` is "
+        f"how many seconds of the correction that boundary swallowed."
+        if clamped
+        else ""
+    )
+    return [
+        f"**The {len(lines)} spoken line(s) were mixed where the host's "
+        f"stepped clock puts them in the video**, not at the beat-log offsets "
+        f"in the table below: each line's `at` in `timeline.json`'s "
+        f"`narration` is its `t` plus the steps its own capture recorded "
+        f"before that instant. Without it the voice would trail the caption "
+        f"by the size of the step for the rest of the take (issue #226).{tail}",
         "",
     ]
 
@@ -770,6 +921,13 @@ def render_timeline_md(doc: dict) -> str:
     # loud. The recorder warns about the same thing on stderr, minutes and
     # several thousand lines before anybody opens this file (issue #229).
     out += _capture_clock_md(capture_clock_correction(doc)[1])
+    # Directly under it, because it is the same statement about a different
+    # artifact: the row's timestamp is on the beat log, and so was the audio
+    # until the mix corrected it. Read off `narration` rather than recomputed
+    # from `capture_clock` — what belongs here is what the mix *did*, and a
+    # paragraph derived from the record would keep claiming a correction if
+    # the mix ever stopped applying one.
+    out += _narration_md(doc.get("narration"))
     # The exit column only exists when something in this take has one — a web
     # timeline would otherwise carry an empty column on every row. A `run` beat
     # whose status could not be read shows "?" rather than blank, so the

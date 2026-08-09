@@ -101,6 +101,7 @@ from demo_recording.narration import (  # noqa: E402
     TTS_KEY_CHARS,
     TTS_KEY_SEP,
     _tts_key,
+    mix_plan,
 )
 from demo_recording.stitching import _merged_timeline  # noqa: E402
 from demo_recording.target import TargetRefused  # noqa: E402
@@ -5503,6 +5504,559 @@ class TimelineClockNote(unittest.TestCase):
         self.assertNotIn("was not measured", text)
 
 
+class _ScriptedClock:
+    """A `_CaptureClock` that reports a record somebody wrote down.
+
+    Substituted onto a real recorder for the same reason `clock_record` exists
+    at all: a box either steps its wall clock or it does not, and on one that
+    does not a corrected mix and an uncorrected one are the same ffmpeg command
+    line. Everything about the stepped case here is scripted; that the video
+    really follows the host's clock was measured off the pixels of six takes
+    (#229, #250) and is not this file's claim.
+    """
+
+    def __init__(self, record: dict) -> None:
+        self._record = record
+
+    def report(self) -> dict:
+        return dict(self._record)
+
+
+class NarrationMix(unittest.TestCase):
+    """Where a spoken line ends up in the encoded audio (issue #226).
+
+    `_convert` used to `adelay` each clip by the offset the beat log recorded,
+    which is `time.monotonic()`; the video it is mixed into is stamped with the
+    host's wall clock. So every step the host took during a take moved the
+    picture and left the voice behind — #18's second comment measured **+0.70 s
+    of lag on all three lines** of a take that stalled in its run-up, against
+    +0.11 to +0.14 s in a clean one.
+
+    This is the one consequence of the two clocks a *viewer* meets rather than
+    a manifest reader, which is why the delays below are read out of the
+    **ffmpeg command line** and not out of the record the take publishes: a
+    document that printed a corrected offset over a clip mixed somewhere else
+    would satisfy an assertion that only read the document, and that is the
+    artifact-lies shape the record exists to prevent.
+    """
+
+    def mixed(self, clock: object, *offsets: float) -> tuple[list[int], object]:
+        """(the adelay ms ffmpeg was really handed, the take's own record)."""
+        rec = recorder(self, cls=TermRec)
+        rec._speech = True
+        if clock is not None:
+            rec._capture_clock = _ScriptedClock(clock)  # type: ignore[assignment]
+        rec._lines = [
+            (off, Path(f"/nonexistent/line-{n}.mp3")) for n, off in enumerate(offsets)
+        ]
+        seen: list[list[str]] = []
+
+        def run(cmd, **kwargs):
+            seen.append([str(part) for part in cmd])
+            Path(str(cmd[-1])).write_bytes(b"a stand-in for a recording")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        was = core_module.subprocess.run
+        core_module.subprocess.run = run
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rec._convert(Path(rec.out_dir) / "take.webm")
+        finally:
+            core_module.subprocess.run = was
+        self.assertEqual(len(seen), 1, f"expected one ffmpeg call, got {seen!r}")
+        cmd = seen[0]
+        self.assertIn("-filter_complex", cmd, "the mix went in without a filter graph")
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        return [int(ms) for ms in re.findall(r"adelay=(-?\d+):", graph)], rec._narration
+
+    # -- the instant each clip is delayed by --------------------------------
+
+    def test_a_line_is_mixed_where_its_own_offset_sits_in_the_video(self):
+        # The clock gave up 0.78 s at 1.0 s, so the moment the log calls 2.0 s
+        # is 1.22 s into the file. The line before the step does not move.
+        # Both numbers are written out here rather than derived from the record.
+        delays, _record = self.mixed(clock_record((1.0, -0.78)), 0.5, 2.0)
+        self.assertEqual(delays, [500, 1220])
+
+    def test_a_step_after_a_line_does_not_move_that_lines_clip(self):
+        # The correction is indexed by the **instant**, not by the take. A
+        # reader applying the record's `total` to every clip would put both of
+        # these 0.78 s from the moment they name — and on a stepped take that
+        # is the whole defect, moved from one clock to the other.
+        delays, _record = self.mixed(clock_record((4.0, -0.78)), 0.5, 2.0)
+        self.assertEqual(delays, [500, 2000])
+
+    def test_steps_that_cancel_still_move_a_line_mixed_between_them(self):
+        # The host this work exists for moves in *pulses* — up 0.9 s, back down
+        # 0.9 s. The take totals zero and every line spoken between the two has
+        # moved by nearly a second, which at 25 fps is 22 frames of a caption
+        # the voice no longer matches.
+        delays, _record = self.mixed(clock_record((2.0, 0.9), (8.0, -0.9)), 5.0)
+        self.assertEqual(delays, [5900])
+
+    def test_a_step_bigger_than_a_lines_offset_starts_the_clip_at_zero(self):
+        # That wall time is not in the file at all, and `adelay` cannot express
+        # a negative delay — ffmpeg refuses the filter outright, which would
+        # cost the take its whole audio track rather than one line's placement.
+        delays, _record = self.mixed(clock_record((0.1, -0.78)), 0.5, 2.0)
+        self.assertEqual(delays, [0, 1220])
+
+    def test_a_clamped_line_says_how_much_of_its_correction_it_lost(self):
+        """The floor above makes the artifact's headline false for one line.
+
+        Every other line's `at` is its `t` plus the steps before it, which is
+        what `timeline.md` says about all of them. This one moved −0.5 and not
+        −0.78, and without `clamped` nothing distinguishes it from a line the
+        clock happened to put at zero — a reader correcting by hand would
+        correct it twice. Absent from the lines that got the whole of theirs,
+        so its presence is the whole signal.
+        """
+        _delays, record = self.mixed(clock_record((0.1, -0.78)), 0.5, 2.0)
+        self.assertEqual(
+            record["lines"],
+            [{"t": 0.5, "at": 0.0, "clamped": 0.28}, {"t": 2.0, "at": 1.22}],
+        )
+
+    def test_a_shortfall_that_rounds_away_is_not_called_a_truncation(self):
+        # `at` is written to three places, so a want of -4e-5 *is* `t` plus the
+        # steps before it at the precision of this record. A `clamped: 0.0`
+        # beside it would be a line claiming a truncation of nothing, against
+        # a field documented as absent when there is nothing to say.
+        _delays, record = self.mixed(clock_record((0.1, -0.50004)), 0.5)
+        self.assertEqual(record["lines"], [{"t": 0.5, "at": 0.0}])
+
+    def test_the_clips_go_in_in_the_order_the_lines_were_spoken(self):
+        # The count is nearly free to satisfy; this is that output K belongs to
+        # input K. Line two's step is between them, so a mix that reversed the
+        # pair would still carry two delays adding to the same total.
+        delays, _record = self.mixed(clock_record((1.0, -0.78)), 0.5, 2.0, 3.0)
+        self.assertEqual(delays, [500, 1220, 2220])
+
+    # -- and what the take writes down about it ------------------------------
+
+    def test_the_record_names_where_each_line_was_logged_and_where_it_went(self):
+        delays, record = self.mixed(clock_record((1.0, -0.78)), 0.5, 2.0)
+        self.assertEqual(
+            record["lines"], [{"t": 0.5, "at": 0.5}, {"t": 2.0, "at": 1.22}]
+        )
+        # ...and the two agree, which is the half that keeps the document from
+        # describing a mix that happened somewhere else.
+        self.assertEqual([int(round(x["at"] * 1000)) for x in record["lines"]], delays)
+
+    def test_a_take_nobody_watched_the_clock_of_is_mixed_raw_and_says_so(self):
+        # The case that looks like the healthy one: `steps` is an empty list
+        # here too (#247), so a consumer reading only `steps` cannot tell "the
+        # clock held still" from "nobody was watching". The raw offset is still
+        # the number used — there is no other — but it is a fallback, and a
+        # record that let it read as a correction is the confidently-wrong
+        # artifact this flag exists to prevent.
+        delays, record = self.mixed(
+            clock_record((1.0, -0.78), measured=False), 0.5, 2.0
+        )
+        self.assertEqual(delays, [500, 2000])
+        self.assertIs(record["clock_correction"]["applied"], False)
+        self.assertIsNone(record["clock_correction"]["total"])
+        self.assertIn(
+            "the sampler was away for up to 5.50s", record["clock_correction"]["note"]
+        )
+
+    def test_a_watched_clock_that_held_still_is_stated_as_a_correction(self):
+        delays, record = self.mixed(clock_record(), 0.5, 2.0)
+        self.assertEqual(delays, [500, 2000])
+        self.assertIs(record["clock_correction"]["applied"], True)
+        self.assertEqual(record["clock_correction"]["steps"], 0)
+        self.assertIsNone(record["clock_correction"]["note"])
+
+    def test_a_stepped_take_states_the_correction_it_applied(self):
+        _delays, record = self.mixed(clock_record((1.0, -0.78)), 0.5, 2.0)
+        self.assertIs(record["clock_correction"]["applied"], True)
+        self.assertEqual(record["clock_correction"]["steps"], 1)
+        self.assertAlmostEqual(record["clock_correction"]["total"], -0.78, places=4)
+
+    def test_a_take_that_spoke_nothing_claims_no_mix_at_all(self):
+        # Narration on, no lines: the segment still gets its silent track so
+        # `stitch()` can concat, and there is no placement to describe.
+        delays, record = self.mixed(clock_record((1.0, -0.78)))
+        self.assertEqual(delays, [])
+        self.assertIsNone(record)
+
+    def test_a_conversion_that_failed_claims_no_mix_either(self):
+        # `narration` says where the audio of *this* mp4 is. ffmpeg raising
+        # leaves no mp4 this take wrote — the same reason `duration` is gated
+        # on `_converted` rather than on the file existing (issue #20).
+        rec = recorder(self, cls=TermRec)
+        rec._speech = True
+        rec._capture_clock = _ScriptedClock(clock_record((1.0, -0.78)))
+        rec._lines = [(0.5, Path("/nonexistent/line-0.mp3"))]
+
+        def run(cmd, **kwargs):
+            raise subprocess.CalledProcessError(1, cmd)
+
+        was = core_module.subprocess.run
+        core_module.subprocess.run = run
+        try:
+            with self.assertRaises(subprocess.CalledProcessError):
+                rec._convert(Path(rec.out_dir) / "take.webm")
+        finally:
+            core_module.subprocess.run = was
+        self.assertIsNone(rec._narration)
+
+    def test_the_timeline_carries_the_record_the_mix_wrote(self):
+        # The link between the two, without which every assertion above grades
+        # a field nobody reads: `_timeline_doc` publishes what `_convert` set,
+        # rather than recomputing it from a record read a second time.
+        rec = recorder(self, cls=TermRec)
+        rec._narration = {"lines": [{"t": 0.5, "at": 0.5}], "clock_correction": {}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = rec._timeline_doc()
+        self.assertIs(doc["narration"], rec._narration)
+
+
+class NarrationMixPlan(unittest.TestCase):
+    """`mix_plan` on the record shapes a recorder cannot produce (#226).
+
+    Two of the three states reach the mix only through a document: a timeline
+    with no `capture_clock` at all, and a record whose steps are not in a shape
+    anything can attribute. `_CaptureClock.report()` always returns a
+    well-formed dict, so they are asked of the function directly.
+    """
+
+    def test_no_record_at_all_mixes_raw_and_refuses_to_call_it_a_correction(self):
+        lines, state = mix_plan([0.5, 2.0], None)
+        self.assertEqual([line["at"] for line in lines], [0.5, 2.0])
+        self.assertIs(state["applied"], False)
+        self.assertIn("no capture_clock", state["note"])
+
+    def test_a_step_missing_its_size_refuses_the_whole_record(self):
+        # Half a record is not a correction: the malformed step would drop
+        # silently out of every sum and leave the rest looking applied.
+        record = clock_record((1.0, -0.78), (4.0, -0.5))
+        del record["steps"][1]["delta"]
+        lines, state = mix_plan([0.5, 5.0], record)
+        self.assertEqual([line["at"] for line in lines], [0.5, 5.0])
+        self.assertIs(state["applied"], False)
+
+    def test_a_line_before_a_forward_step_is_left_where_it_was(self):
+        # The control for the sign, in the direction the WSL2 host's pulses
+        # go up rather than down.
+        lines, _state = mix_plan([0.5, 2.0], clock_record((1.0, 0.9)))
+        self.assertEqual([line["at"] for line in lines], [0.5, 2.9])
+
+
+class NarrationTimelineNote(unittest.TestCase):
+    """What `timeline.md` says about where the voice went (issue #226).
+
+    The audio is the one artifact of a take whose reader cannot check it
+    against anything: a listener hears the voice drift off the caption and has
+    no way to learn whether the recorder knew. So the committed, diffable half
+    of the record has to say which of the three answers applied.
+    """
+
+    def doc(self, narration: object) -> dict:
+        return envelope(
+            capture_clock=clock_record(),
+            narration=narration,
+            beats=[beat(0, "caption", 0.1)],
+        )
+
+    def record(self, state: dict) -> dict:
+        return {"lines": [{"t": 0.5, "at": 0.5}], "clock_correction": state}
+
+    def test_a_mix_that_could_not_be_corrected_says_so_above_the_table(self):
+        text = render_timeline_md(
+            self.doc(
+                self.record(
+                    {
+                        "applied": False,
+                        "total": None,
+                        "steps": 0,
+                        "note": "the sampler was away for up to 5.50s",
+                    }
+                )
+            )
+        )
+        self.assertIn("mixed at their beat-log offsets, uncorrected", text)
+        self.assertIn("the sampler was away for up to 5.50s", text)
+        # Above the table, not under it: a reader who has read the rows has
+        # already read them as the times the voice is at.
+        self.assertLess(text.index("uncorrected"), text.index("| # | start |"))
+
+    def test_a_mix_that_followed_a_stepped_clock_says_that_instead(self):
+        text = render_timeline_md(
+            self.doc(
+                self.record({"applied": True, "total": -0.78, "steps": 1, "note": None})
+            )
+        )
+        self.assertIn("mixed where the host's stepped clock puts them", text)
+        self.assertNotIn("uncorrected", text)
+
+    def test_steps_that_cancel_are_still_a_correction_worth_stating(self):
+        """Decided on the **count**, never on the total.
+
+        The host this work exists for moves in pulses — up 0.9 s, back down
+        0.9 s — so a take that catches both totals zero while every line mixed
+        between them has moved by nearly a second. A paragraph that branched on
+        the total would go silent over exactly that, and the reader would take
+        the table's timestamps for the seconds the voice is at.
+        `frames.py` carries this same guard, with this same test.
+        """
+        text = render_timeline_md(
+            self.doc(
+                self.record({"applied": True, "total": 0.0, "steps": 2, "note": None})
+            )
+        )
+        self.assertIn("mixed where the host's stepped clock puts them", text)
+
+    def test_a_truncated_correction_is_named_beside_the_rule_it_breaks(self):
+        # The sentence above says each `at` is its `t` plus the steps before
+        # it. For a clamped line that is false, and it is false in the
+        # artifact rather than only in the code.
+        doc = self.doc(
+            {
+                "lines": [{"t": 0.3, "at": 0.0, "clamped": 0.7}, {"t": 4.0, "at": 3.0}],
+                "clock_correction": {
+                    "applied": True,
+                    "total": -1.0,
+                    "steps": 1,
+                    "note": None,
+                },
+            }
+        )
+        text = render_timeline_md(doc)
+        self.assertIn("1 of them could not be moved the whole way", text)
+        self.assertIn("`clamped` is how many seconds", text)
+
+    def test_a_clamped_line_of_a_stitched_part_is_not_claimed_to_be_at_zero(self):
+        """A clamp on part two lands at part two's offset, not at 0.0.
+
+        The prose used to say "those clips start at the top of the track,
+        their `at` is 0.0", which is true of a take recorded in one piece and
+        false of every stitched part after the first — `stitch()` moves a
+        part's lines by its `offset` and `clamped` travels with them. A
+        published artifact naming a second the clip is not at is the failure
+        this whole field exists to prevent, and it is reachable whenever a
+        part's first line sits inside a backward step.
+        """
+        doc = self.doc(
+            {
+                "lines": [
+                    {"t": 2.0, "at": 1.22, "segment": "part1"},
+                    {"t": 8.0, "at": 7.5, "clamped": 0.28, "segment": "part2"},
+                ],
+                "clock_correction": {
+                    "applied": True,
+                    "total": -1.06,
+                    "steps": 2,
+                    "parts": 2,
+                    "parts_uncorrected": 0,
+                    "note": None,
+                },
+            }
+        )
+        text = render_timeline_md(doc)
+        self.assertIn("1 of them could not be moved the whole way", text)
+        self.assertIn("start where their own capture does", text)
+        self.assertNotIn("`at` is 0.0", text)
+        self.assertNotIn("top of the track", text)
+
+    def test_a_take_with_nothing_clamped_says_nothing_about_clamping(self):
+        # The control. Without it the sentence above is satisfied by a
+        # paragraph that prints the caveat over every stepped take.
+        text = render_timeline_md(
+            self.doc(
+                self.record({"applied": True, "total": -0.78, "steps": 1, "note": None})
+            )
+        )
+        self.assertIn("mixed where the host's stepped clock puts them", text)
+        self.assertNotIn("could not be moved the whole way", text)
+
+    def test_a_demo_where_only_some_parts_could_correct_says_how_many(self):
+        # A merged record knows what fraction of the demo its refusal is
+        # about. Saying "the 3 spoken lines were mixed uncorrected" over a demo
+        # where two of them were corrected is pessimistic and still untrue.
+        doc = self.doc(
+            {
+                "lines": [{"t": 2.0, "at": 1.22}, {"t": 8.5, "at": 8.5}],
+                "clock_correction": {
+                    "applied": False,
+                    "total": None,
+                    "steps": 0,
+                    "parts": 2,
+                    "parts_uncorrected": 1,
+                    "note": "part2 mixed its narration at the beat-log offsets",
+                },
+            }
+        )
+        text = render_timeline_md(doc)
+        self.assertIn("lines of 1 of this demo's 2 narrated segment(s)", text)
+        self.assertNotIn("The 2 spoken line(s) were mixed at their beat-log", text)
+
+    def test_a_single_take_still_speaks_about_its_own_lines(self):
+        # The control for the sentence above: a record with no parts to count
+        # keeps the wording that names the lines, rather than losing the
+        # subject of the sentence to a merged-only key.
+        text = render_timeline_md(
+            self.doc(
+                self.record(
+                    {
+                        "applied": False,
+                        "total": None,
+                        "steps": 0,
+                        "note": "the sampler was away for up to 5.50s",
+                    }
+                )
+            )
+        )
+        self.assertIn("The 1 spoken line(s) were mixed at their beat-log", text)
+
+    def test_the_ordinary_take_says_nothing_about_its_narration(self):
+        # A watched clock that held still put every line exactly where the log
+        # says. A paragraph on every timeline is a paragraph nobody reads, and
+        # the two above are worth reading only because this one is silent.
+        text = render_timeline_md(
+            self.doc(
+                self.record({"applied": True, "total": 0.0, "steps": 0, "note": None})
+            )
+        )
+        self.assertNotIn("spoken line", text)
+
+    def test_a_take_that_narrated_nothing_says_nothing(self):
+        self.assertNotIn("spoken line", render_timeline_md(self.doc(None)))
+
+
+def merged_narration_of(records: list[object]) -> dict:
+    """A two-part merged timeline whose parts carry `records` as narration."""
+    names = [f"part{n + 1}" for n in range(len(records))]
+    docs = [
+        {
+            "recorder": "Recorder",
+            "segment": name,
+            "beats": [],
+            "capture_clock": clock_record(),
+            "narration": narration,
+        }
+        for name, narration in zip(names, records, strict=True)
+    ]
+    return _merged_timeline(
+        names,
+        [Path(f"{name}.seg.mp4") for name in names],
+        docs,
+        [7.5, 6.0],
+        Path("demo.mp4"),
+    )
+
+
+class MergedNarration(unittest.TestCase):
+    """Where a stitched demo's spoken lines are (issue #226 under #7).
+
+    `stitch()` removes the parts and their beat logs, so a line's placement
+    survives only if the merge carries it. Each part mixed its own audio on its
+    own capture's clock and `concat -c copy` laid the tracks end to end at the
+    parts' measured durations, which is the only arithmetic here.
+    """
+
+    def part(self, *lines: tuple[float, float], applied: bool = True) -> dict:
+        return {
+            "lines": [{"t": t, "at": at} for t, at in lines],
+            "clock_correction": {
+                "applied": applied,
+                "total": -0.78 if applied else None,
+                "steps": 1 if applied else 0,
+                "note": None if applied else "the sampler was away for up to 5.50s",
+            },
+        }
+
+    def test_a_later_parts_line_is_moved_by_the_parts_before_it(self):
+        # Part one's video measures 7.5 s, so part two's 1.0 s line is at 8.5 s
+        # of the joined file — and its own capture's correction is already in
+        # the `at` it arrived with, never applied a second time.
+        merged = merged_narration_of([self.part((2.0, 1.22)), self.part((1.0, 0.4))])
+        self.assertEqual(
+            merged["narration"]["lines"],
+            [
+                {"t": 2.0, "at": 1.22, "segment": "part1"},
+                {"t": 8.5, "at": 7.9, "segment": "part2"},
+            ],
+        )
+
+    def test_one_part_that_could_not_correct_its_mix_refuses_for_the_demo(self):
+        # The demo a listener plays is one file. A part whose voice drifts off
+        # its captions is not made right by the parts that did not.
+        merged = merged_narration_of(
+            [self.part((2.0, 1.22)), self.part((1.0, 1.0), applied=False)]
+        )
+        self.assertIs(merged["narration"]["clock_correction"]["applied"], False)
+        self.assertIsNone(merged["narration"]["clock_correction"]["total"])
+        self.assertIn(
+            "the sampler was away", merged["narration"]["clock_correction"]["note"]
+        )
+
+    def test_a_clamped_line_keeps_its_shortfall_and_lands_at_its_parts_offset(self):
+        # `clamped` has to survive the merge, and the `at` it goes with is the
+        # part's offset rather than zero. Both halves matter: the number is
+        # what says the line did not get its whole correction, and 7.5 is
+        # where the clip actually is in the joined file.
+        clamped = merged_narration_of(
+            [
+                self.part((2.0, 1.22)),
+                {
+                    "lines": [{"t": 0.5, "at": 0.0, "clamped": 0.28}],
+                    "clock_correction": {
+                        "applied": True,
+                        "total": -0.78,
+                        "steps": 1,
+                        "note": None,
+                    },
+                },
+            ]
+        )
+        self.assertEqual(
+            clamped["narration"]["lines"][1],
+            {"t": 8.0, "at": 7.5, "clamped": 0.28, "segment": "part2"},
+        )
+
+    def test_the_refusal_says_how_many_of_the_parts_it_is_about(self):
+        # `applied` is all-or-nothing on purpose, so the counts are what keep
+        # the artifact from reporting a demo where one part of two could not
+        # correct as a demo where neither could.
+        merged = merged_narration_of(
+            [self.part((2.0, 1.22)), self.part((1.0, 1.0), applied=False)]
+        )
+        state = merged["narration"]["clock_correction"]
+        self.assertEqual((state["parts"], state["parts_uncorrected"]), (2, 1))
+        self.assertIn("part2 mixed its narration", state["note"])
+
+    def test_a_demo_whose_parts_all_corrected_states_the_whole_correction(self):
+        merged = merged_narration_of([self.part((2.0, 1.22)), self.part((1.0, 0.4))])
+        state = merged["narration"]["clock_correction"]
+        self.assertIs(state["applied"], True)
+        self.assertEqual(state["steps"], 2)
+        self.assertAlmostEqual(state["total"], -1.56, places=4)
+
+    def test_a_silent_part_does_not_refuse_the_correction_it_never_needed(self):
+        # A part that narrated nothing contributed no audio, so its clock has
+        # nothing to say about where the audio is. Folding it in would let a
+        # wordless segment report a demo as uncorrected.
+        merged = merged_narration_of([self.part((2.0, 1.22)), None])
+        self.assertIs(merged["narration"]["clock_correction"]["applied"], True)
+        self.assertEqual(
+            merged["narration"]["lines"],
+            [{"t": 2.0, "at": 1.22, "segment": "part1"}],
+        )
+
+    def test_a_demo_nobody_narrated_carries_no_narration_record(self):
+        self.assertIsNone(merged_narration_of([None, None])["narration"])
+
+    def test_each_part_keeps_its_own_record_on_its_own_clock(self):
+        # The merged list above is on the joined video's clock; a reader who
+        # wants to know what one part measured has to be able to get it back.
+        merged = merged_narration_of([self.part((2.0, 1.22)), self.part((1.0, 0.4))])
+        self.assertEqual(
+            [s["narration"]["lines"] for s in merged["segments"]],
+            [[{"t": 2.0, "at": 1.22}], [{"t": 1.0, "at": 0.4}]],
+        )
+
+
 class StatedInjectionCount(unittest.TestCase):
     """The figure `tests/README.md` prints about this file's own manifest.
 
@@ -5569,6 +6123,87 @@ class _StubWatcher:
     @property
     def covered(self) -> bool:
         return self.samples > 1 and self.max_gap <= 0.25
+
+
+class NarrationSpanModel(unittest.TestCase):
+    """`tests/smoke`'s prediction of where the mix is audible (issue #226).
+
+    Here rather than in `tests/smoke-inject` for the reason `ClockCoverageCheck`
+    gives: the case that matters cannot be produced on demand. A backward
+    wall-clock step shortens the video and not the audio, so a mix corrected
+    onto the video's clock can start one clip while the previous is still
+    playing — and `silencedetect` then reports **one** stretch for two lines.
+
+    This is not hypothetical and it is why the function exists. The first
+    version of the smoke check asserted one stretch per line; a real take of
+    the arm on 2026-08-09 stepped −1.073 s at 2.214 s, the corrected mix put
+    line 1 at 2.228 s inside line 0's 1.028–2.628 s clip, the file carried one
+    stretch, and the arm went red about a correction that was right. A harness
+    whose model breaks on the phenomenon it grades costs that phenomenon its
+    diagnosis.
+    """
+
+    def setUp(self):
+        self.spans = _smoke_module().expected_loud_spans
+
+    def test_clips_that_do_not_touch_are_one_span_each(self):
+        # The control, and the steady host's answer: without it every
+        # assertion below is satisfied by a function that merges everything.
+        self.assertEqual(
+            self.spans([0.963, 3.228], [1.6, 0.3]),
+            [(0.963, 2.563, (0,)), (3.228, 3.528, (1,))],
+        )
+
+    def test_a_clip_starting_inside_the_previous_one_is_one_span(self):
+        # The measured take, written out: the step put line 1 0.4 s inside
+        # line 0, and the file carries 1.028-2.628 s of continuous audio.
+        self.assertEqual(
+            self.spans([1.028, 2.228], [1.6, 0.3]), [(1.028, 2.628, (0, 1))]
+        )
+
+    def test_a_merged_span_reaches_the_later_of_the_two_ends(self):
+        # ...and the other overlap, where the second clip outlives the first.
+        # Taking the first clip's end would under-predict the stretch and go
+        # red about a clip that is exactly where it belongs.
+        self.assertEqual(self.spans([1.0, 1.2], [0.3, 1.6]), [(1.0, 2.8, (0, 1))])
+
+    def test_clips_closer_than_the_detector_can_separate_are_one_span(self):
+        # `silencedetect` only reports a silence at least `d` long, so two
+        # clips 40 ms apart come back as one stretch whatever the arithmetic
+        # says. The prediction has to agree with the measurement's resolution.
+        self.assertEqual(
+            self.spans([1.0, 2.64], [1.6, 0.3], gap=0.08), [(1.0, 2.94, (0, 1))]
+        )
+
+    def test_a_gap_the_detector_can_see_stays_two_spans(self):
+        # The boundary from the other side, and the reason the case above is
+        # not just "merge anything close".
+        self.assertEqual(
+            self.spans([1.0, 2.7], [1.6, 0.3], gap=0.08),
+            [(1.0, 2.6, (0,)), (2.7, 3.0, (1,))],
+        )
+
+    def test_a_span_names_the_lines_it_covers_and_not_its_own_position(self):
+        """Membership, which is what keeps two later claims honest.
+
+        A span built from one clip can still be graded on that clip's
+        *duration*, and an end-of-span bar cannot — an onset 110 ms early
+        against a clip 250 ms too long satisfies the second and not the first.
+        And a failure has to name the line to go and listen to: here the
+        second span is line 2, and calling it "line 1" after its position
+        sends the reader to a clip that is fine.
+        """
+        found = self.spans([1.0, 1.2, 4.0], [1.6, 0.3, 0.5])
+        self.assertEqual([members for _s, _e, members in found], [(0, 1), (2,)])
+
+    def test_membership_follows_the_clip_and_not_the_order_it_was_given(self):
+        # The lines are sorted by where they land, which on a stepped take is
+        # not the order they were spoken in. The indices have to travel with
+        # the clip through that sort, or every message names the wrong line.
+        self.assertEqual(
+            self.spans([4.0, 1.0], [0.3, 0.5]),
+            [(1.0, 1.5, (1,)), (4.0, 4.3, (0,))],
+        )
 
 
 class ClockCoverageCheck(unittest.TestCase):
@@ -5758,6 +6393,295 @@ _CURSOR_LISTENS_AT_DOMCONTENTLOADED = """\
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    (
+        # **The defect issue #226 is about**, restored exactly: each clip mixed
+        # at the offset the beat log recorded, on a video that is not on that
+        # clock. It is the one consequence of the two clocks a listener meets
+        # rather than a manifest reader, and it changes nothing whatsoever on a
+        # host whose clock holds still — which is why the tests it must fail
+        # are driven by a scripted record.
+        "every narration clip is mixed at its beat-log offset",
+        "core.py",
+        "                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}"
+        ':all=1[a{i}]"',
+        "                    f\"[{i + 1}:a]adelay={int(round(line['t'] * 1000))}"
+        ':all=1[a{i}]"',
+        [
+            "NarrationMix.test_a_line_is_mixed_where_its_own_offset_sits_in_the_video",
+            "NarrationMix.test_steps_that_cancel_still_move_a_line_mixed_between_them",
+            "NarrationMix.test_a_step_bigger_than_a_lines_offset_starts_the_clip_at_zero",
+            "NarrationMix.test_the_clips_go_in_in_the_order_the_lines_were_spoken",
+            "NarrationMix."
+            "test_the_record_names_where_each_line_was_logged_and_where_it_went",
+        ],
+    ),
+    (
+        # The correction read once for the whole take instead of at each line's
+        # own instant — the shape that was the blocking defect in the review
+        # frames' version of this rule (#253). Every clip then moves by the
+        # take's running total, including the ones spoken before the step.
+        "each clip is corrected by the take's total rather than by its own instant",
+        "narration.py",
+        "        want = float(off) + shift(off)",
+        '        want = float(off) + shift(float("inf"))',
+        [
+            "NarrationMix.test_a_step_after_a_line_does_not_move_that_lines_clip",
+            "NarrationMix.test_steps_that_cancel_still_move_a_line_mixed_between_them",
+            "NarrationMix.test_a_line_is_mixed_where_its_own_offset_sits_in_the_video",
+        ],
+    ),
+    (
+        # The third state presented as the second: a take nobody watched the
+        # clock of, publishing a record that says the mix was corrected. The
+        # audio is in exactly the same place either way, which is the whole
+        # reason this is the dangerous one — the artifact is the only thing
+        # that can tell a listener the placement was a fallback.
+        "a mix nobody could correct reports itself as corrected",
+        "narration.py",
+        "    shift, state = capture_clock_shift(record)",
+        "    shift, _state = capture_clock_shift(record)\n"
+        '    state = {"applied": True, "total": 0.0, "steps": 0, "note": None}',
+        [
+            "NarrationMix.test_a_take_nobody_watched_the_clock_of_is_mixed_raw_and_says_so",
+            "NarrationMix.test_a_stepped_take_states_the_correction_it_applied",
+            "NarrationMixPlan."
+            "test_no_record_at_all_mixes_raw_and_refuses_to_call_it_a_correction",
+            "NarrationMixPlan.test_a_step_missing_its_size_refuses_the_whole_record",
+        ],
+    ),
+    (
+        # The floor that keeps a corrected offset out of negative territory.
+        # `adelay` refuses a negative delay outright, so this does not misplace
+        # one line — it costs the take its whole audio track.
+        "a line the clock stepped past is given a negative delay",
+        "narration.py",
+        '        line = {"t": round(float(off), 3), "at": round(max(0.0, want), 3)}',
+        '        line = {"t": round(float(off), 3), "at": round(want, 3)}',
+        [
+            "NarrationMix.test_a_step_bigger_than_a_lines_offset_starts_the_clip_at_zero",
+            "NarrationMix.test_a_clamped_line_says_how_much_of_its_correction_it_lost",
+        ],
+    ),
+    (
+        # The paragraph decided on the take's **total** instead of on how many
+        # times the clock moved. Two steps that cancel — a +0.9 s pulse and the
+        # −0.9 s that undoes it, which is the shape of the host this work
+        # exists for — total zero, and every line mixed between them has moved
+        # by nearly a second. `frames.py` carries the same guard and has
+        # carried this injection since #253; this one did not, and the review
+        # of #226 found it passing 275/275 against exactly this mutation.
+        "timeline.md reads a pulse and its undo as a mix that did not move",
+        "timeline.py",
+        '    if not clock.get("steps"):',
+        '    if not (clock.get("total") or 0.0):',
+        [
+            "NarrationTimelineNote."
+            "test_steps_that_cancel_are_still_a_correction_worth_stating"
+        ],
+    ),
+    (
+        # The line that hit the zero floor, published as though it had been
+        # corrected like the rest. The headline sentence above it says every
+        # `at` is its `t` plus the steps before it; for this one that is false,
+        # and a reader correcting by hand corrects it twice.
+        "a truncated correction is published as though it were whole",
+        "narration.py",
+        "        if clamped:",
+        "        if False:",
+        ["NarrationMix.test_a_clamped_line_says_how_much_of_its_correction_it_lost"],
+    ),
+    (
+        # ...and the other side of the same key: a shortfall of 4e-5 s, which
+        # is nothing at the three places `at` is written to, published as a
+        # truncation. The field is documented as absent when there is nothing
+        # to say, and a reader who trusts that reads a line as truncated when
+        # its `at` really is `t` plus the steps before it.
+        "a shortfall too small to write down is still called a truncation",
+        "narration.py",
+        "        clamped = round(-want, 3) if want < 0 else 0.0",
+        "        clamped = -want if want < 0 else 0.0",
+        # Only the rounding case, and that is the whole point: this box's
+        # 0.5 + (-0.78) is exactly -0.28, so the ordinary clamped line reads
+        # the same with the rounding gone. The shortfall nobody can write down
+        # is the only observable there is.
+        ["NarrationMix.test_a_shortfall_that_rounds_away_is_not_called_a_truncation"],
+    ),
+    (
+        # ...and the renderer's half of the same claim, which the injection
+        # above cannot reach: it builds its record by hand, so a `mix_plan`
+        # that still marks the line and a `timeline.md` that stops mentioning
+        # it are two different failures.
+        "timeline.md stops naming the lines whose correction was truncated",
+        "timeline.py",
+        '    clamped = [line for line in lines if line.get("clamped")]',
+        "    clamped = []",
+        [
+            "NarrationTimelineNote."
+            "test_a_truncated_correction_is_named_beside_the_rule_it_breaks"
+        ],
+    ),
+    (
+        # The sentence as it shipped in the first round of #226, which is true
+        # of a take recorded in one piece and false of every stitched part
+        # after the first: `stitch()` moves a clamped line by its part's
+        # `offset`, so its `at` is 7.5 and not 0.0. A published artifact
+        # naming a second the clip is not at.
+        "timeline.md says a clamped clip is at the top of the track",
+        "timeline.py",
+        '        f"and `adelay` cannot express a negative delay. Those clips start where "\n'
+        '        f"their own capture does — the top of the file on a take recorded in "\n'
+        '        f"one piece, that part\'s `offset` on a stitched demo — and `clamped` is "\n'
+        '        f"how many seconds of the correction that boundary swallowed."',
+        '        f"and `adelay` cannot express a negative delay. Those clips start at "\n'
+        '        f"the top of the track, their `at` is 0.0, and `clamped` is "\n'
+        '        f"how many seconds of the correction that boundary swallowed."',
+        [
+            "NarrationTimelineNote."
+            "test_a_clamped_line_of_a_stitched_part_is_not_claimed_to_be_at_zero"
+        ],
+    ),
+    (
+        # A stitched demo's refusal reported as the whole demo's when it is one
+        # part's. Pessimistic rather than dangerous, and still not what
+        # happened — the counts are the only thing that makes the sentence
+        # true, so nothing may quietly stop computing them.
+        "a stitched demo forgets how many of its parts could not correct",
+        "stitching.py",
+        '            "parts_uncorrected": len(refused),',
+        '            "parts_uncorrected": 0,',
+        [
+            "MergedNarration.test_the_refusal_says_how_many_of_the_parts_it_is_about",
+        ],
+    ),
+    (
+        # The smoke harness back to "one line, one stretch of audio" — the
+        # model a real stepped take of the narration arm falsified. It is a
+        # break in `tests/smoke` rather than in the recorder because the defect
+        # was the harness's, and the direction it fails in is the expensive
+        # one: red about a correction that was right.
+        "the smoke harness expects one audible stretch per spoken line",
+        "tests/smoke",
+        "        if spans and start - spans[-1][1] <= gap:",
+        "        if spans and start - spans[-1][1] <= -1e9:",
+        [
+            "NarrationSpanModel.test_a_clip_starting_inside_the_previous_one_is_one_span",
+            "NarrationSpanModel.test_a_merged_span_reaches_the_later_of_the_two_ends",
+            "NarrationSpanModel."
+            "test_clips_closer_than_the_detector_can_separate_are_one_span",
+        ],
+    ),
+    (
+        # A span labelled by its position instead of by the clip it carries.
+        # With one merged pair every later span names a line one too low, so
+        # a failure sends the reader to a clip that is fine — and the
+        # single-clip duration bar, which is chosen on membership, is applied
+        # to the wrong clip's length.
+        "a merged span is labelled by its position rather than by its clips",
+        "tests/smoke",
+        "            spans[-1] = (first, max(end, start + length), (*members, index))",
+        "            spans[-1] = (first, max(end, start + length), members)",
+        [
+            "NarrationSpanModel."
+            "test_a_span_names_the_lines_it_covers_and_not_its_own_position",
+            "NarrationSpanModel.test_a_clip_starting_inside_the_previous_one_is_one_span",
+        ],
+    ),
+    (
+        # The indices dropped through the sort. On a stepped take the clips do
+        # not land in the order they were spoken, so a membership derived from
+        # position after sorting names the wrong line every time.
+        "the span model loses which clip is which when it sorts them",
+        "tests/smoke",
+        "    ordered = sorted(\n"
+        "        enumerate(zip(starts, lengths, strict=True)), key=lambda pair: pair[1][0]\n"
+        "    )",
+        "    ordered = list(enumerate(sorted(zip(starts, lengths, strict=True))))",
+        [
+            "NarrationSpanModel."
+            "test_membership_follows_the_clip_and_not_the_order_it_was_given",
+        ],
+    ),
+    (
+        # The committed half of the record goes quiet about where the voice is.
+        # A listener cannot check audio against anything, so a timeline that
+        # says nothing is a demo whose narration placement is unfalsifiable.
+        "timeline.md says nothing about where the spoken lines went",
+        "timeline.py",
+        "    if not isinstance(narration, dict):",
+        "    if True:",
+        [
+            "NarrationTimelineNote."
+            "test_a_mix_that_could_not_be_corrected_says_so_above_the_table",
+            "NarrationTimelineNote.test_a_mix_that_followed_a_stepped_clock_says_that_instead",
+        ],
+    ),
+    (
+        # `_timeline_doc` recomputing, or dropping, what the mix wrote down.
+        # Every assertion about `narration` grades a field nobody reads if the
+        # document does not carry it.
+        "the timeline drops the record the mix wrote",
+        "core.py",
+        '            "narration": self._narration,',
+        '            "narration": None,',
+        ["NarrationMix.test_the_timeline_carries_the_record_the_mix_wrote"],
+    ),
+    (
+        # The record set before ffmpeg has agreed to write the file. A take
+        # whose conversion raised then publishes the placement of an audio
+        # track that does not exist — the stale-artifact shape of issue #20.
+        "a take whose conversion failed still reports where its audio is",
+        "core.py",
+        '                narration = {"lines": plan, "clock_correction": clock}',
+        '                narration = {"lines": plan, "clock_correction": clock}\n'
+        "                self._narration = narration",
+        ["NarrationMix.test_a_conversion_that_failed_claims_no_mix_either"],
+    ),
+    (
+        # A stitched demo's lines left on their own part's clock. Part two's
+        # audio really is at 8.5 s of the joined file; a record saying 1.0 s
+        # points a reader at part one.
+        "a stitched demo's spoken lines are not moved onto the joined clock",
+        "stitching.py",
+        '                    "at": _shift(line.get("at"), record["offset"]),',
+        '                    "at": line.get("at"),',
+        ["MergedNarration.test_a_later_parts_line_is_moved_by_the_parts_before_it"],
+    ),
+    (
+        # One part's refusal swallowed by the parts that managed. The demo is
+        # one file and a listener plays all of it.
+        "a part that could not correct its mix is outvoted by the parts that did",
+        "stitching.py",
+        '            refused.append(str(record["segment"]))',
+        "            pass",
+        [
+            "MergedNarration."
+            "test_one_part_that_could_not_correct_its_mix_refuses_for_the_demo",
+            "MergedNarration.test_the_refusal_says_how_many_of_the_parts_it_is_about",
+        ],
+    ),
+    (
+        # ...and the other direction: a segment that spoke nothing dragging a
+        # narrated demo's record down to "uncorrected", and inventing a record
+        # for a demo where nobody spoke at all.
+        "a segment that narrated nothing votes on where the narration is",
+        "stitching.py",
+        "        if not isinstance(narration, dict):\n            continue",
+        "        if not isinstance(narration, dict):\n            narration = {}",
+        [
+            "MergedNarration."
+            "test_a_silent_part_does_not_refuse_the_correction_it_never_needed",
+            "MergedNarration.test_a_demo_nobody_narrated_carries_no_narration_record",
+        ],
+    ),
+    (
+        # The per-part record, which is the only place a reader can get back to
+        # what one capture measured once the merged list has moved everything.
+        "a stitched demo forgets what each part measured for itself",
+        "stitching.py",
+        '                "narration": doc.get("narration"),',
+        '                "narration": None,',
+        ["MergedNarration.test_each_part_keeps_its_own_record_on_its_own_clock"],
+    ),
     (
         # The correction a consumer would apply to a beat timestamp, with its
         # sign flipped. The field is still there and still lists the right

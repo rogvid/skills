@@ -62,7 +62,7 @@ from .failure import (
     render_failure_md,
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
-from .narration import tts_clip
+from .narration import mix_plan, tts_clip
 from .target import guard_target
 from .timeline import (
     ATTRIBUTION_SLACK_S,
@@ -1014,6 +1014,12 @@ class _DemoBase:
         # #20), the review frames extracted off `media`, and the last frame in
         # `failure/`. Set in `_convert`, after ffmpeg returns.
         self._converted = False
+        # Where this take's spoken lines were put in that mp4, and whether the
+        # host's wall clock could be corrected for when they were (issue #226).
+        # Null until `_convert` has mixed them, so a take that narrated
+        # nothing — or encoded nothing — says nothing rather than claiming an
+        # empty mix. See `narration.mix_plan`.
+        self._narration: dict | None = None
         # What the *picture* turned out to be (issue #97). Measured off the
         # encoded mp4 in `__exit__`, so it is null on any take that wrote none,
         # and it is the one thing in the timeline that describes the frames
@@ -2269,6 +2275,13 @@ take with fewer beats than the last one would otherwise leave the
             # a host that did not step, which is the healthy answer and is
             # *not* the same as the key being absent.
             "capture_clock": self._capture_clock.report(),
+            # Where the spoken lines landed in that mp4, and whether the clock
+            # above could be corrected for when they did (issue #226). Null on
+            # a take that mixed no speech, which is the same answer a take
+            # that encoded nothing gives — in both cases there is no audio
+            # track this could describe. Taken from `_convert`, not recomputed
+            # here: what belongs in the artifact is what the mix did.
+            "narration": self._narration,
             # Built from the *scrubbed* beats, not from `self._beats`, so a
             # still path or a caption that the mask reached is masked here too
             # rather than reappearing in the coverage table (issue #12).
@@ -2502,16 +2515,28 @@ take with fewer beats than the last one would otherwise leave the
     def _convert(self, webm: Path) -> None:
         mp4 = self._media_path()
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(webm)]
+        narration: dict | None = None
         if self._speech:
-            # Mix each narration clip in at the moment its line appeared.
+            # Mix each narration clip in at the moment its line appeared —
+            # **in the video**, which is not the moment the beat log recorded
+            # (issue #226). See `mix_plan`: the log is `time.monotonic()`, the
+            # frames are stamped with the host's wall clock, and a step between
+            # the two is a voice that trails its caption for the rest of the
+            # take. `self._capture_clock` has already been stopped by
+            # `__exit__` at this point, so the record is the whole capture's.
+            #
             # Segments always get an aac track (silence if no lines) so
             # stitch()'s lossless concat sees uniform streams.
             if self._lines:
+                plan, clock = mix_plan(
+                    [off for off, _ in self._lines], self._capture_clock.report()
+                )
+                narration = {"lines": plan, "clock_correction": clock}
                 for _, clip in self._lines:
                     cmd += ["-i", str(clip)]
                 delayed = ";".join(
-                    f"[{i + 1}:a]adelay={int(off * 1000)}:all=1[a{i}]"
-                    for i, (off, _) in enumerate(self._lines)
+                    f"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}:all=1[a{i}]"
+                    for i, line in enumerate(plan)
                 )
                 inputs = "".join(f"[a{i}]" for i in range(len(self._lines)))
                 # aformat pins the layout: mixed mono TTS clips would
@@ -2538,5 +2563,11 @@ take with fewer beats than the last one would otherwise leave the
         # `mp4.exists()`, because the file may be a previous take's and the
         # flag cannot be (issue #20).
         self._converted = True
+        # Set here rather than where it is computed, and for the same reason:
+        # `timeline.json` would otherwise describe an audio track that ffmpeg
+        # refused to write. A take whose conversion raised keeps
+        # `narration: null`, which is what a take that mixed nothing says too —
+        # and neither of them has an mp4 for it to be about.
+        self._narration = narration
         spoken = f", {len(self._lines)} spoken lines" if self._speech else ""
         print(f"wrote {mp4} ({mp4.stat().st_size // 1024} kB{spoken})")

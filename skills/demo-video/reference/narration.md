@@ -34,6 +34,29 @@ needed; captions are the narration script.
   the previous spoken line.
 - Write captions for the ear as well as the eye: short sentences, no
   markup, nothing you wouldn't say aloud.
+- **A clip is mixed where its line is in the *video*, not where the beat
+  log put it.** The log is `time.monotonic()` and the recording is stamped
+  with the host's wall clock, so a host that steps that clock while a take
+  records would otherwise leave the voice behind while the picture moved —
+  measured once at +0.70 s of lag on every line of a stalled take. The
+  recorder corrects each line by the wall-clock steps its own capture saw
+  before that line, and writes down what it did: `narration` in
+  `timeline.json` carries every line's `t` (the beat-log instant) and `at`
+  (where it went in the mp4), with a `clock_correction` that says whether a
+  correction was possible at all. When the sampler could not watch the clock
+  the mix falls back to the raw offset, `timeline.md` says so in a paragraph
+  above the beat table, and the audio may be out by however far the host
+  moved.
+- **A backward step between two lines can make their clips overlap, and that
+  is the correction working.** The step shortens the *video*; it does not
+  shorten the clip. The recorder waited line 1 out before starting line 2 in
+  monotonic time, but the seconds the step deleted are not in the file to wait
+  through, so line 2's corrected onset can land while line 1 is still
+  speaking — measured once at 0.4 s of overlap after a −1.07 s step. Two
+  voices for a fraction of a second is the price of both lines matching their
+  captions; the alternative is every line after the step trailing its caption
+  by the whole step. If a take comes back with audible double-talk, look at
+  `capture_clock.steps` before you look at the storyboard.
 - Verify audio like you verify frames: `ffprobe` shows the aac stream;
   `ffmpeg -af silencedetect` should show speech blocks spanning the video;
   if the key has STT permission, transcribe the extracted track with

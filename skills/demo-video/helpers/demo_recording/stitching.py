@@ -133,6 +133,81 @@ def _merge_capture_clock(docs: list[dict], records: list[dict]) -> dict | None:
     }
 
 
+def _merge_narration(docs: list[dict], records: list[dict]) -> dict | None:
+    """Every part's spoken lines, moved onto the stitched video's clock.
+
+    Each part mixed its own audio into its own `.seg.mp4` at its own capture's
+    corrected offsets (issue #226), and `concat -c copy` lays those tracks
+    end to end at the parts' measured durations — so a line's place in the
+    joined video is its place in its part plus that part's `offset`, the same
+    arithmetic the beats get. `segment` is carried per line for the same reason
+    a step carries one: it is the attribution to trust when a reader asks which
+    capture's clock a number is on.
+
+    Returns **null** when no part narrated, which is what a single take that
+    narrated nothing says too. A part that narrated nothing is simply absent
+    from `lines` — it contributed no audio, so its clock has nothing to say
+    about this field, and folding its state in would let a silent segment
+    refuse a correction two narrated ones really applied.
+    """
+    lines: list[dict] = []
+    refused: list[str] = []
+    note: str | None = None
+    steps = 0
+    total = 0.0
+    narrating = 0
+    for doc, record in zip(docs, records, strict=True):
+        narration = doc.get("narration")
+        if not isinstance(narration, dict):
+            continue
+        narrating += 1
+        for line in narration.get("lines") or []:
+            lines.append(
+                {
+                    **line,
+                    "t": _shift(line.get("t"), record["offset"]),
+                    "at": _shift(line.get("at"), record["offset"]),
+                    "segment": record["segment"],
+                }
+            )
+        state = narration.get("clock_correction")
+        state = state if isinstance(state, dict) else {}
+        if state.get("applied"):
+            steps += int(state.get("steps") or 0)
+            total += float(state.get("total") or 0.0)
+        else:
+            refused.append(str(record["segment"]))
+            note = note or state.get("note")
+    if not narrating:
+        return None
+    applied = not refused
+    return {
+        "lines": lines,
+        "clock_correction": {
+            # False the moment **any** narrating part could not correct its own
+            # mix: the demo a listener plays is one file, and one part's voice
+            # drifting off its captions is not made right by the others.
+            "applied": applied,
+            "total": round(total, 4) if applied else None,
+            "steps": steps if applied else 0,
+            # ...but *how much* of the demo that is, said rather than left to
+            # the reader. The flag above is all-or-nothing on purpose; without
+            # these two `timeline.md` prints "the 3 spoken lines were mixed
+            # uncorrected" over a demo where two of them were corrected, which
+            # is pessimistic and still not what happened. Absent from a single
+            # take's record, which has no parts to count.
+            "parts": narrating,
+            "parts_uncorrected": len(refused),
+            "note": None
+            if applied
+            else (
+                f"{', '.join(refused)} mixed its narration at the beat-log "
+                f"offsets, uncorrected" + (f" — {note}" if note else "")
+            ),
+        },
+    }
+
+
 # How far a segment's recorded `duration` may sit from what its .seg.mp4
 # measures now. The recorder probed the same file with the same tool moments
 # after writing it, so anything past this is not rounding — it is a log paired
@@ -328,6 +403,10 @@ def _merged_timeline(
                 # theirs, and the parts that *were* measured should not go
                 # with it — see `_merge_capture_clock`.
                 "capture_clock": doc.get("capture_clock"),
+                # Likewise: where this part put its own spoken lines, on its
+                # own clock. The merged field above is the same lines moved
+                # onto the joined video's.
+                "narration": doc.get("narration"),
             }
         )
         offset = round(offset + duration, 3)
@@ -351,6 +430,9 @@ def _merged_timeline(
         # and attributed per capture, because a step in an earlier part must
         # not be applied to a later part's beats (issue #225).
         "capture_clock": _merge_capture_clock(docs, records),
+        # Where the spoken lines are in the joined video, and whether every
+        # part that spoke could put them on that video's clock (issue #226).
+        "narration": _merge_narration(docs, records),
         # Recomputed over the *merged* beat list, not unioned from the
         # segments' own reports: `index` is renumbered by the merge, and a
         # report assembled from per-segment ones would point a reviewer at beat

@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~41 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~42 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -183,7 +183,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~48 s)
-tests/smoke-inject                # all 49 entries, ~41 min
+tests/smoke-inject                # all 51 entries, ~42 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1113,6 +1113,28 @@ Four things, and the third is the one the axis exists for:
   44100 Hz. `_convert` pins these with `aformat` rather than letting `amix`
   decide, because mono TTS clips otherwise yield a mono track that `-c copy`
   cannot concatenate with the stereo silence of a segment that narrated nothing.
+- **every clip is where the take says it put it, read off the encoded file**
+  ([#226](https://github.com/rogvid/skills/issues/226)). The bars above ask
+  whether the mix happened; this asks *where it landed*, which is the thing a
+  listener notices and no 0.4 s window can see. `silencedetect` at −50 dBFS
+  splits the track into the stretches that carry a clip, and each stretch has
+  to start within **120 ms** of the second `timeline.json`'s `narration` names
+  and to last as long as the tone this file seeded. Measured on this arm's own
+  take: the two clips came back at **0.963016 s and 3.228000 s** against a mix
+  aimed at 0.963 s and 3.228 s, and occupied 1.600 s and 0.300 s against the
+  1.6 s and 0.3 s tones — sub-millisecond, against the 0.70–1.50 s the lag this
+  exists to catch was measured at. And `at` itself is checked against **this harness's own**
+  wall-clock sampler rather than against the recorder's `capture_clock` — the
+  arm now runs `watch_wall_clock()` for the length of the take, so a recorder
+  that stopped correcting, or corrected by the wrong number, disagrees with a
+  reading it cannot influence.
+
+  **What it cannot say on a steady host**, stated rather than implied: where
+  the wall clock does not step the correction is zero, and this passes
+  identically for a mix that never corrected anything. The arithmetic is graded
+  in `tests/unit` (`NarrationMix`, `NarrationMixPlan`) against scripted
+  records; what the arm adds is that the clip really is in the file at the
+  second the record names. See **Known gaps**.
 
 **All four were fault-injected**, none of them having been watched to fail
 before:
@@ -1687,7 +1709,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-49 entries, 12 arms, ~41.4 min of takes
+51 entries, 12 arms, ~41.7 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1715,7 +1737,7 @@ paragraph whose job is to say what this manifest does not cover.
 | arm | entries | what a miss would mean |
 |---|---|---|
 | `--lock-only` | 3 | a run the machine lock refuses goes back to building an output directory it will never write to and printing `recordings left in` under `smoke: FAILED`, naming it ([#105](https://github.com/rogvid/skills/issues/105)) — or the fix overshoots and no failing run is told where its recordings are, which the third entry is the control for |
-| `--narration-only` | 4 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for |
+| `--narration-only` | 6 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for. Two more are about *where* the voice went ([#226](https://github.com/rogvid/skills/issues/226)), which no window bar can see: the mix landing 250 ms from the second the take's own record names, and the record naming a second the mix did not use — caught only because the arm now watches the host's wall clock itself and compares |
 | `--coverage-only` | 5 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md` |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
@@ -1729,7 +1751,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 40 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 41 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -1872,6 +1894,74 @@ exactly where `--strict-only` came from.
 
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
+
+- **That the narration correction is right on a host whose clock really
+  steps.** [#226](https://github.com/rogvid/skills/issues/226) puts each spoken
+  clip at its own offset *plus the wall-clock steps its capture recorded before
+  it*, because the video is on the host's wall clock and the beat log is not.
+  Nothing in this repo can make a host step its clock on demand, so every
+  assertion about the correction is driven by a **scripted** `capture_clock` —
+  `tests/unit`'s `NarrationMix` reads the delays back out of the ffmpeg command
+  line the recorder really built, and `NarrationMixPlan` covers the record
+  shapes a recorder cannot produce. The `--narration-only` arm measures the
+  onsets off the encoded mp4 and cross-checks them against its own wall-clock
+  sampler, which on a steady box reads zero: **that arm passes identically for
+  a mix that never corrected anything.** What is therefore ungraded end to end
+  is the world model itself — that the encode really follows the host's clock —
+  and that was measured once, off pixels, in
+  [#250](https://github.com/rogvid/skills/issues/250): six takes, 38 caption
+  transitions, up to −1.50 s uncorrected against all 38 within 101 ms
+  corrected. Nothing re-runs it. On the WSL2 box of
+  [#247](https://github.com/rogvid/skills/issues/247), whose clock does pulse,
+  the arm's cross-check becomes a real grading of the stepped case — by
+  accident of the host, which is not coverage.
+
+  **Nothing measures the audio against the caption's pixels in one file.**
+  #226's acceptance criterion is phrased as onset-versus-caption-appearance;
+  what exists is onset-versus-clock on `--narration-only` (≤120 ms, measured
+  sub-millisecond) and caption-versus-clock in #250 (38 transitions, ≤101 ms).
+  Composed, that bounds the cross-modal distance at about **221 ms** against a
+  700–1500 ms defect, which is sufficient — with two caveats worth having in
+  writing: one half is a historical measurement nothing re-runs, and the two
+  halves were taken on different arms. The cheap way to close it is not to
+  rework the narration storyboard (whose interlude teardown destroys
+  `caption_arrival`'s quiet run-up) but to add **one spoken line to an arm that
+  already runs `caption_arrival`** — `--web-only` or `--segments-only` — where
+  both halves would then be read off the same mp4.
+
+  **Where a step merges two clips, the arm can only grade the merged
+  stretch's edges.** Once a backward step puts one clip inside another,
+  `silencedetect` reports one stretch and there is no per-clip length left to
+  check: a short clip moved anywhere inside a long one — or dropped from the
+  mix entirely — changes neither edge. Measured on a real stepped take of this
+  arm (lines at 2.101 s and 3.301 s, a −1.073 s step at 2.214 s): line 1 mixed
+  **0.772 s late reads clean**, and line 1 **omitted reads clean**; the blind
+  window is about **1.17 s**, inside the 0.70–1.50 s band the defect lives in.
+  It also needs `timeline.json` to still name the right second, so the record
+  has to be wrong in a way consistent with itself. This is not a regression:
+  before the merge model the same regime returned "1 stretch for 2 spoken
+  lines" for a *correct* mix too, so nothing in it was graded at all. Closing
+  it needs a per-clip signature in the audio — distinct tones per line, say —
+  which is a change to what the arm seeds and not to what it measures.
+
+  **The two `if not clock.covered` refusals in the narration checks have no
+  automated test.** The arm cannot produce an uncovered watcher on demand, so
+  the guard that stops an unwatched `before()` from being graded on is
+  exercised by nothing. That is precedent rather than drift —
+  `check_timeline`'s identical guard at `tests/smoke:6195` has been uninjected
+  since #245 — and it is written down here rather than left to be noticed.
+
+  **And the correction narration applies is over-large on this host, by an
+  amount nothing here removes.** #224's diagnosis found that a −Δ wall-clock
+  step does not slide the video: it **deletes a Δ-wide hole** from the file,
+  and separately some takes lose only 16–50 % of the recorded step. Every
+  consumer of `capture_clock` over-corrects as a result — the review frames,
+  the smoke harness's own `before()`, and the narration mix alike — so a line
+  whose instant falls inside such a hole is placed up to a whole step early.
+  [#255](https://github.com/rogvid/skills/issues/255) carries the measurements
+  and fixes it at the source, in `before()` and `capture_clock_correction`, for
+  all consumers at once. Nothing about it is narration-specific and nothing in
+  `narration.py` should chase it.
 
 - **That a real Chromium hands a click's deferred document event to
   `evaluate("0")`.** [#214](https://github.com/rogvid/skills/issues/214) is
