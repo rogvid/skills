@@ -5264,16 +5264,38 @@ class FrameClockCorrection(unittest.TestCase):
         self.assertEqual(windows, [(1.0, 8.22)])
 
     def test_a_beat_the_clock_swallowed_loses_its_scene_frames_out_loud(self):
-        """A step bigger than the beat it lands in inverts the search window.
+        """A beat wholly inside a hole has no stretch of video to search.
 
-        Per-instant edges are what make this reachable: the start is corrected
-        by nothing and the end by the whole step, so a step larger than the
-        beat's span puts the end before the start and there is no stretch of
-        video left to search. That is honest — the wall time the beat occupied
-        is not in the file — but `scene_times` answers an inverted window with
-        an empty list, so without this the sheet would simply have fewer frames
-        and say nothing. It needs a step over `SCENE_MIN_SPAN_S`, which is this
-        host's 10 s pulse transient.
+        The step at 0.5 s deletes 0.5-6.5 s of wall time from the file (#256),
+        and the beat runs 1.0-5.0 s: both of its edges are inside that window,
+        so both clamp to the same instant and there is nothing between them.
+        That is honest — the wall time the beat occupied is not in the file —
+        but `scene_times` answers an empty window with an empty list, so
+        without this the sheet would simply have fewer frames and say nothing.
+        It needs a step over `SCENE_MIN_SPAN_S`, which is this host's 10 s
+        pulse transient.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((0.5, -6.0)),
+            beats=[beat(0, "hold", 1.0, t_end=5.0)],
+        )
+        manifest, cuts, windows = self.sheet(doc)
+        self.assertEqual(windows, [], "no window can be searched, so none was")
+        self.assertEqual(manifest["scene_search_skipped"], [0])
+        self.assertEqual(cuts, [0.5], "the last instant the file has, not 0.0")
+        sheet = render_frames_md(manifest)
+        self.assertIn("no extra frames were looked for", sheet)
+
+    def test_a_step_inside_a_beat_leaves_the_part_of_it_the_file_still_has(self):
+        """The near miss of the case above, and the control for it.
+
+        The step at 2.0 s lands *inside* the same beat, so its first second is
+        in the file and its last three are not. The window is that first
+        second — 1.0 s up to the hole's edge — and nothing is reported as
+        skipped. Before #256 this scenario produced an *inverted* window
+        (1.0, -1.0) and was the one the case above was written from: the end
+        was corrected by the whole 6 s step as though the video had slid.
         """
         doc = envelope(
             duration=20.0,
@@ -5281,11 +5303,9 @@ class FrameClockCorrection(unittest.TestCase):
             beats=[beat(0, "hold", 1.0, t_end=5.0)],
         )
         manifest, cuts, windows = self.sheet(doc)
-        self.assertEqual(windows, [], "no window can be searched, so none was")
-        self.assertEqual(manifest["scene_search_skipped"], [0])
-        self.assertEqual(cuts, [0.0])
-        sheet = render_frames_md(manifest)
-        self.assertIn("no extra frames were looked for", sheet)
+        self.assertEqual(windows, [(1.0, 2.0)])
+        self.assertEqual(manifest["scene_search_skipped"], [])
+        self.assertEqual(cuts, [2.0])
 
     def test_a_beat_the_clock_left_alone_reports_no_skipped_search(self):
         # The control: the same long beat with the step outside it keeps its
@@ -5305,17 +5325,24 @@ class FrameClockCorrection(unittest.TestCase):
         # because `stitch()` lays the parts out by their measured durations.
         # Applying it again would put every frame of part two 0.78 s early —
         # worse than not correcting at all.
+        #
+        # The step is at 1.0 s so that its hole — the 0.78 s of wall time it
+        # takes out of the file (#256) — ends before the beat at 2.05 s. This
+        # test is about which capture a step belongs to, and a beat inside a
+        # hole answers a different question, one test below.
         _manifest, cuts, _windows = self.sheet(
-            self.merged([clock_record((1.5, -0.78)), clock_record()])
+            self.merged([clock_record((1.0, -0.78)), clock_record()])
         )
         self.assertEqual(cuts, [0.55, 1.27, 8.05, 9.55])
 
     def test_a_beat_before_its_own_captures_step_is_cut_at_its_midpoint(self):
         # The other direction of the same rule, inside one part: part two's
-        # step at 1.5 s of its own clock is 9.0 s on the stitched one, so the
-        # beat at 8.05 s keeps its midpoint and the beat at 9.55 s moves.
+        # step at 1.0 s of its own clock is 8.5 s on the stitched one, so the
+        # beat at 8.05 s keeps its midpoint and the beat at 9.55 s moves. Same
+        # reason as above for 1.0 rather than 1.5: 9.55 has to be past the end
+        # of the step's hole for this to be a test about attribution.
         _manifest, cuts, _windows = self.sheet(
-            self.merged([clock_record(), clock_record((1.5, -0.78))])
+            self.merged([clock_record(), clock_record((1.0, -0.78))])
         )
         self.assertEqual(cuts, [0.55, 2.05, 8.05, 8.77])
 
@@ -5328,6 +5355,121 @@ class FrameClockCorrection(unittest.TestCase):
         )
         self.assertEqual(cuts, [4.22])
         self.assertEqual(windows, [(2.22, 6.22)])
+
+    # -- the hole a backward step leaves (issue #256) ------------------------
+    #
+    # The numbers in the first three are the measured ones, off the take that
+    # found this: a −1.051 s step at 5.151 s of `seg-run1`, and `beat-05` with
+    # its midpoint at 5.633 s, inside the hole (5.151, 6.202). The frame that
+    # shipped was cut at **4.58 s** and shows the previous caption.
+
+    def test_a_beat_the_step_deleted_is_cut_at_the_last_frame_before_the_gap(self):
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((5.151, -1.051)),
+            beats=[beat(0, "caption", 5.133, t_end=6.133)],
+        )
+        _manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [5.151], "the hole's edge, not 4.582")
+
+    def test_that_frame_is_marked_as_one_with_no_video_of_its_beat(self):
+        # The cut alone is not the fix: 5.151 s is a real second of the file
+        # and reads exactly like a frame of the beat unless the manifest says
+        # otherwise. 0.569 s is how much longer the hole runs past the
+        # midpoint, which is also how far too early the old rule put it.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((5.151, -1.051)),
+            beats=[beat(0, "caption", 5.133, t_end=6.133)],
+        )
+        manifest, _cuts, _windows = self.sheet(doc)
+        self.assertEqual(manifest["frames"][0]["no_video"], 0.569)
+
+    def test_the_sheet_tells_a_reviewer_that_frame_is_not_of_its_beat(self):
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((5.151, -1.051)),
+            beats=[beat(0, "caption", 5.133, t_end=6.133)],
+        )
+        manifest, _cuts, _windows = self.sheet(doc)
+        sheet = render_frames_md(manifest)
+        self.assertIn("`beat-00.png` is not at the beat it is named for", sheet)
+        self.assertIn("569 ms after `beat-00.png`", sheet)
+        # Beside the picture too, not only in the preamble a scrolling
+        # reviewer never reaches.
+        self.assertIn("## beat-00 — 5.15s (no video of this beat", sheet)
+
+    def test_a_beat_past_the_hole_still_gets_the_whole_step(self):
+        """The control, and the one that stops the fix from being a rollback.
+
+        A correction that clamped everything after a backward step — or that
+        stopped correcting at all — passes every assertion above. This beat's
+        midpoint is 0.1 s past the end of the same hole, so it moves by the
+        full −1.051 s and carries no marker at all.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((5.151, -1.051)),
+            beats=[beat(0, "caption", 6.252, t_end=6.352)],
+        )
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [5.251])
+        self.assertNotIn("no_video", manifest["frames"][0])
+        self.assertNotIn("no video of this beat", render_frames_md(manifest))
+
+    def test_a_forward_step_leaves_no_hole_at_all(self):
+        """The other control, and the direction this host's pulses go *up*.
+
+        A forward step does not delete wall time from the file — the encoder
+        keeps writing, the stamps just jump — so an instant after one is at
+        `t + Δ` with nothing withheld. A clamp that fired on any step, rather
+        than on the window a *backward* one deletes, would put this frame
+        0.9 s early and call it honest.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, 0.9)),
+            beats=[beat(0, "caption", 2.5, t_end=2.7)],
+        )
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [3.5])
+        self.assertNotIn("no_video", manifest["frames"][0])
+
+    def test_two_holes_that_overlap_clamp_to_the_first_of_them(self):
+        """Chained pulses, which is the shape of the host this exists for.
+
+        The step at 2.0 s stalls the file at 2.0 s, and the second one at
+        2.5 s — while it is still stalled — takes the wall clock another
+        second further back, so it has 2.0 s to climb rather than 1.0 s and
+        the file resumes at mono 4.0 s, not 3.0 s. The midpoint at 3.0 s is
+        inside all of that: the frame is the file's last instant, 2.0 s, and
+        the video only comes back 1.0 s after the beat. A per-step rule that
+        clamped to the *nearest* step would answer 1.5 s here — the second
+        step's own edge, which is video that does not exist either.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, -1.0), (2.5, -1.0)),
+            beats=[beat(0, "caption", 2.9, t_end=3.1)],
+        )
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [2.0])
+        self.assertEqual(manifest["frames"][0]["no_video"], 1.0)
+
+    def test_a_hole_the_next_beat_outlives_leaves_that_beat_alone(self):
+        # Two beats, one record: the fourth state is a property of the
+        # *instant*, so the same well-measured record answers it differently
+        # for two beats 1 s apart. A manifest that marked the take rather than
+        # the frame would mark both.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, -1.0)),
+            beats=[beat(0, "caption", 2.4, t_end=2.6), beat(1, "caption", 3.4)],
+        )
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [2.0, 2.45])
+        self.assertEqual(manifest["frames"][0]["no_video"], 0.5)
+        self.assertNotIn("no_video", manifest["frames"][1])
 
     # -- and what the sheet says it did -------------------------------------
 
@@ -5445,12 +5587,12 @@ class FrameClockCorrection(unittest.TestCase):
 
     def test_a_step_inside_the_last_beat_is_not_reported_as_capture_loss(self):
         # The same claim where the correction has to be read at the beat's
-        # **end**: the step at 5.2 s is inside the last beat (4.8-5.6 s), so a
+        # **end**: the step at 4.9 s is inside the last beat (4.8-5.6 s), so a
         # reader summing to the beat's *start* finds nothing and reports
         # 0.60 s of loss that the record has already explained.
         doc = envelope(
             duration=5.0,
-            capture_clock=clock_record((5.2, -0.78)),
+            capture_clock=clock_record((4.9, -0.78)),
             beats=[beat(0, "caption", 0.5), beat(1, "hold", 4.8, t_end=5.6)],
         )
         manifest, _cuts, _windows = self.sheet(doc)
@@ -5594,11 +5736,43 @@ class NarrationMix(unittest.TestCase):
         delays, _record = self.mixed(clock_record((2.0, 0.9), (8.0, -0.9)), 5.0)
         self.assertEqual(delays, [5900])
 
+    def test_a_line_the_step_deleted_the_moment_of_starts_before_the_gap(self):
+        """The measured hole, on the audio side of it (issue #256).
+
+        A −1.051 s step at 5.151 s takes 5.151-6.202 s of wall time out of the
+        file outright rather than sliding it, so the 5.633 s the log gives this
+        line is a moment `demo.mp4` does not contain. Mixing at `t` plus the
+        steps before it — 4.582 s — starts the clip a whole step early, over
+        the caption *before* the one it is about. It goes at the last moment
+        the file has instead, and the record says why.
+        """
+        delays, record = self.mixed(clock_record((5.151, -1.051)), 5.633)
+        self.assertEqual(delays, [5151], "the hole's edge, not 4582")
+        self.assertEqual(
+            record["lines"], [{"t": 5.633, "at": 5.151, "no_video": 0.569}]
+        )
+
+    def test_a_line_past_the_hole_still_moves_by_the_whole_step(self):
+        # The control. A mix that clamped everything after a backward step, or
+        # stopped correcting, passes the test above and puts this line 1.05 s
+        # late — the defect #226 exists for, restored by the fix to #256.
+        delays, record = self.mixed(clock_record((5.151, -1.051)), 6.3)
+        self.assertEqual(delays, [5249])
+        self.assertNotIn("no_video", record["lines"][0])
+
     def test_a_step_bigger_than_a_lines_offset_starts_the_clip_at_zero(self):
         # That wall time is not in the file at all, and `adelay` cannot express
         # a negative delay — ffmpeg refuses the filter outright, which would
         # cost the take its whole audio track rather than one line's placement.
-        delays, _record = self.mixed(clock_record((0.1, -0.78)), 0.5, 2.0)
+        #
+        # **The step is at -0.5 s, before this capture's frame zero**, and it
+        # has to be: since #256 a step's own hole clamps every instant inside
+        # it to the last moment the file has, which is never below the step's
+        # time. What is left below zero is a step the sampler saw before the
+        # first frame — the recorder's own sampler starts at `_t0` and does not
+        # produce one, so this is a record shape only a reader has to survive,
+        # and `adelay` losing the whole audio track is why it still does.
+        delays, _record = self.mixed(clock_record((-0.5, -0.78)), 0.5, 2.0)
         self.assertEqual(delays, [0, 1220])
 
     def test_a_clamped_line_says_how_much_of_its_correction_it_lost(self):
@@ -5611,7 +5785,7 @@ class NarrationMix(unittest.TestCase):
         correct it twice. Absent from the lines that got the whole of theirs,
         so its presence is the whole signal.
         """
-        _delays, record = self.mixed(clock_record((0.1, -0.78)), 0.5, 2.0)
+        _delays, record = self.mixed(clock_record((-0.5, -0.78)), 0.5, 2.0)
         self.assertEqual(
             record["lines"],
             [{"t": 0.5, "at": 0.0, "clamped": 0.28}, {"t": 2.0, "at": 1.22}],
@@ -5622,7 +5796,7 @@ class NarrationMix(unittest.TestCase):
         # steps before it at the precision of this record. A `clamped: 0.0`
         # beside it would be a line claiming a truncation of nothing, against
         # a field documented as absent when there is nothing to say.
-        _delays, record = self.mixed(clock_record((0.1, -0.50004)), 0.5)
+        _delays, record = self.mixed(clock_record((-0.5, -0.50004)), 0.5)
         self.assertEqual(record["lines"], [{"t": 0.5, "at": 0.0}])
 
     def test_the_clips_go_in_in_the_order_the_lines_were_spoken(self):
@@ -5735,6 +5909,14 @@ class NarrationMixPlan(unittest.TestCase):
         lines, state = mix_plan([0.5, 5.0], record)
         self.assertEqual([line["at"] for line in lines], [0.5, 5.0])
         self.assertIs(state["applied"], False)
+
+    def test_a_forward_step_deletes_nothing_so_no_line_is_marked(self):
+        # A forward step moves the stamps and keeps writing; only a backward
+        # one takes wall time out of the file. A `no_video` here would be the
+        # clamp firing on the sign of nothing (#256).
+        lines, _state = mix_plan([0.5, 2.0], clock_record((1.0, 0.9)))
+        self.assertEqual([line["at"] for line in lines], [0.5, 2.9])
+        self.assertEqual([line for line in lines if "no_video" in line], [])
 
     def test_a_line_before_a_forward_step_is_left_where_it_was(self):
         # The control for the sign, in the direction the WSL2 host's pulses
@@ -5868,6 +6050,37 @@ class NarrationTimelineNote(unittest.TestCase):
             )
         )
         self.assertIn("mixed where the host's stepped clock puts them", text)
+        self.assertNotIn("could not be moved the whole way", text)
+        self.assertNotIn("spoken over wall time", text)
+
+    def test_a_line_the_clock_stepped_over_is_named_as_having_no_moment(self):
+        """The other way the headline sentence is false, and a different one.
+
+        `clamped` is a line the *start of the file* caught. This is a line
+        whose moment the host's clock deleted from the middle of the file
+        (issue #256): there is nothing in `media` for it to be at, its clip
+        starts at the last instant before the gap, and a listener who hears it
+        against the caption before the one it belongs to has no other way to
+        find out why. Folding the two into one sentence would send that
+        listener to the top of the track to look for a clip that is 5 s in.
+        """
+        doc = self.doc(
+            {
+                "lines": [
+                    {"t": 5.633, "at": 5.151, "no_video": 0.569},
+                    {"t": 8.0, "at": 6.949},
+                ],
+                "clock_correction": {
+                    "applied": True,
+                    "total": -1.051,
+                    "steps": 1,
+                    "note": None,
+                },
+            }
+        )
+        text = render_timeline_md(doc)
+        self.assertIn("1 of them was spoken over wall time", text)
+        self.assertIn("`no_video` is how many seconds later", text)
         self.assertNotIn("could not be moved the whole way", text)
 
     def test_a_demo_where_only_some_parts_could_correct_says_how_many(self):
@@ -6322,6 +6535,170 @@ class ClockCoverageCheck(unittest.TestCase):
         )
 
 
+class HostClockHole(unittest.TestCase):
+    """`tests/smoke`'s own reader of a stepped clock, on a scripted one (#256).
+
+    Here for the reason `ClockCoverageCheck` gives, doubled. The harness's
+    watcher and its reading of a merged record are the third consumer #256 is
+    about, and **the case that matters cannot be produced on demand**: a
+    backward step's hole exists only on a host that steps its wall clock, and
+    on one that does not every line of `video_instant` is dead and every
+    assertion below is satisfied by the arithmetic it replaced. The host this
+    was written on stepped twice on 2026-08-09 and not at all for the six days
+    before that; grading this on the arm would be grading the host.
+
+    The numbers are the measured ones: a −1.051 s step at 5.151 s, which takes
+    5.151-6.202 s of wall time out of the file, and a beat whose midpoint is at
+    5.633 s inside it. Written out here rather than derived, so an arithmetic
+    that changed has to disagree with a person rather than with itself.
+    """
+
+    def setUp(self):
+        self.smoke = _smoke_module()
+
+    def clock(self, *steps: tuple[float, float], boundaries: list | None = None):
+        """A `HostClock` that never sampled anything, holding `steps`.
+
+        The thread is never started: `raw` is what `_run` would have appended
+        and `_t0` is what `rebase` would have set, so everything below is the
+        real class answering about a clock that behaved exactly this way.
+        """
+        clock = self.smoke.HostClock()
+        clock._t0 = 0.0
+        clock.raw = list(steps)
+        clock.boundaries = boundaries or []
+        return clock
+
+    # -- what the watcher answers -------------------------------------------
+
+    def test_an_instant_the_step_deleted_reaches_only_the_last_frame_before_it(self):
+        clock = self.clock((5.151, -1.051))
+        self.assertAlmostEqual(5.633 + clock.before(5.633), 5.151, places=6)
+
+    def test_that_instant_is_reported_as_having_no_video_of_its_own(self):
+        # `before()` alone cannot say it: −0.482 s is a perfectly ordinary
+        # correction to look at, and the whole defect is that it reads like
+        # one. 0.569 s is how much longer the hole runs past the instant.
+        clock = self.clock((5.151, -1.051))
+        self.assertAlmostEqual(clock.hole(5.633), 0.569, places=6)
+
+    def test_an_instant_past_the_hole_gets_the_whole_step_and_no_hole(self):
+        # The control. A watcher that clamped everything after a backward step
+        # passes both assertions above and puts every later beat a full step
+        # from where it is — which is #229's defect, restored.
+        clock = self.clock((5.151, -1.051))
+        self.assertAlmostEqual(clock.before(6.3), -1.051, places=6)
+        self.assertEqual(clock.hole(6.3), 0.0)
+
+    def test_an_instant_before_the_step_is_untouched(self):
+        clock = self.clock((5.151, -1.051))
+        self.assertEqual(clock.before(5.0), 0.0)
+        self.assertEqual(clock.hole(5.0), 0.0)
+
+    def test_a_forward_step_deletes_nothing(self):
+        # The direction this host's pulses go *up*. A clamp keyed on "a step
+        # happened" rather than on the window a backward one deletes would
+        # withhold this correction and read the file 0.9 s off.
+        clock = self.clock((2.0, 0.9))
+        self.assertAlmostEqual(clock.before(2.5), 0.9, places=6)
+        self.assertEqual(clock.hole(2.5), 0.0)
+
+    def test_a_hole_belongs_to_its_own_capture_and_not_to_the_next(self):
+        # `before()` reads only the steps of `t`'s own capture, and the hole
+        # has to be read the same way: part one's lost wall time is already in
+        # the offset `stitch()` laid part two out by, so a beat 0.2 s into
+        # part two is not inside part one's hole no matter how wide it was.
+        clock = self.clock((5.151, -1.051), boundaries=[0.0, 5.5])
+        self.assertEqual(clock.before(5.7), 0.0)
+        self.assertEqual(clock.hole(5.7), 0.0)
+
+    # -- and what a reader of the published record answers -------------------
+
+    def merged(self, *steps: tuple[float, float]) -> dict:
+        return {
+            "measured": True,
+            "steps": [{"t": t, "delta": d, "segment": "part1"} for t, d in steps],
+            "total": round(sum(d for _t, d in steps), 4),
+        }
+
+    def test_a_reader_of_the_record_clamps_a_beat_inside_the_hole_too(self):
+        # The same claim on the other side of `check_merged_capture_clock`'s
+        # comparison. Both sides have to move together or a stepping take goes
+        # red about a recorder that was right — which is how #255 measured
+        # 4 of 6 stepping runs failing.
+        read = self.smoke.merged_clock_correction(
+            self.merged((5.151, -1.051)),
+            {"t_start": 5.633, "segment": "part1"},
+        )
+        self.assertAlmostEqual(5.633 + read, 5.151, places=6)
+
+    def test_a_reader_still_applies_the_whole_step_past_the_hole(self):
+        read = self.smoke.merged_clock_correction(
+            self.merged((5.151, -1.051)),
+            {"t_start": 6.3, "segment": "part1"},
+        )
+        self.assertAlmostEqual(read, -1.051, places=6)
+
+    def test_a_reader_ignores_a_hole_measured_in_another_capture(self):
+        # The attribution rule, restated for the hole: part two's beats are
+        # not inside part one's hole, whatever its timestamps say.
+        read = self.smoke.merged_clock_correction(
+            self.merged((5.151, -1.051)),
+            {"t_start": 5.633, "segment": "part2"},
+        )
+        self.assertEqual(read, 0.0)
+
+    # -- and what it refuses to let the sheet get away with ------------------
+
+    def sheet(self, *, marked: bool, middle: float = 5.633):
+        """One frame of one beat, with and without the recorder's marker."""
+        frame = {"file": "beat-00.png", "kind": "beat", "beat": 0, "t": 5.151}
+        if marked:
+            frame["no_video"] = 0.569
+        beats = {0: {"index": 0, "t_start": middle - 0.5, "t_end": middle + 0.5}}
+        return [frame], beats
+
+    def test_a_frame_of_a_deleted_beat_that_says_nothing_is_a_failure(self):
+        listed, beats = self.sheet(marked=False)
+        problems = self.smoke.unstated_holes(
+            "web", self.clock((5.151, -1.051)), listed, beats
+        )
+        self.assertEqual(len(problems), 1, f"expected one complaint, got {problems!r}")
+        self.assertIn("no frame of that beat in demo.mp4 at all", problems[0])
+        self.assertIn("569 ms", problems[0])
+
+    def test_the_same_frame_with_the_marker_passes(self):
+        listed, beats = self.sheet(marked=True)
+        self.assertEqual(
+            self.smoke.unstated_holes(
+                "web", self.clock((5.151, -1.051)), listed, beats
+            ),
+            [],
+        )
+
+    def test_a_frame_of_a_beat_with_video_is_not_asked_to_claim_a_hole(self):
+        # The control, and the one a steady host runs: no step, no hole, no
+        # complaint. Without it the check is satisfied by one that demands
+        # `no_video` on every frame of every take.
+        listed, beats = self.sheet(marked=False)
+        self.assertEqual(
+            self.smoke.unstated_holes("web", self.clock(), listed, beats), []
+        )
+
+    def test_a_midpoint_on_the_edge_of_a_hole_is_left_alone(self):
+        # Two samplers on their own 20 ms grids do not both know which side of
+        # an edge an instant fell on, and this check is not the place to find
+        # out: this midpoint is 22 ms short of where the video resumes, well
+        # under `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S`, and is not graded.
+        listed, beats = self.sheet(marked=False, middle=6.18)
+        self.assertEqual(
+            self.smoke.unstated_holes(
+                "web", self.clock((5.151, -1.051)), listed, beats
+            ),
+            [],
+        )
+
+
 # --------------------------------------------------------------------------
 
 # Issue #203, as the overlay shipped before it was fixed and after it was.
@@ -6420,10 +6797,12 @@ INJECTIONS = [
         # own instant — the shape that was the blocking defect in the review
         # frames' version of this rule (#253). Every clip then moves by the
         # take's running total, including the ones spoken before the step.
+        # `place(1e9)` is that total: no record puts a step out there, so the
+        # instant is past every hole and its shift is the whole sum.
         "each clip is corrected by the take's total rather than by its own instant",
         "narration.py",
-        "        want = float(off) + shift(off)",
-        '        want = float(off) + shift(float("inf"))',
+        "        want = placed.at",
+        "        want = float(off) + place(1e9).at - 1e9",
         [
             "NarrationMix.test_a_step_after_a_line_does_not_move_that_lines_clip",
             "NarrationMix.test_steps_that_cancel_still_move_a_line_mixed_between_them",
@@ -6438,8 +6817,8 @@ INJECTIONS = [
         # that can tell a listener the placement was a fallback.
         "a mix nobody could correct reports itself as corrected",
         "narration.py",
-        "    shift, state = capture_clock_shift(record)",
-        "    shift, _state = capture_clock_shift(record)\n"
+        "    place, state = capture_clock_shift(record)",
+        "    place, _state = capture_clock_shift(record)\n"
         '    state = {"applied": True, "total": 0.0, "steps": 0, "note": None}',
         [
             "NarrationMix.test_a_take_nobody_watched_the_clock_of_is_mixed_raw_and_says_so",
@@ -6552,6 +6931,174 @@ INJECTIONS = [
         [
             "MergedNarration.test_the_refusal_says_how_many_of_the_parts_it_is_about",
         ],
+    ),
+    # -- the hole a backward step leaves (issue #256) ------------------------
+    #
+    # Every one of these is a no-op on a host whose wall clock holds still, and
+    # so is the code they break. That is not a reason to skip them, it is the
+    # reason they exist here rather than in an arm: `tests/smoke` cannot make a
+    # host step, and the box this was written on stepped twice in a week.
+    (
+        # **The defect issue #256 is about**, restored exactly: a −Δ step read
+        # as a slide rather than as a Δ-wide window deleted from the file, so
+        # every instant inside that window is corrected up to a whole step
+        # early into content that predates the step. This is what shipped in
+        # `d5212c0` and `5b00786`, and it was found by eye — `beat-05.png` cut
+        # at 4.58 s, showing the previous caption.
+        "a backward step is read as a slide, so an instant with no video is moved",
+        "timeline.py",
+        "    reached = max(shifted, edge)",
+        "    reached = shifted",
+        [
+            "FrameClockCorrection."
+            "test_a_beat_the_step_deleted_is_cut_at_the_last_frame_before_the_gap",
+            "FrameClockCorrection."
+            "test_that_frame_is_marked_as_one_with_no_video_of_its_beat",
+            "FrameClockCorrection."
+            "test_the_sheet_tells_a_reviewer_that_frame_is_not_of_its_beat",
+            "FrameClockCorrection.test_two_holes_that_overlap_clamp_to_the_first_of_them",
+            "FrameClockCorrection.test_a_hole_the_next_beat_outlives_leaves_that_beat_alone",
+            "FrameClockCorrection."
+            "test_a_beat_the_clock_swallowed_loses_its_scene_frames_out_loud",
+            "NarrationMix.test_a_line_the_step_deleted_the_moment_of_starts_before_the_gap",
+        ],
+    ),
+    (
+        # ...and the over-correction in the other direction, which is what an
+        # author reaching for the smallest fix writes: clamp everything after a
+        # step to the last instant before it. Every beat of the rest of the
+        # take then sits a whole step from where it is, which is #229 undone —
+        # and it satisfies every assertion about the hole itself.
+        "every instant after a step is clamped, not only the ones with no video",
+        "timeline.py",
+        "    reached = max(shifted, edge)",
+        "    reached = edge if edge > -math.inf else shifted",
+        [
+            "FrameClockCorrection.test_a_beat_past_the_hole_still_gets_the_whole_step",
+            "FrameClockCorrection.test_a_forward_step_leaves_no_hole_at_all",
+            "FrameClockCorrection.test_a_frame_is_cut_where_its_beat_sits_in_the_video",
+            "NarrationMix.test_a_line_past_the_hole_still_moves_by_the_whole_step",
+            "NarrationMixPlan.test_a_forward_step_deletes_nothing_so_no_line_is_marked",
+        ],
+    ),
+    (
+        # The step's own delta counted into the edge it is the edge *of* — the
+        # off-by-one an author writing this loop by hand makes, and the one
+        # that leaves the arithmetic looking like a high-water mark while
+        # answering the naive sum for every backward step.
+        "the hole's edge is measured after its own step instead of before it",
+        "timeline.py",
+        "        edge = max(edge, at + running)\n        running += delta",
+        "        running += delta\n        edge = max(edge, at + running)",
+        [
+            "FrameClockCorrection."
+            "test_a_beat_the_step_deleted_is_cut_at_the_last_frame_before_the_gap",
+            "FrameClockCorrection.test_two_holes_that_overlap_clamp_to_the_first_of_them",
+            "NarrationMix.test_a_line_the_step_deleted_the_moment_of_starts_before_the_gap",
+        ],
+    ),
+    (
+        # The clamp applied and not published. The frame is in the right place
+        # and the sheet reads exactly like a sheet of frames that are where
+        # their beats are — which is the whole failure, because a reviewer
+        # cannot tell by looking that this one is a picture of the moment
+        # before the step rather than of the beat.
+        "a frame of a beat with no video is published as an ordinary frame",
+        "frames.py",
+        "        if placed.lost:",
+        "        if False:",
+        [
+            "FrameClockCorrection."
+            "test_that_frame_is_marked_as_one_with_no_video_of_its_beat",
+            "FrameClockCorrection."
+            "test_the_sheet_tells_a_reviewer_that_frame_is_not_of_its_beat",
+            "FrameClockCorrection.test_two_holes_that_overlap_clamp_to_the_first_of_them",
+            "FrameClockCorrection.test_a_hole_the_next_beat_outlives_leaves_that_beat_alone",
+        ],
+    ),
+    (
+        # ...the manifest keeping the marker and the sheet dropping the
+        # paragraph. `frames.md` is what a reviewer is handed; `frames.json` is
+        # what a tool reads, and nobody reviewing a demo through this skill
+        # opens the JSON.
+        "frames.md stops naming the beats the clock deleted",
+        "frames.py",
+        "    out += _no_video_md(frames)",
+        "    out += []",
+        [
+            "FrameClockCorrection."
+            "test_the_sheet_tells_a_reviewer_that_frame_is_not_of_its_beat"
+        ],
+    ),
+    (
+        # ...and the same sentence beside the picture, which is the one a
+        # reviewer scrolling the frames actually reads. The preamble is above
+        # a table they may never scroll back to.
+        "the frame's own heading stops saying there is no video of its beat",
+        "frames.py",
+        '        if frame.get("no_video"):',
+        "        if False:",
+        [
+            "FrameClockCorrection."
+            "test_the_sheet_tells_a_reviewer_that_frame_is_not_of_its_beat"
+        ],
+    ),
+    (
+        # The audible half of the same silence: the clip goes to the last
+        # moment before the gap, correctly, and the record says it is where
+        # every other line is. A listener who hears it against the wrong
+        # caption has nothing to read that explains it.
+        "a narration line spoken over deleted wall time is recorded as ordinary",
+        "narration.py",
+        "        if round(placed.lost, 3):",
+        "        if False:",
+        [
+            "NarrationMix.test_a_line_the_step_deleted_the_moment_of_starts_before_the_gap"
+        ],
+    ),
+    (
+        # ...and the renderer's half, which the injection above cannot reach:
+        # `NarrationTimelineNote` builds its record by hand, so a `mix_plan`
+        # that still marks the line and a `timeline.md` that stops mentioning
+        # it are two different failures.
+        "timeline.md stops naming the lines whose moment is not in the video",
+        "timeline.py",
+        '    holed = [line for line in lines if line.get("no_video")]',
+        "    holed = []",
+        [
+            "NarrationTimelineNote."
+            "test_a_line_the_clock_stepped_over_is_named_as_having_no_moment"
+        ],
+    ),
+    (
+        # The harness's own reader, broken the same way the recorder's was.
+        # This is the direction that costs a diagnosis: `check_beat_frames` and
+        # `check_merged_capture_clock` would go red on a stepping take about a
+        # recorder that placed every frame correctly, which is 4 of 6 of the
+        # runs #255 measured.
+        "the harness's own watcher reads a backward step as a slide",
+        "tests/smoke",
+        "    reached = max(shifted, edge)",
+        "    reached = shifted",
+        [
+            "HostClockHole."
+            "test_an_instant_the_step_deleted_reaches_only_the_last_frame_before_it",
+            "HostClockHole.test_that_instant_is_reported_as_having_no_video_of_its_own",
+            "HostClockHole.test_a_reader_of_the_record_clamps_a_beat_inside_the_hole_too",
+            "HostClockHole.test_a_frame_of_a_deleted_beat_that_says_nothing_is_a_failure",
+        ],
+    ),
+    (
+        # ...and the harness accepting a sheet that says nothing. Its own
+        # placement check passes either way — the frame really is at the hole's
+        # edge — so without this the one artifact a reviewer reads can go back
+        # to presenting a beat with no video as a frame at its midpoint, with
+        # the arm green.
+        "the harness lets a sheet present a deleted beat as an ordinary frame",
+        "tests/smoke",
+        '        if not frame.get("no_video"):',
+        "        if False:",
+        ["HostClockHole.test_a_frame_of_a_deleted_beat_that_says_nothing_is_a_failure"],
     ),
     (
         # The smoke harness back to "one line, one stretch of audio" — the
@@ -6873,7 +7420,9 @@ INJECTIONS = [
         # The manifest, the names and the count are all untouched.
         "every review frame is cut on the beat log rather than on the video's clock",
         "frames.py",
-        "        middle = min(max(logged + correct(beat, logged), 0.0), last)",
+        "        placed = place(beat, logged)\n"
+        "        middle = min(max(placed.at, 0.0), last)",
+        "        placed = place(beat, logged)\n"
         "        middle = min(max(logged, 0.0), last)",
         [
             "FrameClockCorrection.test_a_frame_is_cut_where_its_beat_sits_in_the_video",
@@ -6887,8 +7436,8 @@ INJECTIONS = [
         # left — and they arrive named for it.
         "the scene search window stays on the beat log's clock",
         "frames.py",
-        "        lo = min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last)\n"
-        "        hi = min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last)",
+        "        lo = min(max(place(beat, float(t_start)).at, 0.0), last)\n"
+        "        hi = min(max(place(beat, float(t_end)).at, 0.0), last)",
         "        lo = min(float(t_start), last)\n        hi = min(float(t_end), last)",
         [
             "FrameClockCorrection.test_the_scene_search_window_is_the_beats_span_in_the_video",
@@ -6910,9 +7459,11 @@ INJECTIONS = [
         "the correction is read at the beat's start and applied to its midpoint",
         "frames.py",
         "        logged = (float(t_start) + float(t_end)) / 2\n"
-        "        middle = min(max(logged + correct(beat, logged), 0.0), last)",
+        "        placed = place(beat, logged)",
         "        logged = (float(t_start) + float(t_end)) / 2\n"
-        "        middle = min(max(logged + correct(beat, float(t_start)), 0.0), last)",
+        "        placed = place(beat, float(t_start))._replace(\n"
+        "            at=logged + place(beat, float(t_start)).at - float(t_start)\n"
+        "        )",
         [
             "FrameClockCorrection.test_a_step_inside_a_beat_moves_the_frame_cut_after_it",
         ],
@@ -6923,9 +7474,9 @@ INJECTIONS = [
         # as capture loss the record has already explained.
         "the capture-loss floor is corrected at the last beat's start, not its end",
         "frames.py",
-        "    over = tail_end + correct(tail, tail_end) - float(duration)",
-        '    over = tail_end + correct(tail, float(tail.get("t_start") or 0.0)) '
-        "- float(duration)",
+        "    over = place(tail, tail_end).at - float(duration)",
+        '    _start = float(tail.get("t_start") or 0.0)\n'
+        "    over = tail_end + place(tail, _start).at - _start - float(duration)",
         [
             "FrameClockCorrection."
             "test_a_step_inside_the_last_beat_is_not_reported_as_capture_loss",
@@ -6938,9 +7489,8 @@ INJECTIONS = [
         # is worse than not correcting at all.
         "a beat is corrected by every capture's steps rather than its own",
         "timeline.py",
-        '            if step.get("segment") == beat.get("segment")\n'
-        '            and float(step["t"]) <= float(t)',
-        '            if float(step["t"]) <= float(t)',
+        '                if step.get("segment") == beat.get("segment")',
+        "                if True",
         [
             # Only this one. A merged demo whose *later* part carries the step
             # is unmoved by dropping the filter — every earlier beat is before
@@ -6956,11 +7506,13 @@ INJECTIONS = [
     (
         # The take's whole total applied to every beat, including the ones
         # recorded before the clock moved. `total` is the one number in the
-        # record that is the correction for no beat at all.
+        # record that is the correction for no beat at all. Since #256 the
+        # "before `t`" half of the rule lives in `_placed`'s loop, so that is
+        # where it is broken: a bound no step can exceed lets every step in.
         "a beat is corrected by steps the clock had not taken yet",
         "timeline.py",
-        '            and float(step["t"]) <= float(t)',
-        "            and True",
+        "        if at > t:",
+        "        if at > t + 1e9:",
         [
             "FrameClockCorrection.test_a_step_after_a_beat_does_not_move_that_beats_frame",
             "FrameClockCorrection.test_a_frame_is_cut_where_its_beat_sits_in_the_video",
@@ -7061,7 +7613,7 @@ INJECTIONS = [
         # the one line of the sheet that is about how much to distrust it.
         "a recorded wall-clock step is also reported as lost capture time",
         "frames.py",
-        "    over = tail_end + correct(tail, tail_end) - float(duration)",
+        "    over = place(tail, tail_end).at - float(duration)",
         "    over = tail_end - float(duration)",
         [
             "FrameClockCorrection.test_a_recorded_step_is_not_also_reported_as_capture_loss",

@@ -1951,17 +1951,21 @@ knows is missing is worse than one that is openly absent.
   `check_timeline`'s identical guard at `tests/smoke:6195` has been uninjected
   since #245 — and it is written down here rather than left to be noticed.
 
-  **And the correction narration applies is over-large on this host, by an
-  amount nothing here removes.** #224's diagnosis found that a −Δ wall-clock
-  step does not slide the video: it **deletes a Δ-wide hole** from the file,
-  and separately some takes lose only 16–50 % of the recorded step. Every
-  consumer of `capture_clock` over-corrects as a result — the review frames,
-  the smoke harness's own `before()`, and the narration mix alike — so a line
-  whose instant falls inside such a hole is placed up to a whole step early.
-  [#255](https://github.com/rogvid/skills/issues/255) carries the measurements
-  and fixes it at the source, in `before()` and `capture_clock_correction`, for
-  all consumers at once. Nothing about it is narration-specific and nothing in
-  `narration.py` should chase it.
+  **And the correction narration applies can still be over-large on this
+  host, by an amount nothing here measures.** #224's diagnosis found two
+  things. The first — that a −Δ wall-clock step **deletes a Δ-wide hole** from
+  the file rather than sliding it, so a line spoken inside that hole was
+  placed up to a whole step early — is fixed at the source in
+  [#256](https://github.com/rogvid/skills/issues/256), for the review frames,
+  the smoke harness's own `before()` and the narration mix at once; a line in
+  a hole now carries `no_video` and `timeline.md` names it. The second is
+  open: some takes lose only **16–50 %** of the recorded step, so subtracting
+  all of it aims a clip Δ−loss too early even outside a hole. Nothing in this
+  repo checks the recorded step against the pixels, which is
+  [#259](https://github.com/rogvid/skills/issues/259).
+  [#255](https://github.com/rogvid/skills/issues/255) carries both
+  measurements. Nothing about either is narration-specific and nothing in
+  `narration.py` should chase them.
 
 - **That a real Chromium hands a click's deferred document event to
   `evaluate("0")`.** [#214](https://github.com/rogvid/skills/issues/214) is
@@ -2124,7 +2128,7 @@ knows is missing is worse than one that is openly absent.
   **And on a host whose clock never steps, the correction is a no-op** — a
   corrected cut and an uncorrected one are the same number, so no arm of this
   suite can tell them apart there. The arithmetic is graded on a *scripted*
-  record by `FrameClockCorrection` in `tests/unit`, where 15 injections cost
+  record by `FrameClockCorrection` in `tests/unit`, where 21 injections cost
   0.2 s each — the figure is checked against the manifest by
   `StatedInjectionCount`, because it drifted once already — including the one that reads the correction at a beat's
   `t_start` and applies it to the midpoint, which is how #253 shipped its first
@@ -2135,6 +2139,28 @@ knows is missing is worse than one that is openly absent.
   which of the three cases it was, and that a step the recorder invents moves
   the frames and is caught by a placement check reading this harness's own
   watcher.
+
+  **A backward step is not a slide, and until
+  [#256](https://github.com/rogvid/skills/issues/256) every consumer read it
+  as one.** A step of −Δ deletes the monotonic window `(T, T+Δ)` from the file
+  outright — the encoder stamps frames with the wall clock and will not write
+  a stamp it has already written, so the file stalls instead of rewinding,
+  measured one video frame wide (`video 31.560 → 31.600 shows mono 31.644 →
+  32.644`). An instant inside that window has no frame at all, and `t + (the
+  steps before t)` puts it up to a whole step early, in content that predates
+  the step: `seg-run1`'s `beat-05.png`, cut at 4.58 s, **showing the previous
+  caption**. All three consumers now place an instant at the wall clock's
+  *high-water mark* — the recorder's `timeline._placed`, and this harness's
+  own `video_instant`, hand-written apart from it — which is the same sum
+  digit for digit outside a hole and clamps to the file's last instant inside
+  one, and each says so in its own artifact: `no_video` on a frame and on a
+  narration line, a named paragraph in `frames.md` and in `timeline.md`, and
+  the hole in the harness's own failure text. `HostClockHole` in `tests/unit`
+  grades the harness's half on a scripted clock, `FrameClockCorrection` and
+  `NarrationMix` the recorder's. **None of it is reachable on a steady host**,
+  which is why all of it is synthetic; what #256 deliberately did not do is
+  question whether the recorded Δ is the width of the hole, which is
+  [#259](https://github.com/rogvid/skills/issues/259).
 
 - **~~…and the correction above rests on a premise that did not reproduce on
   2026-08-08.~~ Retracted; the premise holds and the *sampler* was broken**

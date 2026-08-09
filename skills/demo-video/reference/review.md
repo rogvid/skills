@@ -45,6 +45,18 @@ uncorrected cut was out by up to 1.50 s. The timestamps in `frames.json` and
 `frames.md` are **already on the video's clock** — do not apply
 `capture_clock` to them a second time.
 
+**A beat can have no frame at all, and the sheet says which**
+([#256](https://github.com/rogvid/skills/issues/256)). A backward step of Δ
+does not slide the video: it takes a Δ-wide window of wall time *out of the
+file*, because the encoder will not write a frame stamp it has already
+written. A beat inside that window was never encoded, so its frame is the last
+one before the gap — `frames.json` gives it a `no_video` (how many seconds
+later the video resumes) and `frames.md` names it, above the table and beside
+the picture. Read such a frame as the moment the demo had reached when the
+clock moved, not as the beat. Without the clamp the cut lands up to a whole
+step early, which is how `seg-run1`'s `beat-05.png` came out showing the
+previous caption.
+
 `frames.md` says which of the three cases the take was, because a corrected
 sheet and an uncorrected one are otherwise the same document: the clock
 stepped and the frames were moved, the clock was watched and held still, or

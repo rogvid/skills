@@ -87,6 +87,18 @@ TTS_API_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
 #     `steps` cannot tell "the clock held still" from "nobody knows". Zero is
 #     still the number applied — there is no other — but it is a fallback and
 #     not a correction, and `mix_plan` hands its caller the state to say so.
+#
+# And one property of the *step* that the arithmetic above got wrong until
+# issue #256: a backward step of Δ does not slide the video, it deletes a
+# Δ-wide window of wall time from the file. A line spoken inside that window
+# was spoken over a moment `media` does not contain, and `t + (the steps before
+# t)` puts its clip up to a whole step early — over content that predates the
+# step, which for a narration line means the caption before the one it is
+# about. `capture_clock_shift` clamps such an instant to the last moment the
+# file has and says how much it swallowed; `no_video` carries that onto the
+# line, for the same reason `clamped` does, and `timeline.md` states it. The
+# clip is still mixed, because the alternative is dropping a spoken line out
+# of the audio over a defect of the host's clock.
 
 
 def mix_plan(
@@ -117,19 +129,30 @@ def mix_plan(
     travels with them, so a clamped line of part two has an `at` of that
     part's offset. Anything printing prose about it has to say "the start of
     its own capture" rather than "0.0".
+
+    A line whose instant a backward step deleted from the file carries
+    `no_video` instead — also **only when it has one** — being the seconds
+    between where the clip was put and where the video starts again. Its `at`
+    is the last moment the file has before the gap rather than `t` plus the
+    steps before it, for the reason the section above gives: there is no such
+    moment in the video, and the placement every other line gets would put
+    this clip a whole step early (issue #256).
     """
-    shift, state = capture_clock_shift(record)
+    place, state = capture_clock_shift(record)
     lines = []
     for off in offsets:
-        want = float(off) + shift(off)
+        placed = place(off)
+        want = placed.at
         # Rounded *before* the test, not after. A `want` of −5e-5 is a
         # truncation of nothing at the precision this record is written at,
         # and a `clamped: 0.0` beside it would be a line claiming its `at` is
-        # not `t` plus the steps before it when it is.
+        # not `t` plus the steps before it when it is. Same for `no_video`.
         clamped = round(-want, 3) if want < 0 else 0.0
         line = {"t": round(float(off), 3), "at": round(max(0.0, want), 3)}
         if clamped:
             line["clamped"] = clamped
+        if round(placed.lost, 3):
+            line["no_video"] = round(placed.lost, 3)
         lines.append(line)
     return lines, state
 

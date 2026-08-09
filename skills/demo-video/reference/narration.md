@@ -47,6 +47,14 @@ needed; captions are the narration script.
   the mix falls back to the raw offset, `timeline.md` says so in a paragraph
   above the beat table, and the audio may be out by however far the host
   moved.
+- **A line spoken while the clock was stepping back has no moment in the
+  video, and its record says so.** A backward step of Δ deletes Δ of wall time
+  from the file rather than moving it, so there is nothing in the mp4 for such
+  a line to be at: its clip starts at the last moment before the gap and
+  carries `no_video`, the seconds until the video resumes
+  ([#256](https://github.com/rogvid/skills/issues/256)). `timeline.md` names
+  those lines. Correcting them like the rest puts the voice a whole step
+  early, over the caption before the one it is about.
 - **A backward step between two lines can make their clips overlap, and that
   is the correction working.** The step shortens the *video*; it does not
   shorten the clip. The recorder waited line 1 out before starting line 2 in
