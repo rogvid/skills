@@ -2595,6 +2595,30 @@ class TargetGuard(unittest.TestCase):
             TARGET_PRIVATE,
         )
 
+    def test_the_spelling_a_boolean_workflow_input_renders_is_accepted(self):
+        # Every other test here writes `"1"`, and the CI path never does. The
+        # workflow passes `DEMO_VIDEO_ALLOW_PRIVATE:
+        # ${{ inputs.allow-private-network-target }}`, and a `type: boolean`
+        # input renders as the string `true` — so narrowing `_env_flag`'s
+        # accepted spellings to drop it puts the pre-check and the recorder
+        # back into disagreement with both suites green. `tests/ci-unit`'s
+        # `WorkflowGates` holds up the other half, that the input is declared
+        # boolean and therefore renders this way.
+        self.assertEqual(
+            self.build(
+                base_url=TARGET_PRIVATE, env={"DEMO_VIDEO_ALLOW_PRIVATE": "true"}
+            ).base_url,
+            TARGET_PRIVATE,
+        )
+        # And the *other* rendering must not read as consent. A flag treating
+        # any non-empty value as true would widen the opt-in to every run of a
+        # workflow that passes the input at all — which is every run, since
+        # the input has a default.
+        with self.assertRaises(TargetRefused):
+            self.build(
+                base_url=TARGET_PRIVATE, env={"DEMO_VIDEO_ALLOW_PRIVATE": "false"}
+            )
+
     def test_the_terminal_recorder_refuses_the_environments_public_target(self):
         # `TerminalRecorder` takes no `base_url` — it drives a PTY. What it
         # does share is the environment, and `DEMO_VIDEO_BASE_URL` is how a
@@ -5906,6 +5930,28 @@ INJECTIONS = [
         "import argparse\nimport sys",
         "import argparse\nimport ipaddress\nimport sys",
         ["OneClassifier.test_the_classification_lives_in_exactly_one_shipped_file"],
+    ),
+    (
+        # The CI path, and the one no other assertion here walks: every other
+        # test writes `"1"`, which a workflow never sends. Dropping `true`
+        # leaves both suites green and puts the pre-check and the recorder
+        # back into disagreement — the regression this pull request was
+        # failed on in review.
+        "the opt-in stops accepting the spelling a boolean input renders",
+        "core.py",
+        '    return value.lower() in ("1", "true", "yes", "on")',
+        '    return value.lower() in ("1", "yes", "on")',
+        ["TargetGuard.test_the_spelling_a_boolean_workflow_input_renders_is_accepted"],
+    ),
+    (
+        # The other direction, and the worse one: `false` reading as consent
+        # widens the private opt-in to every run of a workflow that passes the
+        # input at all — which is every run, because the input defaults.
+        "any non-empty value reads as consent, so false enables the opt-in",
+        "core.py",
+        '    return value.lower() in ("1", "true", "yes", "on")',
+        "    return bool(value)",
+        ["TargetGuard.test_the_spelling_a_boolean_workflow_input_renders_is_accepted"],
     ),
     (
         # Both of these still refuse. What they lose is the half of the

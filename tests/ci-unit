@@ -365,7 +365,15 @@ def workflow_steps(text: str) -> dict[str, list[str]]:
 
 
 def step_env(lines: list[str]) -> dict[str, str]:
-    """One step's `env:` mapping, as written."""
+    """One step's `env:` mapping, as written.
+
+    Comments are skipped, and that is not tidiness: a `#` line holding a colon
+    parses as an entry, and this file has one — the note above
+    `DEMO_VIDEO_ALLOW_PRIVATE` quotes the input name. It produced a phantom
+    `'# same question'` key, harmless to the lookups below but a free unit of
+    margin for the `len(self.record)` control, which is exactly how a control
+    stops controlling anything.
+    """
     out: dict[str, str] = {}
     inside = False
     for line in lines:
@@ -375,13 +383,27 @@ def step_env(lines: list[str]) -> dict[str, str]:
         if inside:
             if not line.startswith("          "):
                 break
-            key, sep, value = line.strip().partition(":")
+            entry = line.strip()
+            if entry.startswith("#"):
+                continue
+            key, sep, value = entry.partition(":")
             if sep:
                 out[key.strip()] = value.strip()
     return out
 
 
 class WorkflowGates(unittest.TestCase):
+    """Whatever the guard step is permitted, the Record step passes through.
+
+    **A known false positive, so nobody debugs a correct workflow.** This reads
+    the two steps' own `env:` blocks. Hoisting `DEMO_VIDEO_ALLOW_PRIVATE` to
+    the job-level `env:` is a perfectly good workflow and this will call it
+    missing, with a message saying the export is not there. Wrong in the
+    conservative direction — it fails a working configuration rather than
+    passing a broken one — but wrong. If you hoisted it deliberately, teach
+    `step_env` about the job block rather than deleting the assertion.
+    """
+
     def setUp(self):
         text = _WORKFLOW.read_text(encoding="utf-8")
         self.steps = workflow_steps(text)
@@ -408,6 +430,29 @@ class WorkflowGates(unittest.TestCase):
         # The control on `facts()`. Everything below is "each fact is
         # accounted for", which is free to satisfy over none of them.
         self.assertGreaterEqual(len(self.facts()), 2, self.facts())
+
+    def test_every_entry_that_mentions_an_input_is_read_as_one(self):
+        # `facts()` is anchored, so a fact can leave it *without leaving the
+        # file* — YAML-quote the value, or write
+        # `${{ inputs.x && 'true' || 'false' }}`, and the entry is still there,
+        # still fed to the guard, and no longer counted. Reproduced with the
+        # Record step's export deleted at the same time: the suite stayed
+        # green, which is the original regression reachable again through a
+        # cosmetic edit.
+        #
+        # The counting controls cannot see it — quoting changes no key, and
+        # `len(facts()) >= 2` sits one under the current three. So the claim
+        # here is equality, not a floor: an entry this file recognises as
+        # mentioning an input must be one `facts()` reads. A form that is not
+        # supported fails loudly instead of silently dropping out.
+        mentioned = {k for k, v in self.guard.items() if "inputs." in v}
+        self.assertEqual(
+            set(self.facts()),
+            mentioned,
+            f"the guard step mentions {sorted(mentioned)} but only "
+            f"{sorted(self.facts())} parse as an input. An entry that dropped "
+            f"out is a fact nothing below checks the passthrough of.",
+        )
 
     def test_every_fact_the_guard_classifies_on_reaches_the_recorder(self):
         wrong = []
@@ -441,6 +486,22 @@ class WorkflowGates(unittest.TestCase):
                     f"step exports {recorder_env} from inputs.{match.group(1)}"
                 )
         self.assertEqual(wrong, [], "\n  - ".join([""] + wrong))
+
+    def test_the_private_opt_in_is_declared_a_boolean_input(self):
+        # This is what grounds `tests/unit`'s
+        # `test_the_spelling_a_boolean_workflow_input_renders_is_accepted`. A
+        # `type: boolean` input renders into the step's environment as the
+        # string `true` or `false` — never `1` — and that pair is what the
+        # recorder's `_env_flag` has to accept for the two gates to agree.
+        # Change the type and a different set of strings arrives.
+        text = _WORKFLOW.read_text(encoding="utf-8")
+        block = re.search(
+            r"\n      allow-private-network-target:\n(.*?)(?=\n      \S)",
+            text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(block, "no allow-private-network-target input declared")
+        self.assertIn("type: boolean", block.group(1))
 
     def test_no_unpassed_fact_is_unexplained(self):
         self.assertEqual(
@@ -821,7 +882,44 @@ INJECTIONS = [
         [
             "WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder",
             "WorkflowGates.test_the_guard_classifies_on_more_than_one_input",
+            "WorkflowGates.test_every_entry_that_mentions_an_input_is_read_as_one",
         ],
+    ),
+    (
+        # A fact leaving `facts()` without leaving the file. Quoting the value
+        # changes nothing a counting control can see, and with the Record
+        # step's export deleted at the same time the suite was green — the
+        # original regression, reachable through a cosmetic edit.
+        "the guard step's value is YAML-quoted, so the fact stops parsing",
+        "demo-video.yml",
+        "          ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}",
+        '          ALLOW_PRIVATE: "${{ inputs.allow-private-network-target }}"',
+        ["WorkflowGates.test_every_entry_that_mentions_an_input_is_read_as_one"],
+    ),
+    (
+        # The other half of the boolean claim: the type is what decides which
+        # strings reach `_env_flag`. `tests/unit` grades that it accepts the
+        # pair a boolean renders; this grades that a boolean is what renders.
+        "the private opt-in stops being a boolean input",
+        "demo-video.yml",
+        "        type: boolean\n        default: false",
+        '        type: string\n        default: ""',
+        ["WorkflowGates.test_the_private_opt_in_is_declared_a_boolean_input"],
+    ),
+    (
+        # The allowlist is the one way `test_every_fact_…` can be talked out of
+        # checking a fact, and a reason is its only defence against becoming a
+        # rubber stamp. Injection 3 above lists the unexplained-reason test,
+        # but reddens it through `setUp` — this is the break that reaches its
+        # body, which is the difference between an assertion that fires and
+        # one that is merely present.
+        "an allowlisted fact loses the reason it was allowlisted for",
+        "tests/ci-unit",
+        '    "EXTRA_ENV": (\n        "not a recorder setting: the \'Export the caller\'s extra environment\' "\n'
+        '        "step writes each KEY=VALUE line to $GITHUB_ENV, so the storyboard "\n'
+        '        "sees them under the caller\'s own names"\n    ),',
+        '    "EXTRA_ENV": "",',
+        ["WorkflowGates.test_no_unpassed_fact_is_unexplained"],
     ),
 ]
 
@@ -842,10 +940,18 @@ def fault_inject() -> int:
             # of that file and of nothing else.
             workflow = Path(tmp) / "demo-video.yml"
             shutil.copy(WORKFLOW, workflow)
+            # And this file, so an injection can reach the suite's own
+            # allowlist. The copy is what runs; it reads every path it uses
+            # from the three variables below, so `REPO` resolving to /tmp
+            # changes nothing.
+            inner = Path(tmp) / "ci-unit"
+            shutil.copy(Path(__file__).resolve(), inner)
             if script == "target.py":
                 target = skill / "helpers" / "demo_recording" / script
             elif script == "demo-video.yml":
                 target = workflow
+            elif script == "tests/ci-unit":
+                target = inner
             else:
                 target = root / script
             text = target.read_text(encoding="utf-8")
@@ -862,7 +968,7 @@ def fault_inject() -> int:
             target.write_text(text.replace(old, new), encoding="utf-8")
 
             done = subprocess.run(
-                [sys.executable, str(Path(__file__).resolve()), "--_inner"],
+                [sys.executable, str(inner), "--_inner"],
                 capture_output=True,
                 text=True,
                 env={

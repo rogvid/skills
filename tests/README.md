@@ -2367,7 +2367,7 @@ knows is missing is worse than one that is openly absent.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
-- **The target guard classifies a configured host, and six things about that
+- **The target guard classifies a configured host, and seven things about that
   are not graded anywhere.** `target.py` is applied by both recorders at
   construction and by `scripts/demo-target-guard` in CI. `tests/unit`'s
   `TargetGuard` and `OneClassifier`, and `tests/ci-unit`'s `Classify` /
@@ -2403,6 +2403,19 @@ knows is missing is worse than one that is openly absent.
      claim about a third-party CLI's copying rules, checked once by installing
      the skill and running the guard out of the install — it does — and
      nothing re-checks it when that CLI changes.
+  7. **That a real `workflow_call` with `allow-private-network-target: true`
+     records.** Nothing here runs GitHub. `WorkflowGates` grades the text of
+     `.github/workflows/demo-video.yml` and actionlint type-checks its
+     expressions; neither executes a job. No in-repo caller sets that input,
+     so the regression it exists to catch would not appear on this
+     repository's own pull requests either.
+
+  `WorkflowGates` also has a **known false positive**, stated in its docstring:
+  it reads the two steps' own `env:` blocks, so hoisting the export to the
+  job-level `env:` is reported as missing. That is wrong in the conservative
+  direction — a working configuration fails rather than a broken one passing —
+  but it will mislead whoever hits it, and the fix is to teach `step_env`
+  about the job block rather than to delete the assertion.
 
   And the standing one, which is a scope statement rather than a gap:
   **anything the take reaches other than its classified target.** A page that
