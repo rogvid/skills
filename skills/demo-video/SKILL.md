@@ -30,11 +30,15 @@ works almost always is worse than none, because it is what persuades somebody
 it is safe to point the recorder at production. The absence is the stronger
 guarantee ([#138](https://github.com/rogvid/skills/issues/138)).
 
-**The recorder refuses a public target, in CI and on your machine.** Both
-recorders classify `base_url` at construction, before a browser opens:
-loopback passes, a private host needs `allow_private=True`, a public one is
-refused and no option permits it. CI runs the same classifier over
-`extra-env` and each storyboard's source ([reference/ci.md](reference/ci.md)).
+**The recorder refuses a public target, in CI and on your machine**, at
+construction, before a browser opens. `Recorder` classifies its `base_url`;
+*both* recorders classify `DEMO_VIDEO_BASE_URL`, which is the only target a
+`TerminalRecorder` has and is checked **even when a storyboard passes a
+loopback `base_url`** — a shell exporting production and a storyboard saying
+otherwise is refused rather than quietly resolved. Loopback passes, a private
+host needs `allow_private=True`, a public one is refused and no option permits
+it. CI runs the same classifier over `extra-env` and each storyboard's source
+([reference/ci.md](reference/ci.md)).
 
 ## Overview
 
@@ -76,10 +80,9 @@ Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 | `demo-video-FAILED.md` | Only after a take that did not finish: what happened, when, and whether the `demo.mp4` beside it is this take's. Deleted by the next take that writes its own artifacts | **no** |
 
 The storyboard is the durable artifact, not the video. The last four rows are
-neither: they are inputs to a review that happens once, derived from a video
-that is itself not committed, and all four are in this repo's `.gitignore`
-([#50](https://github.com/rogvid/skills/issues/50)). See **Commit the
-storyboard, not the media** in the Process section.
+inputs to a review that happens once, derived from a video that is itself not
+committed, and all four are gitignored
+([#50](https://github.com/rogvid/skills/issues/50)) — Process step 8.
 
 ## What this does not do
 
@@ -139,12 +142,11 @@ read them all up front, and do not skip one the text tells you to open.
 
 ## Setup (once per project)
 
-1. **Check for `uv` first**: run `uv --version`; if it is missing, run
-   `bash <this skill's directory>/ensure.sh`, which installs it and restores
-   the exec bits on `scripts/` (idempotent — every path in this file is
-   relative to the skill's own directory, not your cwd). Storyboards are
-   single-file uv scripts and cannot run without uv; do not fall back to pip
-   or a project venv.
+1. **Check for `uv` first**: run `uv --version`; if missing, run `bash <this
+   skill's directory>/ensure.sh` — it installs uv and restores the exec bits
+   on `scripts/`, and every path in this file is relative to the skill's own
+   directory, not your cwd. Storyboards are single-file uv scripts and cannot
+   run without uv; do not fall back to pip or a project venv.
 2. **`ffmpeg`** (which includes `ffprobe`) must be on PATH. **Chromium**
    once per machine: `uv run --with playwright playwright install chromium`
    (on a fresh Linux box add `--with-deps` for system libraries). If a
@@ -514,9 +516,8 @@ return.
    says so in the same column that says the mp4 is not committed.
 
    **`evidence/` is not committed either, and for a stronger reason than the
-   mp4** — it is greppable plaintext of a real app's DOM, and `timeline.md` is
-   what a reader six months from now gets
-   ([reference/review.md](reference/review.md)).
+   mp4** — it is greppable plaintext of a real app's DOM; `timeline.md` is what
+   a reader six months from now gets ([reference/review.md](reference/review.md)).
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has
@@ -591,10 +592,9 @@ npx skills add https://github.com/rogvid/skills/tree/main/skills/demo-video
 ```
 
 add `-g` to install it globally (`~/`) so it is available everywhere. Then run
-Setup in the project where you record. The skill is not tied to
-the `.claude/skills/` convention: each storyboard embeds the skill's
-location as written at creation time, and `DEMO_VIDEO_SKILL_DIR`
-overrides it — so `.agents/` folders, global installs, or any other
-harness layout work the same way. Re-recording a committed storyboard
-requires the skill to be installed — that is the one setup step a fresh
-clone needs.
+Setup in the project where you record. The skill is not tied to the
+`.claude/skills/` convention: each storyboard embeds the skill's location as
+written at creation time, and `DEMO_VIDEO_SKILL_DIR` overrides it — so
+`.agents/` folders, global installs, or any other harness layout work the same
+way. Re-recording a committed storyboard requires the skill to be installed —
+that is the one setup step a fresh clone needs.

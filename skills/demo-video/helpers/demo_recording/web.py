@@ -502,7 +502,11 @@ class Recorder(_DemoBase):
         # The base checked `DEMO_VIDEO_BASE_URL`; this checks what this take
         # actually resolved, which is the explicit argument when there is one.
         # Still before a browser exists — `__enter__` is what launches one.
-        guard_target(self.base_url, self._allow_private)
+        guard_target(
+            self.base_url,
+            self._allow_private,
+            source="this take's base_url",
+        )
         # The recording is composited into a window and scaled down (~0.8),
         # so captions are rendered larger to stay readable in the final mp4.
         self._caption_font_px = 34

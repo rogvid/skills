@@ -80,6 +80,14 @@ input that permits it**. That is a static check on configuration and source
 text, not an egress control: a storyboard that computes its URL at run time is
 invisible to it.
 
+`allow-private-network-target` is passed to the recorders too, as
+`DEMO_VIDEO_ALLOW_PRIVATE` on the `Record` step. It has to be: they classify
+the target again at construction, so an input that widened only the pre-check
+would pass the guard and then refuse the take one Chromium download later.
+That is not hypothetical — it is what this workflow did until
+`WorkflowGates` in `tests/ci-unit` was written, which now requires every fact
+the guard step classifies on to reach the recorder from the same input.
+
 **The classifier is the skill's, not the workflow's, and CI is not the only
 place it runs.** The rules live in `helpers/demo_recording/target.py`, which
 both recorders apply in `__init__` — so a storyboard run by hand refuses a
@@ -93,8 +101,16 @@ bash <skill-dir>/ensure.sh          # once per session
 ```
 
 It exits 2 and names the offending URL on stderr. Run it yourself before
-pointing a storyboard at a host you have not recorded against before — it is
-the same verdict the recorder will reach, without paying for a browser first.
-`--allow-private` mirrors `allow-private-network-target`; there is no
-`--allow-public`, and adding one to the workflow would not help, because the
-recorder refuses independently.
+pointing a storyboard at a host you have not recorded against before — given
+the same two facts it reaches the same verdict the recorder will, without
+paying for a browser first. `--allow-private` mirrors
+`allow-private-network-target`; there is no `--allow-public`, and adding one
+to the workflow would not help, because the recorder refuses independently.
+
+**Two things the recorders check that the CLI does not**, so a clean guard run
+is not a promise the take will start. `DEMO_VIDEO_BASE_URL` in the *recording*
+environment is classified by both recorders even when the storyboard passes a
+loopback `base_url` — deliberately, so a shell exporting production cannot be
+overridden into silence — and a `TerminalRecorder` has no `base_url` at all,
+so that variable is the only target it has. Pass `--url` whatever the take
+will actually see, and unset the variable when it names something else.

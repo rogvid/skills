@@ -146,16 +146,25 @@ def scan(text: str) -> list[str]:
     return out
 
 
-def guard_target(url: str | None, allow_private: bool) -> None:
+def guard_target(url: str | None, allow_private: bool, source: str = "") -> None:
     """Raise `TargetRefused` unless a recorder may be pointed at `url`.
 
     Called from `_DemoBase.__init__` and `Recorder.__init__` — at construction,
     before a browser exists, so the refusal happens before anything can be
     painted let alone encoded. An empty or absent URL is not a target and is
     left alone; the recorder's own default is loopback.
+
+    **`source` says where the URL came from, and it is not decoration.** The
+    hard case is a public `DEMO_VIDEO_BASE_URL` exported into the shell while
+    the storyboard passes a loopback `base_url`: the refusal then names a host
+    that appears nowhere in the file the author is looking at. Without the
+    source that reads as the recorder inventing a URL, and there is nothing in
+    the message to act on — while the private branch two lines up helpfully
+    names its opt-in. Whoever knows which input was read says so.
     """
     if not url or not url.strip():
         return
     reason = check(url, allow_private, private_remedy=RECORDER_PRIVATE_REMEDY)
     if reason is not None:
-        raise TargetRefused(f"refusing to record against {reason}")
+        where = f" (from {source})" if source else ""
+        raise TargetRefused(f"refusing to record against {reason}{where}")

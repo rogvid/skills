@@ -41,6 +41,7 @@ from types import ModuleType
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / ".github" / "scripts"
 SKILL = REPO / "skills" / "demo-video"
+WORKFLOW = REPO / ".github" / "workflows" / "demo-video.yml"
 
 
 def load(name: str, directory: Path | None = None) -> ModuleType:
@@ -59,6 +60,7 @@ def load(name: str, directory: Path | None = None) -> ModuleType:
 
 _DIR = Path(os.environ.get("CI_UNIT_SCRIPTS", SCRIPTS))
 _SKILL = Path(os.environ.get("CI_UNIT_SKILL", SKILL))
+_WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
 storyboards = load("demo-storyboards", _DIR)
 comment = load("demo-comment", _DIR)
 
@@ -293,6 +295,157 @@ class GuardExitCode(unittest.TestCase):
         done = self._run("--url", "https://tickets.acme.com", "--allow-private")
         self.assertEqual(done.returncode, 2)
         self.assertIn("tickets.acme.com", done.stderr)
+
+
+# --------------------------------------------------------------------------
+# The pre-check and the recorder are handed the same facts
+# --------------------------------------------------------------------------
+#
+# Two gates classify the recording target on one run: the `Refuse a target
+# that could be production` step, before anything is installed, and the
+# recorder itself, in `__init__`. They apply the *same* rules — `target.py`,
+# through two doors — so the only way they can disagree is by being handed
+# different facts.
+#
+# That is exactly how they disagreed. The guard step read
+# `allow-private-network-target` and the Record step did not pass it on, so a
+# caller who set it passed the pre-check and then raised `TargetRefused` at
+# construction — several minutes, one browser and one Chromium download later,
+# on the ordinary configured path. Nothing saw it: no test in this repository
+# read the workflow file, and no in-repo caller sets that input, so CI was
+# green and would have stayed green.
+#
+# What is graded below is the *coupling*, not the YAML. Step ordering, `if:`
+# conditions and whether a step runs at all are still GitHub's to execute and
+# actionlint's to type-check. This asks one question a text can answer: does
+# every fact the guard classifies on reach the recorder that will re-classify
+# it, from the same input.
+
+# What the guard step names each fact -> what the recorder reads it as. Both
+# recorders resolve their target through `DEMO_VIDEO_*` (`core.py`'s `_env`
+# and `_env_flag`, applied in `target.py`), so these are the names the Record
+# step has to export for the two verdicts to agree.
+GUARD_FACT_TO_RECORDER_ENV = {
+    "BASE_URL": "DEMO_VIDEO_BASE_URL",
+    "ALLOW_PRIVATE": "DEMO_VIDEO_ALLOW_PRIVATE",
+}
+
+# A fact the guard reads that the Record step deliberately does not export
+# under a `DEMO_VIDEO_*` name, with the reason. An allowlist without reasons is
+# how a check like this stops grading anything, so the reasons are asserted.
+GUARD_FACT_NOT_PASSED = {
+    "EXTRA_ENV": (
+        "not a recorder setting: the 'Export the caller's extra environment' "
+        "step writes each KEY=VALUE line to $GITHUB_ENV, so the storyboard "
+        "sees them under the caller's own names"
+    ),
+}
+
+GUARD_STEP = "Refuse a target that could be production"
+RECORD_STEP = "Record"
+_INPUT_RE = re.compile(r"^\$\{\{\s*inputs\.([a-z0-9-]+)\s*\}\}$")
+
+
+def workflow_steps(text: str) -> dict[str, list[str]]:
+    """Step name -> the lines under it. Unnamed steps (`- uses:`) are skipped."""
+    steps: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line.startswith("      - "):
+            head = line[len("      - ") :]
+            current = (
+                head[len("name: ") :].strip() if head.startswith("name: ") else None
+            )
+            if current is not None:
+                steps[current] = []
+            continue
+        if current is not None:
+            steps[current].append(line)
+    return steps
+
+
+def step_env(lines: list[str]) -> dict[str, str]:
+    """One step's `env:` mapping, as written."""
+    out: dict[str, str] = {}
+    inside = False
+    for line in lines:
+        if line == "        env:":
+            inside = True
+            continue
+        if inside:
+            if not line.startswith("          "):
+                break
+            key, sep, value = line.strip().partition(":")
+            if sep:
+                out[key.strip()] = value.strip()
+    return out
+
+
+class WorkflowGates(unittest.TestCase):
+    def setUp(self):
+        text = _WORKFLOW.read_text(encoding="utf-8")
+        self.steps = workflow_steps(text)
+        # The haystack, before anything is claimed about it. A parser that
+        # stopped matching would make every assertion below hold over an empty
+        # mapping — the catalogue's vacuous sweep, and the likeliest way this
+        # check dies quietly when the workflow is reindented or renamed.
+        for name in (GUARD_STEP, RECORD_STEP):
+            self.assertIn(name, self.steps, f"no {name!r} step in {_WORKFLOW}")
+        self.guard = step_env(self.steps[GUARD_STEP])
+        self.record = step_env(self.steps[RECORD_STEP])
+        self.assertGreaterEqual(len(self.guard), 3, self.guard)
+        self.assertGreaterEqual(len(self.record), 2, self.record)
+
+    def facts(self) -> dict[str, str]:
+        """Guard env entries that come from a workflow input -> that input."""
+        found = {}
+        for key, value in self.guard.items():
+            if match := _INPUT_RE.match(value):
+                found[key] = match.group(1)
+        return found
+
+    def test_the_guard_classifies_on_more_than_one_input(self):
+        # The control on `facts()`. Everything below is "each fact is
+        # accounted for", which is free to satisfy over none of them.
+        self.assertGreaterEqual(len(self.facts()), 2, self.facts())
+
+    def test_every_fact_the_guard_classifies_on_reaches_the_recorder(self):
+        wrong = []
+        for fact, workflow_input in sorted(self.facts().items()):
+            if fact in GUARD_FACT_NOT_PASSED:
+                continue
+            recorder_env = GUARD_FACT_TO_RECORDER_ENV.get(fact)
+            if recorder_env is None:
+                wrong.append(
+                    f"{fact} (from inputs.{workflow_input}) is neither mapped "
+                    f"to a DEMO_VIDEO_* name nor listed as deliberately not "
+                    f"passed through"
+                )
+                continue
+            exported = self.record.get(recorder_env)
+            if exported is None:
+                wrong.append(
+                    f"the guard permits on inputs.{workflow_input} but the "
+                    f"Record step exports no {recorder_env}, so the recorder "
+                    f"re-classifies without it and can refuse what the "
+                    f"pre-check passed"
+                )
+            elif (match := _INPUT_RE.match(exported)) is None:
+                wrong.append(
+                    f"{recorder_env} is {exported!r}, not read from an input — "
+                    f"the two gates can no longer be given the same answer"
+                )
+            elif match.group(1) != workflow_input:
+                wrong.append(
+                    f"the guard reads inputs.{workflow_input} and the Record "
+                    f"step exports {recorder_env} from inputs.{match.group(1)}"
+                )
+        self.assertEqual(wrong, [], "\n  - ".join([""] + wrong))
+
+    def test_no_unpassed_fact_is_unexplained(self):
+        self.assertEqual(
+            sorted(k for k, v in GUARD_FACT_NOT_PASSED.items() if not v.strip()), []
+        )
 
 
 # --------------------------------------------------------------------------
@@ -638,6 +791,38 @@ INJECTIONS = [
         '    if d is None:\n        return "0s"',
         ["Render.test_a_null_duration_is_not_reported_as_a_number"],
     ),
+    (
+        # The regression itself, as it shipped: the guard step permits a
+        # private host and the Record step never tells the recorder. Green CI
+        # both before and after, because nothing read this file.
+        "the Record step stops passing the private opt-in to the recorder",
+        "demo-video.yml",
+        "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}\n",
+        "",
+        ["WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder"],
+    ),
+    (
+        # The same disagreement written the other way, and the one a reviewer
+        # is likelier to wave through: the variable is there, so the two gates
+        # look coupled, and it is pinned to a constant the input cannot move.
+        "the Record step hardcodes the opt-in instead of reading the input",
+        "demo-video.yml",
+        "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}",
+        '          DEMO_VIDEO_ALLOW_PRIVATE: "false"',
+        ["WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder"],
+    ),
+    (
+        # The step parser is the haystack every assertion above sits on, and a
+        # renamed or reindented step is how it dies quietly.
+        "the guard step is renamed, so the coupling check reads nothing",
+        "demo-video.yml",
+        "      - name: Refuse a target that could be production",
+        "      - name: Refuse a target that might be production",
+        [
+            "WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder",
+            "WorkflowGates.test_the_guard_classifies_on_more_than_one_input",
+        ],
+    ),
 ]
 
 
@@ -653,8 +838,14 @@ def fault_inject() -> int:
             # have to be the broken copy or the inner run grades the tree.
             skill = Path(tmp) / "demo-video"
             shutil.copytree(SKILL, skill)
+            # And the workflow, because the two gates agreeing is a property
+            # of that file and of nothing else.
+            workflow = Path(tmp) / "demo-video.yml"
+            shutil.copy(WORKFLOW, workflow)
             if script == "target.py":
                 target = skill / "helpers" / "demo_recording" / script
+            elif script == "demo-video.yml":
+                target = workflow
             else:
                 target = root / script
             text = target.read_text(encoding="utf-8")
@@ -678,6 +869,7 @@ def fault_inject() -> int:
                     **os.environ,
                     "CI_UNIT_SCRIPTS": str(root),
                     "CI_UNIT_SKILL": str(skill),
+                    "CI_UNIT_WORKFLOW": str(workflow),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}
@@ -716,12 +908,21 @@ def fault_inject() -> int:
 #
 # Stated plainly rather than implied by silence:
 #
-# - **The workflow YAML itself.** Step ordering, `if:` conditions, artifact
-#   retention actually reaching `upload-artifact`, and the find-or-create
-#   comment logic are executed only by GitHub. They are verified by running
-#   the workflow on a real pull request and looking at the result — pushing
-#   twice and confirming there is still one comment is the only honest test of
-#   "updated in place", and it is done by hand on the reference pull request.
+# - **Almost all of the workflow YAML.** Step ordering, `if:` conditions,
+#   artifact retention actually reaching `upload-artifact`, and the
+#   find-or-create comment logic are executed only by GitHub. They are verified
+#   by running the workflow on a real pull request and looking at the result —
+#   pushing twice and confirming there is still one comment is the only honest
+#   test of "updated in place", and it is done by hand on the reference pull
+#   request.
+#
+#   The **one** exception is `WorkflowGates` above, and it is deliberately
+#   narrow: that every fact the guard step classifies on is handed to the
+#   recorder that re-classifies it, from the same input. That is a property of
+#   the text, it is what broke, and no run of the workflow on an in-repo pull
+#   request would have caught it either — the regression only appears for a
+#   caller who sets `allow-private-network-target`, and this repository has
+#   none.
 # - **The recorder.** `tests/smoke` owns that.
 # - **Egress.** The target guard is a static check on configuration and source
 #   text. A storyboard that computes a URL at run time is invisible to it, and

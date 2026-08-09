@@ -1273,6 +1273,10 @@ DOC_SYMBOL_ALLOWED = {
     # regression in it.
     "MAX_CAPTURE_LOSS_S": "a constant in tests/smoke",
     "MAX_SKEW_DRIFT_S": "a constant in tests/smoke",
+    # Same reason, one suite over: reference/ci.md names the assertion that
+    # keeps the workflow's two gates agreeing, because a reader who changes
+    # that workflow needs to know something grades it.
+    "WorkflowGates": "a test class in tests/ci-unit",
 }
 
 
@@ -2600,6 +2604,30 @@ class TargetGuard(unittest.TestCase):
         with self.assertRaises(TargetRefused) as caught:
             self.build(cls=TerminalRecorder, env={"DEMO_VIDEO_BASE_URL": TARGET_PUBLIC})
         self.assertIn(TARGET_PUBLIC, str(caught.exception))
+
+    def test_the_refusal_says_which_input_the_url_came_from(self):
+        # The hard case, and the reason this is graded rather than left to the
+        # message: with a public variable exported and a loopback argument in
+        # the storyboard, the refusal names a host that appears **nowhere in
+        # the file the author is reading**. Naming the class is not enough
+        # there — the next question is "where is that URL even from", and a
+        # message that cannot answer it reads as a bug in the recorder.
+        with self.assertRaises(TargetRefused) as caught:
+            self.build(
+                base_url=TARGET_LOOPBACK, env={"DEMO_VIDEO_BASE_URL": TARGET_PUBLIC}
+            )
+        message = str(caught.exception)
+        self.assertIn("DEMO_VIDEO_BASE_URL", message)
+        self.assertIn("unset it", message)
+        # And the other source is not claimed: the argument was loopback, so a
+        # message blaming `base_url` would send the author to the wrong line.
+        self.assertNotIn("base_url", message)
+
+        with self.assertRaises(TargetRefused) as caught:
+            self.build(base_url=TARGET_PUBLIC)
+        argument = str(caught.exception)
+        self.assertIn("base_url", argument)
+        self.assertNotIn("DEMO_VIDEO_BASE_URL", argument)
 
     def test_a_loopback_argument_does_not_launder_a_public_environment(self):
         # Fail closed, deliberately, and stated because it is the surprising
@@ -5792,12 +5820,18 @@ INJECTIONS = [
     ),
     # -- the target guard ---------------------------------------------------
     #
-    # Seven breaks, and they are deliberately at different depths, because
-    # "the recorder refuses production" decomposes into claims that can fail
-    # one at a time: the rule itself, each recorder's application of it, the
-    # asymmetry between the two opt-ins, and whether a second copy of any of
-    # it has appeared. A single injection at the rule would go red for all of
-    # them and prove only that something, somewhere, is load-bearing.
+    # Ten breaks, and they are deliberately at different depths, because "the
+    # recorder refuses production" decomposes into claims that can fail one at
+    # a time: the rule itself, each recorder's application of it, the
+    # asymmetry between the two opt-ins, what the refusal tells the reader,
+    # and whether a second copy of any of it has appeared. A single injection
+    # at the rule would go red for all of them and prove only that something,
+    # somewhere, is load-bearing.
+    #
+    # The eleventh lives in `tests/ci-unit` rather than here, because what it
+    # breaks is the workflow: `WorkflowGates` grades that the pre-check and
+    # the recorder are handed the same facts, which is the coupling that broke
+    # in review.
     (
         "the rule stops refusing a public host",
         "target.py",
@@ -5808,7 +5842,8 @@ INJECTIONS = [
     (
         "the web recorder resolves base_url and never classifies it",
         "web.py",
-        "        guard_target(self.base_url, self._allow_private)",
+        "        guard_target(\n            self.base_url,\n            self._allow_private,\n"
+        '            source="this take\'s base_url",\n        )',
         "        pass  # the argument goes unchecked",
         [
             "TargetGuard.test_nothing_gets_a_public_target_through",
@@ -5818,7 +5853,9 @@ INJECTIONS = [
     (
         "the shared base stops classifying the target the environment names",
         "core.py",
-        '        guard_target(_env("BASE_URL"), self._allow_private)',
+        '        guard_target(\n            _env("BASE_URL"),\n            self._allow_private,\n'
+        '            source=(\n                "DEMO_VIDEO_BASE_URL in the environment — unset it, or export "\n'
+        '                "a target this take may be recorded against"\n            ),\n        )',
         "        pass  # the environment goes unchecked",
         [
             "TargetGuard.test_the_terminal_recorder_refuses_the_environments_public_target",
@@ -5869,6 +5906,25 @@ INJECTIONS = [
         "import argparse\nimport sys",
         "import argparse\nimport ipaddress\nimport sys",
         ["OneClassifier.test_the_classification_lives_in_exactly_one_shipped_file"],
+    ),
+    (
+        # Both of these still refuse. What they lose is the half of the
+        # message that tells the reader which input to go and change — which
+        # is invisible to every other assertion here, because the exception
+        # type and the class are unchanged.
+        "the refusal stops naming the environment variable it read",
+        "core.py",
+        '            source=(\n                "DEMO_VIDEO_BASE_URL in the environment — unset it, or export "\n'
+        '                "a target this take may be recorded against"\n            ),\n',
+        "",
+        ["TargetGuard.test_the_refusal_says_which_input_the_url_came_from"],
+    ),
+    (
+        "the refusal stops distinguishing the argument from the environment",
+        "web.py",
+        '            source="this take\'s base_url",\n',
+        "",
+        ["TargetGuard.test_the_refusal_says_which_input_the_url_came_from"],
     ),
     (
         "an internal threshold drifts back onto the package's front door",

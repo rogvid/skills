@@ -2367,24 +2367,50 @@ knows is missing is worse than one that is openly absent.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
-- **The target guard classifies a configured host, and three things about that
+- **The target guard classifies a configured host, and six things about that
   are not graded anywhere.** `target.py` is applied by both recorders at
-  construction and by `scripts/demo-target-guard` in CI, and `tests/unit`'s
-  `TargetGuard` and `OneClassifier` plus `tests/ci-unit`'s `Classify`/`Check`/
-  `Scan` grade the rule, its application, and that there is one copy of it.
-  What none of them can see: **(1)** a copy of the rules re-appearing *outside*
-  the skill directory — `OneClassifier` sweeps `SKILL_DIR` only, because
-  `--fault-inject` copies that directory and an assertion reading the real
-  repository from inside a broken copy would grade the wrong tree; **(2)**
-  whether `npx skills add` still carries `scripts/` and `ensure.sh` to a
-  consumer — that is a claim about a third-party CLI's copying rules, checked
-  by installing the skill and running the guard out of the install (it does,
-  measured once, by hand), and nothing re-checks it when that CLI changes;
-  **(3)** anything the take reaches
-  *other than* `base_url` — a page that fetches another origin, a terminal
-  storyboard that curls one, a URL computed at run time. The guard is a static
-  classifier over configuration and source text, not an egress control, and
-  `target.py`'s docstring says so in the same words.
+  construction and by `scripts/demo-target-guard` in CI. `tests/unit`'s
+  `TargetGuard` and `OneClassifier`, and `tests/ci-unit`'s `Classify` /
+  `Check` / `Scan` / `WorkflowGates`, grade the rule, each recorder's
+  application of it, that there is one copy of it, and that the workflow hands
+  the pre-check and the recorder the same facts. What none of them can see:
+
+  1. **A copy of the rules re-appearing *outside* the skill directory.**
+     `OneClassifier` sweeps `SKILL_DIR` only, because `--fault-inject` copies
+     that directory and an assertion reading the real repository from inside a
+     broken copy would grade the wrong tree.
+  2. **A rule re-implemented under different names.** `OneClassifier`'s
+     markers (`_PRIVATE_SUFFIXES`, `is_loopback`, `ipaddress`) are
+     name-shaped; a hand-rolled copy that spells them differently is
+     invisible. The identity check beside it covers the shape that has
+     actually happened — a helper shadowing `check` — and not this one.
+  3. **An opt-in read straight from `os.environ`.**
+     `test_nothing_spells_an_allow_public` matches `_env("…")` and
+     `_env_flag("…")` calls, which is how every recorder setting is read; a
+     direct `os.environ.get("DEMO_VIDEO_ALLOW_PUBLIC")` would not be seen, and
+     `core.py` already reads `ELEVENLABS_API_KEY` that way, so the shape is
+     available.
+  4. **Exactly which tests an injection turns red.** `--fault-inject` requires
+     the named tests to be *among* the failures, not to be all of them, so a
+     break with wider blast radius than its entry claims still passes. The
+     entries are written narrow on purpose; nothing enforces that.
+  5. **The refusal's ordering for `TerminalRecorder` specifically.**
+     `test_the_refusal_lands_before_anything_reaches_a_browser` reads the
+     browser stand-in through `Recorder`. The shared base is what refuses in
+     both, so the claim carries, but it carries by argument rather than by
+     measurement.
+  6. **Whether `npx skills add` still carries `scripts/` and `ensure.sh`.** A
+     claim about a third-party CLI's copying rules, checked once by installing
+     the skill and running the guard out of the install — it does — and
+     nothing re-checks it when that CLI changes.
+
+  And the standing one, which is a scope statement rather than a gap:
+  **anything the take reaches other than its classified target.** A page that
+  fetches another origin, a terminal storyboard that curls one, a URL computed
+  at run time. This is a static classifier over configuration and source text,
+  not an egress control, and `target.py`'s docstring says so in the same
+  words. `scripts/demo-target-guard` is also outside mypy's scope, which runs
+  over `skills/demo-video/helpers/` only.
 
 Failures accumulate and print together, each naming the file or interaction and
 the number that was wrong. The process exits non-zero if there is even one, and

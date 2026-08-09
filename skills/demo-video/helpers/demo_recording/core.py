@@ -895,7 +895,14 @@ class _DemoBase:
         if allow_private is None:
             allow_private = _env_flag("ALLOW_PRIVATE")
         self._allow_private = bool(allow_private)
-        guard_target(_env("BASE_URL"), self._allow_private)
+        guard_target(
+            _env("BASE_URL"),
+            self._allow_private,
+            source=(
+                "DEMO_VIDEO_BASE_URL in the environment — unset it, or export "
+                "a target this take may be recorded against"
+            ),
+        )
         out_dir = out_dir or _env("OUT_DIR")
         if out_dir is None:
             raise RuntimeError(

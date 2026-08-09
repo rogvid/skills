@@ -82,8 +82,11 @@ on:
       allow-private-network-target:
         description: >-
           Permit a private or internal host (10.x, a container service name,
-          *.internal). Public hosts are refused regardless — there is no input
-          that permits one. See skills/demo-video/scripts/demo-target-guard.
+          *.internal), in the pre-check *and* in the recorders — it is passed
+          to them as DEMO_VIDEO_ALLOW_PRIVATE, because they classify the
+          target again at construction. Public hosts are refused regardless —
+          there is no input that permits one. See
+          skills/demo-video/scripts/demo-target-guard.
         type: boolean
         default: false
       extra-env:
@@ -350,6 +353,14 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         env:
           DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}
+          # The recorders classify the target again, in `__init__`, with the
+          # same rules the guard step ran. So they need the same answer to the
+          # same question: without this line `allow-private-network-target:
+          # true` passed the pre-check and then raised `TargetRefused` one
+          # browser download later. `_env_flag` reads the `true`/`false` a
+          # boolean input renders as. `WorkflowGates` in tests/ci-unit is what
+          # keeps the two steps saying the same thing.
+          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}
           DEMO_VIDEO_SPEECH: "0"
         run: |
           set -uo pipefail

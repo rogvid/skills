@@ -35,10 +35,14 @@ never sees it. This is the whole mechanism:
 2. Frontmatter needs `name` and `description`. `name` must equal the directory
    name. Write `description` as a **trigger condition** ("Use when …") — that text
    is what an agent matches against to decide whether to invoke the skill.
-3. If the skill needs a companion executable, bundle its source under
-   `<skill>/cli/` and invoke it from `SKILL.md` (e.g. via `npx tsx
-   <skill>/cli/src/index.ts`) so `npx skills add` carries it along. Do not rely
-   on a globally-installed binary.
+3. If the skill needs a companion executable, bundle its source under the
+   skill and invoke it from `SKILL.md` so `npx skills add` carries it along.
+   Do not rely on a globally-installed binary. **A Python executable goes in
+   `<skill>/scripts/` as a PEP 723 uv script** — that is what
+   `skills/script-conventions` specifies, what `ruff.toml`'s `extend-include`
+   lints, and what `ensure.sh` restores the exec bits on. `<skill>/cli/` is
+   for a bundled TypeScript CLI run via `npx tsx <skill>/cli/src/index.ts`,
+   which is a different animal; do not put a uv script there.
 
 ## Promoting a skill (`wip/` → `skills/`)
 
