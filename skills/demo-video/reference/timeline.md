@@ -14,7 +14,15 @@ next to the media, whether or not the storyboard finished. No storyboard
 changes are needed; it is a byproduct of recording.
 
 `timeline.md` is the readable version: a table of every beat, then each still
-embedded under the caption it was taken during. **Commit both.** They are
+embedded under the caption it was taken during. Directly above that table it
+says when the host's wall clock **stepped** during the take, and by how much —
+the times in the table are `time.monotonic()` and `demo.mp4` is on the wall
+clock, so a step parts the two (`timeline.json`'s `capture_clock` carries every
+step; [limits.md](limits.md) has the measurement, and
+[#229](https://github.com/rogvid/skills/issues/229) is why this is printed).
+When nothing could watch
+that clock it says *that* instead, which is a different answer from silence.
+**Commit both.** They are
 small, diffable, and unlike `demo.mp4` they survive as a record of what the
 demo showed after the video has been regenerated or thrown away — which is
 what makes them worth reviewing in a PR.

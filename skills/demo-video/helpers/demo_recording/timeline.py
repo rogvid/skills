@@ -13,6 +13,7 @@ checkable without recording anything.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from .failure import FAILURE_DIR, FAILURE_MARKER
@@ -69,12 +70,20 @@ from .markdown import _fmt_t, _md_cell
 #                          (issue #247). An empty `steps` with `measured` true
 #                          means the clock held still, which is a different
 #                          answer again from the field being absent.
-#                          **A beat the log puts at `t` sits at
-#                          `t + (the steps before it)` in the video** —
+#                          **An instant the log puts at `t` sits at
+#                          `t + (the steps before `t`)` in the video** —
 #                          measured against the encode over six takes and 38
 #                          caption transitions, residual under 101 ms where
 #                          the uncorrected log was out by up to 1.50 s.
-#                          reference/limits.md has the measurement.
+#                          reference/limits.md has the measurement. Note the
+#                          rule is indexed by the **instant being converted**,
+#                          not by the beat it came from: converting a beat's
+#                          midpoint sums the steps before the midpoint, and a
+#                          step inside that beat's first half belongs to it.
+#                          Reading `t_start` for every instant of a beat leaves
+#                          such a step out entirely, and the measurement above
+#                          cannot see that — caption transitions sit at beat
+#                          *starts*, the one instant where the two agree.
 #                          On a merged demo (`stitch`) every part's steps are
 #                          here, moved onto the stitched clock by that part's
 #                          `offset`, and each step also carries the `segment`
@@ -83,10 +92,12 @@ from .markdown import _fmt_t, _md_cell
 #                          sampled for as long as the capture runs, which is
 #                          longer than the video it produced, so a step's `t`
 #                          can fall past the next part's `boundaries` entry.
-#                          The correction for a beat is the steps of *its own*
-#                          segment up to its `t_start` — never `total`, and
+#                          The correction for an instant is the steps of *its
+#                          own* segment up to that instant — never `total`, and
 #                          never an earlier part's, whose loss is already in
-#                          the offsets. `boundaries` (merged demos only) is
+#                          the offsets. `capture_clock_correction` below is
+#                          this rule, and is what the recorder's own consumers
+#                          read it through. `boundaries` (merged demos only) is
 #                          where each capture starts on the stitched clock.
 #                          **Null** on a merged demo any of whose parts carried
 #                          no usable record: a partial answer here would say a
@@ -380,6 +391,207 @@ def timeline_paths(out_dir: Path | str, segment: str | None = None) -> tuple[Pat
     return out_dir / f"{stem}.json", out_dir / f"{stem}.md"
 
 
+# -- reading `capture_clock` back ---------------------------------------------
+#
+# `beats` are `time.monotonic()`; `media` is on the host's *wall* clock. So an
+# instant the log puts at `t` sits at `t + (the steps its own capture recorded
+# before it)` in the video — the rule the envelope documentation above states,
+# measured over six takes and 38 caption transitions: uncorrected the video was
+# up to 1.50 s from the log by 13.5 s in, corrected all 38 landed within 101 ms
+# (issue #229, reference/limits.md).
+#
+# **It is indexed by the instant, not by the beat**, and the difference is a
+# whole step. The envelope's "up to its `t_start`" is that rule applied to a
+# beat's *start*; a consumer converting the beat's **midpoint** — which is what
+# a review frame is cut at — has to sum the steps before the *midpoint*, or a
+# step landing in the beat's own first half is left out and that frame does not
+# move at all. That is not a corner case: **46.9 %, 48.0 % and 48.8 % of each
+# take's `duration`** lies inside some beat's first half over this repo's three
+# committed demos, so roughly one recorded step in two falls there. (Of the
+# beats' own spans it is 50.0 % by construction, which is why the denominator
+# is stated.) It was missed the first time
+# because #250 validated the rule against *caption transitions*, which sit at
+# beat starts — the one instant at which the two readings cannot differ.
+#
+# **The record can give three different answers, and the third is the one that
+# is easy to lose:**
+#
+#   * `measured: true` with steps — correct by them, per capture.
+#   * `measured: true` with none — the clock *was watched* and held still. The
+#     correction is zero because somebody looked.
+#   * `measured: false`, or no record at all — **nobody knows.** `steps` is an
+#     empty list here too (issue #247), so a consumer reading only `steps`
+#     cannot tell this case from the one above it. Zero is still the number
+#     applied, because there is no other number available — but it is not a
+#     correction, and an artifact built on it has to say so. A sheet that
+#     implies a correction nobody could compute is exactly the confidently
+#     wrong attribution this field grew a `measured` flag to prevent.
+#
+# `state` below is what an artifact prints so its reader can tell the three
+# apart, and it is deliberately part of the return value rather than something
+# a caller re-derives.
+
+
+def _usable_steps(doc: dict, record: dict) -> list[dict] | None:
+    """`record`'s steps, or None if this record cannot honestly correct a beat.
+
+    Refuses rather than corrects by part of a record. A step missing its `t`
+    or its `delta` would silently drop out of every sum, and a merged record
+    whose steps have lost the `segment` they were measured in matches no beat
+    at all — both leave the arithmetic looking applied while it corrects
+    nothing, which is worse than declining out loud.
+    """
+    listed = record.get("steps")
+    if not isinstance(listed, list):
+        return None
+    # Which captures a step is allowed to name, read off the document rather
+    # than assumed: the segments of a merged demo, and *no segment at all* on a
+    # take recorded in one piece, whose beats carry none either. Both
+    # directions matter — a merged step with no `segment` and a single take's
+    # step that has one both match no beat, so they would correct nothing while
+    # the sheet reported a correction.
+    #
+    # **Stated limit, and pre-existing**: this is inexact for one document
+    # shape it never sees — a single *segment*'s own timeline, whose beats do
+    # carry a segment while its steps do not, so `{None}` accepts every step
+    # and `correct` then matches no beat. Nothing reaches it: `beat_frames`
+    # returns `skipped` for a document with a `segment` before it asks for a
+    # correction at all, and `stitch()` re-derives the merged record from the
+    # parts rather than reading one part's. Written down so the next reader
+    # does not have to re-derive that.
+    named = {s.get("segment") for s in doc.get("segments") or [] if isinstance(s, dict)}
+    allowed = named or {None}
+    steps = []
+    for step in listed:
+        if not isinstance(step, dict):
+            return None
+        at, delta = step.get("t"), step.get("delta")
+        for value in (at, delta):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return None
+        if step.get("segment") not in allowed:
+            return None
+        steps.append(step)
+    return steps
+
+
+def _no_correction(beat: dict, t: float) -> float:
+    """The correction for a record that cannot supply one. Zero, and stated."""
+    return 0.0
+
+
+def capture_clock_correction(
+    doc: dict,
+) -> tuple[Callable[[dict, float], float], dict]:
+    """(correct, state) — how far each instant of `doc` slid under the video.
+
+    `correct(beat, t)` is the seconds to add to the beat-log instant `t`, taken
+    from `beat`, to reach the same moment in `media`: the steps of that beat's
+    **own capture** up to **`t` itself**, never the running total and never an
+    earlier part's, whose loss is already in the merged offsets (see
+    `_merge_capture_clock`). On a take recorded in one piece neither the steps
+    nor the beats name a segment, and the same rule is then the whole list.
+
+    **`t` and not the beat**, because a caller converting a beat's midpoint and
+    one converting its start are asking different questions whenever a step
+    landed between the two — see the note above this function.
+
+    `state` is what the artifact says about the correction — `applied`,
+    `total`, `steps` (how many the record carries) and `note` (why not, when
+    `applied` is false). It exists so a document cannot show a corrected
+    timestamp without being able to say whether a correction was possible.
+    """
+    record = doc.get("capture_clock")
+    if not isinstance(record, dict):
+        return _no_correction, {
+            "applied": False,
+            "total": None,
+            "steps": 0,
+            "note": (
+                "this timeline carries no capture_clock, so nothing here knows "
+                "whether the host's wall clock moved under the beat log"
+            ),
+        }
+    if record.get("measured") is not True:
+        return _no_correction, {
+            "applied": False,
+            "total": None,
+            "steps": 0,
+            "note": record.get("note")
+            or (
+                "the take's wall clock was not measured, so nothing here knows "
+                "whether it moved under the beat log"
+            ),
+        }
+    steps = _usable_steps(doc, record)
+    if steps is None:
+        return _no_correction, {
+            "applied": False,
+            "total": None,
+            "steps": 0,
+            "note": (
+                "this timeline's capture_clock says it was measured, but its "
+                "steps are not in the shape this reader can attribute to a "
+                "beat — correcting by part of a record would look applied "
+                "while correcting nothing"
+            ),
+        }
+
+    def correct(beat: dict, t: float) -> float:
+        return sum(
+            float(step["delta"])
+            for step in steps
+            if step.get("segment") == beat.get("segment")
+            and float(step["t"]) <= float(t)
+        )
+
+    return correct, {
+        "applied": True,
+        # Totalled from the steps that were **used**, not copied out of the
+        # record's own `total`. The two can disagree — `tests/smoke` has an
+        # injection for exactly that — and this number's job is to describe
+        # the correction that was applied, not to repeat a claim about it.
+        "total": round(sum(float(step["delta"]) for step in steps), 4),
+        "steps": len(steps),
+        "note": None,
+    }
+
+
+def _capture_clock_md(state: dict) -> list[str]:
+    """What `timeline.md` says about the clock its own timestamps are on.
+
+    Silent on the ordinary take — a measured clock that held still is what the
+    reader already assumes, and a line on every timeline is a line nobody
+    reads. It speaks in the two cases where the assumption is wrong: the clock
+    stepped, or nobody watched it.
+    """
+    if not state.get("applied"):
+        return [
+            f"**The clock this take's video is on was not measured.** "
+            f"{state.get('note')}. The times below are `time.monotonic()` and "
+            f"the recording is on the host's wall clock, so if the two parted "
+            f"company while this was recording, nothing in this file can say "
+            f"by how much.",
+            "",
+        ]
+    # On the **count**, never on the total: two steps that cancel total zero
+    # and still part the two clocks for everything recorded between them.
+    if not state.get("steps"):
+        return []
+    return [
+        f"**The host's wall clock stepped {state.get('steps')} time(s) while "
+        f"this was recorded** ({state.get('total') or 0.0:+.2f}s in total). The "
+        f"times below are `time.monotonic()`; the recording is on that wall "
+        f"clock, so an instant this table puts at `t` sits at `t` plus the "
+        f"steps its own capture recorded before `t` — not at `t`, and not at "
+        f"`t` plus the total above, which is the correction for no single row. "
+        f"`timeline.json`'s `capture_clock` carries every step and the capture "
+        f"it was measured in; `frames/frames.md` says whether the review "
+        f"frames were cut with it applied.",
+        "",
+    ]
+
+
 def _coverage_md(coverage: object) -> list[str]:
     """The acceptance-criteria section of timeline.md, or nothing (issue #12).
 
@@ -552,6 +764,12 @@ def render_timeline_md(doc: dict) -> str:
     # scrolls past 28 beats first has already formed the impression the
     # coverage report exists to test (issue #12).
     out += _coverage_md(doc.get("coverage"))
+    # Directly above the beat table, because it is a statement about the
+    # numbers in it: a reader who has scrolled past the table has already read
+    # the timestamps as the video's, which is the misreading this says out
+    # loud. The recorder warns about the same thing on stderr, minutes and
+    # several thousand lines before anybody opens this file (issue #229).
+    out += _capture_clock_md(capture_clock_correction(doc)[1])
     # The exit column only exists when something in this take has one — a web
     # timeline would otherwise carry an empty column on every row. A `run` beat
     # whose status could not be read shows "?" rather than blank, so the
