@@ -139,15 +139,44 @@ uncorrected is the way to get it wrong twice
 under `frames/` are cut on the video's clock**, midpoint plus that beat's own
 capture's steps before *that midpoint* (the rule is indexed by the instant you
 are converting, not by the beat — a step inside a beat's first half moves its
-frame), and `frames/frames.md` says which of the three cases the take was;
+frame; and a beat a backward step deleted from the file is cut at the last
+instant before the gap and marked `no_video`, see below), and
+`frames/frames.md` says which of the three cases the take was;
 **every narration clip is mixed on the video's clock too**
 ([#226](https://github.com/rogvid/skills/issues/226)) — `timeline.json`'s
 `narration.lines` gives each spoken line's `t` (the beat log's instant) beside
 its `at` (where the clip really is in `media`, which is `t` corrected by the
 same rule and never below zero), with `narration.clock_correction` saying which
-of the three cases applied; and `timeline.md` says above its beat table when the
+of the three cases applied — a line may also carry `clamped`, the seconds a
+correction lost to the start of the file, but **no record the recorder can
+emit produces one any more**: since
+[#256](https://github.com/rogvid/skills/issues/256) an instant is never placed
+earlier than the step that moved it, and the recorder's sampler starts at frame
+zero, so `at` cannot come out negative. The floor and the field stay because
+`adelay` refuses a negative delay outright and would cost the take its whole
+audio track; read `clamped` as a guard against a malformed record, not as
+something to expect; and `timeline.md` says above its beat table when the
 clock stepped and by how much, and what that meant for the audio. `timeline.json`'s beat
 timestamps are untouched — they are the log, and the log is `time.monotonic()`.
+
+**A backward step is not a slide, and correcting one as though it were puts an
+instant up to a whole step early.** A step of −Δ at `T` deletes the monotonic
+window `(T, T+Δ)` from the file outright: the encoder stamps frames with the
+wall clock and will not write a stamp it has already written, so the file
+stalls for the width of the step instead of rewinding. Measured one video
+frame wide — `video 31.560 → 31.600 shows mono 31.644 → 32.644`. An instant
+inside that window has **no video at all**, and `t + (the steps before t)`
+lands it in content that predates the step; that is how a review frame came
+out showing the previous caption
+([#256](https://github.com/rogvid/skills/issues/256)). The rule that holds
+everywhere is that the video's clock is the wall clock's **high-water mark**:
+an instant sits at the greatest of `t + (the steps before t)` and every
+`T + (the steps before T)` for a step at `T ≤ t`. Outside a hole that is the
+same sum; inside one it is the last instant the file has, and whatever you
+build on it has to be able to say *this beat has no frame* rather than print a
+timestamp as though it did. The recorder's own consumers do: a `no_video` on a
+review frame and on a narration line, and a paragraph in `frames.md` and
+`timeline.md` naming them.
 
 What to do everywhere else: prefer `timeline.json`'s `capture_clock`, which
 records every step with its offset and size, and correct with it — **after

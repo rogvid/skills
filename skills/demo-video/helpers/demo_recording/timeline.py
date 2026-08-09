@@ -13,8 +13,10 @@ checkable without recording anything.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from .failure import FAILURE_DIR, FAILURE_MARKER
 from .markdown import _fmt_t, _md_cell
@@ -84,6 +86,28 @@ from .markdown import _fmt_t, _md_cell
 #                          such a step out entirely, and the measurement above
 #                          cannot see that — caption transitions sit at beat
 #                          *starts*, the one instant where the two agree.
+#                          **A backward step also leaves a hole, and the rule
+#                          above is wrong inside it** (issue #256). A step of
+#                          −Δ at `T` does not slide the video: it *deletes*
+#                          the monotonic window `(T, T+Δ)` from the file,
+#                          because the encoder stamps frames with the wall
+#                          clock and will not write a stamp it has already
+#                          written. Measured one video frame wide — `video
+#                          31.560 → 31.600 shows mono 31.644 → 32.644`. An
+#                          instant inside that window has **no video at all**,
+#                          and `t + (the steps before t)` lands it up to a
+#                          whole step early, in content that predates the
+#                          step. The rule that holds everywhere is that the
+#                          video's clock is the *high-water mark* of the wall
+#                          clock: an instant sits at the greatest of `t + (the
+#                          steps before t)` and every `T + (the steps before
+#                          T)` for a step at `T ≤ t`. Outside a hole the two
+#                          agree exactly and this is the same arithmetic;
+#                          inside one it clamps to the last instant the file
+#                          has. `capture_clock_correction` below answers both
+#                          — where the instant sits, and how many seconds of
+#                          the correction the hole swallowed — and the
+#                          recorder's own consumers say which they got.
 #                          On a merged demo (`stitch`) every part's steps are
 #                          here, moved onto the stitched clock by that part's
 #                          `offset`, and each step also carries the `segment`
@@ -159,6 +183,22 @@ from .markdown import _fmt_t, _md_cell
 #                          recorded in one piece, that part's `offset` on a
 #                          stitched demo — **not** 0.0 there), and that line
 #                          alone is *not* `t` plus the steps before it.
+#                          **No record this recorder emits produces a
+#                          `clamped` line any more** (issue #256): an instant
+#                          is never placed earlier than the step that moved
+#                          it, and the sampler starts at frame zero, so `at`
+#                          cannot come out negative. The field and its floor
+#                          stay for a record from somewhere else, because
+#                          `adelay` refuses a negative delay and that costs a
+#                          take its whole audio track rather than one clip.
+#                          A line carries `no_video` — again **only when it
+#                          has one** — when the instant it was spoken at falls
+#                          inside a hole a backward step deleted from the file
+#                          (issue #256): its `at` is the last moment before
+#                          that gap and `no_video` is how many seconds later
+#                          the video resumes. There is no moment in `media`
+#                          for such a line to be at, and the rule above is
+#                          false for it in the other direction.
 #                          On a merged demo every
 #                          part's lines are here, moved onto the stitched clock
 #                          by that part's `offset` and each naming its own
@@ -465,6 +505,76 @@ def timeline_paths(out_dir: Path | str, segment: str | None = None) -> tuple[Pat
 # `state` below is what an artifact prints so its reader can tell the three
 # apart, and it is deliberately part of the return value rather than something
 # a caller re-derives.
+#
+# **And there is a fourth thing an *instant* can be, which no state describes:
+# inside a hole, with no video at all** (issue #256). That is a property of the
+# instant and not of the record — the same well-measured record answers it for
+# one beat and not for the next — so it rides on the answer instead, as
+# `Placed.lost`. A −Δ step deletes the monotonic window `(T, T+Δ)` from the
+# file, and until #256 every consumer here returned a shift for every `t > T`,
+# so an instant inside that window was corrected up to a whole step early, into
+# content that predates the step. Measured in the shipped path: `seg-run1`'s
+# `beat-05` had its midpoint at 5.633 s, inside the hole (5.151, 6.202); its
+# frame was cut at video 4.58 s and **shows the previous caption**.
+#
+# The arithmetic is `_placed` below, and it is the wall clock's *high-water
+# mark* rather than a running sum with a special case bolted on. Two properties
+# of writing it that way are worth stating, because both are what make it safe
+# to apply everywhere:
+#
+#   * **on a host that never steps it is the identity**, and on a host that
+#     steps it is the old sum digit for digit everywhere outside a hole.
+#     Nothing about an ordinary take changes — which is also why nothing about
+#     an ordinary take can grade it, and why every case for it is synthetic.
+#   * **it composes.** Overlapping holes — a second step landing inside the
+#     first one's window — fall out of the maximum with no rule of their own,
+#     which a per-step special case would have had to get right by hand.
+#
+# What it deliberately does **not** do is second-guess the size of the step:
+# the hole is Δ wide because the record says the step was Δ. Three of six
+# stepping takes in #255 showed the video moving by less than the recorded
+# amount, and that is issue #259 — a question about whether the record
+# describes the world, which no arithmetic here can answer.
+
+
+class Placed(NamedTuple):
+    """Where a beat-log instant is in the video, and whether it is there at all.
+
+    `at` is the instant in `media`, already clamped to the last instant the
+    file has if this one falls inside a hole. `lost` is how many seconds of
+    the correction that clamp swallowed: **zero for an instant with video**,
+    and for one without, the distance from here to where the file starts
+    again — which is also how far too early the uncorrected rule would have
+    put it. A consumer that publishes `at` without saying `lost` is back to
+    presenting a beat with no video as a frame at its midpoint.
+    """
+
+    at: float
+    lost: float
+
+
+def _placed(steps: list[tuple[float, float]], t: float) -> Placed:
+    """`t` on the video's clock, given one capture's steps. See above.
+
+    The video's clock is the high-water mark of the host's wall clock, because
+    the encoder will not write a frame stamp it has already written: the file
+    stalls for the width of a backward step instead of rewinding.
+    """
+    running = 0.0
+    # The furthest the file had got before any step at or before `t` — the
+    # edge a hole clamps to. `-inf` rather than 0.0 so that a capture with no
+    # steps is the identity rather than a floor at its own start.
+    edge = -math.inf
+    for at, delta in sorted(steps):
+        if at > t:
+            break
+        edge = max(edge, at + running)
+        running += delta
+    shifted = t + running
+    # `max`, so an instant with video returns `shifted` *itself* and `lost` is
+    # exactly 0.0 rather than a rounding of it.
+    reached = max(shifted, edge)
+    return Placed(reached, reached - shifted)
 
 
 def _usable_steps(doc: dict, record: dict) -> list[dict] | None:
@@ -510,26 +620,39 @@ def _usable_steps(doc: dict, record: dict) -> list[dict] | None:
     return steps
 
 
-def _no_correction(beat: dict, t: float) -> float:
-    """The correction for a record that cannot supply one. Zero, and stated."""
-    return 0.0
+def _no_correction(beat: dict, t: float) -> Placed:
+    """The placement for a record that cannot supply one. `t`, and stated.
+
+    `lost` is 0.0 rather than null, and that is not a claim that this instant
+    has video: a record nobody could read says nothing about holes either.
+    `state.applied` is what carries "nothing here knows", and every consumer
+    prints it — a second null to mean the same thing would be a second thing
+    to forget.
+    """
+    return Placed(float(t), 0.0)
 
 
 def capture_clock_correction(
     doc: dict,
-) -> tuple[Callable[[dict, float], float], dict]:
-    """(correct, state) — how far each instant of `doc` slid under the video.
+) -> tuple[Callable[[dict, float], Placed], dict]:
+    """(place, state) — where each instant of `doc` is in the video.
 
-    `correct(beat, t)` is the seconds to add to the beat-log instant `t`, taken
-    from `beat`, to reach the same moment in `media`: the steps of that beat's
-    **own capture** up to **`t` itself**, never the running total and never an
-    earlier part's, whose loss is already in the merged offsets (see
-    `_merge_capture_clock`). On a take recorded in one piece neither the steps
-    nor the beats name a segment, and the same rule is then the whole list.
+    `place(beat, t)` puts the beat-log instant `t`, taken from `beat`, at the
+    same moment in `media`, using the steps of that beat's **own capture** up
+    to **`t` itself** — never the running total and never an earlier part's,
+    whose loss is already in the merged offsets (see `_merge_capture_clock`).
+    On a take recorded in one piece neither the steps nor the beats name a
+    segment, and the same rule is then the whole list.
 
     **`t` and not the beat**, because a caller converting a beat's midpoint and
     one converting its start are asking different questions whenever a step
     landed between the two — see the note above this function.
+
+    It returns a `Placed`, not a number of seconds, because an instant a
+    backward step deleted from the file has no honest number: `at` is then the
+    last instant the file has and `lost` says how much of the correction that
+    clamp swallowed. A caller that reads `at` alone is publishing a frame at a
+    moment the video does not contain (issue #256).
 
     `state` is what the artifact says about the correction — `applied`,
     `total`, `steps` (how many the record carries) and `note` (why not, when
@@ -572,15 +695,17 @@ def capture_clock_correction(
             ),
         }
 
-    def correct(beat: dict, t: float) -> float:
-        return sum(
-            float(step["delta"])
-            for step in steps
-            if step.get("segment") == beat.get("segment")
-            and float(step["t"]) <= float(t)
+    def place(beat: dict, t: float) -> Placed:
+        return _placed(
+            [
+                (float(step["t"]), float(step["delta"]))
+                for step in steps
+                if step.get("segment") == beat.get("segment")
+            ],
+            float(t),
         )
 
-    return correct, {
+    return place, {
         "applied": True,
         # Totalled from the steps that were **used**, not copied out of the
         # record's own `total`. The two can disagree — `tests/smoke` has an
@@ -592,8 +717,8 @@ def capture_clock_correction(
     }
 
 
-def capture_clock_shift(record: object) -> tuple[Callable[[float], float], dict]:
-    """(shift, state) for a capture that is still the only one there is.
+def capture_clock_shift(record: object) -> tuple[Callable[[float], Placed], dict]:
+    """(place, state) for a capture that is still the only one there is.
 
     `capture_clock_correction` above reads a finished timeline, where a step is
     attributed to the segment it was measured in and a beat is matched against
@@ -605,19 +730,19 @@ def capture_clock_shift(record: object) -> tuple[Callable[[float], float], dict]
     to drift apart, because `frames/` and the audio track of the same demo have
     to describe the same video.
 
-    `shift(t)` is the seconds to add to the beat-log instant `t`; `state` is the
-    same three-state record `capture_clock_correction` returns, and the caller
-    is expected to put it in an artifact rather than swallow it.
+    `place(t)` puts the beat-log instant `t` in the video, as a `Placed`;
+    `state` is the same three-state record `capture_clock_correction` returns,
+    and the caller is expected to put it in an artifact rather than swallow it.
     """
     correct, state = capture_clock_correction({"capture_clock": record})
 
-    def shift(t: float) -> float:
+    def place(t: float) -> Placed:
         # The empty beat is the point: a single capture's steps carry no
         # segment and neither does this, so every step in the record is this
         # instant's to be corrected by.
         return correct({}, t)
 
-    return shift, state
+    return place, state
 
 
 def _capture_clock_md(state: dict) -> list[str]:
@@ -673,7 +798,11 @@ def _narration_md(narration: object) -> list[str]:
 
       * a line whose correction hit the zero floor (`clamped`) did not move by
         the steps before it — it moved by as much of them as the start of the
-        file left room for;
+        file left room for. Unreachable from a record this recorder writes
+        since #256, and kept for one that came from elsewhere;
+      * a line the clock stepped *over* (`no_video`) was spoken during wall
+        time the file does not contain, so its clip sits at the last moment
+        before the gap and not where the steps put it (issue #256);
       * on a stitched demo where only some narrating parts could correct, the
         refusal is stated as **k of m segments** rather than as the whole demo.
     """
@@ -730,6 +859,24 @@ def _narration_md(narration: object) -> list[str]:
         f"one piece, that part's `offset` on a stitched demo — and `clamped` is "
         f"how many seconds of the correction that boundary swallowed."
         if clamped
+        else ""
+    )
+    # ...and the lines that were spoken over wall time the file does not have.
+    # A different sentence from `clamped` and never folded into it: that one is
+    # a line the *start of the file* caught, this one is a line the host's
+    # clock deleted the moment of. Both make the headline sentence false, for
+    # different reasons a listener would chase differently.
+    holed = [line for line in lines if line.get("no_video")]
+    tail += (
+        f" **{len(holed)} of them {'was' if len(holed) == 1 else 'were'} spoken "
+        f"over wall time that is not in the video at all**: a backward step "
+        f"takes its own width out of the file rather than moving it, so there "
+        f"is no moment in `media` for "
+        f"{'that line' if len(holed) == 1 else 'those lines'} to be at. "
+        f"{'Its' if len(holed) == 1 else 'Their'} clip starts at the last "
+        f"moment before the gap, and `no_video` is how many seconds later the "
+        f"video resumes (issue #256)."
+        if holed
         else ""
     )
     return [

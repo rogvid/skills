@@ -76,6 +76,18 @@ from .timeline import capture_clock_correction, timeline_paths
 # manifest and the sheet say so in as many words. Zero is the only number
 # available there, but it is a fallback and not a correction, and a sheet that
 # let the two look alike would be claiming an accuracy nobody measured.
+#
+# **And a beat can have no frame to be cut at all.** A backward step of Δ does
+# not slide the video, it deletes a Δ-wide window of wall time from the file
+# (issue #256, and the note over `capture_clock_correction`), so a midpoint
+# inside that window is of a moment `demo.mp4` does not contain. `Placed.lost`
+# is how the correction says so, and this is the one case where the sheet's
+# timestamp is *not* where the beat is: the frame is cut at the last instant
+# before the gap, and both manifest and sheet name the beat as one whose own
+# wall time is missing. The alternative — cutting at the midpoint plus the
+# steps, as everything here did until #256 — puts the frame up to a whole step
+# early, in content that predates the step, and it was found by eye:
+# `seg-run1`'s `beat-05.png` was cut at 4.58 s and shows the previous caption.
 FRAMES_DIRNAME = "frames"
 FRAMES_SCHEMA = 1
 
@@ -185,9 +197,10 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     Reads the timeline the take just wrote (or `doc`), extracts
     `frames/beat-NN.png` at each beat's midpoint **on the video's clock** — the
     midpoint plus that beat's own capture's recorded wall-clock steps, or the
-    bare midpoint with the reason stated when the record cannot say (see the
-    section header) — and writes `frames/frames.md` for a reviewer and
-    `frames/frames.json` for a tool. Neither says anything
+    bare midpoint with the reason stated when the record cannot say, or the
+    last instant before the gap for a beat a backward step deleted from the
+    file (see the section header) — and writes `frames/frames.md` for a
+    reviewer and `frames/frames.json` for a tool. Neither says anything
     about what is *in* a frame — see the section header.
 
     Returns the manifest. Safe to re-run: it is a pure function of the mp4 and
@@ -247,7 +260,7 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             duration = float(beats[-1].get("t_end") or 0.0)
     last = max(0.0, float(duration) - _FRAME_EDGE_S)
 
-    correct, clock = capture_clock_correction(doc)
+    place, clock = capture_clock_correction(doc)
     manifest["clock_correction"] = clock
 
     planned: list[dict] = []
@@ -264,23 +277,35 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # what puts the beat where the frames are, and clamping first would
         # aim at the end of a file the beat does not reach.
         #
-        # Every instant is corrected **by the steps before that instant** —
-        # `correct(beat, t)`, not one number per beat. A step landing inside a
+        # Every instant is placed **by the steps before that instant** —
+        # `place(beat, t)`, not one number per beat. A step landing inside a
         # beat's own first half moved this frame and did not move the beat's
         # start, and half of a take's wall time is inside some beat's first
         # half, so a per-beat number leaves roughly one step in two applied to
         # the wrong instants.
         logged = (float(t_start) + float(t_end)) / 2
-        middle = min(max(logged + correct(beat, logged), 0.0), last)
+        placed = place(beat, logged)
+        middle = min(max(placed.at, 0.0), last)
         index = int(beat.get("index", len(planned)))
-        planned.append(
-            {
-                "file": f"beat-{index:02d}.png",
-                "kind": "beat",
-                "beat": index,
-                "t": round(middle, 3),
-            }
-        )
+        entry = {
+            "file": f"beat-{index:02d}.png",
+            "kind": "beat",
+            "beat": index,
+            "t": round(middle, 3),
+        }
+        # **Only when there is one**, like narration's `clamped`: a key on
+        # every frame is a key nobody reads, and `0.0` beside a frame that is
+        # exactly where its beat is would be a hole nobody found.
+        #
+        # Rounded *before* the test, exactly as `mix_plan` does it and for the
+        # same reason: a midpoint 0.2 ms short of where the video resumes is
+        # inside a hole by less than this record can write down, and
+        # `"no_video": 0.0` beside it says "there is no frame of this beat"
+        # about a frame that is where its beat is. Testing the raw float was
+        # this file's own version of the bug the rounding exists to stop.
+        if round(placed.lost, 3):
+            entry["no_video"] = round(placed.lost, 3)
+        planned.append(entry)
         # Only for beats long enough to hide an unscripted transition. Beat
         # alignment sees what the storyboard wrote down; a redirect, a toast or
         # a load finishing inside a long hold is invisible to it.
@@ -291,15 +316,17 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # the log's clock it would scan a stretch the beat had already left —
         # and each edge is corrected at its own instant, because a step inside
         # the beat moves its end and not its start.
-        lo = min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last)
-        hi = min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last)
-        # Correcting each edge at its own instant can put the end *before* the
-        # start: a step larger than the beat's span leaves none of that beat's
-        # wall time in the file, and a beat clamped past the end of the video
-        # collapses the same way. There is genuinely nothing to search, and
-        # `scene_times` answers an inverted window with an empty list — so the
-        # only wrong move is to let the sheet quietly carry fewer frames.
-        # Recorded here, printed in frames.md, and named by beat.
+        lo = min(max(place(beat, float(t_start)).at, 0.0), last)
+        hi = min(max(place(beat, float(t_end)).at, 0.0), last)
+        # Placing each edge at its own instant can leave no window at all: a
+        # beat that begins and ends inside one backward step's hole has none of
+        # its wall time in the file, so both edges clamp to the same instant,
+        # and a beat clamped past the end of the video collapses the same way.
+        # There is genuinely nothing to search, and `scene_times` answers an
+        # empty window with an empty list — so the only wrong move is to let the
+        # sheet quietly carry fewer frames. Recorded here, printed in frames.md,
+        # and named by beat. A beat the step lands *inside* keeps the part of
+        # its span the file still has, which is `lo` up to the hole's edge.
         if hi <= lo:
             skipped_scenes.append(index)
             continue
@@ -350,7 +377,7 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     # amount they were just moved by.
     tail = beats[-1]
     tail_end = float(tail.get("t_end") or 0.0)
-    over = tail_end + correct(tail, tail_end) - float(duration)
+    over = place(tail, tail_end).at - float(duration)
     manifest["capture_loss_at_least"] = round(max(0.0, over), 3)
     json_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     md_path.write_text(render_frames_md(manifest))
@@ -389,7 +416,7 @@ def write_beat_frames(out_dir: Path | str, doc: dict, where: str) -> dict | None
     return manifest
 
 
-def _clock_md(clock: object) -> list[str]:
+def _clock_md(clock: object, holed: bool = False) -> list[str]:
     """What the sheet says about the clock its frames were cut on.
 
     Three sentences for three states, and the reason all three are printed
@@ -399,6 +426,14 @@ def _clock_md(clock: object) -> list[str]:
     a corrected one — which is the confidently-wrong artifact this whole field
     exists to avoid, and it is why "the clock was watched and held still" is
     also stated out loud instead of being inferred from silence.
+
+    `holed` is whether any frame on this sheet is of a beat the clock deleted
+    from the file, and it is a parameter rather than something the paragraph
+    below leaves to `_no_video_md` to correct afterwards: the stepped sentence
+    says flatly that every frame is its midpoint plus the steps before it, and
+    for those frames that is false. A reader who stops at the first paragraph
+    — which is what a headline paragraph is for — would carry away the wrong
+    rule and never reach the correction.
     """
     if not isinstance(clock, dict):
         return []
@@ -425,12 +460,60 @@ def _clock_md(clock: object) -> list[str]:
     return [
         f"**The host's wall clock stepped {clock.get('steps')} time(s) while "
         f"this was recorded** ({clock.get('total') or 0.0:+.2f}s in total), and "
-        f"the video is on that clock. Each frame below was therefore cut at "
-        f"its beat's midpoint **plus the steps its own capture recorded before "
-        f"that instant**, not at the midpoint itself — the timestamps in the "
-        f"table are where the frames came out of the video, and the total "
-        f"above is the correction for none of them individually. "
-        f"`timeline.json`'s `capture_clock` has the steps.",
+        f"the video is on that clock. "
+        + (
+            "Each frame below was therefore cut at "
+            if not holed
+            else "Except for the frames named in the next paragraph, whose "
+            "beats are not in the file at all, each frame below was cut at "
+        )
+        + "its beat's midpoint **plus the steps its own capture recorded "
+        "before that instant**, not at the midpoint itself — the timestamps "
+        "in the table are where the frames came out of the video, and the "
+        "total above is the correction for none of them individually. "
+        "`timeline.json`'s `capture_clock` has the steps.",
+        "",
+    ]
+
+
+def _no_video_md(frames: list[dict]) -> list[str]:
+    """The frames whose beat the host's clock deleted from the file (#256).
+
+    Named, never counted, and never silent: the sheet's whole contract is that
+    a frame is the moment its heading says it is, and for these it is not —
+    there is no such moment in `demo.mp4` to be. A backward step of Δ deletes
+    a Δ-wide window of wall time outright rather than sliding the video, so a
+    beat inside that window was never encoded. The frame is the last one before
+    the gap, which is as close as the file goes.
+
+    Saying nothing here is the failure this exists to stop, and it is not
+    hypothetical: it is what shipped. `seg-run1`'s `beat-05.png` was cut a
+    whole step early, into content that predates the step, and arrived on a
+    sheet that presented it as the beat's midpoint — a frame of the previous
+    caption, confidently numbered for the beat after it.
+    """
+    holed = [f for f in frames if f.get("no_video")]
+    if not holed:
+        return []
+    named = ", ".join(f"`{_md_cell(f.get('file'))}`" for f in holed)
+    return [
+        f"**{named} {'is' if len(holed) == 1 else 'are'} not at the beat "
+        f"{'it is' if len(holed) == 1 else 'they are'} named for: the host's "
+        f"wall clock stepped backwards over that moment, and a backward step "
+        f"takes its own width of wall time *out of the file* rather than "
+        f"moving it.** There is no frame of "
+        f"{'that beat' if len(holed) == 1 else 'those beats'} in this "
+        f"recording. What is printed is the last frame before the gap — the "
+        f"video resumes "
+        + ", ".join(
+            f"{float(f['no_video']) * 1000:.0f} ms after `{_md_cell(f.get('file'))}`'s "
+            f"own moment"
+            for f in holed
+        )
+        + ". Read "
+        + ("it" if len(holed) == 1 else "them")
+        + " as the moment the demo reached before the clock moved, not as the "
+        "beat. `timeline.json`'s `capture_clock` has the steps.",
         "",
     ]
 
@@ -476,7 +559,9 @@ def render_frames_md(manifest: dict) -> str:
     ]
     if manifest.get("skipped"):
         return "\n".join(out + [f"No frames were written: {manifest['skipped']}.", ""])
-    out += _clock_md(manifest.get("clock_correction"))
+    holed = _no_video_md(frames)
+    out += _clock_md(manifest.get("clock_correction"), bool(holed))
+    out += holed
     swallowed = manifest.get("scene_search_skipped") or []
     if swallowed:
         # Named, not counted: the reader's question is which beat is thinner
@@ -512,5 +597,10 @@ def render_frames_md(manifest: dict) -> str:
         title = f"{name.removesuffix('.png')} — {_fmt_t(frame.get('t'))}s"
         if frame.get("kind") == "scene":
             title += " (an extra frame: the picture changed here)"
+        # Beside the picture as well as above the table: a reviewer scrolling
+        # the frames reads the headings and never the preamble, and this is the
+        # one heading whose timestamp is not where its beat is.
+        if frame.get("no_video"):
+            title += " (no video of this beat — the last frame before the gap)"
         out += [f"## {title}", "", f"![{name}]({name})", ""]
     return "\n".join(out).rstrip() + "\n"

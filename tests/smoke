@@ -2097,12 +2097,8 @@ class HostClock:
     def total(self) -> float:
         return sum(delta for _, delta in self.steps)
 
-    def before(self, t: float) -> float:
-        """How much the wall clock had stepped by `t` seconds into the video.
-
-        Negative when the clock went backwards, which is the direction that
-        takes wall time out of the video. A beat the log puts at `t` is at
-        `t + before(t)` in demo.mp4.
+    def in_video(self, t: float) -> tuple[float, float]:
+        """(where `t` is in demo.mp4, how much of it has no video) — see below.
 
         **Only the steps inside `t`'s own capture count.** A capture's first
         frame is where its clock starts, so a step during an earlier part
@@ -2118,7 +2114,35 @@ class HostClock:
         to be able to disagree, or `capture_clock` is not being graded.
         """
         start = max((b for b in self.boundaries if b <= t), default=0.0)
-        return sum(delta for at, delta in self.steps if start <= at <= t)
+        return video_instant(
+            [(at, delta) for at, delta in self.steps if start <= at <= t], t
+        )
+
+    def before(self, t: float) -> float:
+        """How much the wall clock had stepped by `t` seconds into the video.
+
+        Negative when the clock went backwards, which is the direction that
+        takes wall time out of the video. A beat the log puts at `t` is at
+        `t + before(t)` in demo.mp4.
+
+        **Not simply the sum of the steps before `t`**, and the difference is a
+        whole step: a backward step deletes its own width of wall time from the
+        file rather than sliding it, so an instant inside that hole has no
+        frame and `before()` returns what it takes to reach the last one there
+        is (issue #256). `hole()` is how a caller tells that case from an
+        instant the file really contains — this number alone cannot, which is
+        the defect #256 is about, on the harness's side of it.
+        """
+        return self.in_video(t)[0] - t
+
+    def hole(self, t: float) -> float:
+        """Seconds of wall time at `t` that never reached the file, or 0.0.
+
+        Non-zero only inside a backward step's hole, where it is the distance
+        from `t` to the moment the video starts again — which is also how far
+        too early `t + (the steps before t)` would have put it.
+        """
+        return self.in_video(t)[1]
 
     def describe(self) -> str:
         if not self.steps:
@@ -2126,6 +2150,69 @@ class HostClock:
         return "the host's wall clock stepped " + ", ".join(
             f"{delta * 1000:+.0f} ms at {at:.1f}s" for at, delta in self.steps
         )
+
+
+def video_instant(steps: list[tuple[float, float]], t: float) -> tuple[float, float]:
+    """(where `t` is in the video, how many seconds of it have no video at all).
+
+    The one piece of clock arithmetic this file shares between its own watcher
+    and its reading of a published record, because it is not a claim about the
+    recorder — it is what a wall clock does to a file. `HostClock.before` and
+    `merged_clock_correction` are both hand-written *from this*, and both stay
+    hand-written away from the recorder's own `timeline._placed`, which is the
+    independence that matters: a correction taken from the code under test
+    agrees with that code whatever it says.
+
+    **A backward step of Δ does not slide the video. It deletes the monotonic
+    window `(T, T+Δ)` from the file** (issue #256): the encoder stamps frames
+    with the host's wall clock and will not write a stamp it has already
+    written, so the file stalls for the width of the step instead of rewinding.
+    Measured one video frame wide — `video 31.560 → 31.600 shows mono 31.644 →
+    32.644`. So the video's clock is the *high-water mark* of the wall clock,
+    and an instant inside a hole has no frame of its own at all: it clamps to
+    the last one the file has, and the second return value says how far short
+    of the naive `t + (the steps before t)` that left it.
+
+    Everywhere outside a hole this is that sum, digit for digit, and on a host
+    whose clock never steps it is the identity. Which is to say: **on a healthy
+    box every line of this is dead**, and nothing an arm of this suite prints
+    grades it. `HostClockHole` in `tests/unit` does, on a scripted clock.
+    """
+    running = 0.0
+    edge = -math.inf
+    for at, delta in sorted(steps):
+        if at > t:
+            break
+        edge = max(edge, at + running)
+        running += delta
+    shifted = t + running
+    reached = max(shifted, edge)
+    return reached, reached - shifted
+
+
+def hole_clause(clock, t: float, at: float) -> str:
+    """What a failure adds when the instant it is about has no video. Or "".
+
+    Both places this harness prints "the instant `t` is at `at` in the video"
+    are wrong about `at` inside a hole — it is not where that instant is, it is
+    the last moment the file has before the instant's own wall time was deleted
+    (issue #256). Sent to `at` without this, a reader goes looking for a frame
+    that is not there and concludes the harness is confused.
+
+    One function for both messages, appended as a whole sentence rather than
+    spliced into either, so the two cannot drift and so this is gradeable on
+    its own: neither call site is reachable on a host whose clock holds still,
+    and `HostClockHole` in `tests/unit` is the only thing that runs it.
+    """
+    gap = clock.hole(t) if clock is not None else 0.0
+    if not gap:
+        return ""
+    return (
+        f" There is no video of that instant at all: the host's wall clock "
+        f"stepped backwards over it, so {at:.3f}s is the last moment before a "
+        f"gap the video only resumes from {gap * 1000:.0f} ms later, and the "
+        f"recorder is expected to have clamped to the same place (issue #256)."
+    )
 
 
 def joined_clock(parts: list[tuple[HostClock, float]]) -> HostClock:
@@ -2378,23 +2465,31 @@ def merged_clock_correction(record: object, beat: dict) -> float:
     "check that shares the bug's blind spot". The documented rule is the steps
     of *this beat's own capture*, up to this beat — not the running total, and
     not an earlier part's, whose lost wall time is already in the offsets the
-    merge laid the parts out by.
+    merge laid the parts out by — clamped to the last instant the file has
+    where a backward step deleted this one (`video_instant`, issue #256).
+
+    **The hole arithmetic is shared with `HostClock.before`, and that narrows
+    what the comparison in `check_merged_capture_clock` grades**: a bug in
+    `video_instant` cancels on both sides of it. What is left there is what
+    that check is for — whether the *record* attributes its steps to the right
+    capture — and the arithmetic itself is graded against hand-written numbers
+    by `HostClockHole` in `tests/unit`.
     """
     if not isinstance(record, dict):
         return 0.0
     t_start = beat.get("t_start")
     if not isinstance(t_start, (int, float)):
         return 0.0
-    total = 0.0
+    steps = []
     for step in record.get("steps") or []:
         if not isinstance(step, dict):
             continue
         at, delta = step.get("t"), step.get("delta")
         if not isinstance(at, (int, float)) or not isinstance(delta, (int, float)):
             continue
-        if step.get("segment") == beat.get("segment") and at <= float(t_start):
-            total += float(delta)
-    return total
+        if step.get("segment") == beat.get("segment"):
+            steps.append((float(at), float(delta)))
+    return video_instant(steps, float(t_start))[0] - float(t_start)
 
 
 def check_merged_capture_clock(
@@ -6577,6 +6672,71 @@ def check_form_pacing(label: str, out_dir: Path) -> list[str]:
     return failures
 
 
+def _check_unstated_holes(
+    label: str, clock, listed: list[dict], beats: dict
+) -> list[str]:
+    """Frames of a beat the host's clock deleted, that the sheet calls ordinary.
+
+    A backward step of Δ takes a Δ-wide window of wall time out of the file
+    (issue #256), and a beat whose midpoint falls inside one has no frame in
+    `demo.mp4` at all. The recorder cuts the last frame before the gap, which
+    is the only honest thing it can cut — and the sheet then has to *say* that,
+    or the reviewer reads a picture of the moment before the step as a picture
+    of the beat. That is what shipped: `seg-run1`'s `beat-05.png`, cut a whole
+    step early, showing the previous caption, numbered for the next one.
+
+    Only the missing direction is graded. A frame the recorder marks that this
+    watcher did not find a hole for is *not* failed here: the two samplers are
+    on their own 20 ms grids, and whether they agree about the steps at all is
+    `check_capture_clock`'s claim, made against the record rather than against
+    a derived consequence of it. For the same reason a midpoint within
+    `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S` of either edge of the hole is left
+    alone: neither watcher knows which side of the edge it fell on.
+
+    Pure in its inputs, and that is deliberate — a host that does not step its
+    clock produces no holes and can never reach the failure below, so the only
+    way anyone sees this fail is `HostClockHole` in `tests/unit` handing it a
+    scripted clock. Named `_check_…` so `smoke-inject`'s roster counts it: an
+    assertion site the coverage report cannot see makes that report understate
+    what exists, which is the one direction a coverage claim must never fail in.
+    """
+    if clock is None:
+        return []
+    failures = []
+    for frame in listed:
+        beat = beats.get(frame.get("beat"))
+        if beat is None or not isinstance(beat.get("t_start"), (int, float)):
+            continue
+        # `t_end` guarded as well as `t_start`, because a beat can reach here
+        # without one — `check_beat_frames` builds `beats` straight from
+        # `timeline.json` — and a harness check that raises instead of
+        # reporting takes the whole arm down over a beat it had nothing to say
+        # about.
+        if not isinstance(beat.get("t_end"), (int, float)):
+            continue
+        middle = (float(beat["t_start"]) + float(beat["t_end"])) / 2
+        gap = clock.hole(middle)
+        near_edge = any(
+            abs(middle - at) <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S
+            for at, _delta in clock.steps
+        )
+        if gap <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S or near_edge:
+            continue
+        if not frame.get("no_video"):
+            failures.append(
+                f"{label}: beat {frame.get('beat')} runs "
+                f"{beat['t_start']}-{beat['t_end']}s and this harness watched "
+                f"the host's wall clock step backwards over its midpoint "
+                f"({middle:.3f}s) — the video resumes {gap * 1000:.0f} ms after "
+                f"it, so there is no frame of that beat in demo.mp4 at all. "
+                f"{frame.get('file')} is at {frame.get('t')}s with nothing in "
+                f"frames.json saying so, and a sheet that presents the last "
+                f"frame before the gap as the beat's own hands the reviewer a "
+                f"picture of the moment before the step (issue #256)"
+            )
+    return failures
+
+
 def check_beat_frames(
     label: str,
     out_dir: Path,
@@ -6602,6 +6762,10 @@ def check_beat_frames(
         together: the first without the second passes a manifest that says the
         right time over the wrong picture, and the second without the first
         passes a frame faithfully cut from the wrong second;
+      * **a beat the clock deleted is not presented as a frame of itself** —
+        `_check_unstated_holes()`, which fires only where this harness's own
+        watcher saw the wall clock step backwards over a beat's midpoint
+        (issue #256);
       * **the sheet says which clock it cut them on.** On a host that never
         steps its clock the corrected instant and the uncorrected one are the
         same number, so the bullet above cannot tell a recorder that applies
@@ -6719,7 +6883,12 @@ def check_beat_frames(
                 f"and its midpoint sits at {want:.3f}s in the video "
                 f"({middle:.3f}s on the beat log, {stepped(middle):+.3f}s of "
                 f"wall clock before it) — "
-                f"the frame is not the moment the sheet numbers it for"
+                f"the frame is not the moment the sheet numbers it for."
+                # ...and where that instant has no video at all, `want` is the
+                # last frame before the gap and not the midpoint's own moment.
+                # A reader sent to look for the beat at `want` would otherwise
+                # go looking for a frame the file does not contain (#256).
+                + hole_clause(clock, middle, want)
             )
         if not mp4.is_file() or not duration:
             continue
@@ -6807,6 +6976,7 @@ def check_beat_frames(
                 f"the storyboard into it is how it ends up back on the sheet"
             )
 
+    failures += _check_unstated_holes(label, clock, listed, beats)
     failures += _check_frame_captions(
         label,
         out_dir,
@@ -10061,7 +10231,13 @@ def check_narration_placement(
                 f"of demo.mp4; this harness's own wall-clock reading puts the "
                 f"{off:.3f}s instant at {want:.3f}s ({clock.describe()}). The "
                 f"recorder and an independent sampler disagree about where "
-                f"the voice should be (issue #226)"
+                f"the voice should be (issue #226)."
+                # Where the instant has no video, say so rather than reporting
+                # a second as though the file had one: `want` is then the last
+                # moment before the gap, and the recorder is expected to have
+                # clamped a line spoken during a backward step to the same
+                # place (issue #256).
+                + hole_clause(clock, float(off), want)
             )
 
     # (3). Nothing below reads the recorder's record — the file is the witness.
