@@ -102,22 +102,34 @@ def mix_plan(
     demo whose audio placement cannot be told from a guess.
 
     `at` never goes below zero, and **a line that hit that floor says so**. A
-    backward step larger than a line's own offset puts that instant before the
-    video's first frame — the wall time it occupied is genuinely not in the
+    backward step larger than a line's own offset puts that instant before this
+    capture's first frame — the wall time it occupied is genuinely not in the
     file — and `adelay` has no way to express a negative delay, so the clip
-    starts at the top of the track. That line's `at` is then *not* its `t` plus
-    the steps before it, which is what every other line's is and what the
-    artifact says about all of them; `clamped` carries the seconds of
-    correction the start of the file swallowed, and is absent from the lines
-    that got the whole of theirs.
+    starts at the beginning of this capture's own audio. That line's `at` is
+    then *not* its `t` plus the steps before it, which is what every other
+    line's is and what the artifact says about all of them; `clamped` carries
+    the seconds of correction that were swallowed, and is absent from the lines
+    that got the whole of theirs — including the ones whose shortfall rounds
+    away to nothing.
+
+    **Zero here is this capture's zero, not the demo's.** `stitch()` moves a
+    part's lines onto the joined clock by that part's `offset`, and `clamped`
+    travels with them, so a clamped line of part two has an `at` of that
+    part's offset. Anything printing prose about it has to say "the start of
+    its own capture" rather than "0.0".
     """
     shift, state = capture_clock_shift(record)
     lines = []
     for off in offsets:
         want = float(off) + shift(off)
+        # Rounded *before* the test, not after. A `want` of −5e-5 is a
+        # truncation of nothing at the precision this record is written at,
+        # and a `clamped: 0.0` beside it would be a line claiming its `at` is
+        # not `t` plus the steps before it when it is.
+        clamped = round(-want, 3) if want < 0 else 0.0
         line = {"t": round(float(off), 3), "at": round(max(0.0, want), 3)}
-        if want < 0:
-            line["clamped"] = round(-want, 3)
+        if clamped:
+            line["clamped"] = clamped
         lines.append(line)
     return lines, state
 

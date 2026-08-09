@@ -5617,6 +5617,14 @@ class NarrationMix(unittest.TestCase):
             [{"t": 0.5, "at": 0.0, "clamped": 0.28}, {"t": 2.0, "at": 1.22}],
         )
 
+    def test_a_shortfall_that_rounds_away_is_not_called_a_truncation(self):
+        # `at` is written to three places, so a want of -4e-5 *is* `t` plus the
+        # steps before it at the precision of this record. A `clamped: 0.0`
+        # beside it would be a line claiming a truncation of nothing, against
+        # a field documented as absent when there is nothing to say.
+        _delays, record = self.mixed(clock_record((0.1, -0.50004)), 0.5)
+        self.assertEqual(record["lines"], [{"t": 0.5, "at": 0.0}])
+
     def test_the_clips_go_in_in_the_order_the_lines_were_spoken(self):
         # The count is nearly free to satisfy; this is that output K belongs to
         # input K. Line two's step is between them, so a mix that reversed the
@@ -5818,6 +5826,39 @@ class NarrationTimelineNote(unittest.TestCase):
         self.assertIn("1 of them could not be moved the whole way", text)
         self.assertIn("`clamped` is how many seconds", text)
 
+    def test_a_clamped_line_of_a_stitched_part_is_not_claimed_to_be_at_zero(self):
+        """A clamp on part two lands at part two's offset, not at 0.0.
+
+        The prose used to say "those clips start at the top of the track,
+        their `at` is 0.0", which is true of a take recorded in one piece and
+        false of every stitched part after the first — `stitch()` moves a
+        part's lines by its `offset` and `clamped` travels with them. A
+        published artifact naming a second the clip is not at is the failure
+        this whole field exists to prevent, and it is reachable whenever a
+        part's first line sits inside a backward step.
+        """
+        doc = self.doc(
+            {
+                "lines": [
+                    {"t": 2.0, "at": 1.22, "segment": "part1"},
+                    {"t": 8.0, "at": 7.5, "clamped": 0.28, "segment": "part2"},
+                ],
+                "clock_correction": {
+                    "applied": True,
+                    "total": -1.06,
+                    "steps": 2,
+                    "parts": 2,
+                    "parts_uncorrected": 0,
+                    "note": None,
+                },
+            }
+        )
+        text = render_timeline_md(doc)
+        self.assertIn("1 of them could not be moved the whole way", text)
+        self.assertIn("start where their own capture does", text)
+        self.assertNotIn("`at` is 0.0", text)
+        self.assertNotIn("top of the track", text)
+
     def test_a_take_with_nothing_clamped_says_nothing_about_clamping(self):
         # The control. Without it the sentence above is satisfied by a
         # paragraph that prints the caveat over every stepped take.
@@ -5948,6 +5989,30 @@ class MergedNarration(unittest.TestCase):
         self.assertIsNone(merged["narration"]["clock_correction"]["total"])
         self.assertIn(
             "the sampler was away", merged["narration"]["clock_correction"]["note"]
+        )
+
+    def test_a_clamped_line_keeps_its_shortfall_and_lands_at_its_parts_offset(self):
+        # `clamped` has to survive the merge, and the `at` it goes with is the
+        # part's offset rather than zero. Both halves matter: the number is
+        # what says the line did not get its whole correction, and 7.5 is
+        # where the clip actually is in the joined file.
+        clamped = merged_narration_of(
+            [
+                self.part((2.0, 1.22)),
+                {
+                    "lines": [{"t": 0.5, "at": 0.0, "clamped": 0.28}],
+                    "clock_correction": {
+                        "applied": True,
+                        "total": -0.78,
+                        "steps": 1,
+                        "note": None,
+                    },
+                },
+            ]
+        )
+        self.assertEqual(
+            clamped["narration"]["lines"][1],
+            {"t": 8.0, "at": 7.5, "clamped": 0.28, "segment": "part2"},
         )
 
     def test_the_refusal_says_how_many_of_the_parts_it_is_about(self):
@@ -6086,32 +6151,58 @@ class NarrationSpanModel(unittest.TestCase):
         # assertion below is satisfied by a function that merges everything.
         self.assertEqual(
             self.spans([0.963, 3.228], [1.6, 0.3]),
-            [(0.963, 2.563), (3.228, 3.528)],
+            [(0.963, 2.563, (0,)), (3.228, 3.528, (1,))],
         )
 
     def test_a_clip_starting_inside_the_previous_one_is_one_span(self):
         # The measured take, written out: the step put line 1 0.4 s inside
         # line 0, and the file carries 1.028-2.628 s of continuous audio.
-        self.assertEqual(self.spans([1.028, 2.228], [1.6, 0.3]), [(1.028, 2.628)])
+        self.assertEqual(
+            self.spans([1.028, 2.228], [1.6, 0.3]), [(1.028, 2.628, (0, 1))]
+        )
 
     def test_a_merged_span_reaches_the_later_of_the_two_ends(self):
         # ...and the other overlap, where the second clip outlives the first.
         # Taking the first clip's end would under-predict the stretch and go
         # red about a clip that is exactly where it belongs.
-        self.assertEqual(self.spans([1.0, 1.2], [0.3, 1.6]), [(1.0, 2.8)])
+        self.assertEqual(self.spans([1.0, 1.2], [0.3, 1.6]), [(1.0, 2.8, (0, 1))])
 
     def test_clips_closer_than_the_detector_can_separate_are_one_span(self):
         # `silencedetect` only reports a silence at least `d` long, so two
         # clips 40 ms apart come back as one stretch whatever the arithmetic
         # says. The prediction has to agree with the measurement's resolution.
-        self.assertEqual(self.spans([1.0, 2.64], [1.6, 0.3], gap=0.08), [(1.0, 2.94)])
+        self.assertEqual(
+            self.spans([1.0, 2.64], [1.6, 0.3], gap=0.08), [(1.0, 2.94, (0, 1))]
+        )
 
     def test_a_gap_the_detector_can_see_stays_two_spans(self):
         # The boundary from the other side, and the reason the case above is
         # not just "merge anything close".
         self.assertEqual(
             self.spans([1.0, 2.7], [1.6, 0.3], gap=0.08),
-            [(1.0, 2.6), (2.7, 3.0)],
+            [(1.0, 2.6, (0,)), (2.7, 3.0, (1,))],
+        )
+
+    def test_a_span_names_the_lines_it_covers_and_not_its_own_position(self):
+        """Membership, which is what keeps two later claims honest.
+
+        A span built from one clip can still be graded on that clip's
+        *duration*, and an end-of-span bar cannot — an onset 110 ms early
+        against a clip 250 ms too long satisfies the second and not the first.
+        And a failure has to name the line to go and listen to: here the
+        second span is line 2, and calling it "line 1" after its position
+        sends the reader to a clip that is fine.
+        """
+        found = self.spans([1.0, 1.2, 4.0], [1.6, 0.3, 0.5])
+        self.assertEqual([members for _s, _e, members in found], [(0, 1), (2,)])
+
+    def test_membership_follows_the_clip_and_not_the_order_it_was_given(self):
+        # The lines are sorted by where they land, which on a stepped take is
+        # not the order they were spoken in. The indices have to travel with
+        # the clip through that sort, or every message names the wrong line.
+        self.assertEqual(
+            self.spans([4.0, 1.0], [0.3, 0.5]),
+            [(1.0, 1.5, (1,)), (4.0, 4.3, (0,))],
         )
 
 
@@ -6395,9 +6486,25 @@ INJECTIONS = [
         # and a reader correcting by hand corrects it twice.
         "a truncated correction is published as though it were whole",
         "narration.py",
-        "        if want < 0:",
-        "        if want < -1e9:",
+        "        if clamped:",
+        "        if False:",
         ["NarrationMix.test_a_clamped_line_says_how_much_of_its_correction_it_lost"],
+    ),
+    (
+        # ...and the other side of the same key: a shortfall of 4e-5 s, which
+        # is nothing at the three places `at` is written to, published as a
+        # truncation. The field is documented as absent when there is nothing
+        # to say, and a reader who trusts that reads a line as truncated when
+        # its `at` really is `t` plus the steps before it.
+        "a shortfall too small to write down is still called a truncation",
+        "narration.py",
+        "        clamped = round(-want, 3) if want < 0 else 0.0",
+        "        clamped = -want if want < 0 else 0.0",
+        # Only the rounding case, and that is the whole point: this box's
+        # 0.5 + (-0.78) is exactly -0.28, so the ordinary clamped line reads
+        # the same with the rounding gone. The shortfall nobody can write down
+        # is the only observable there is.
+        ["NarrationMix.test_a_shortfall_that_rounds_away_is_not_called_a_truncation"],
     ),
     (
         # ...and the renderer's half of the same claim, which the injection
@@ -6411,6 +6518,26 @@ INJECTIONS = [
         [
             "NarrationTimelineNote."
             "test_a_truncated_correction_is_named_beside_the_rule_it_breaks"
+        ],
+    ),
+    (
+        # The sentence as it shipped in the first round of #226, which is true
+        # of a take recorded in one piece and false of every stitched part
+        # after the first: `stitch()` moves a clamped line by its part's
+        # `offset`, so its `at` is 7.5 and not 0.0. A published artifact
+        # naming a second the clip is not at.
+        "timeline.md says a clamped clip is at the top of the track",
+        "timeline.py",
+        '        f"and `adelay` cannot express a negative delay. Those clips start where "\n'
+        '        f"their own capture does — the top of the file on a take recorded in "\n'
+        '        f"one piece, that part\'s `offset` on a stitched demo — and `clamped` is "\n'
+        '        f"how many seconds of the correction that boundary swallowed."',
+        '        f"and `adelay` cannot express a negative delay. Those clips start at "\n'
+        '        f"the top of the track, their `at` is 0.0, and `clamped` is "\n'
+        '        f"how many seconds of the correction that boundary swallowed."',
+        [
+            "NarrationTimelineNote."
+            "test_a_clamped_line_of_a_stitched_part_is_not_claimed_to_be_at_zero"
         ],
     ),
     (
@@ -6441,6 +6568,37 @@ INJECTIONS = [
             "NarrationSpanModel.test_a_merged_span_reaches_the_later_of_the_two_ends",
             "NarrationSpanModel."
             "test_clips_closer_than_the_detector_can_separate_are_one_span",
+        ],
+    ),
+    (
+        # A span labelled by its position instead of by the clip it carries.
+        # With one merged pair every later span names a line one too low, so
+        # a failure sends the reader to a clip that is fine — and the
+        # single-clip duration bar, which is chosen on membership, is applied
+        # to the wrong clip's length.
+        "a merged span is labelled by its position rather than by its clips",
+        "tests/smoke",
+        "            spans[-1] = (first, max(end, start + length), (*members, index))",
+        "            spans[-1] = (first, max(end, start + length), members)",
+        [
+            "NarrationSpanModel."
+            "test_a_span_names_the_lines_it_covers_and_not_its_own_position",
+            "NarrationSpanModel.test_a_clip_starting_inside_the_previous_one_is_one_span",
+        ],
+    ),
+    (
+        # The indices dropped through the sort. On a stepped take the clips do
+        # not land in the order they were spoken, so a membership derived from
+        # position after sorting names the wrong line every time.
+        "the span model loses which clip is which when it sorts them",
+        "tests/smoke",
+        "    ordered = sorted(\n"
+        "        enumerate(zip(starts, lengths, strict=True)), key=lambda pair: pair[1][0]\n"
+        "    )",
+        "    ordered = list(enumerate(sorted(zip(starts, lengths, strict=True))))",
+        [
+            "NarrationSpanModel."
+            "test_membership_follows_the_clip_and_not_the_order_it_was_given",
         ],
     ),
     (

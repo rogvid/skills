@@ -1929,6 +1929,28 @@ knows is missing is worse than one that is openly absent.
   already runs `caption_arrival`** — `--web-only` or `--segments-only` — where
   both halves would then be read off the same mp4.
 
+  **Where a step merges two clips, the arm can only grade the merged
+  stretch's edges.** Once a backward step puts one clip inside another,
+  `silencedetect` reports one stretch and there is no per-clip length left to
+  check: a short clip moved anywhere inside a long one — or dropped from the
+  mix entirely — changes neither edge. Measured on a real stepped take of this
+  arm (lines at 2.101 s and 3.301 s, a −1.073 s step at 2.214 s): line 1 mixed
+  **0.772 s late reads clean**, and line 1 **omitted reads clean**; the blind
+  window is about **1.17 s**, inside the 0.70–1.50 s band the defect lives in.
+  It also needs `timeline.json` to still name the right second, so the record
+  has to be wrong in a way consistent with itself. This is not a regression:
+  before the merge model the same regime returned "1 stretch for 2 spoken
+  lines" for a *correct* mix too, so nothing in it was graded at all. Closing
+  it needs a per-clip signature in the audio — distinct tones per line, say —
+  which is a change to what the arm seeds and not to what it measures.
+
+  **The two `if not clock.covered` refusals in the narration checks have no
+  automated test.** The arm cannot produce an uncovered watcher on demand, so
+  the guard that stops an unwatched `before()` from being graded on is
+  exercised by nothing. That is precedent rather than drift —
+  `check_timeline`'s identical guard at `tests/smoke:6195` has been uninjected
+  since #245 — and it is written down here rather than left to be noticed.
+
   **And the correction narration applies is over-large on this host, by an
   amount nothing here removes.** #224's diagnosis found that a −Δ wall-clock
   step does not slide the video: it **deletes a Δ-wide hole** from the file,

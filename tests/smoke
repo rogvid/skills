@@ -9797,8 +9797,16 @@ def loud_spans(mp4: Path, duration: float) -> list[tuple[float, float]] | None:
 
 def expected_loud_spans(
     starts: list[float], lengths: list[float], gap: float = NARRATION_SILENCE_MIN_S
-) -> list[tuple[float, float]]:
+) -> list[tuple[float, float, tuple[int, ...]]]:
     """Where the clips should be audible in the mix, overlaps merged.
+
+    Returns `(start, end, the lines that span covers)`. **The membership is
+    load-bearing twice.** A span built from one clip can still be graded on
+    that clip's *duration* — two errors that cancel, an onset 110 ms early
+    against a clip 250 ms too long, satisfy an end-of-span bar and not a
+    duration one. And a failure has to name the line the reader should go and
+    listen to: with three lines and one merged pair, the second span is line 2
+    and calling it "line 1" sends them to the wrong clip.
 
     **Not one span per clip**, and the difference is the phenomenon this arm
     exists for. A backward wall-clock step shortens the *video* and not the
@@ -9817,13 +9825,17 @@ def expected_loud_spans(
     Written as a pure function so `tests/unit` can grade the overlap case,
     which no box produces on demand.
     """
-    spans: list[tuple[float, float]] = []
-    for start, length in sorted(zip(starts, lengths, strict=True)):
+    spans: list[tuple[float, float, tuple[int, ...]]] = []
+    ordered = sorted(
+        enumerate(zip(starts, lengths, strict=True)), key=lambda pair: pair[1][0]
+    )
+    for index, (start, length) in ordered:
         if spans and start - spans[-1][1] <= gap:
-            spans[-1] = (spans[-1][0], max(spans[-1][1], start + length))
+            first, end, members = spans[-1]
+            spans[-1] = (first, max(end, start + length), (*members, index))
         else:
-            spans.append((start, start + length))
-    return [(round(a, 3), round(b, 3)) for a, b in spans]
+            spans.append((start, start + length, (index,)))
+    return [(round(a, 3), round(b, 3), members) for a, b, members in spans]
 
 
 def record_narration(
@@ -9976,6 +9988,19 @@ def check_narration_placement(
     never corrected anything. The arithmetic of the correction is graded in
     `tests/unit` (`NarrationMix`) against scripted records; what this adds is
     that the clip really is in the file at the second the record names.
+
+    **And what it cannot say where the clips merge.** Once a step puts one
+    clip inside another, claim 3 sees one stretch and can only grade its two
+    edges — a short clip moved anywhere inside a long one, or dropped from the
+    mix entirely, changes neither. Measured on a real stepped take of this arm
+    (lines at 2.101 s and 3.301 s, a −1.073 s step at 2.214 s): line 1 mixed
+    0.772 s late reads clean, and line 1 omitted reads clean; the blind window
+    is about **1.17 s**, which is inside the 0.70–1.50 s band the defect lives
+    in. It needs the record to still name the right second, so claim 2 has to
+    have been satisfied by a lie that is consistent with itself. This is not a
+    regression — before the merge model the same regime returned "1 stretch
+    for 2 lines" for a *correct* mix too, so nothing there was graded at all —
+    but it is a hole, and it is in `tests/README.md`'s Known gaps.
     """
     label = "narration"
     failures: list[str] = []
@@ -10064,7 +10089,8 @@ def check_narration_placement(
     # probed back off the clips, which would ask the same question of the same
     # files the recorder mixed. Overlaps merged, because a corrected mix on a
     # stepped host really does produce them; see `expected_loud_spans`.
-    wanted = expected_loud_spans(expected, [s for _text, s in NARRATION_LINES])
+    clips = [seconds for _text, seconds in NARRATION_LINES]
+    wanted = expected_loud_spans(expected, clips)
     if len(spans) != len(wanted):
         return failures + [
             f"{label}: demo.mp4 carries {len(spans)} stretch(es) of audio "
@@ -10073,24 +10099,42 @@ def check_narration_placement(
             f"each other or one is missing, and every window assertion in this "
             f"arm can pass on both"
         ]
-    for n, ((start, end), (want, want_end)) in enumerate(
-        zip(spans, wanted, strict=True)
-    ):
+    for (start, end), (want, want_end, members) in zip(spans, wanted, strict=True):
+        # Named after the lines it really covers, not after its position:
+        # merging makes those two different, and a failure that names the
+        # wrong line sends the reader to the wrong clip.
+        whose = "line " + "+".join(str(m) for m in members)
         if abs(start - want) > NARRATION_ONSET_TOLERANCE_S:
             failures.append(
-                f"{label}: line {n}'s audio starts at {start:.3f}s of "
+                f"{label}: {whose}'s audio starts at {start:.3f}s of "
                 f"demo.mp4, {(start - want) * 1000:+.0f} ms from the "
                 f"{want:.3f}s it belongs at, over the "
                 f"{NARRATION_ONSET_TOLERANCE_S * 1000:.0f} ms this grades. "
                 f"The voice is that far from the caption it was spoken for "
                 f"(issue #226)"
             )
-        if abs(end - want_end) > NARRATION_SPAN_TOLERANCE_S:
+        if len(members) == 1:
+            # **The duration, wherever a span is one clip.** An end-of-span
+            # bar lets two errors cancel — an onset 110 ms early inside the
+            # 120 ms bar, against a 1.85 s stretch where 1.6 s was seeded,
+            # measured landing 140 ms from the wanted end and passing. That
+            # widens the effective length bar from 0.15 s to 0.27 s in the
+            # cancelling direction, and the length is expressible here.
+            clip = clips[members[0]]
+            if abs((end - start) - clip) > NARRATION_SPAN_TOLERANCE_S:
+                failures.append(
+                    f"{label}: {whose} occupies {end - start:.3f}s of demo.mp4 "
+                    f"against a {clip:.3f}s clip — the onset is right and the "
+                    f"clip is not what was mixed there"
+                )
+        elif abs(end - want_end) > NARRATION_SPAN_TOLERANCE_S:
+            # A merged span has no single clip length to be. Its end is the
+            # last clip's end, and that is the only length claim left; see the
+            # Known gaps entry for what merging hides.
             failures.append(
-                f"{label}: line {n}'s audio ends at {end:.3f}s of demo.mp4 "
-                f"against the {want_end:.3f}s a {want_end - want:.3f}s clip "
-                f"started there should reach — the onset is right and what was "
-                f"mixed at it is not the clip"
+                f"{label}: the merged stretch carrying {whose} ends at "
+                f"{end:.3f}s of demo.mp4 against the {want_end:.3f}s its clips "
+                f"should reach — something in it is not the clip it should be"
             )
     return failures
 

@@ -152,10 +152,14 @@ from .markdown import _fmt_t, _md_cell
 #                          fell back to the raw offset because nobody watched
 #                          the clock. A line also carries `clamped` — **only
 #                          when it has one** — being the seconds of correction
-#                          that could not be applied because the result was
-#                          negative: `at` is 0.0 there, `adelay` cannot express
-#                          a negative delay, and that line alone is *not* `t`
-#                          plus the steps before it. On a merged demo every
+#                          that could not be applied because the result fell
+#                          before its own capture's first frame: `adelay`
+#                          cannot express a negative delay, so `at` is the
+#                          start of that line's *own capture* (0.0 on a take
+#                          recorded in one piece, that part's `offset` on a
+#                          stitched demo — **not** 0.0 there), and that line
+#                          alone is *not* `t` plus the steps before it.
+#                          On a merged demo every
 #                          part's lines are here, moved onto the stitched clock
 #                          by that part's `offset` and each naming its own
 #                          `segment`; `clock_correction.applied` is true only
@@ -711,13 +715,20 @@ def _narration_md(narration: object) -> list[str]:
     # untrue for. Reachable only here: an uncorrected mix shifts nothing, so
     # nothing it produces can go negative.
     clamped = [line for line in lines if line.get("clamped")]
+    # **"the start of its own capture", never "0.0".** A single take's capture
+    # starts at the top of the file and the two read the same; a stitched
+    # part's starts at that part's `offset`, and a clamped line of part two has
+    # an `at` of 7.5 rather than of zero. Saying 0.0 there is a published
+    # artifact stating a second the clip is not at, on exactly the host this
+    # correction exists for.
     tail = (
         f" **{len(clamped)} of them could not be moved the whole way**: the "
-        f"steps before that line were larger than the line's own offset, so "
-        f"the wall time it occupied is not in the video at all and `adelay` "
-        f"cannot express a negative delay. Those clips start at the top of the "
-        f"track, their `at` is 0.0, and `clamped` is how many seconds of the "
-        f"correction the start of the file swallowed."
+        f"steps before that line were larger than the line's own offset into "
+        f"its capture, so the wall time it occupied is not in the video at all "
+        f"and `adelay` cannot express a negative delay. Those clips start where "
+        f"their own capture does — the top of the file on a take recorded in "
+        f"one piece, that part's `offset` on a stitched demo — and `clamped` is "
+        f"how many seconds of the correction that boundary swallowed."
         if clamped
         else ""
     )
