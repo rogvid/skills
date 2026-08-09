@@ -37,7 +37,9 @@ into a take on the WSL2 box of
 **The second of those two is corrected, and the first is not**
 ([#229](https://github.com/rogvid/skills/issues/229)). Each frame is cut at
 its beat's midpoint **plus the wall-clock steps its own capture recorded
-before it**, read out of `timeline.json`'s `capture_clock`; corrected that way,
+before that midpoint** — the instant being converted, not the beat's start, so
+a step landing inside a beat's first half moves that beat's frame — read out of
+`timeline.json`'s `capture_clock`; corrected that way,
 38 caption transitions over six takes landed within 101 ms of the log where the
 uncorrected cut was out by up to 1.50 s. The timestamps in `frames.json` and
 `frames.md` are **already on the video's clock** — do not apply

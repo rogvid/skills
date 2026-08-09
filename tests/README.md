@@ -662,7 +662,8 @@ recorder claims, and it deliberately claims very little:
   by the manifest and vice versa.
 - **Each frame is the moment it says it is.** Two halves, and only together.
   Its timestamp must be its beat's midpoint **moved onto the video's clock by
-  this harness's own wall-clock watcher** ([#229](https://github.com/rogvid/skills/issues/229)),
+  this harness's own wall-clock watcher, read at the midpoint**
+  ([#229](https://github.com/rogvid/skills/issues/229)),
   computed *here* from
   `timeline.json` — not imported from the recorder, and not corrected with the
   take's own `capture_clock`, because a check that re-derives its expectation
@@ -2033,8 +2034,11 @@ knows is missing is worse than one that is openly absent.
   **And on a host whose clock never steps, the correction is a no-op** — a
   corrected cut and an uncorrected one are the same number, so no arm of this
   suite can tell them apart there. The arithmetic is graded on a *scripted*
-  record by `FrameClockCorrection` in `tests/unit`, where six injections cost
-  0.2 s each; what `--segments-only` adds on any host is that the sheet states
+  record by `FrameClockCorrection` in `tests/unit`, where ten injections cost
+  0.2 s each — including the one that reads the correction at a beat's
+  `t_start` and applies it to the midpoint, which is how #253 shipped its first
+  round and is a whole step wrong for every step landing in a beat's first
+  half (49.2-49.6 % of take wall time, across the three committed demos); what `--segments-only` adds on any host is that the sheet states
   which of the three cases it was, and that a step the recorder invents moves
   the frames and is caught by a placement check reading this harness's own
   watcher.
@@ -2121,6 +2125,45 @@ knows is missing is worse than one that is openly absent.
   are runnable here when the host is quiet, and #229's two were run and caught.
   Treat a green `--segments-only` on this box as a reading of the host as much
   as of the recorder.
+
+- **`_check_frame_captions` is the only check that compares the review sheet
+  against the world, and it has no injection.** Everything else about the
+  frames — the count, the naming, the placement, and since
+  [#229](https://github.com/rogvid/skills/issues/229) the correction the sheet
+  states — grades an artifact against a record or against this harness's own
+  watcher. Only the caption-band ranking reads pixels, and it is one of the 16
+  of 40 check functions with no `smoke-inject` entry. #229 increased what rests
+  on it: a correction applied to the wrong instant moves frames away from their
+  beats, and this is the arm that would see it. Closing it is
+  [#233](https://github.com/rogvid/skills/issues/233)'s shape, and it is not
+  closed.
+
+- **#229's frame-placement guard cannot see the defect it was assumed to
+  catch, on a short beat.** Two clean `--segments-only` runs on the WSL2 box on
+  2026-08-09 caught the host stepping (**−907 ms at 8.62 s** and **−918 ms at
+  9.094 s** on the merged clock, part2 both times), and the frames check passed
+  both with the correction applied — 14 of 15 and 12 of 15 frames placed within
+  0.02 s of where this harness's own watcher puts them. Run 2 also contains a
+  real instance of the defect review #253 blocked on: the step landed **inside**
+  beat 9's span (8.935–9.255 s), so the shipped code cut `beat-09.png` at
+  8.177 s where the pre-fix code would have cut it at 9.095 s — **0.918 s**, or
+  ~23 frames.
+
+  **And the guard would not have caught that one.** Beat 9 is 0.32 s long, so
+  its midpoint sits 1 ms from the step and
+  `MAX_CLOCK_STEP_TIME_DISAGREEMENT_S` skips it — it is one of the "3 not
+  placement-graded" the arm printed — and `_check_frame_captions` excluded it
+  too, as within 0.75 s of a caption change. The guard catches this class only
+  for a beat **longer than 0.5 s** whose step lands **more than 0.25 s before
+  the midpoint**; on a short beat the exclusion window covers exactly the
+  frames the defect hits. `FrameClockCorrection` in `tests/unit` is the real
+  gate on it, and this is why: an arm that skips the ambiguous frames cannot
+  also be the thing that grades them.
+
+  Both runs were nonetheless **red**, on `check_merge_offset`'s caption timing
+  (+540 ms and +340 ms of *log-ahead* skew, and on the second run a slide past
+  the 1.5 s search window) — the #215/#224 shape, in assertions #229 does not
+  touch.
 
 - **The terminal arm loses roughly a second more than its host clock explains,
   and nothing here knows why.** The correction is exact on the web arm — six

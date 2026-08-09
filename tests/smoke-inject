@@ -652,11 +652,11 @@ INJECTIONS = [
         # instant `frames.py`'s own header says is the wrong one.
         name="every review frame is cut at the start of its beat, not its midpoint",
         module="frames.py",
-        old=(
-            "        middle = min(max((float(t_start) + float(t_end)) / 2 + slid, "
-            "0.0), last)"
+        old="        middle = min(max(logged + correct(beat, logged), 0.0), last)",
+        new=(
+            "        middle = min(max(float(t_start) + correct(beat, "
+            "float(t_start)), 0.0), last)"
         ),
-        new="        middle = min(max(float(t_start) + slid, 0.0), last)",
         arm="--segments-only",
         sites=("check_beat_frames",),
         must_contain=("the frame is not the moment the sheet numbers it for",),

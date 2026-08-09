@@ -137,8 +137,9 @@ Two things in the recorder already apply this for you, and reading them as
 uncorrected is the way to get it wrong twice
 ([#229](https://github.com/rogvid/skills/issues/229)): **the review frames
 under `frames/` are cut on the video's clock**, midpoint plus that beat's own
-capture's steps before it, and `frames/frames.md` says which of the three
-cases the take was; and `timeline.md` says above its beat table when the clock
+capture's steps before *that midpoint* (the rule is indexed by the instant you
+are converting, not by the beat — a step inside a beat's first half moves its
+frame), and `frames/frames.md` says which of the three cases the take was; and `timeline.md` says above its beat table when the clock
 stepped and by how much. `timeline.json`'s beat timestamps are untouched — they
 are the log, and the log is `time.monotonic()`.
 

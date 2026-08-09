@@ -234,8 +234,15 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         # Onto the video's clock before anything is clamped: the correction is
         # what puts the beat where the frames are, and clamping first would
         # aim at the end of a file the beat does not reach.
-        slid = correct(beat)
-        middle = min(max((float(t_start) + float(t_end)) / 2 + slid, 0.0), last)
+        #
+        # Every instant is corrected **by the steps before that instant** —
+        # `correct(beat, t)`, not one number per beat. A step landing inside a
+        # beat's own first half moved this frame and did not move the beat's
+        # start, and half of a take's wall time is inside some beat's first
+        # half, so a per-beat number leaves roughly one step in two applied to
+        # the wrong instants.
+        logged = (float(t_start) + float(t_end)) / 2
+        middle = min(max(logged + correct(beat, logged), 0.0), last)
         index = int(beat.get("index", len(planned)))
         planned.append({
             "file": f"beat-{index:02d}.png",
@@ -250,10 +257,12 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
             continue
         # The same slide, for the same reason: this window is a search through
         # the video, so it has to be the beat's span *in the video*. Left on
-        # the log's clock it would scan a stretch the beat had already left.
+        # the log's clock it would scan a stretch the beat had already left —
+        # and each edge is corrected at its own instant, because a step inside
+        # the beat moves its end and not its start.
         window = (
-            min(max(float(t_start) + slid, 0.0), last),
-            min(max(float(t_end) + slid, 0.0), last),
+            min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last),
+            min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last),
         )
         for n, cut in enumerate(scene_times(mp4, *window), 1):
             planned.append({
@@ -298,7 +307,8 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     # here too would tell a reviewer their frames may be stale by the very
     # amount they were just moved by.
     tail = beats[-1]
-    over = float(tail.get("t_end") or 0.0) + correct(tail) - float(duration)
+    tail_end = float(tail.get("t_end") or 0.0)
+    over = tail_end + correct(tail, tail_end) - float(duration)
     manifest["capture_loss_at_least"] = round(max(0.0, over), 3)
     json_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     md_path.write_text(render_frames_md(manifest))
@@ -361,21 +371,26 @@ def _clock_md(clock: object) -> list[str]:
             f"demo — and nothing here knows by how much.",
             "",
         ]
-    total = clock.get("total") or 0.0
-    if not total:
+    # On the **count**, never on the total. Two steps that cancel — a +0.9 s
+    # pulse and the -0.9 s that undoes it, which is the shape of the host this
+    # work exists for — total zero and still move every frame cut between
+    # them. Branching on the total would print "did not step" over a sheet
+    # whose frames had moved by nearly a second.
+    if not clock.get("steps"):
         return [
             "The host's wall clock was watched for the length of this take and "
             "did not step, so each frame is at its beat's midpoint.",
             "",
         ]
     return [
-        f"**The host's wall clock stepped {total:+.2f}s while this was "
-        f"recorded**, over {clock.get('steps')} step(s), and the video is on "
-        f"that clock. Each frame below was therefore cut at its beat's "
-        f"midpoint **plus the steps its own capture recorded before it**, not "
-        f"at the midpoint itself — the timestamps in the table are where the "
-        f"frames came out of the video. `timeline.json`'s `capture_clock` has "
-        f"the steps.",
+        f"**The host's wall clock stepped {clock.get('steps')} time(s) while "
+        f"this was recorded** ({clock.get('total') or 0.0:+.2f}s in total), and "
+        f"the video is on that clock. Each frame below was therefore cut at "
+        f"its beat's midpoint **plus the steps its own capture recorded before "
+        f"that instant**, not at the midpoint itself — the timestamps in the "
+        f"table are where the frames came out of the video, and the total "
+        f"above is the correction for none of them individually. "
+        f"`timeline.json`'s `capture_clock` has the steps.",
         "",
     ]
 

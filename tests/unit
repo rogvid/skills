@@ -5219,6 +5219,43 @@ class FrameClockCorrection(unittest.TestCase):
         )
         self.assertEqual(cuts, [0.55, 2.05])
 
+    def test_a_step_inside_a_beat_moves_the_frame_cut_after_it(self):
+        """The correction is indexed by the **instant**, not by the beat.
+
+        A frame is cut at the midpoint, so the steps that apply to it are the
+        ones before the *midpoint* — a step landing in the beat's first half
+        moved that frame and nothing about the beat's start says so. Summing
+        to `t_start` instead leaves exactly this beat uncorrected, by the whole
+        step, while the sheet claims the correction was applied; and it is not
+        a corner, because roughly half of a take's wall time is inside some
+        beat's first half.
+
+        The numbers are written out: beat 0 runs 1.0-9.0 s, its midpoint is
+        5.0 s on the log, the clock had given up 0.78 s by then, so the frame
+        is at 4.22 s of the file. Beat 1 is wholly after the step and moves by
+        the same 0.78 s.
+        """
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, -0.78)),
+            beats=[beat(0, "hold", 1.0, t_end=9.0), beat(1, "caption", 10.4)],
+        )
+        _manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [4.22, 9.67])
+
+    def test_a_scene_window_is_clipped_by_a_step_inside_its_own_beat(self):
+        # The same rule at both edges of the search window: the step at 2.0 s
+        # is inside the beat, so the window's start is uncorrected (1.0 s) and
+        # its end is 0.78 s earlier (9.0 - 0.78). Correcting both edges by one
+        # number would scan 0.78 s of the wrong video either way.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, -0.78)),
+            beats=[beat(0, "hold", 1.0, t_end=9.0)],
+        )
+        _manifest, _cuts, windows = self.sheet(doc)
+        self.assertEqual(windows, [(1.0, 8.22)])
+
     def test_a_step_only_moves_the_frames_of_the_capture_that_measured_it(self):
         # Part one losing 0.78 s of wall time is already in part two's offset,
         # because `stitch()` lays the parts out by their measured durations.
@@ -5288,8 +5325,41 @@ class FrameClockCorrection(unittest.TestCase):
         )
         self.assertEqual(manifest["clock_correction"]["steps"], 1)
         sheet = render_frames_md(manifest)
-        self.assertIn("wall clock stepped -0.78s", sheet)
-        self.assertIn("plus the steps its own capture recorded before it", sheet)
+        self.assertIn("wall clock stepped 1 time(s)", sheet)
+        self.assertIn("(-0.78s in total)", sheet)
+        self.assertIn(
+            "plus the steps its own capture recorded before that instant", sheet
+        )
+
+    def test_steps_that_cancel_are_still_steps_on_the_sheet(self):
+        # The host this work exists for moves in *pulses* — up 0.9 s, back
+        # down 0.9 s — and a take that catches both totals zero while every
+        # frame cut between them has moved by nearly a second. A sheet that
+        # branched on the total would print "did not step" over exactly that.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record((2.0, 0.9), (8.0, -0.9)),
+            beats=[beat(0, "caption", 5.0)],
+        )
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [5.95])
+        self.assertEqual(manifest["clock_correction"]["total"], 0.0)
+        self.assertEqual(manifest["clock_correction"]["steps"], 2)
+        sheet = render_frames_md(manifest)
+        self.assertNotIn("did not step", sheet)
+        self.assertIn("stepped 2 time(s)", sheet)
+
+    def test_a_single_takes_step_that_names_a_capture_refuses_the_record(self):
+        # A take recorded in one piece has no `segments` and its beats carry
+        # no segment, so a step that names one matches nothing — the same
+        # correct-nothing-while-reporting-a-correction shape as the merged
+        # case below, from the other side of the guard.
+        doc = self.take(clock_record((1.0, -0.78)), 0.5, 2.0)
+        doc["capture_clock"]["steps"][0]["segment"] = "part1"
+        manifest, cuts, _windows = self.sheet(doc)
+        self.assertEqual(cuts, [0.55, 2.05])
+        self.assertIs(manifest["clock_correction"]["applied"], False)
+        self.assertIn("cut on the beat log, uncorrected", render_frames_md(manifest))
 
     def test_a_merged_step_that_names_no_capture_corrects_nothing_and_says_so(self):
         # The shape #250's own injection was rewritten for: on a merged
@@ -5329,6 +5399,19 @@ class FrameClockCorrection(unittest.TestCase):
         bare, _cuts, _windows = self.sheet(doc)
         self.assertAlmostEqual(bare["capture_loss_at_least"], 0.7, places=3)
 
+    def test_a_step_inside_the_last_beat_is_not_reported_as_capture_loss(self):
+        # The same claim where the correction has to be read at the beat's
+        # **end**: the step at 5.2 s is inside the last beat (4.8-5.6 s), so a
+        # reader summing to the beat's *start* finds nothing and reports
+        # 0.60 s of loss that the record has already explained.
+        doc = envelope(
+            duration=5.0,
+            capture_clock=clock_record((5.2, -0.78)),
+            beats=[beat(0, "caption", 0.5), beat(1, "hold", 4.8, t_end=5.6)],
+        )
+        manifest, _cuts, _windows = self.sheet(doc)
+        self.assertEqual(manifest["capture_loss_at_least"], 0.0)
+
     def test_a_sheet_that_wrote_no_frames_claims_no_correction(self):
         doc = self.take(clock_record((1.0, -0.78)), 0.5)
         doc["segment"] = "part1"
@@ -5350,8 +5433,8 @@ class TimelineClockNote(unittest.TestCase):
 
     def test_a_stepped_clock_is_named_with_its_size_above_the_beat_table(self):
         text = render_timeline_md(self.doc(clock_record((1.0, -0.78), (4.0, -0.72))))
-        self.assertIn("wall clock stepped -1.50s", text)
-        self.assertIn("over 2 step(s)", text)
+        self.assertIn("wall clock stepped 2 time(s)", text)
+        self.assertIn("(-1.50s in total)", text)
         # Above the table, not under it: a reader who has already read the
         # rows has read them as the video's timestamps.
         self.assertLess(text.index("wall clock stepped"), text.index("| # | start |"))
@@ -5360,6 +5443,14 @@ class TimelineClockNote(unittest.TestCase):
         text = render_timeline_md(self.doc(clock_record(measured=False)))
         self.assertIn("was not measured", text)
         self.assertIn("the sampler was away for up to 5.50s", text)
+
+    def test_steps_that_cancel_are_still_named_in_the_timeline(self):
+        # Two steps that undo each other total zero and still part the beat
+        # log from the video for everything recorded between them, so the
+        # paragraph is decided on the count.
+        text = render_timeline_md(self.doc(clock_record((2.0, 0.9), (8.0, -0.9))))
+        self.assertIn("stepped 2 time(s)", text)
+        self.assertIn("(+0.00s in total)", text)
 
     def test_a_watched_clock_that_held_still_adds_nothing(self):
         # The ordinary take, and the reason the two paragraphs above are worth
@@ -5757,12 +5848,12 @@ INJECTIONS = [
     ),
     # -- and what the review sheet does with all of it (issue #229) ----------
     #
-    # Six entries, and all six are breaks a steady host cannot notice: with no
-    # step in the record, a corrected cut and an uncorrected one are the same
-    # number. The scripted records in `FrameClockCorrection` are what makes
-    # them faults on any box — the hazard #250's own manifest hit, where an
-    # injection that stripped `segment` off every merged step was a no-op
-    # wherever the clock never moved.
+    # Every entry below is a break a steady host cannot notice: with no step in
+    # the record, a corrected cut and an uncorrected one are the same number.
+    # The scripted records in `FrameClockCorrection` are what makes them faults
+    # on any box — the hazard #250's own manifest hit, where an injection that
+    # stripped `segment` off every merged step was a no-op wherever the clock
+    # never moved.
     (
         # The state everything was in before this: the sheet a reviewer reads
         # is cut on the beat log, and on a host that stepped its clock every
@@ -5770,8 +5861,8 @@ INJECTIONS = [
         # The manifest, the names and the count are all untouched.
         "every review frame is cut on the beat log rather than on the video's clock",
         "frames.py",
-        "        middle = min(max((float(t_start) + float(t_end)) / 2 + slid, 0.0), last)",
-        "        middle = min(max((float(t_start) + float(t_end)) / 2, 0.0), last)",
+        "        middle = min(max(logged + correct(beat, logged), 0.0), last)",
+        "        middle = min(max(logged, 0.0), last)",
         [
             "FrameClockCorrection.test_a_frame_is_cut_where_its_beat_sits_in_the_video",
             "FrameClockCorrection."
@@ -5785,12 +5876,46 @@ INJECTIONS = [
         "the scene search window stays on the beat log's clock",
         "frames.py",
         "        window = (\n"
-        "            min(max(float(t_start) + slid, 0.0), last),\n"
-        "            min(max(float(t_end) + slid, 0.0), last),\n"
+        "            min(max(float(t_start) + correct(beat, float(t_start)), 0.0), last),\n"
+        "            min(max(float(t_end) + correct(beat, float(t_end)), 0.0), last),\n"
         "        )",
         "        window = (min(float(t_start), last), min(float(t_end), last))",
         [
             "FrameClockCorrection.test_the_scene_search_window_is_the_beats_span_in_the_video",
+            "FrameClockCorrection."
+            "test_a_scene_window_is_clipped_by_a_step_inside_its_own_beat",
+        ],
+    ),
+    (
+        # **The defect review #253 blocked on**, as it shipped: the correction
+        # read at the beat's `t_start` and then applied to its midpoint, both
+        # window edges and the tail. A step landing in a beat's own first half
+        # is then left out, that frame does not move at all — by the whole
+        # step — and the sheet says it was corrected. Roughly one recorded step
+        # in two lands there: 49.2-49.6 % of take wall time is inside some
+        # beat's first half across this repo's three committed demos.
+        "the correction is read at the beat's start and applied to its midpoint",
+        "frames.py",
+        "        logged = (float(t_start) + float(t_end)) / 2\n"
+        "        middle = min(max(logged + correct(beat, logged), 0.0), last)",
+        "        logged = (float(t_start) + float(t_end)) / 2\n"
+        "        middle = min(max(logged + correct(beat, float(t_start)), 0.0), last)",
+        [
+            "FrameClockCorrection.test_a_step_inside_a_beat_moves_the_frame_cut_after_it",
+        ],
+    ),
+    (
+        # The same defect at the tail: the last beat's *end* corrected by the
+        # steps before its start, so a step inside that beat is counted again
+        # as capture loss the record has already explained.
+        "the capture-loss floor is corrected at the last beat's start, not its end",
+        "frames.py",
+        "    over = tail_end + correct(tail, tail_end) - float(duration)",
+        '    over = tail_end + correct(tail, float(tail.get("t_start") or 0.0)) '
+        "- float(duration)",
+        [
+            "FrameClockCorrection."
+            "test_a_step_inside_the_last_beat_is_not_reported_as_capture_loss",
         ],
     ),
     (
@@ -5801,8 +5926,8 @@ INJECTIONS = [
         "a beat is corrected by every capture's steps rather than its own",
         "timeline.py",
         '            if step.get("segment") == beat.get("segment")\n'
-        '            and float(step["t"]) <= float(t_start)',
-        '            if float(step["t"]) <= float(t_start)',
+        '            and float(step["t"]) <= float(t)',
+        '            if float(step["t"]) <= float(t)',
         [
             # Only this one. A merged demo whose *later* part carries the step
             # is unmoved by dropping the filter — every earlier beat is before
@@ -5821,7 +5946,7 @@ INJECTIONS = [
         # record that is the correction for no beat at all.
         "a beat is corrected by steps the clock had not taken yet",
         "timeline.py",
-        '            and float(step["t"]) <= float(t_start)',
+        '            and float(step["t"]) <= float(t)',
         "            and True",
         [
             "FrameClockCorrection.test_a_step_after_a_beat_does_not_move_that_beats_frame",
@@ -5846,13 +5971,29 @@ INJECTIONS = [
         # A merged record whose steps name no capture matches no beat, so this
         # applies nothing while reporting a correction — the same no-op the
         # sheet would then be silent about.
-        "a merged step belonging to no capture is accepted as usable",
+        "a step belonging to no capture of this demo is accepted as usable",
         "timeline.py",
-        '        if merged and step.get("segment") not in merged:\n            return None',
+        '        if step.get("segment") not in allowed:\n            return None',
         "        if False:\n            return None",
         [
             "FrameClockCorrection."
             "test_a_merged_step_that_names_no_capture_corrects_nothing_and_says_so",
+            "FrameClockCorrection."
+            "test_a_single_takes_step_that_names_a_capture_refuses_the_record",
+        ],
+    ),
+    (
+        # The guard as it first shipped: keyed off `doc["segments"]`, so it
+        # never ran on a take recorded in one piece. A step naming a capture
+        # that demo does not have then matches no beat, corrects nothing, and
+        # is reported as applied.
+        "a single take's steps may name a capture the demo does not have",
+        "timeline.py",
+        '        if step.get("segment") not in allowed:',
+        '        if named and step.get("segment") not in named:',
+        [
+            "FrameClockCorrection."
+            "test_a_single_takes_step_that_names_a_capture_refuses_the_record",
         ],
     ),
     (
@@ -5878,8 +6019,8 @@ INJECTIONS = [
         # the one line of the sheet that is about how much to distrust it.
         "a recorded wall-clock step is also reported as lost capture time",
         "frames.py",
-        '    over = float(tail.get("t_end") or 0.0) + correct(tail) - float(duration)',
-        '    over = float(tail.get("t_end") or 0.0) - float(duration)',
+        "    over = tail_end + correct(tail, tail_end) - float(duration)",
+        "    over = tail_end - float(duration)",
         [
             "FrameClockCorrection.test_a_recorded_step_is_not_also_reported_as_capture_loss",
         ],
@@ -5891,13 +6032,38 @@ INJECTIONS = [
         # entry above, from the other side.
         "the review sheet stops saying its frames were cut with the clock applied",
         "frames.py",
-        '    total = clock.get("total") or 0.0\n    if not total:',
-        '    return []\n    total = clock.get("total") or 0.0\n    if not total:',
+        '    if not clock.get("steps"):',
+        '    return []\n    if not clock.get("steps"):',
         [
             "FrameClockCorrection."
             "test_a_watched_clock_that_held_still_says_that_rather_than_nothing",
             "FrameClockCorrection."
             "test_a_stepped_take_says_on_the_sheet_that_its_frames_were_moved",
+        ],
+    ),
+    (
+        # The sheet decides "did it step?" on the **total** rather than on the
+        # count, so a pulse and the step that undoes it read as a clock that
+        # held still — over a sheet whose frames moved by 0.9 s. Narrow
+        # trigger, and it is the shape of the host this whole field exists for.
+        "the sheet reads a pulse and its undo as a clock that never stepped",
+        "frames.py",
+        '    if not clock.get("steps"):',
+        '    if not (clock.get("total") or 0.0):',
+        [
+            "FrameClockCorrection.test_steps_that_cancel_are_still_steps_on_the_sheet",
+        ],
+    ),
+    (
+        # The same, in the beat table: two steps that cancel take the whole
+        # paragraph off `timeline.md`, on a take whose beats and video really
+        # did part company in between.
+        "timeline.md reads a pulse and its undo as a clock that never stepped",
+        "timeline.py",
+        '    if not state.get("steps"):',
+        '    if not (state.get("total") or 0.0):',
+        [
+            "TimelineClockNote.test_steps_that_cancel_are_still_named_in_the_timeline",
         ],
     ),
     (
