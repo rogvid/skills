@@ -14,10 +14,12 @@ newly found gap outside it is a line in this file, and an author who knows the
 boundary can work around it. Each section names the issue it supersedes, and
 carries that issue's numbers, so the evidence outlives the issue.
 
-Two limits live elsewhere and are not repeated. The recorder hides nothing that
+Some limits live elsewhere and are not repeated. The recorder hides nothing that
 reaches the screen — the top of [SKILL.md](../SKILL.md), and the reason there
 is no masking verb. A frozen clock changes what an app does and usually does it
-silently — [determinism.md](determinism.md).
+silently, and every boundary about the recorder's own cursor sits beside it —
+when the dot is drawn at all, why a verb landing on exactly `(0, 0)` draws
+nothing, and when a move can be dropped outright — [determinism.md](determinism.md).
 
 ## What the recorder will not notice about your app
 

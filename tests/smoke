@@ -11025,6 +11025,60 @@ def main() -> int:
     return 0
 
 
+# How many previous ephemeral output directories survive a new run, and the
+# age under which one is never touched however many there are (issue #218).
+#
+# A failed run keeps its directory on purpose — that is what makes a failure
+# debuggable, and `main()` only removes an ephemeral `out_root` when there were
+# no failures. Nothing ever reaped them, so the pile was 134 directories when
+# #218 was filed. It is bounded in practice by the host clearing `/tmp` on
+# restart, which is why this is keep-last-N rather than anything cleverer:
+# the directory somebody is about to look at is the one that just failed, and
+# the four before it cover going back to compare.
+#
+# `REAP_MIN_AGE_S` is the concurrency guard. The machine lock means one suite
+# at a time, but `--allow-concurrent` exists and a run that has been going for
+# under an hour may still be writing. Young directories are never removed
+# *and* they use up the budget, so a burst of concurrent runs reaps nothing.
+KEEP_OUT_ROOTS = 5
+REAP_MIN_AGE_S = 3600.0
+
+
+def out_roots_to_reap(
+    entries: list[tuple[Path, float]],
+    now: float,
+    keep: int = KEEP_OUT_ROOTS,
+    min_age_s: float = REAP_MIN_AGE_S,
+) -> list[Path]:
+    """Which previous runs' directories this run may remove.
+
+    Pure, and separated from the filesystem for exactly that reason: the
+    interesting behaviour is the budget arithmetic, and a test that had to
+    stage real directories with faked mtimes would grade the staging.
+    """
+    young = [(p, m) for p, m in entries if now - m < min_age_s]
+    old = sorted(
+        ((p, m) for p, m in entries if now - m >= min_age_s),
+        key=lambda pm: pm[1],
+        reverse=True,
+    )
+    room = max(0, keep - len(young))
+    return [p for p, _ in old[room:]]
+
+
+def reap_previous_out_roots() -> None:
+    """Apply `out_roots_to_reap` to this host's temp directory."""
+    entries: list[tuple[Path, float]] = []
+    for path in Path(tempfile.gettempdir()).glob("demo-video-smoke-*"):
+        try:
+            if path.is_dir():
+                entries.append((path, path.stat().st_mtime))
+        except OSError:
+            continue  # vanished under us, or not ours to read
+    for stale in out_roots_to_reap(entries, time.time()):
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def open_output(args: argparse.Namespace) -> tuple[Path, bool]:
     """This run's output directory, and whether the run owns it.
 
@@ -11039,6 +11093,8 @@ def open_output(args: argparse.Namespace) -> tuple[Path, bool]:
         out_root = args.out_dir.resolve()
         out_root.mkdir(parents=True, exist_ok=True)
         return out_root, False
+    # Before this run's own directory exists, so it is never a candidate.
+    reap_previous_out_roots()
     return Path(tempfile.mkdtemp(prefix="demo-video-smoke-")), True
 
 

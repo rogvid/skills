@@ -2249,6 +2249,77 @@ def _smoke_guards():
     return guards, flags
 
 
+class ReapedOutRoots(unittest.TestCase):
+    """The keep-last-N policy for `/tmp/demo-video-smoke-*` (issue #218).
+
+    A failed run keeps its directory deliberately, and nothing ever removed
+    them — 134 on the box that filed #218. The pile is bounded in practice by
+    the host clearing `/tmp` on restart, so what matters is not that the
+    reaper is aggressive but that it never takes the one somebody is about to
+    read, and never takes a directory a concurrent run is still writing to.
+    """
+
+    def setUp(self):
+        self.smoke = _smoke_module()
+        self.now = 1_000_000.0
+
+    def aged(self, count, age_s, prefix="old"):
+        return [
+            (Path(f"/tmp/{prefix}-{i}"), self.now - age_s - i) for i in range(count)
+        ]
+
+    def reap(self, entries, **kw):
+        return self.smoke.out_roots_to_reap(entries, self.now, **kw)
+
+    def test_the_five_most_recent_survive_and_the_rest_go(self):
+        entries = self.aged(9, 7200)
+        reaped = self.reap(entries, keep=5, min_age_s=3600.0)
+        self.assertEqual(
+            [p.name for p in reaped],
+            ["old-5", "old-6", "old-7", "old-8"],
+            "the reaper should keep the five newest by mtime and remove the "
+            "rest — anything else and the directory a run just failed in is "
+            "not reliably the one that survives",
+        )
+
+    def test_nothing_young_is_removed_however_many_there_are(self):
+        # Twenty concurrent runs, all started minutes ago. A reaper that went
+        # by count alone would delete fifteen directories being written to.
+        entries = self.aged(20, 60, prefix="live")
+        self.assertEqual(
+            self.reap(entries, keep=5, min_age_s=3600.0),
+            [],
+            "a directory younger than the age floor must never be reaped, "
+            "whatever the count — --allow-concurrent means a young directory "
+            "may still be receiving a take",
+        )
+
+    def test_a_young_directory_spends_the_budget_it_occupies(self):
+        """The subtle one, and the reason `keep` is not applied to old alone.
+
+        Four live runs plus five old directories is nine on disk. If `keep`
+        counted only the old ones, the floor would be nine and the pile would
+        grow by one for every concurrent run ever made.
+        """
+        entries = self.aged(4, 60, prefix="live") + self.aged(5, 7200)
+        reaped = self.reap(entries, keep=5, min_age_s=3600.0)
+        self.assertEqual(
+            [p.name for p in reaped],
+            ["old-1", "old-2", "old-3", "old-4"],
+            "four young directories should leave room for exactly one old "
+            "one, so the total on disk settles at `keep`",
+        )
+
+    def test_fewer_than_the_budget_reaps_nothing(self):
+        self.assertEqual(self.reap(self.aged(3, 7200), keep=5, min_age_s=3600.0), [])
+        self.assertEqual(self.reap([], keep=5, min_age_s=3600.0), [])
+
+    def test_the_shipped_constants_are_the_ones_the_policy_was_argued_for(self):
+        # An ungraded constant is one nothing pins. These two are the policy.
+        self.assertEqual(self.smoke.KEEP_OUT_ROOTS, 5)
+        self.assertEqual(self.smoke.REAP_MIN_AGE_S, 3600.0)
+
+
 class CheapArm(unittest.TestCase):
     def setUp(self):
         self.guards, self.flags = _smoke_guards()
@@ -5588,6 +5659,40 @@ INJECTIONS = [
         'POINTER_PATH_RE = re.compile(r"\\breference/[A-Za-z0-9_-]+\\.md\\b")',
         'POINTER_PATH_RE = re.compile(r"\\breference/[A-Za-z0-9_-]{80,}\\.md\\b")',
         ["DocPointers.test_every_reference_document_the_skill_names_exists"],
+    ),
+    (
+        # The concurrency guard removed. Every directory becomes a candidate,
+        # so a run started five minutes ago and still recording has its output
+        # deleted underneath it by the next run to start.
+        "the reaper treats a directory a live run is writing to as reapable",
+        "tests/smoke",
+        "        ((p, m) for p, m in entries if now - m >= min_age_s),",
+        "        ((p, m) for p, m in entries),",
+        [
+            "ReapedOutRoots.test_nothing_young_is_removed_however_many_there_are",
+            "ReapedOutRoots.test_a_young_directory_spends_the_budget_it_occupies",
+        ],
+    ),
+    (
+        # The budget applied to the old directories alone. Nothing is deleted
+        # that should not be, so every count-based check still passes — the
+        # pile simply never stops growing, one per concurrent run, which is
+        # the failure #218 is about rather than the destructive one above.
+        "young directories are kept without spending the budget they occupy",
+        "tests/smoke",
+        "    room = max(0, keep - len(young))",
+        "    room = keep",
+        ["ReapedOutRoots.test_a_young_directory_spends_the_budget_it_occupies"],
+    ),
+    (
+        # Oldest-first. Exactly `keep` directories survive, so a check that
+        # counted what was left would pass, and the one a run just failed in
+        # is the first thing deleted.
+        "the reaper keeps the oldest directories instead of the newest",
+        "tests/smoke",
+        "        key=lambda pm: pm[1],\n        reverse=True,",
+        "        key=lambda pm: pm[1],",
+        ["ReapedOutRoots.test_the_five_most_recent_survive_and_the_rest_go"],
     ),
     (
         "a deletion leaves a constant in tests/smoke that nothing reads",
