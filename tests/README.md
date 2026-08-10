@@ -1872,23 +1872,44 @@ paragraph whose job is to say what this manifest does not cover.
   points — most recently for #260, which shipped with unit grading alone.
 
   The trigger is a conjunction and nothing else: the arm went red **and** the
-  takes it left behind list a step under `capture_clock.steps`. A red baseline
-  with a steady clock still refuses on its **first** take, exactly as before —
-  that is the genuinely broken recorder, and a retry that outlasted it would
-  certify fourteen entries against a recorder nobody had shown works.
-  Exhausting the three attempts is a refusal that names each attempt's reason
-  *and* the failures the arm reported, because on this host a real fault and a
-  clock step arrive together. Every discarded attempt prints its own failure
-  list, `BASE` says which attempt passed, and the run's last line carries
-  `NOTE: not a first-take baseline` so the line a reviewer quotes cannot read
-  as a first-take green.
+  takes it left behind list a step of at least `MIN_GATING_STEP_S` under
+  `capture_clock.steps`. That bar is the recorder's own `_CaptureClock.WARN_S`
+  (40 ms, one frame of the encode) and **not** its sampler's floor
+  `MIN_STEP_S` (5 ms) — under `WARN_S` the video and the log still agree about
+  which frame a beat is on, so a blip there is not a reason an arm went red,
+  and gating on it would buy a broken recorder three takes eight times as
+  often as the recorder itself thinks anything happened. #255's real steps are
+  1.0–1.4 s.
+
+  A red baseline with a steady clock still refuses on its **first** take,
+  exactly as before — that is the genuinely broken recorder, and a retry that
+  outlasted it would certify fourteen entries against a recorder nobody had
+  shown works. Exhausting the three attempts is a refusal that names each
+  attempt's reason *and* the failures the arm reported, because on this host a
+  real fault and a clock step arrive together. Every discarded attempt prints
+  its own failure list live **and** keeps it, so the end-of-run block reprints
+  it 40 minutes later; `BASE` says which attempt passed; and the run's last
+  line carries `NOTE: not a first-take baseline` so the line a reviewer quotes
+  cannot read as a first-take green.
+
+  **The one absorption it cannot rule out** is a *genuinely flaky* failure that
+  arrived alongside a step and then did not recur. A deterministic red is never
+  absorbed — it comes back on every attempt and exhausts the bound — but a
+  one-in-three one is greened by attempt 2 and survives only as the failure
+  lines in the end-of-run block. That is why those lines are kept rather than
+  only printed, and the block says so itself.
+
+  **It multiplies the worst case too.** An arm that hangs after writing a
+  stepping `timeline.json` costs `ARM_TIMEOUT_S` (20 min) three times over
+  before the refusal, where it used to cost 20 minutes once. Cost only; the
+  verdict is unchanged.
 
   It does **not** make a stepping take pass, and it is not a fix for one —
   [#255](https://github.com/rogvid/skills/issues/255) and
   [#259](https://github.com/rogvid/skills/issues/259) own that. On a steady
   host every line of it is dead, which is why it is graded by
   `BaselineRerecord` in `tests/unit` against hand-written takes and a scripted
-  loop rather than by running an arm, and why 14 `tests/unit` injections break
+  loop rather than by running an arm, and why 20 `tests/unit` injections break
   `tests/smoke-inject` itself.
 
 ### When it runs

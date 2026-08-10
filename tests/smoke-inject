@@ -97,6 +97,10 @@ ARM_TIMEOUT_S = 1_200
 # else — an arm that cannot record three steady takes in a row is not a host
 # anything here should be certified on, and the exhausted message says exactly
 # that instead of retrying into a pass.
+#
+# It multiplies the worst case as well as the normal one: an arm that hangs
+# after writing a stepping `timeline.json` costs `ARM_TIMEOUT_S` (20 min) three
+# times over before the refusal, where it used to cost 20 minutes once.
 BASELINE_ATTEMPTS = 3
 
 # Measured on this box, clean, one arm at a time (see tests/README.md).
@@ -1284,23 +1288,60 @@ def _clock_records(node: object, path: str) -> Iterator[tuple[str, object]]:
             yield from _clock_records(item, f"{path}[{index}]")
 
 
-def _step_text(step: object) -> str:
-    """One `capture_clock.steps` entry, in the wording `HostClock` prints."""
-    if isinstance(step, dict):
-        at, delta = step.get("t"), step.get("delta")
-        numbers = (int, float)
-        if isinstance(at, numbers) and isinstance(delta, numbers):
-            if not isinstance(at, bool) and not isinstance(delta, bool):
-                return f"{delta * 1000:+.0f} ms at {at:.1f}s"
-    return repr(step)
+def _step_seen(step: object) -> tuple[float, float, object] | None:
+    """(t, delta, segment) of one `capture_clock.steps` entry, or `None`.
+
+    `None` for anything this cannot read as a number, and that is the safe
+    direction: a malformed record is a broken recorder, and a broken recorder
+    must not buy itself another take.
+    """
+    if not isinstance(step, dict):
+        return None
+    at, delta = step.get("t"), step.get("delta")
+    if isinstance(at, bool) or isinstance(delta, bool):
+        return None
+    if not isinstance(at, (int, float)) or not isinstance(delta, (int, float)):
+        return None
+    return float(at), float(delta), step.get("segment")
+
+
+def _step_text(at: float, delta: float, segment: object) -> str:
+    """One step, in the wording `HostClock.describe` prints.
+
+    A merged record's steps carry the `segment` they were measured in and a `t`
+    that `_merge_capture_clock` has already shifted onto the *stitched* clock,
+    while the part's own record keeps its own zero. So one step in part 2 is
+    honestly two different times in two records, and without saying which clock
+    each is on a reader looks at the pair and sees a disagreement.
+    """
+    said = f"{delta * 1000:+.0f} ms at {at:.1f}s"
+    if isinstance(segment, str):
+        return f"{said} of the stitched demo, measured in {segment}"
+    return said
+
+
+# The smallest step this gates on, and it is the **recorder's own** bar for
+# saying something out loud rather than the smallest thing its sampler can see.
+# `_CaptureClock.MIN_STEP_S` is 0.005 — five milliseconds, which by that class's
+# own comment leaves "the video and the log still agree about which frame a beat
+# is on". Gating there would let a 5 ms blip buy a broken recorder three takes.
+# `WARN_S` is one frame of the encode, it is where the recorder starts warning
+# its author, and #255's real steps are 1.0-1.4 s — two orders above it.
+#
+# Hand-written here rather than imported from `demo_recording.core`, like every
+# other constant this harness holds against the recorder: a bar taken from the
+# code under test moves whenever that code does. `BaselineRerecord` grades the
+# two against each other so the drift is a failure rather than a discovery.
+MIN_GATING_STEP_S = 0.04
 
 
 def recorded_steps(out_dir: Path) -> list[str]:
     """What the takes under `out_dir` wrote down about the host's wall clock.
 
-    One string per `capture_clock` record that lists a step, naming the file
-    and the field it came out of. Empty on a steady host, on a run that got far
-    enough to write nothing, and on a document this cannot parse.
+    One string per `capture_clock` record carrying a step of at least
+    `MIN_GATING_STEP_S`, naming the file and the field it came out of. Empty on
+    a steady host, on a run that got far enough to write nothing, and on a
+    document this cannot parse.
 
     **The recorder's own published record, deliberately.** This harness has a
     watcher of its own — `HostClock` in `tests/smoke` — but it lives and dies
@@ -1321,9 +1362,17 @@ def recorded_steps(out_dir: Path) -> list[str]:
             if not isinstance(record, dict):
                 continue
             steps = record.get("steps")
-            if not isinstance(steps, list) or not steps:
+            if not isinstance(steps, list):
                 continue
-            said = ", ".join(_step_text(step) for step in steps)
+            seen = [_step_seen(step) for step in steps]
+            big = [
+                step
+                for step in seen
+                if step is not None and abs(step[1]) >= MIN_GATING_STEP_S
+            ]
+            if not big:
+                continue
+            said = ", ".join(_step_text(*step) for step in big)
             found.append(f"{path.relative_to(out_dir)} {where}: {said}")
     return found
 
@@ -1342,13 +1391,27 @@ def rerecord_reason(code: int, steps: list[str]) -> str | None:
     return "the host's wall clock stepped during it — " + "; ".join(steps)
 
 
+class Discarded(NamedTuple):
+    """A baseline take that was thrown away, and **what it had said**.
+
+    The failures travel with the reason because the end-of-run block is the
+    only place a reader of a 42-minute run will see this. A summary that
+    printed the clock step alone would describe a genuinely flaky failure —
+    one red on attempt 1, green on attempt 2 — as nothing but the host's
+    clock, hundreds of lines below the `BASE` line that said otherwise.
+    """
+
+    reason: str
+    failures: tuple[str, ...]
+
+
 class Baseline(NamedTuple):
     """One arm's clean run, and what it cost to get one."""
 
     arm: str
     attempts: int
     seconds: float
-    discarded: tuple[str, ...]  # the reason each earlier attempt was re-recorded
+    discarded: tuple[Discarded, ...]
 
     def summary(self) -> str:
         if not self.discarded:
@@ -1389,13 +1452,24 @@ def rerecord_report(baselines: list[Baseline]) -> list[str]:
     ]
     for base in again:
         out.append(f"  {base.arm}: {base.attempts} attempt(s)")
-        for number, why in enumerate(base.discarded, 1):
-            out.append(f"    attempt {number} discarded, {why}")
+        for number, gone in enumerate(base.discarded, 1):
+            out.append(f"    attempt {number} discarded, {gone.reason}")
+            out.append(f"      and it had reported {len(gone.failures)} failure(s):")
+            for line in gone.failures:
+                out.append(f"      | {line[:160]}")
     out.append(
         "\nA re-record happens only when the arm went red *and* the takes it "
         "left recorded a wall-clock step. It does not make a stepping take "
         "pass and it is not a fix for one — #255/#259 own that — so an entry "
-        "below rests on a baseline this host had to be asked for twice.\n"
+        "below rests on a baseline this host had to be asked for twice."
+    )
+    out.append(
+        "Read those failures. The one thing this cannot tell apart is a "
+        "**genuinely flaky** failure that happened to arrive with a step and "
+        "then happened not to recur — a deterministic red is never absorbed, "
+        "because it comes back on every attempt and exhausts the bound, but a "
+        "one-in-three one is greened by attempt 2 and lives only in the lines "
+        "above.\n"
     )
     return out
 
@@ -1407,7 +1481,7 @@ def baseline(arm: str) -> Baseline:
     `rerecord_reason` names — see the section comment above.
     """
     started = time.monotonic()
-    discarded: list[str] = []
+    discarded: list[Discarded] = []
     for attempt in range(1, BASELINE_ATTEMPTS + 1):
         with tempfile.TemporaryDirectory(prefix="smoke-inject-") as tmp:
             root = stage(Path(tmp))
@@ -1435,7 +1509,7 @@ def baseline(arm: str) -> Baseline:
                 + "\n".join(f"       - {ln}" for ln in lines[:6])
                 + ("\n       " + err[-600:] if not lines else "")
             )
-        discarded.append(reason)
+        discarded.append(Discarded(reason, tuple(lines[:6])))
         # Printed in full, every time. A re-recorded baseline has to be harder
         # to overlook than a first-take green one, because the reader who is
         # about to trust fourteen PASS lines is the one who needs to know that
@@ -1453,7 +1527,9 @@ def baseline(arm: str) -> Baseline:
         f"a wall-clock step, so this is the host, the recorder, or both — "
         f"which of those it is, this cannot say, and it is not going to record "
         f"again until it likes the answer.\n"
-        + "\n".join(f"       attempt {n}: {why}" for n, why in enumerate(discarded, 1))
+        + "\n".join(
+            f"       attempt {n}: {gone.reason}" for n, gone in enumerate(discarded, 1)
+        )
         + "\n"
         + "\n".join(f"       - {ln}" for ln in lines[:6])
         + ("\n       " + err[-600:] if not lines else "")

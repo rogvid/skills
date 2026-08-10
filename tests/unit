@@ -6933,6 +6933,84 @@ class BaselineRerecord(unittest.TestCase):
             )
             self.assertEqual(self.inject.recorded_steps(out), [])
 
+    def test_a_blip_too_small_for_the_recorder_to_warn_about_is_not_a_step(self):
+        """The gate is the recorder's *out loud* bar, not its sampler's floor.
+
+        `_CaptureClock.MIN_STEP_S` is 5 ms, and by that class's own comment a
+        step under `WARN_S` leaves "the video and the log still agree about
+        which frame a beat is on". A 5 ms blip is therefore not a reason the
+        arm went red, and gating on it would buy a broken recorder three takes
+        on a host that hiccups — 8x more often than the recorder itself thinks
+        anything happened. #255's real steps are 1.0-1.4 s.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {"capture_clock": self.clock((1.0, -0.005))},
+            )
+            self.assertEqual(self.inject.recorded_steps(out), [])
+
+    def test_the_gate_sits_exactly_where_the_recorder_starts_warning(self):
+        # Both sides of the boundary, and the constant itself against the
+        # recorder's. The bar is hand-written in the harness on purpose, so
+        # the two drifting apart has to be a failure rather than a discovery.
+        self.assertEqual(self.inject.MIN_GATING_STEP_S, _CaptureClock.WARN_S)
+        bar = self.inject.MIN_GATING_STEP_S
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out, "a/timeline.json", {"capture_clock": self.clock((1.0, -bar))}
+            )
+            self.take(
+                out,
+                "b/timeline.json",
+                {"capture_clock": self.clock((1.0, -bar + 0.001))},
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("a/timeline.json", found[0])
+
+    def test_a_real_step_beside_a_blip_is_reported_without_the_blip(self):
+        # A record can carry both. The reason a developer reads should name
+        # the step that plausibly cost the take its frames, not pad itself
+        # with scheduling noise the recorder would not have mentioned.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {"capture_clock": self.clock((1.0, -0.005), (5.151, -1.051))},
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("-1051 ms at 5.2s", found[0])
+        self.assertNotIn("-5 ms", found[0])
+
+    def test_a_merged_step_says_which_capture_and_which_clock_it_is_on(self):
+        # `_merge_capture_clock` shifts a step's `t` onto the stitched clock
+        # and stamps it with the part it was measured in, while the part's own
+        # record keeps its own zero. One step then prints as two different
+        # times, and without saying which clock each is on the pair reads as a
+        # disagreement between two records.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {
+                    "capture_clock": {
+                        **self.clock(),
+                        "steps": [{"t": 8.9, "delta": -1.051, "segment": "part2"}],
+                    }
+                },
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("-1051 ms at 8.9s of the stitched demo", found[0])
+        self.assertIn("measured in part2", found[0])
+
     def test_a_capture_clock_whose_steps_is_not_a_list_says_nothing(self):
         """A malformed record is a broken recorder, not a stepping host.
 
@@ -7047,6 +7125,13 @@ class BaselineRerecord(unittest.TestCase):
         self.assertIsInstance(result, self.inject.Baseline)
         self.assertEqual((result.attempts, len(runs)), (2, 2))
         self.assertEqual(len(result.discarded), 1)
+        # The discarded take's failures travel with it, not just its reason:
+        # the end-of-run block is built from this and is the only place a
+        # reader of a 42-minute run will see that anything was red.
+        self.assertEqual(
+            result.discarded[0].failures,
+            ("segments: beat-05's frame shows the previous caption",),
+        )
         # And the discarded attempt is in the output, with what it said.
         self.assertIn("attempt 1 of 3 went red", printed)
         self.assertIn("-1051 ms at 5.2s", printed)
@@ -7126,8 +7211,20 @@ class BaselineRerecord(unittest.TestCase):
     # -- and what a reader of the output is told ------------------------------
 
     def base(self, *discarded: str):
+        """A finished baseline whose earlier attempts said `discarded`.
+
+        Each one carries a failure line of its own, because that is what the
+        end-of-run block has to reproduce: the reason alone would describe a
+        flaky red as nothing but the host's clock.
+        """
         return self.inject.Baseline(
-            "--segments-only", len(discarded) + 1, 31.0, tuple(discarded)
+            "--segments-only",
+            len(discarded) + 1,
+            31.0,
+            tuple(
+                self.inject.Discarded(why, (f"segments: something was red ({why})",))
+                for why in discarded
+            ),
         )
 
     def test_a_baseline_that_took_three_goes_says_so_where_it_is_printed(self):
@@ -7163,6 +7260,20 @@ class BaselineRerecord(unittest.TestCase):
         self.assertIn("attempt 1 discarded, stepped — a", block)
         self.assertIn("attempt 2 discarded, stepped — b", block)
         self.assertIn("3 attempt(s)", block)
+
+    def test_the_report_also_says_what_the_discarded_attempt_had_reported(self):
+        """The persistent copy of the failure list, and why it has to exist.
+
+        On a twelve-arm run this block is 40 minutes below the `BASE` line
+        that printed the failures live, and nobody scrolls back. A summary
+        carrying only the clock step describes a red that happened to be
+        flaky as nothing but the host — which is the one absorption this
+        design cannot rule out, so it must at least be legible.
+        """
+        block = "\n".join(self.inject.rerecord_report([self.base("stepped — a")]))
+        self.assertIn("it had reported 1 failure(s)", block)
+        self.assertIn("segments: something was red (stepped — a)", block)
+        self.assertIn("genuinely flaky", block)
 
 
 # --------------------------------------------------------------------------
@@ -9711,7 +9822,7 @@ INJECTIONS = [
     # The thing being broken here is a decision **not to run a check**, so its
     # failure mode is silence: a retry that swallowed a red would report all
     # fourteen `--segments-only` entries as caught against a recorder nobody
-    # had shown works. Two of the eight below are that direction specifically —
+    # had shown works. Two of the fourteen below are that direction specifically —
     # "retry until green" in `rerecord_reason` and in `baseline`'s loop — and
     # both are caught by controls rather than by cases.
     (
@@ -9726,10 +9837,44 @@ INJECTIONS = [
     (
         "a capture_clock's steps count is read as the steps themselves",
         "tests/smoke-inject",
-        "            if not isinstance(steps, list) or not steps:\n",
-        "            if not steps:\n",
+        "            if not isinstance(steps, list):\n",
+        "            if steps is None:\n",
         [
             "BaselineRerecord.test_a_capture_clock_whose_steps_is_not_a_list_says_nothing"
+        ],
+    ),
+    (
+        # The recorder's sampler floor, not its out-loud bar. A 5 ms blip is
+        # 8x under the point the recorder itself thinks anything happened, and
+        # gating there buys a broken recorder three takes on a hiccupping host.
+        "the gate drops to the sampler's floor instead of the recorder's warning",
+        "tests/smoke-inject",
+        "MIN_GATING_STEP_S = 0.04\n",
+        "MIN_GATING_STEP_S = 0.005\n",
+        [
+            "BaselineRerecord.test_a_blip_too_small_for_the_recorder_to_warn_about_is_not_a_step",
+            "BaselineRerecord.test_the_gate_sits_exactly_where_the_recorder_starts_warning",
+            "BaselineRerecord.test_a_real_step_beside_a_blip_is_reported_without_the_blip",
+        ],
+    ),
+    (
+        "any step at all opens the gate, however small the recorder said it was",
+        "tests/smoke-inject",
+        "                if step is not None and abs(step[1]) >= MIN_GATING_STEP_S\n",
+        "                if step is not None\n",
+        [
+            "BaselineRerecord.test_a_blip_too_small_for_the_recorder_to_warn_about_is_not_a_step",
+            "BaselineRerecord.test_the_gate_sits_exactly_where_the_recorder_starts_warning",
+            "BaselineRerecord.test_a_real_step_beside_a_blip_is_reported_without_the_blip",
+        ],
+    ),
+    (
+        "a merged step stops saying which capture and which clock it is on",
+        "tests/smoke-inject",
+        '        return f"{said} of the stitched demo, measured in {segment}"\n',
+        "        return said\n",
+        [
+            "BaselineRerecord.test_a_merged_step_says_which_capture_and_which_clock_it_is_on"
         ],
     ),
     (
@@ -9788,7 +9933,7 @@ INJECTIONS = [
     (
         "the re-record report stops saying why each attempt was discarded",
         "tests/smoke-inject",
-        '            out.append(f"    attempt {number} discarded, {why}")\n',
+        '            out.append(f"    attempt {number} discarded, {gone.reason}")\n',
         '            out.append("    an attempt was discarded")\n',
         [
             "BaselineRerecord.test_the_report_names_every_discarded_attempt_and_its_reason"
@@ -9801,8 +9946,8 @@ INJECTIONS = [
         # list rather than by way of the decision.
         "a take that recorded no step is read as one that recorded a step",
         "tests/smoke-inject",
-        "            if not isinstance(steps, list) or not steps:\n",
-        "            if not isinstance(steps, list):\n",
+        "            if not big:\n                continue\n",
+        "            if big is None:\n                continue\n",
         ["BaselineRerecord.test_a_steady_host_leaves_nothing_to_find"],
     ),
     (
@@ -9841,11 +9986,52 @@ INJECTIONS = [
     (
         "the reason stops saying how big the step was and when it landed",
         "tests/smoke-inject",
-        '                return f"{delta * 1000:+.0f} ms at {at:.1f}s"\n',
-        '                return "a step"\n',
+        '    said = f"{delta * 1000:+.0f} ms at {at:.1f}s"\n',
+        '    said = "a step"\n',
         [
             "BaselineRerecord.test_a_step_in_a_takes_own_record_is_found_and_quoted",
             "BaselineRerecord.test_a_step_only_one_segments_own_record_carries_is_found",
+        ],
+    ),
+    (
+        # A discarded take's failures are printed live and then thrown away, so
+        # the end-of-run block — 40 minutes below, and the only part anyone
+        # reads — describes a red that happened to be flaky as nothing but the
+        # host's clock.
+        "a discarded baseline keeps its reason and forgets what went red",
+        "tests/smoke-inject",
+        "        discarded.append(Discarded(reason, tuple(lines[:6])))\n",
+        "        discarded.append(Discarded(reason, ()))\n",
+        [
+            "BaselineRerecord.test_a_red_over_a_stepping_host_is_recorded_again_and_then_accepted"
+        ],
+    ),
+    (
+        "the end-of-run block stops reprinting what the discarded take reported",
+        "tests/smoke-inject",
+        '            out.append(f"      and it had reported {len(gone.failures)} failure(s):")\n'
+        "            for line in gone.failures:\n"
+        '                out.append(f"      | {line[:160]}")\n',
+        "            pass\n",
+        [
+            "BaselineRerecord.test_the_report_also_says_what_the_discarded_attempt_had_reported"
+        ],
+    ),
+    (
+        # The stated limit, in the artifact rather than only in the PR body.
+        "the report stops naming the flaky failure it cannot rule out",
+        "tests/smoke-inject",
+        "    out.append(\n"
+        '        "Read those failures. The one thing this cannot tell apart is a "\n'
+        '        "**genuinely flaky** failure that happened to arrive with a step and "\n'
+        '        "then happened not to recur — a deterministic red is never absorbed, "\n'
+        '        "because it comes back on every attempt and exhausts the bound, but a "\n'
+        '        "one-in-three one is greened by attempt 2 and lives only in the lines "\n'
+        '        "above.\\n"\n'
+        "    )\n",
+        "",
+        [
+            "BaselineRerecord.test_the_report_also_says_what_the_discarded_attempt_had_reported"
         ],
     ),
 ]
