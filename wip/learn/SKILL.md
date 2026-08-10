@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Manually invoked — use when the user runs /learn, or explicitly asks to learn a topic properly, find the gaps in their understanding, be quizzed on something, or be taught rather than just handed an answer. Not for ordinary questions where the user just wants the answer — answering directly is the right move there. Diagnoses the edge of what the user knows with calibration questions, maps what is solid, shaky, and missing, teaches one gap at a time with retrieval practice, and keeps a resumable note so later sessions start from recall instead of from scratch.
+description: Manually invoked — use when the user runs /learn, or explicitly asks to learn a topic properly, find the gaps in their understanding, be quizzed on something, or be taught rather than just handed an answer. Not for ordinary questions where the user just wants the answer — answering directly is the right move there. Diagnoses the edge of what the user knows with calibration questions, maps what is solid, shaky, and missing, teaches one gap at a time with retrieval practice, and closes by distilling the session into whatever the user's own system reuses — a resumable topic note, a PKM/TIL note, retrieval-shaped flashcards, or a blog seed — built from what the user actually got wrong.
 disable-model-invocation: true
 ---
 
@@ -105,12 +105,43 @@ End the session deliberately rather than letting it trail off:
 - Leave **three to five recall questions** targeting exactly what was taught.
   Not for answering now — they are the warm-up for next time, because
   retrieval a day later is worth more than retrieval a minute later.
-- Offer to save a note so the topic is resumable: the map, the open gaps, and
-  the recall questions. Suggest a location (`notes/learning/<topic>.md` in the
-  project, or wherever the user keeps notes) but let them pick, and never
-  commit it to version control without being asked. On a later `/learn` of the
-  same topic, start by finding this note and opening with its recall questions
-  — how those go is the new probe.
+- Then offer to distill (step 6). Do it at close, not "later": chat sessions
+  are fragile — messages get lost, windows end — and the session's diagnostic
+  detail is the raw material, so condense it while it still exists.
+
+## 6. Distill into the user's own systems
+
+A session leaves behind material worth more than a transcript, because it is
+*calibrated*: it records not just what is true about the topic but what this
+user specifically got wrong, which metaphor finally made a thing click, and
+which phrasings were theirs. Offer to condense that into the formats the
+user's own systems reuse — ask which they want rather than dumping all of
+them:
+
+- **Resumable topic note** — for a later `/learn` of the same topic: the map,
+  the open gaps, the recall questions. On a later invocation, find this note
+  first and open with its recall questions — how those go is the new probe.
+- **PKM / TIL note** — the mechanisms in their corrected form, the handles
+  and metaphors that landed, a *misconceptions I had* section stated as
+  plainly as the map was, and source pointers. Where the user produced a good
+  final phrasing of an idea, keep their wording — their words are their
+  retrieval hooks, not yours.
+- **Flashcards** — write fronts retrieval-shaped: predict, apply,
+  explain-why. Never recognition — "What is X?" is a weak card; "Why does X
+  go in this column when it seems to belong in that one?" is a strong one.
+  Prioritize cards from the session's **documented errors**: a card
+  re-testing a mistake the user actually made outranks ten generic facts,
+  because it re-probes the exact edge the diagnosis found — and it is the one
+  card no pre-made deck can contain. Emit a format their tool imports (TSV
+  for Anki) alongside the readable version.
+- **Blog / essay seed** — the session's own arc is the outline: what I
+  thought I knew, the question that broke it, the mechanism, the payoff.
+  Sessions where the learner was wrong in an *interesting* way make the best
+  posts; offer this one only when they were.
+
+Whatever the format: suggest a location or hand over a file, let the user
+pick where it lives, and never commit anything to version control without
+being asked.
 
 ## Ways this goes wrong
 

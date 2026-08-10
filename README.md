@@ -44,7 +44,7 @@ or installed. (You can still pull one directly by path if you want to try it.)
 | Skill | What it does |
 |---|---|
 | [`verified-review`](wip/verified-review/) | The two halves of a review loop that terminates — a bounded reviewer contract, and the fault-injection rule that stops a green suite meaning nothing. Includes a catalogue of measurements that look rigorous and grade nothing. |
-| [`learn`](wip/learn/) | Manually invoked (`/learn`) tutor protocol: probes for the edge of what you know with calibration questions, maps solid/shaky/missing gaps, teaches one gap at a time with retrieval practice, and keeps a resumable topic note. |
+| [`learn`](wip/learn/) | Manually invoked (`/learn`) tutor protocol: probes for the edge of what you know with calibration questions, maps solid/shaky/missing gaps, teaches one gap at a time with retrieval practice, and distills the session into resumable notes, PKM/TIL notes, flashcards, or a blog seed — built from what you actually got wrong. |
 
 ## Recording a demo on a pull request
 
