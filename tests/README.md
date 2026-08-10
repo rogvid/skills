@@ -600,15 +600,19 @@ really did lose 0.8 s of video says so.
 
 | | bound | why |
 |---|---|---|
-| log **ahead** of the frame | 250 ms | nothing about the capture can move an event *later*, so a positive skew is the log's own error |
+| log **ahead** of the frame | 250 ms | the beat log's own error, **on a take whose host clock held still** — and only then. This row used to say that nothing about the capture can move an event later, full stop; [#255](https://github.com/rogvid/skills/issues/255) measured the correction doing it, by subtracting a step the capture only partly lost. On a stepping take the failure text names the step first ([#257](https://github.com/rogvid/skills/issues/257)) |
 | video **ahead** of the log, host clock subtracted | 750 ms | what is left once the host's steps are out: the gap before the screencast's *first* frame, which the video's zero is, plus the 40 ms sampling grid and the caption's fade. Measured at 20-140 ms over fifteen idle takes and **500-540 ms at load 3.1** — it is how long Chromium takes to paint, so it stays wide on purpose ([#78](https://github.com/rogvid/skills/issues/78) is what tightening it would become) |
 | the two probes **drifting apart** | 250 ms | whatever the capture loses at the head, it loses for every frame equally, so it cancels here — and a wall-clock step landing *between* the probes is now subtracted per probe rather than reaching this bar. **This is the sharp one, and the correction is what made it sharp:** before it, 680 ms of drift on a healthy recorder was indistinguishable from a beat log that was not being read monotonically |
 
 Observed across eight consecutive `--web-only` runs and six full runs, both
 media: first caption **-80 to -200 ms**, closing caption **-160 to 0 ms**,
-drift **0 to 80 ms**. Nothing came near the 250 ms *ahead* bound — no run has
-ever produced a positive skew — which is the point of splitting by direction:
-the tight bound guards a failure mode with no natural variation near it.
+drift **0 to 80 ms**. Nothing came near the 250 ms *ahead* bound in any of
+those runs, which is the point of splitting by direction: the tight bound
+guards a failure mode with no natural variation near it **on a steady host**.
+Every run above was one. #255 later measured +906, +540 and +970 ms of
+positive skew on takes whose clock stepped, so "no run has ever produced a
+positive skew" — which this paragraph used to say — described the hosts these
+figures were taken on and not the bound.
 `_t0` set after `_start()` instead of at page creation measures **+320 ms** and
 fails it; `_t0` set 0.9 s *early* measures **-900 ms** and fails the second
 (`tests/smoke-inject`, "every beat is stamped 0.9s after the frame it
@@ -1775,7 +1779,7 @@ paragraph whose job is to say what this manifest does not cover.
   | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
   | `check_verb_classification` | `VerbClassification` — every classified verb is one a recorder logs, and every verb a recorder logs is classified, with the set size asserted first so neither holds vacuously. **Merge-only since #61**: the only arms that reach it are `--content-only` and `--terminal-only`, so nothing runs it on a pull request |
   | `check_determinism` | genuinely ungraded. It reads the clock, the locale and the motion setting *out of the page*, which is the whole point of it — a constructor that stored the flag and never wired it up satisfies anything asserted on the Python side |
-  | `check_merge_offset` | genuinely ungraded. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half |
+  | `check_merge_offset` | genuinely ungraded as timing. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half. One claim of it is graded: `LogEarlyCause` reads the AST and requires its positive-skew message to come from `log_early_causes()` rather than from its own copy of a verdict (#257) — the wording, not the measurement |
   | `check_opening_gap` | `OpeningWarning` — `held: null` against `held: 0.0`, and the blank floor that keeps the warning readable. **Merge-only since #61**: `--web-only` is the only arm that reaches it |
   | `check_opening` | genuinely ungraded — the first frame of a web take, measured in pixels (#119). **Merge-only since #61**: `--web-only` is the only arm that reaches it, so on a pull request nothing runs it and nothing injects against it |
   | `check_opening_card` | genuinely ungraded — three statements about one sweep of one corner of a frame (#110) |

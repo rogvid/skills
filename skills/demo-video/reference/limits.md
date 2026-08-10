@@ -121,10 +121,19 @@ beat, all 38 landed within **101 ms**, and within 40 ms at the caption-on edges
 (a caption fade takes two frames to cross, which is the rest).
 
 The suite's bars are asymmetric because the two directions have different
-causes: `MAX_LOG_EARLY_S = 0.25` for the log running ahead of the frame
-(nothing about capture can move an event later, so that direction is the log's
-own error) and `MAX_CAPTURE_LOSS_S = 0.75` for the video running ahead of the
-log. Both storyboards inject a small animated element for their whole length,
+causes: `MAX_LOG_EARLY_S = 0.25` for the log running ahead of the frame and
+`MAX_CAPTURE_LOSS_S = 0.75` for the video running ahead of the log. That first
+direction is the beat log's own error **on a take whose host clock held
+still**, and only then — this file used to say that nothing about capture can
+move an event later, full stop, and
+[#255](https://github.com/rogvid/skills/issues/255) measured two ways it can:
+an instant inside the window a backward step deletes, and a capture that lost
+less wall time than the step it recorded, which the correction then
+over-shoots by the difference (+540 to +970 ms on three takes). On a stepping
+take the suite now names the step first
+([#257](https://github.com/rogvid/skills/issues/257)).
+
+Both storyboards inject a small animated element for their whole length,
 which gives the capture frames to measure with — **not**, as this file
 previously claimed, protection from idle loss, which does not exist. `MAX_CAPTURE_LOSS_S`
 now bounds only the gap before the first frame: 20–140 ms idle, 500–540 ms at
