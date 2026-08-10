@@ -2127,6 +2127,14 @@ SMOKE = Path(os.environ.get("UNIT_SMOKE", REPO / "tests" / "smoke"))
 # while an injection is in place rather than going quiet exactly then.
 README = Path(os.environ.get("UNIT_README", REPO / "tests" / "README.md"))
 
+# `tests/smoke-inject`, on the same terms. Graded here rather than by its own
+# `--self-test` because the state that matters — a baseline the host's clock
+# walked over — cannot be produced on demand, and because this file has the
+# fault-injection driver that refuses an injection which did not land.
+SMOKE_INJECT = Path(
+    os.environ.get("UNIT_SMOKE_INJECT", REPO / "tests" / "smoke-inject")
+)
+
 # Below this, `tests/smoke` was not parsed — an empty or truncated file makes
 # "nothing is unread" hold trivially, the catalogue's vacuous sweep. It is 271
 # today; this is a floor on "a suite was read", not a bar on its size.
@@ -2221,6 +2229,24 @@ def _smoke_module():
     from importlib.machinery import SourceFileLoader
 
     loader = SourceFileLoader("_smoke_under_test", str(SMOKE))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _smoke_inject_module():
+    """`tests/smoke-inject` imported as a module, so its guards can be called.
+
+    Importing it runs nothing: everything at module level is a constant, a
+    `Path` that is never touched, or the `INJECTIONS` literal. So a copy under
+    a temp directory — which is what `--fault-inject` hands this — imports as
+    happily as the original does.
+    """
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    loader = SourceFileLoader("_smoke_inject_under_test", str(SMOKE_INJECT))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -6777,6 +6803,479 @@ class HostClockHole(unittest.TestCase):
         self.assertEqual(self.smoke.hole_clause(None, 6.3, 6.3), "")
 
 
+class BaselineRerecord(unittest.TestCase):
+    """`tests/smoke-inject`'s re-recorded clean baseline (issue #258).
+
+    Here, and not in `tests/smoke-inject --self-test`, for the reason
+    `ClockCoverageCheck` and `HostClockHole` both give: the state this grades
+    is a baseline whose host stepped its wall clock, and that cannot be
+    produced on demand — measured 0 of 7 step-free `--segments-only` runs red
+    against 4 of 6 stepping ones (#255). **Every take below is written by
+    hand.** On a steady host the whole retry path is dead, so an assertion that
+    needed the host's help would grade the host.
+
+    What is being defended is one direction. A retry that swallowed a red would
+    certify all fourteen entries aimed at that arm against a recorder nobody
+    had shown works, which is a worse artifact than an arm that cannot run —
+    so the controls here (`…_is_not_retried`, `…_is_still_red_at_the_bound`)
+    carry more weight than the cases.
+    """
+
+    def setUp(self):
+        self.inject = _smoke_inject_module()
+
+    def take(self, out: Path, name: str, doc: dict) -> None:
+        """One `timeline.json` on disk, where a finished arm would leave it."""
+        (out / name).parent.mkdir(parents=True, exist_ok=True)
+        (out / name).write_text(json.dumps(doc), encoding="utf-8")
+
+    def clock(self, *steps: tuple[float, float]) -> dict:
+        """A `capture_clock` record, in `_CaptureClock.report`'s own shape."""
+        return {
+            "measured": True,
+            "note": None,
+            "steps": [{"t": at, "delta": delta} for at, delta in steps],
+            "total": round(sum(delta for _at, delta in steps), 4),
+            "sample_interval": 0.02,
+            "min_step": 0.005,
+            "max_gap": 0.021,
+            "max_gap_limit": 0.25,
+        }
+
+    # -- what the takes say about the host -----------------------------------
+
+    def test_a_step_in_a_takes_own_record_is_found_and_quoted(self):
+        # The measured one: −1.051 s at 5.151 s. The reason a developer reads
+        # has to name the step, not just assert one happened, or the refusal
+        # sends them to look for a take they cannot identify.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {"capture_clock": self.clock((5.151, -1.051))},
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("segments/timeline.json", found[0])
+        self.assertIn("capture_clock", found[0])
+        self.assertIn("-1051 ms at 5.2s", found[0])
+
+    def test_a_step_only_one_segments_own_record_carries_is_found(self):
+        # A stitched take's merged `capture_clock` is **null** whenever any
+        # part was not measured, and the part records survive it under
+        # `segments`. Reading the root field alone would call that host steady
+        # and report a red the step caused as a broken recorder.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {
+                    "capture_clock": None,
+                    "segments": [
+                        {"segment": "part-a", "capture_clock": self.clock()},
+                        {
+                            "segment": "part-b",
+                            "capture_clock": self.clock((2.2, -1.073)),
+                        },
+                    ],
+                },
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("segments[1].capture_clock", found[0])
+        self.assertIn("-1073 ms at 2.2s", found[0])
+
+    def test_a_steady_host_leaves_nothing_to_find(self):
+        # The control the whole feature rests on. `recorded_steps` returning
+        # anything on a steady host is a retry on every red baseline there is.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(out, "segments/timeline.json", {"capture_clock": self.clock()})
+            self.take(out, "web/web.seg.timeline.json", {"capture_clock": self.clock()})
+            self.assertEqual(self.inject.recorded_steps(out), [])
+
+    def test_a_steps_list_under_any_other_field_is_not_a_wall_clock_step(self):
+        """The scope, which is `capture_clock` and not the name `steps`.
+
+        `timeline.json` already carries a second field called `steps` —
+        `narration.clock_correction.steps`, in this fixture, an *integer*
+        count of the steps a mix was corrected for. That near-miss is why the
+        walk is keyed on the enclosing field rather than the inner name, and
+        the second record here is the version of it that a name-keyed walk
+        could not survive: a `steps` **list** somewhere that is not a clock
+        the recorder measured.
+
+        No such field exists in today's `timeline.json`, and that is the point
+        of a narrowing — it costs nothing now and it is what keeps the next
+        field added to the envelope from silently becoming a retry trigger.
+        The catalogue's wrong-scope search, in the direction that would
+        re-record a genuinely broken recorder.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {
+                    "capture_clock": self.clock(),
+                    "narration": {
+                        "lines": [],
+                        "clock_correction": {
+                            "applied": True,
+                            "total": -1.073,
+                            "steps": 2,
+                        },
+                    },
+                    "some_later_field": {"steps": [{"t": 1.0, "delta": -1.0}]},
+                },
+            )
+            self.assertEqual(self.inject.recorded_steps(out), [])
+
+    def test_a_blip_too_small_for_the_recorder_to_warn_about_is_not_a_step(self):
+        """The gate is the recorder's *out loud* bar, not its sampler's floor.
+
+        `_CaptureClock.MIN_STEP_S` is 5 ms, and by that class's own comment a
+        step under `WARN_S` leaves "the video and the log still agree about
+        which frame a beat is on". A 5 ms blip is therefore not a reason the
+        arm went red, and gating on it would buy a broken recorder three takes
+        on a host that hiccups — 8x more often than the recorder itself thinks
+        anything happened. #255's real steps are 1.0-1.4 s.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {"capture_clock": self.clock((1.0, -0.005))},
+            )
+            self.assertEqual(self.inject.recorded_steps(out), [])
+
+    def test_the_gate_sits_exactly_where_the_recorder_starts_warning(self):
+        # Both sides of the boundary, and the constant itself against the
+        # recorder's. The bar is hand-written in the harness on purpose, so
+        # the two drifting apart has to be a failure rather than a discovery.
+        self.assertEqual(self.inject.MIN_GATING_STEP_S, _CaptureClock.WARN_S)
+        bar = self.inject.MIN_GATING_STEP_S
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out, "a/timeline.json", {"capture_clock": self.clock((1.0, -bar))}
+            )
+            self.take(
+                out,
+                "b/timeline.json",
+                {"capture_clock": self.clock((1.0, -bar + 0.001))},
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("a/timeline.json", found[0])
+
+    def test_a_real_step_beside_a_blip_is_reported_without_the_blip(self):
+        # A record can carry both. The reason a developer reads should name
+        # the step that plausibly cost the take its frames, not pad itself
+        # with scheduling noise the recorder would not have mentioned.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {"capture_clock": self.clock((1.0, -0.005), (5.151, -1.051))},
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("-1051 ms at 5.2s", found[0])
+        self.assertNotIn("-5 ms", found[0])
+
+    def test_a_merged_step_says_which_capture_and_which_clock_it_is_on(self):
+        # `_merge_capture_clock` shifts a step's `t` onto the stitched clock
+        # and stamps it with the part it was measured in, while the part's own
+        # record keeps its own zero. One step then prints as two different
+        # times, and without saying which clock each is on the pair reads as a
+        # disagreement between two records.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {
+                    "capture_clock": {
+                        **self.clock(),
+                        "steps": [{"t": 8.9, "delta": -1.051, "segment": "part2"}],
+                    }
+                },
+            )
+            found = self.inject.recorded_steps(out)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("-1051 ms at 8.9s of the stitched demo", found[0])
+        self.assertIn("measured in part2", found[0])
+
+    def test_a_capture_clock_whose_steps_is_not_a_list_says_nothing(self):
+        """A malformed record is a broken recorder, not a stepping host.
+
+        `check_capture_clock` in `tests/smoke` fails a take whose
+        `capture_clock.steps` is not a list, and `smoke-inject` carries an
+        entry that breaks exactly that. So this is the shape a red baseline
+        really can arrive in — and reading the `3` here as three steps would
+        re-record the one failure this must never absorb.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.take(
+                out,
+                "segments/timeline.json",
+                {"capture_clock": {**self.clock(), "steps": 3}},
+            )
+            self.assertEqual(self.inject.recorded_steps(out), [])
+
+    def test_a_run_that_wrote_no_take_and_one_that_wrote_rubbish_say_nothing(self):
+        # An arm that died before recording, and a truncated document. Both
+        # are "this cannot say the clock stepped", which is the safe answer:
+        # the red stands and the developer sees it on the first take.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.assertEqual(self.inject.recorded_steps(out), [])
+            (out / "segments").mkdir()
+            (out / "segments" / "timeline.json").write_text('{"capture_c')
+            self.assertEqual(self.inject.recorded_steps(out), [])
+
+    # -- and what is done about it -------------------------------------------
+
+    def test_a_red_arm_over_a_stepping_host_is_re_recorded(self):
+        self.assertIsNotNone(self.inject.rerecord_reason(1, ["-1051 ms at 5.2s"]))
+
+    def test_a_red_arm_over_a_steady_host_is_not_retried(self):
+        """The control that keeps a genuinely broken recorder red.
+
+        This is the whole risk of #258 in one assertion: a baseline that fails
+        with no step under it has to reach `Refused` on its first take, as it
+        did before any of this existed.
+        """
+        self.assertIsNone(self.inject.rerecord_reason(1, []))
+
+    def test_an_arm_that_passed_is_never_re_recorded(self):
+        # A retry keyed on the steps alone would re-record a *green* baseline
+        # on a stepping host, and then take whichever of the two answers came
+        # last.
+        self.assertIsNone(self.inject.rerecord_reason(0, ["-1051 ms at 5.2s"]))
+
+    def test_the_number_of_attempts_is_bounded_and_small(self):
+        """An unbounded retry is "run until green" wearing a reason.
+
+        What this pins is that the bound exists and stays small enough that
+        exhausting it is a refusal a developer waits out rather than a loop.
+        What it cannot say is whether 3 is the right number; that is a cost
+        judgement, written down beside the constant.
+        """
+        self.assertGreaterEqual(self.inject.BASELINE_ATTEMPTS, 2)
+        self.assertLessEqual(self.inject.BASELINE_ATTEMPTS, 4)
+
+    # -- the loop itself, over scripted arm runs -----------------------------
+
+    def drive(self, *takes: tuple[int, list[str], list[str]]):
+        """`baseline()` over scripted runs. -> (result, printed, runs).
+
+        `takes` is one `(exit code, failure lines, recorded steps)` per arm
+        run, in order. `stage()` and `run_arm()` are replaced because the real
+        ones record a 29-second take of a browser; nothing else is — the loop,
+        its bound, its refusals and everything it prints are the shipped ones.
+
+        A run past the end of the script is an assertion failure rather than a
+        repeat of the last one: a loop that ran longer than the bound is the
+        defect here, and it must not be able to look like a pass.
+        """
+        runs: list[str] = []
+
+        def run_arm(root, arm, out_dir):
+            index = len(runs)
+            runs.append(arm)
+            self.assertLess(index, len(takes), "baseline() ran past its bound")
+            code, lines, _steps = takes[index]
+            body = "".join(f"  - {line}\n" for line in lines)
+            return code, "", f"smoke: FAILED\n{body}" if code else ""
+
+        swapped = {
+            "stage": lambda tmp: tmp,
+            "run_arm": run_arm,
+            "recorded_steps": lambda out: takes[len(runs) - 1][2],
+        }
+        original = {name: getattr(self.inject, name) for name in swapped}
+        printed = io.StringIO()
+        try:
+            for name, stub in swapped.items():
+                setattr(self.inject, name, stub)
+            with contextlib.redirect_stdout(printed):
+                try:
+                    result = self.inject.baseline("--segments-only")
+                except self.inject.Refused as exc:
+                    result = exc
+        finally:
+            for name, real in original.items():
+                setattr(self.inject, name, real)
+        return result, printed.getvalue(), runs
+
+    STEP = ["segments/timeline.json capture_clock: -1051 ms at 5.2s"]
+
+    def test_a_red_over_a_stepping_host_is_recorded_again_and_then_accepted(self):
+        result, printed, runs = self.drive(
+            (1, ["segments: beat-05's frame shows the previous caption"], self.STEP),
+            (0, [], []),
+        )
+        self.assertIsInstance(result, self.inject.Baseline)
+        self.assertEqual((result.attempts, len(runs)), (2, 2))
+        self.assertEqual(len(result.discarded), 1)
+        # The discarded take's failures travel with it, not just its reason:
+        # the end-of-run block is built from this and is the only place a
+        # reader of a 42-minute run will see that anything was red.
+        self.assertEqual(
+            result.discarded[0].failures,
+            ("segments: beat-05's frame shows the previous caption",),
+        )
+        # And the discarded attempt is in the output, with what it said.
+        self.assertIn("attempt 1 of 3 went red", printed)
+        self.assertIn("-1051 ms at 5.2s", printed)
+        self.assertIn("beat-05's frame shows the previous caption", printed)
+        self.assertIn("passes clean on attempt 2 of 3", printed)
+
+    def test_a_red_with_a_steady_clock_is_refused_on_the_first_take(self):
+        """The one that keeps a genuinely broken recorder red.
+
+        The script here would go green on its third run. A retry that ran an
+        arm until it passed would take that green and certify all fourteen
+        entries aimed at the arm on it. `runs == 1` is the assertion; the
+        refusal's wording is not enough, because a loop that refused *after*
+        three takes would still print it.
+        """
+        result, printed, runs = self.drive(
+            (1, ["coverage: AC-3 is not in timeline.md"], []),
+            (1, ["coverage: AC-3 is not in timeline.md"], []),
+            (0, [], []),
+        )
+        self.assertIsInstance(result, self.inject.Refused)
+        self.assertEqual(runs, ["--segments-only"])
+        self.assertIn("nothing aimed at that arm can be graded", str(result))
+        self.assertIn("coverage: AC-3 is not in timeline.md", str(result))
+        self.assertNotIn("attempt", printed)
+
+    def test_a_recorder_broken_under_a_stepping_host_is_still_refused(self):
+        """The hard case: a real failure *and* a stepping clock, together.
+
+        On this host the two arrive together whenever anything is wrong, so
+        the retry cannot be allowed to outlast a fault that survives it. Three
+        takes, three reds, and the refusal has to carry the failure the arm
+        reported — not only the clock's alibi, which is what would send a
+        reader looking at #255 for a broken recorder.
+        """
+        broken = ["coverage: AC-3 is not in timeline.md"]
+        result, _printed, runs = self.drive(
+            (1, broken, self.STEP), (1, broken, self.STEP), (1, broken, self.STEP)
+        )
+        self.assertIsInstance(result, self.inject.Refused)
+        self.assertEqual(len(runs), self.inject.BASELINE_ATTEMPTS)
+        self.assertIn("failed on all 3 attempts", str(result))
+        self.assertIn("attempt 3: the host's wall clock stepped", str(result))
+        self.assertIn("coverage: AC-3 is not in timeline.md", str(result))
+        self.assertIn("the host, the recorder, or both", str(result))
+
+    # -- and the figure the README prints about all of it ---------------------
+
+    CLAIM = re.compile(r"(\d+) `tests/unit` injections break\s+`tests/smoke-inject`")
+
+    def test_the_readme_states_how_many_injections_break_this(self):
+        # `StatedInjectionCount`'s shape, for the same reason: the prose is the
+        # claim, `INJECTIONS` is the truth, and a README reworded past the
+        # pattern is a failure rather than a quiet pass.
+        found = self.CLAIM.search(README.read_text(encoding="utf-8"))
+        self.assertIsNotNone(
+            found,
+            f"{README} no longer states how many injections break "
+            f"tests/smoke-inject in the shape this reads",
+        )
+        registered = sum(1 for entry in INJECTIONS if entry[1] == "tests/smoke-inject")
+        self.assertEqual(int(found.group(1)), registered)
+        # The haystack: both sides agreeing on zero would satisfy the above.
+        self.assertGreater(registered, 5)
+
+    def test_an_arm_the_machine_lock_refused_is_not_re_recorded(self):
+        # A contended arm recorded nothing, so there is no take to read and no
+        # verdict to retry. It has always been its own refusal; a retry that
+        # reached it first would spend three arms discovering the same thing.
+        result, _printed, runs = self.drive(
+            (1, ["refusing to run a second smoke suite on this machine"], self.STEP)
+        )
+        self.assertIsInstance(result, self.inject.Refused)
+        self.assertEqual(len(runs), 1)
+        self.assertIn("holds the machine lock", str(result))
+
+    # -- and what a reader of the output is told ------------------------------
+
+    def base(self, *discarded: str):
+        """A finished baseline whose earlier attempts said `discarded`.
+
+        Each one carries a failure line of its own, because that is what the
+        end-of-run block has to reproduce: the reason alone would describe a
+        flaky red as nothing but the host's clock.
+        """
+        return self.inject.Baseline(
+            "--segments-only",
+            len(discarded) + 1,
+            31.0,
+            tuple(
+                self.inject.Discarded(why, (f"segments: something was red ({why})",))
+                for why in discarded
+            ),
+        )
+
+    def test_a_baseline_that_took_three_goes_says_so_where_it_is_printed(self):
+        said = self.base("the host's wall clock stepped — a", "…— b").summary()
+        self.assertIn("attempt 3 of", said)
+        self.assertIn("2 re-recorded", said)
+
+    def test_a_first_take_baseline_says_only_that(self):
+        self.assertEqual(self.base().summary(), "--segments-only passes clean (31s)")
+
+    def test_the_runs_last_line_says_a_baseline_was_re_recorded(self):
+        """The line a reader quotes into a pull request.
+
+        "All 14 injections were caught" over a baseline that took three goes
+        is the artifact-lies direction: nothing in it is false, and a reviewer
+        reads a first-take green off it.
+        """
+        clause = self.inject.rerecord_clause([self.base("stepped — a")])
+        self.assertIn("not a first-take baseline", clause)
+        self.assertIn("1 clean take(s)", clause)
+        self.assertIn("#258", clause)
+
+    def test_a_run_whose_baselines_were_all_first_takes_adds_no_clause(self):
+        # The control. A clause on every run is a clause nobody reads, and it
+        # would say "not a first-take baseline" about first-take baselines.
+        self.assertEqual(self.inject.rerecord_clause([self.base()]), "")
+        self.assertEqual(self.inject.rerecord_report([self.base()]), [])
+
+    def test_the_report_names_every_discarded_attempt_and_its_reason(self):
+        block = "\n".join(
+            self.inject.rerecord_report([self.base("stepped — a", "stepped — b")])
+        )
+        self.assertIn("attempt 1 discarded, stepped — a", block)
+        self.assertIn("attempt 2 discarded, stepped — b", block)
+        self.assertIn("3 attempt(s)", block)
+
+    def test_the_report_also_says_what_the_discarded_attempt_had_reported(self):
+        """The persistent copy of the failure list, and why it has to exist.
+
+        On a twelve-arm run this block is 40 minutes below the `BASE` line
+        that printed the failures live, and nobody scrolls back. A summary
+        carrying only the clock step describes a red that happened to be
+        flaky as nothing but the host — which is the one absorption this
+        design cannot rule out, so it must at least be legible.
+        """
+        block = "\n".join(self.inject.rerecord_report([self.base("stepped — a")]))
+        self.assertIn("it had reported 1 failure(s)", block)
+        self.assertIn("segments: something was red (stepped — a)", block)
+        self.assertIn("genuinely flaky", block)
+
+
 # --------------------------------------------------------------------------
 
 # Issue #203, as the overlay shipped before it was fixed and after it was.
@@ -9318,6 +9817,223 @@ INJECTIONS = [
             "CheapArm.test_every_arm_a_guard_names_is_a_flag_the_script_accepts",
         ],
     ),
+    # -- the re-recorded baseline (issue #258) --------------------------------
+    #
+    # The thing being broken here is a decision **not to run a check**, so its
+    # failure mode is silence: a retry that swallowed a red would report all
+    # fourteen `--segments-only` entries as caught against a recorder nobody
+    # had shown works. Two of the fourteen below are that direction specifically —
+    # "retry until green" in `rerecord_reason` and in `baseline`'s loop — and
+    # both are caught by controls rather than by cases.
+    (
+        "the walk for a recorded step keys on any field, not on capture_clock",
+        "tests/smoke-inject",
+        '            if key == "capture_clock":\n',
+        '            if isinstance(value, dict) and "steps" in value:\n',
+        [
+            "BaselineRerecord.test_a_steps_list_under_any_other_field_is_not_a_wall_clock_step"
+        ],
+    ),
+    (
+        "a capture_clock's steps count is read as the steps themselves",
+        "tests/smoke-inject",
+        "            if not isinstance(steps, list):\n",
+        "            if steps is None:\n",
+        [
+            "BaselineRerecord.test_a_capture_clock_whose_steps_is_not_a_list_says_nothing"
+        ],
+    ),
+    (
+        # The recorder's sampler floor, not its out-loud bar. A 5 ms blip is
+        # 8x under the point the recorder itself thinks anything happened, and
+        # gating there buys a broken recorder three takes on a hiccupping host.
+        "the gate drops to the sampler's floor instead of the recorder's warning",
+        "tests/smoke-inject",
+        "MIN_GATING_STEP_S = 0.04\n",
+        "MIN_GATING_STEP_S = 0.005\n",
+        [
+            "BaselineRerecord.test_a_blip_too_small_for_the_recorder_to_warn_about_is_not_a_step",
+            "BaselineRerecord.test_the_gate_sits_exactly_where_the_recorder_starts_warning",
+            "BaselineRerecord.test_a_real_step_beside_a_blip_is_reported_without_the_blip",
+        ],
+    ),
+    (
+        "any step at all opens the gate, however small the recorder said it was",
+        "tests/smoke-inject",
+        "                if step is not None and abs(step[1]) >= MIN_GATING_STEP_S\n",
+        "                if step is not None\n",
+        [
+            "BaselineRerecord.test_a_blip_too_small_for_the_recorder_to_warn_about_is_not_a_step",
+            "BaselineRerecord.test_the_gate_sits_exactly_where_the_recorder_starts_warning",
+            "BaselineRerecord.test_a_real_step_beside_a_blip_is_reported_without_the_blip",
+        ],
+    ),
+    (
+        "a merged step stops saying which capture and which clock it is on",
+        "tests/smoke-inject",
+        '        return f"{said} of the stitched demo, measured in {segment}"\n',
+        "        return said\n",
+        [
+            "BaselineRerecord.test_a_merged_step_says_which_capture_and_which_clock_it_is_on"
+        ],
+    ),
+    (
+        "a red baseline is re-recorded whatever its takes said about the clock",
+        "tests/smoke-inject",
+        "    if code == 0 or not steps:\n        return None\n",
+        "    if code == 0:\n        return None\n",
+        ["BaselineRerecord.test_a_red_arm_over_a_steady_host_is_not_retried"],
+    ),
+    (
+        "a baseline that passed is re-recorded because the host stepped",
+        "tests/smoke-inject",
+        "    if code == 0 or not steps:\n        return None\n",
+        "    if not steps:\n        return None\n",
+        ["BaselineRerecord.test_an_arm_that_passed_is_never_re_recorded"],
+    ),
+    (
+        # The loop's own version of "retry until green": the reason is still
+        # computed and still printed, and it no longer decides anything.
+        "baseline() re-records every red arm and only reports the reason",
+        "tests/smoke-inject",
+        "        reason = rerecord_reason(code, steps)\n",
+        '        reason = rerecord_reason(code, steps) or "the arm went red"\n',
+        [
+            "BaselineRerecord.test_a_red_with_a_steady_clock_is_refused_on_the_first_take"
+        ],
+    ),
+    (
+        "the retry stops being bounded by a small number of attempts",
+        "tests/smoke-inject",
+        "BASELINE_ATTEMPTS = 3\n",
+        "BASELINE_ATTEMPTS = 40\n",
+        ["BaselineRerecord.test_the_number_of_attempts_is_bounded_and_small"],
+    ),
+    (
+        "a baseline that took three goes prints what a first-take one prints",
+        "tests/smoke-inject",
+        '            f"{self.arm} passes clean on attempt {self.attempts} of "\n',
+        '            f"{self.arm} passes clean, honestly, of "\n',
+        [
+            "BaselineRerecord.test_a_baseline_that_took_three_goes_says_so_where_it_is_printed",
+            "BaselineRerecord.test_a_red_over_a_stepping_host_is_recorded_again_and_then_accepted",
+        ],
+    ),
+    (
+        # The artifact-lies direction: "All 14 injections were caught" is the
+        # line that gets quoted, and over a re-recorded baseline it reads as a
+        # first-take green unless it says otherwise.
+        "the run's last line stops saying a baseline was re-recorded",
+        "tests/smoke-inject",
+        '        f" NOTE: not a first-take baseline — {takes} clean take(s) across "\n'
+        '        f"{len(again)} arm(s) were re-recorded, see BASE above and #258."\n',
+        '        ""\n',
+        ["BaselineRerecord.test_the_runs_last_line_says_a_baseline_was_re_recorded"],
+    ),
+    (
+        "the re-record report stops saying why each attempt was discarded",
+        "tests/smoke-inject",
+        '            out.append(f"    attempt {number} discarded, {gone.reason}")\n',
+        '            out.append("    an attempt was discarded")\n',
+        [
+            "BaselineRerecord.test_the_report_names_every_discarded_attempt_and_its_reason"
+        ],
+    ),
+    (
+        # The version that reads a steady take as a stepping one: a record with
+        # `steps: []` is still a record, so every red baseline on every host
+        # becomes three. "Retry until green" arriving by way of the *empty*
+        # list rather than by way of the decision.
+        "a take that recorded no step is read as one that recorded a step",
+        "tests/smoke-inject",
+        "            if not big:\n                continue\n",
+        "            if big is None:\n                continue\n",
+        ["BaselineRerecord.test_a_steady_host_leaves_nothing_to_find"],
+    ),
+    (
+        # A stitched take's merged record is null whenever any part was not
+        # measured, and the part records survive under `segments`. Stop
+        # descending into lists and that whole case reads as a steady host.
+        "the walk stops descending into a stitched take's segment records",
+        "tests/smoke-inject",
+        "    elif isinstance(node, list):\n"
+        "        for index, item in enumerate(node):\n"
+        '            yield from _clock_records(item, f"{path}[{index}]")\n',
+        "    elif isinstance(node, list):\n        return\n",
+        ["BaselineRerecord.test_a_step_only_one_segments_own_record_carries_is_found"],
+    ),
+    (
+        "a half-written timeline.json takes the whole manifest down with it",
+        "tests/smoke-inject",
+        "        except (OSError, ValueError):\n            continue\n",
+        "        except (OSError, ValueError):\n            raise\n",
+        [
+            "BaselineRerecord.test_a_run_that_wrote_no_take_and_one_that_wrote_rubbish_say_nothing"
+        ],
+    ),
+    (
+        # The reason has to send a reader somewhere. "The clock stepped" with
+        # no file and no field is a refusal nobody can act on.
+        "the reason stops naming the take and the field it was read from",
+        "tests/smoke-inject",
+        '            found.append(f"{path.relative_to(out_dir)} {where}: {said}")\n',
+        "            found.append(said)\n",
+        [
+            "BaselineRerecord.test_a_step_in_a_takes_own_record_is_found_and_quoted",
+            "BaselineRerecord.test_a_step_only_one_segments_own_record_carries_is_found",
+        ],
+    ),
+    (
+        "the reason stops saying how big the step was and when it landed",
+        "tests/smoke-inject",
+        '    said = f"{delta * 1000:+.0f} ms at {at:.1f}s"\n',
+        '    said = "a step"\n',
+        [
+            "BaselineRerecord.test_a_step_in_a_takes_own_record_is_found_and_quoted",
+            "BaselineRerecord.test_a_step_only_one_segments_own_record_carries_is_found",
+        ],
+    ),
+    (
+        # A discarded take's failures are printed live and then thrown away, so
+        # the end-of-run block — 40 minutes below, and the only part anyone
+        # reads — describes a red that happened to be flaky as nothing but the
+        # host's clock.
+        "a discarded baseline keeps its reason and forgets what went red",
+        "tests/smoke-inject",
+        "        discarded.append(Discarded(reason, tuple(lines[:6])))\n",
+        "        discarded.append(Discarded(reason, ()))\n",
+        [
+            "BaselineRerecord.test_a_red_over_a_stepping_host_is_recorded_again_and_then_accepted"
+        ],
+    ),
+    (
+        "the end-of-run block stops reprinting what the discarded take reported",
+        "tests/smoke-inject",
+        '            out.append(f"      and it had reported {len(gone.failures)} failure(s):")\n'
+        "            for line in gone.failures:\n"
+        '                out.append(f"      | {line[:160]}")\n',
+        "            pass\n",
+        [
+            "BaselineRerecord.test_the_report_also_says_what_the_discarded_attempt_had_reported"
+        ],
+    ),
+    (
+        # The stated limit, in the artifact rather than only in the PR body.
+        "the report stops naming the flaky failure it cannot rule out",
+        "tests/smoke-inject",
+        "    out.append(\n"
+        '        "Read those failures. The one thing this cannot tell apart is a "\n'
+        '        "**genuinely flaky** failure that happened to arrive with a step and "\n'
+        '        "then happened not to recur — a deterministic red is never absorbed, "\n'
+        '        "because it comes back on every attempt and exhausts the bound, but a "\n'
+        '        "one-in-three one is greened by attempt 2 and lives only in the lines "\n'
+        '        "above.\\n"\n'
+        "    )\n",
+        "",
+        [
+            "BaselineRerecord.test_the_report_also_says_what_the_discarded_attempt_had_reported"
+        ],
+    ),
 ]
 
 
@@ -9345,10 +10061,19 @@ def fault_inject() -> int:
             root = skill / "helpers"
             smoke = Path(tmp) / "smoke"
             shutil.copy(REPO / "tests" / "smoke", smoke)
+            # And the injection manifest, for the same reason as `smoke`: the
+            # baseline retry #258 added is a decision this suite grades, and a
+            # decision nobody has watched go the wrong way is a claim.
+            smoke_inject = Path(tmp) / "smoke-inject"
+            shutil.copy(REPO / "tests" / "smoke-inject", smoke_inject)
             unit = Path(tmp) / "unit"
             shutil.copy(Path(__file__).resolve(), unit)
             if module == "tests/smoke":
                 target = smoke
+            elif module == "tests/smoke-inject":
+                # Before the `"/" in module` branch below, which would send it
+                # into the skill directory and fail on a file that is not there.
+                target = smoke_inject
             elif module == "tests/unit":
                 target = unit
             elif module == "__init__.py" or module.endswith(".py"):
@@ -9381,6 +10106,7 @@ def fault_inject() -> int:
                     "UNIT_HELPERS": str(root),
                     "UNIT_SKILL_DIR": str(skill),
                     "UNIT_SMOKE": str(smoke),
+                    "UNIT_SMOKE_INJECT": str(smoke_inject),
                     "UNIT_README": str(REPO / "tests" / "README.md"),
                 },
             )
