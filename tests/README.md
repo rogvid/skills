@@ -1864,6 +1864,32 @@ paragraph whose job is to say what this manifest does not cover.
   injection for the wrong reason. What protects against that is the *named*
   message rather than the exit code, which is the same protection #135 asked
   for.
+- **…and that clean run is recorded up to `BASELINE_ATTEMPTS` (3) times, but
+  only when the host's wall clock stepped underneath it**
+  ([#258](https://github.com/rogvid/skills/issues/258)). Measured on the WSL2
+  box: `--segments-only` was red in **0 of 7** step-free runs and **4 of 6**
+  stepping ones, so the arm's 14 entries were unrunnable here at three separate
+  points — most recently for #260, which shipped with unit grading alone.
+
+  The trigger is a conjunction and nothing else: the arm went red **and** the
+  takes it left behind list a step under `capture_clock.steps`. A red baseline
+  with a steady clock still refuses on its **first** take, exactly as before —
+  that is the genuinely broken recorder, and a retry that outlasted it would
+  certify fourteen entries against a recorder nobody had shown works.
+  Exhausting the three attempts is a refusal that names each attempt's reason
+  *and* the failures the arm reported, because on this host a real fault and a
+  clock step arrive together. Every discarded attempt prints its own failure
+  list, `BASE` says which attempt passed, and the run's last line carries
+  `NOTE: not a first-take baseline` so the line a reviewer quotes cannot read
+  as a first-take green.
+
+  It does **not** make a stepping take pass, and it is not a fix for one —
+  [#255](https://github.com/rogvid/skills/issues/255) and
+  [#259](https://github.com/rogvid/skills/issues/259) own that. On a steady
+  host every line of it is dead, which is why it is graded by
+  `BaselineRerecord` in `tests/unit` against hand-written takes and a scripted
+  loop rather than by running an arm, and why 14 `tests/unit` injections break
+  `tests/smoke-inject` itself.
 
 ### When it runs
 
