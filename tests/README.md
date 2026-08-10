@@ -2454,13 +2454,26 @@ knows is missing is worse than one that is openly absent.
   above the beat table in `timeline.md`, each carrying `video_overlap` — the
   same difference with both instants on the video's clock, which is at or
   below zero when the frames are in order and only the log's column runs
-  backwards.
+  backwards — beside `no_video` / `previous_no_video`, which are the `lost` of
+  each endpoint's `Placed`. **In order is not the same answer as fine**: an
+  endpoint a backward step deleted has no frame at all, and a paragraph
+  claiming the first without the second is
+  [#256](https://github.com/rogvid/skills/issues/256) in a new artifact. The
+  bar is `MERGE_OVERLAP_SLACK_S`, which **is** `check_beats`'
+  `BEAT_ORDER_SLACK_S` — a merge with a tighter bar than the suite's calls a
+  0.6 ms seam non-monotonic on a take the suite passes, and a check that cries
+  wolf gets ignored. `seam` is read off the parts' beat counts and not off the
+  two `segment` strings, because nothing refuses one segment name twice.
 
   **Graded by `MergeOverlap` in `tests/unit` on hand-written documents, and by
-  nothing else.** Six `tests/unit` injections break it — detection off,
+  nothing else.** Thirteen `tests/unit` injections break it — detection off,
   detection on for every seam, the verdict's sign, the verdict claimed where
-  nothing was measured, the clamp this change refused, and `timeline.md`
-  dropping the paragraph. There is **no arm**: the overlap needs a host that
+  nothing was measured, the clamp this change refused, `timeline.md` dropping
+  the paragraph, `Placed.lost` dropped from the record and from the sentence,
+  the hole warning given to every overlap, the bar tightened past the suite's
+  and the constant drifted from it, `seam` keyed on the segment names, and the
+  header counting rows the renderer skips. There is **no arm**: the overlap
+  needs a host that
   steps its wall clock inside a segment, `--segments-only` cannot be made to
   produce one, and an assertion that only bites on a stepping box grades the
   box. What no assertion here can say is that a real stepping host produces

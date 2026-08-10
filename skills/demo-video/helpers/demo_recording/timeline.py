@@ -226,13 +226,22 @@ from .markdown import _fmt_t, _md_cell
 #                          looked. One record per adjacent pair of beats where
 #                          the later one starts before the earlier one ended:
 #                          `beat` / `previous_beat` (their `index` in this
-#                          file), `segment` / `previous_segment`, `seam` (do
-#                          the two belong to different parts), `overlap`
-#                          (seconds, on the clock the table above is on) and
+#                          file), `segment` / `previous_segment`, `seam` (is
+#                          the later beat the first of its part — read off the
+#                          parts' beat counts, not off the two segment names,
+#                          which nothing stops being equal), `overlap`
+#                          (seconds, on the clock the table above is on),
 #                          `video_overlap` (the same difference with both
 #                          instants put on the *video's* clock by the rule
 #                          `capture_clock` documents; **null** when no
-#                          correction was possible, which is not zero).
+#                          correction was possible, which is not zero) and
+#                          `no_video` / `previous_no_video`, the `lost` of
+#                          each endpoint's `Placed`: non-zero when a backward
+#                          step deleted that instant from the file, in which
+#                          case it has **no frame at all** and the pair being
+#                          "in order" says nothing about it. Only reported
+#                          past `MERGE_OVERLAP_SLACK_S` (5 ms), which is the
+#                          bar `tests/smoke` grades a merged log against.
 #                          A merged timestamp is its part's own
 #                          `time.monotonic()` plus that part's `offset`, and
 #                          the offset is the part's real ffprobe duration — a
@@ -813,13 +822,22 @@ def _overlaps_md(overlaps: object) -> list[str]:
 
     `stitch()` publishes the list; this only renders it. The sentence a reader
     needs is the second one: whether the frames are in order even though the
-    column is not.
+    column is not — and, when an endpoint sits in a hole a backward step
+    deleted, that "in order" is **not** the same as "the frames are fine",
+    because one of the two beats has no frame at all (issue #256).
+
+    The count in the header is of the rows this actually prints, not of the
+    list handed in: a hand-edited `timeline.json` can carry an entry this
+    cannot render, and a header that counted those would disagree with the
+    bullets under it in the one document whose job is to be read.
     """
-    if not isinstance(overlaps, list) or not overlaps:
+    listed = overlaps if isinstance(overlaps, list) else []
+    rows = [entry for entry in listed if isinstance(entry, dict)]
+    if not rows:
         return []
     out = [
         f"**This stitched beat log is not monotonic**: "
-        f"{len(overlaps)} beat(s) below start before the beat before them "
+        f"{len(rows)} beat(s) below start before the beat before them "
         f"ended. Nothing was moved to hide it — a merged timestamp is the "
         f"part's own `time.monotonic()` log plus that part's `offset`, and "
         f"the offset is the part's real ffprobe **duration**, which is on the "
@@ -829,16 +847,42 @@ def _overlaps_md(overlaps: object) -> list[str]:
         f"(issue #263). `timeline.json`'s `overlaps` carries the same list.",
         "",
     ]
-    for overlap in overlaps:
-        if not isinstance(overlap, dict):
-            continue
+    for overlap in rows:
         where = "at the seam" if overlap.get("seam") else "inside one segment"
         video = overlap.get("video_overlap")
+        # Which of the two endpoints, if either, the step deleted from the
+        # file. Named by beat, because "one of these has no frame" is not
+        # something a reader can act on.
+        deleted = [
+            (f"beat {_md_cell(overlap.get(beat))}", float(overlap.get(key) or 0.0))
+            for beat, key in (
+                ("previous_beat", "previous_no_video"),
+                ("beat", "no_video"),
+            )
+            if isinstance(overlap.get(key), (int, float))
+            and not isinstance(overlap.get(key), bool)
+            and overlap.get(key)
+        ]
         if not isinstance(video, (int, float)) or isinstance(video, bool):
             verdict = (
                 "nothing here can say whether the video puts them in order: "
                 "this demo carries no `capture_clock` a reader could correct "
                 "them with"
+            )
+        elif video <= 0 and deleted:
+            # In order, and still not fine: `at` for a deleted instant is the
+            # last moment the file has, not where that instant is. Saying only
+            # the first half is the #256 defect in a new artifact.
+            verdict = (
+                f"corrected by each capture's own steps they are "
+                f"{abs(float(video)):.3f}s apart and **in order** — but the "
+                f"file has no frame for "
+                + ", ".join(
+                    f"{name} at all, the video resuming {gap * 1000:.0f} ms later"
+                    for name, gap in deleted
+                )
+                + " (issue #256), so this is not a demo whose frames are all "
+                "there"
             )
         elif video <= 0:
             verdict = (

@@ -332,6 +332,18 @@ def _check_stream_shapes(parts: list[Path]) -> None:
         )
 
 
+# How far a merged beat may start before the previous one ended without being
+# called an overlap. **This is `tests/smoke`'s `BEAT_ORDER_SLACK_S`, and the two
+# have to stay equal**: that is the bar the suite grades a stitched log's
+# monotonicity against, so a tighter number here prints "this stitched beat log
+# is not monotonic" over a take the suite calls healthy, and a wider one stays
+# quiet about a log the suite fails. Measured at 0.4 ms and 0.6 ms seams either
+# side of it. `MergeOverlap.test_the_slack_here_is_the_slack_the_suite_grades`
+# in tests/unit is what keeps them equal; a check that cries wolf is a check
+# that gets ignored, and then it protects nothing.
+MERGE_OVERLAP_SLACK_S = 0.005
+
+
 def _merge_overlaps(doc: dict) -> list[dict]:
     """Where a stitched beat log runs backwards, and what the video's clock says.
 
@@ -364,14 +376,36 @@ def _merge_overlaps(doc: dict) -> list[dict]:
     when no correction was possible at all, which is not the same answer as
     zero and must not read like one.
 
+    `no_video` and `previous_no_video` carry the other half of each `Placed`,
+    and they are not decoration: an endpoint inside a hole has **no frame at
+    all**, and `at` for it is the last instant the file has rather than where
+    that instant is. Publishing `video_overlap` alone would let a reader be
+    told the two beats are in order — which is true — beside a claim that the
+    frames are fine, which is false for a beat the step deleted. That is
+    exactly the defect `Placed.lost` exists to prevent (issue #256), and a
+    conservative direction does not make a false sentence acceptable.
+
     Every adjacent pair is compared, not only the pairs at a seam, because
     "this stitched log is monotonic" is a claim about the whole list — `seam`
     says which kind each one is, since only the seams are this merge's
-    arithmetic. Empty on a healthy merge: the list is the merge saying it
-    looked.
+    arithmetic. **`seam` is read off the parts' beat counts, not off the two
+    beats' `segment` strings**: nothing stops `stitch()` being handed one
+    segment name twice (`tests/smoke` treats "merged segment one twice" as a
+    real failure mode), and a genuine seam reported as "inside one segment"
+    sends the reader to the wrong file.
+
+    Empty on a healthy merge: the list is the merge saying it looked. The bar
+    is `MERGE_OVERLAP_SLACK_S`, which is the suite's own.
     """
     place, state = capture_clock_correction(doc)
     beats = doc.get("beats") or []
+    # Where each part's first beat lands in the merged list, by running total
+    # of the parts' own beat counts. Independent of what the parts are called.
+    seams: set[int] = set()
+    at = 0
+    for record in doc.get("segments") or []:
+        at += int((record or {}).get("beats") or 0)
+        seams.add(at)
     found: list[dict] = []
     for before, after in zip(beats, beats[1:], strict=False):
         ends = _shift(before.get("t_end"), 0.0)
@@ -379,20 +413,26 @@ def _merge_overlaps(doc: dict) -> list[dict]:
         if ends is None or starts is None:
             continue
         overlap = round(ends - starts, 3)
-        if overlap <= 0:
+        if overlap <= MERGE_OVERLAP_SLACK_S:
             continue
+        placed_before = place(before, ends) if state.get("applied") else None
+        placed_after = place(after, starts) if state.get("applied") else None
         found.append(
             {
                 "beat": after.get("index"),
                 "previous_beat": before.get("index"),
                 "segment": after.get("segment"),
                 "previous_segment": before.get("segment"),
-                "seam": after.get("segment") != before.get("segment"),
+                "seam": after.get("index") in seams,
                 "overlap": overlap,
-                "video_overlap": round(
-                    place(before, ends).at - place(after, starts).at, 3
-                )
-                if state.get("applied")
+                "video_overlap": round(placed_before.at - placed_after.at, 3)
+                if placed_before is not None and placed_after is not None
+                else None,
+                "previous_no_video": round(placed_before.lost, 3)
+                if placed_before is not None
+                else None,
+                "no_video": round(placed_after.lost, 3)
+                if placed_after is not None
                 else None,
             }
         )

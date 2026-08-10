@@ -103,7 +103,10 @@ from demo_recording.narration import (  # noqa: E402
     _tts_key,
     mix_plan,
 )
-from demo_recording.stitching import _merged_timeline  # noqa: E402
+from demo_recording.stitching import (  # noqa: E402
+    MERGE_OVERLAP_SLACK_S,
+    _merged_timeline,
+)
 from demo_recording.target import TargetRefused  # noqa: E402
 from demo_recording.timeline import (  # noqa: E402
     ISSUE_KINDS,
@@ -5166,10 +5169,19 @@ def clock_record(*steps: tuple[float, float], measured: bool = True) -> dict:
     }
 
 
+# A `demo.mp4` that cannot exist: its parent directory is never created by
+# anything. `_merged_timeline` probes the path only to fill `duration`, and a
+# relative "demo.mp4" would make this shell out to ffprobe against whatever
+# happens to be in the working directory — a unit test grading a stranger's
+# recording. See the stale-input entry in wip/verified-review.
+ABSENT_DEMO = Path(tempfile.gettempdir()) / "demo-video-unit-no-such-dir" / "demo.mp4"
+
+
 def merged_with_beats(
     parts: list[list[tuple[float, float]]],
     durations: list[float],
     clocks: list[object] | None = None,
+    names: list[str] | None = None,
 ) -> dict:
     """A stitched timeline whose parts carry exactly the beats `parts` names.
 
@@ -5178,8 +5190,12 @@ def merged_with_beats(
     Here the spans are the input: a part's log is allowed to outrun its own
     `.seg.mp4`, which is what a backward wall-clock step does to a capture and
     is the only way to construct issue #263 on a host whose clock holds still.
+
+    `names` is an input too, because nothing in `stitch()` stops two parts
+    being handed the same segment name and the merge has to stay right when
+    they are.
     """
-    names = [f"part{n + 1}" for n in range(len(parts))]
+    names = names or [f"part{n + 1}" for n in range(len(parts))]
     docs = [
         {
             "recorder": "Recorder",
@@ -5206,7 +5222,7 @@ def merged_with_beats(
         [Path(f"{name}.seg.mp4") for name in names],
         docs,
         durations,
-        Path("demo.mp4"),
+        ABSENT_DEMO,
     )
 
 
@@ -5314,6 +5330,101 @@ class MergeOverlap(unittest.TestCase):
             [self.STEADY_BEATS, self.SECOND_PART], self.DURATIONS, self.measured()
         )
         self.assertEqual(doc["overlaps"], [])
+
+    def test_an_endpoint_the_step_deleted_is_not_reported_as_a_frame(self):
+        """In order is not the same answer as fine (#256).
+
+        A part 3.0 s long on disk, a −1.5 s step at 3.0 s, and its last beat
+        ending at 3.8 s — inside the hole that step left. `place` clamps that
+        to 3.0 s and hands back `lost=0.700`, so the pair reads 0.2 s apart
+        and in order, which is true. What is false is "the frames are fine":
+        the file has no frame for that beat at all. `Placed.lost` exists to
+        stop a consumer publishing `at` without it, and a merge that dropped
+        it is that consumer.
+        """
+        doc = merged_with_beats(
+            [[(0.5, 0.6), (3.4, 3.8)], [(0.2, 0.6)]],
+            [3.0, 5.0],
+            [clock_record((3.0, -1.5)), clock_record()],
+        )
+        found = doc["overlaps"][0]
+        self.assertAlmostEqual(found["overlap"], 0.6, places=3)
+        self.assertAlmostEqual(found["video_overlap"], -0.2, places=3)
+        self.assertAlmostEqual(found["previous_no_video"], 0.7, places=3)
+        self.assertEqual(found["no_video"], 0.0)
+        rendered = render_timeline_md(doc)
+        self.assertIn("**in order**", rendered)
+        self.assertIn("no frame for beat 1 at all", rendered)
+        self.assertIn("700 ms later", rendered)
+        self.assertNotIn("frames are fine", rendered)
+
+    def test_a_pair_whose_endpoints_both_have_frames_still_says_they_are_fine(self):
+        # The control for the sentence above: without it, "never say the
+        # frames are fine" passes and the benign case loses the one line that
+        # tells a reviewer not to go looking.
+        rendered = render_timeline_md(self.stitched(self.measured()))
+        self.assertIn("frames are fine", rendered)
+        self.assertNotIn("no frame for beat", rendered)
+
+    def test_the_slack_here_is_the_slack_the_suite_grades(self):
+        """A bar of its own would cry wolf, and a check that cries wolf is off.
+
+        `tests/smoke`'s `check_beats` accepts a seam within
+        `BEAT_ORDER_SLACK_S`. A tighter bar here prints "this stitched beat
+        log is not monotonic" over a take the suite calls healthy; a wider one
+        stays quiet about a log the suite fails.
+        """
+        self.assertEqual(MERGE_OVERLAP_SLACK_S, _smoke_module().BEAT_ORDER_SLACK_S)
+
+    def test_a_seam_inside_the_slack_is_not_called_an_overlap(self):
+        """At the bar, not comfortably inside it — and at the case measured.
+
+        0.6 ms is the seam the first version of this reported, on a take
+        `check_beats` calls healthy. 4 ms and 6 ms are either side of the bar
+        itself, because a constant only tested well past it is one nothing
+        pins.
+        """
+        for last_end in (6.0006, 6.004):
+            with self.subTest(t_end=last_end):
+                quiet = merged_with_beats(
+                    [[(0.5, last_end)], self.SECOND_PART],
+                    self.DURATIONS,
+                    self.measured(),
+                )
+                self.assertEqual(quiet["overlaps"], [])
+        loud = merged_with_beats(
+            [[(0.5, 6.006)], self.SECOND_PART], self.DURATIONS, self.measured()
+        )
+        self.assertEqual(len(loud["overlaps"]), 1)
+        self.assertAlmostEqual(loud["overlaps"][0]["overlap"], 0.006, places=3)
+
+    def test_a_seam_between_two_parts_of_the_same_name_is_still_a_seam(self):
+        """`seam` is the merge's own arithmetic, so it is read off the merge.
+
+        Nothing in `stitch()` refuses one segment name twice, and
+        `tests/smoke` treats "merged segment one twice" as a real failure
+        mode. Keyed on the two beats' `segment` strings, a genuine seam there
+        reads as "inside one segment" and sends the reader to a part's own log
+        for a defect the merge produced.
+        """
+        doc = merged_with_beats(
+            [self.STEPPED_BEATS, self.SECOND_PART],
+            self.DURATIONS,
+            names=["part1", "part1"],
+        )
+        found = doc["overlaps"][0]
+        self.assertEqual((found["previous_beat"], found["beat"]), (1, 2))
+        self.assertEqual(found["previous_segment"], found["segment"])
+        self.assertIs(found["seam"], True)
+
+    def test_the_markdown_counts_the_rows_it_prints(self):
+        # Reachable from a hand-edited timeline.json only, and two lines: a
+        # header saying "2 beat(s)" over one bullet is the artifact
+        # disagreeing with itself in the document whose job is to be read.
+        doc = self.stitched(self.measured())
+        doc["overlaps"] = [*doc["overlaps"], "not a record"]
+        rendered = render_timeline_md(doc)
+        self.assertIn("1 beat(s) below start before", rendered)
 
     def test_a_pair_inside_one_segment_is_reported_and_not_called_a_seam(self):
         # "This stitched log is monotonic" is a claim about the whole list, so
@@ -10674,7 +10785,7 @@ INJECTIONS = [
         # and it is the report beside them that is gone.
         "a stitched log overlaps at the seam and the artifact says nothing",
         "stitching.py",
-        "        if overlap <= 0:\n            continue",
+        "        if overlap <= MERGE_OVERLAP_SLACK_S:\n            continue",
         "        if True:\n            continue",
         [
             "MergeOverlap.test_a_seam_the_step_pushed_past_is_reported_with_its_size",
@@ -10688,7 +10799,7 @@ INJECTIONS = [
         # paragraph about a defect on every healthy stitched demo.
         "every seam is reported as an overlap, including the ones in order",
         "stitching.py",
-        "        if overlap <= 0:\n            continue",
+        "        if overlap <= MERGE_OVERLAP_SLACK_S:\n            continue",
         "        if False:\n            continue",
         [
             "MergeOverlap.test_a_merge_whose_parts_fit_their_own_videos_reports_none",
@@ -10703,8 +10814,8 @@ INJECTIONS = [
         # and still the right length, which is why the count is not the check.
         "the video's clock is read backwards, so the verdict is inverted",
         "stitching.py",
-        "                    place(before, ends).at - place(after, starts).at, 3",
-        "                    place(after, starts).at - place(before, ends).at, 3",
+        '                "video_overlap": round(placed_before.at - placed_after.at, 3)',
+        '                "video_overlap": round(placed_after.at - placed_before.at, 3)',
         [
             "MergeOverlap.test_the_steps_that_caused_it_are_shown_to_put_the_frames_in_order",
             "MergeOverlap.test_an_overlap_the_recorded_steps_do_not_explain_says_so",
@@ -10717,8 +10828,10 @@ INJECTIONS = [
         # null — the artifact-lies direction, and the one that reads best.
         "an overlap nobody could check is reported as if the clock had explained it",
         "stitching.py",
-        '                if state.get("applied")\n                else None,',
-        "                if True\n                else None,",
+        '        placed_before = place(before, ends) if state.get("applied") else None\n'
+        '        placed_after = place(after, starts) if state.get("applied") else None',
+        "        placed_before = place(before, ends)\n"
+        "        placed_after = place(after, starts)",
         [
             "MergeOverlap.test_an_unmeasured_clock_leaves_the_verdict_null_rather_than_zero",
             "MergeOverlap.test_the_markdown_does_not_claim_an_order_nobody_could_check",
@@ -10743,6 +10856,94 @@ INJECTIONS = [
         ],
     ),
     (
+        # `Placed.lost` thrown away, which is the shape of #256 in a new
+        # artifact: the pair really is in order, so the ordering claim stays
+        # true, and the sentence beside it tells a reviewer the frames are
+        # fine when one of the two beats has no frame at all.
+        "an endpoint the step deleted is published as though it had a frame",
+        "stitching.py",
+        '                "previous_no_video": round(placed_before.lost, 3)',
+        '                "previous_no_video": 0.0',
+        [
+            "MergeOverlap.test_an_endpoint_the_step_deleted_is_not_reported_as_a_frame",
+        ],
+    ),
+    (
+        # ...and the same thing one level up, in the sentence itself. The
+        # record still carries the hole; `timeline.md` prints "the frames are
+        # fine" over it, and `timeline.md` is the file a reviewer opens.
+        "timeline.md calls the frames fine over a beat the step deleted",
+        "timeline.py",
+        "        elif video <= 0 and deleted:",
+        "        elif False:",
+        [
+            "MergeOverlap.test_an_endpoint_the_step_deleted_is_not_reported_as_a_frame",
+        ],
+    ),
+    (
+        # ...and the leniency half, which is the direction a "never say the
+        # frames are fine" fix would take: every benign overlap now warns
+        # about missing video that is not missing, and the one line telling a
+        # reviewer not to go looking is gone from the case that earned it.
+        "every overlap is reported as having a beat with no video",
+        "timeline.py",
+        "        elif video <= 0 and deleted:",
+        "        elif video <= 0 or deleted:",
+        [
+            "MergeOverlap."
+            "test_a_pair_whose_endpoints_both_have_frames_still_says_they_are_fine",
+        ],
+    ),
+    (
+        # The bar, back to a strictly-positive one. `check_beats` tolerates
+        # 5 ms of seam, so this prints "**This stitched beat log is not
+        # monotonic**" over takes the suite calls healthy — measured at a
+        # 0.6 ms seam. A check that cries wolf is a check that gets ignored.
+        "the merge reports a seam the suite's own bar tolerates",
+        "stitching.py",
+        "        if overlap <= MERGE_OVERLAP_SLACK_S:",
+        "        if overlap <= 0:",
+        ["MergeOverlap.test_a_seam_inside_the_slack_is_not_called_an_overlap"],
+    ),
+    (
+        # ...and the two bars drifting apart in the other direction, which is
+        # the silent one: a merge that stays quiet about a log `check_beats`
+        # fails.
+        "the merge's slack stops being the slack the suite grades",
+        "stitching.py",
+        "MERGE_OVERLAP_SLACK_S = 0.005",
+        "MERGE_OVERLAP_SLACK_S = 0.05",
+        [
+            "MergeOverlap.test_the_slack_here_is_the_slack_the_suite_grades",
+            "MergeOverlap.test_a_seam_inside_the_slack_is_not_called_an_overlap",
+        ],
+    ),
+    (
+        # `seam` keyed on the two beats' segment names, which is what this
+        # shipped as. Nothing in `stitch()` refuses one segment name twice —
+        # `tests/smoke` treats "merged segment one twice" as a real failure
+        # mode — and a genuine seam reported as "inside one segment" sends the
+        # reader into a part's own log for a defect the merge produced.
+        "a seam between two parts of one name is reported as inside a segment",
+        "stitching.py",
+        '                "seam": after.get("index") in seams,',
+        '                "seam": after.get("segment") != before.get("segment"),',
+        [
+            "MergeOverlap.test_a_seam_between_two_parts_of_the_same_name_is_still_a_seam",
+        ],
+    ),
+    (
+        # A header counting entries the loop below skips. Only a hand-edited
+        # `timeline.json` gets there, and it is two lines — but the artifact
+        # disagreeing with itself is the one thing this paragraph exists to
+        # stop happening to a reader.
+        "the overlap header counts rows timeline.md does not print",
+        "timeline.py",
+        '        f"{len(rows)} beat(s) below start before the beat before them "',
+        '        f"{len(listed)} beat(s) below start before the beat before them "',
+        ["MergeOverlap.test_the_markdown_counts_the_rows_it_prints"],
+    ),
+    (
         # And the rendering: the JSON keeps the list, `timeline.md` drops the
         # paragraph. Nobody reviewing a demo through this skill opens the JSON,
         # so this is the version of the defect a reviewer actually meets — a
@@ -10750,7 +10951,7 @@ INJECTIONS = [
         # sentence anywhere saying why.
         "timeline.md stops saying its own beat table runs backwards",
         "timeline.py",
-        "    if not isinstance(overlaps, list) or not overlaps:\n        return []",
+        "    if not rows:\n        return []",
         "    if True:\n        return []",
         [
             "MergeOverlap.test_the_markdown_names_the_beats_the_size_and_the_verdict",

@@ -246,12 +246,19 @@ Nothing is clamped: a beat's merged timestamp is exactly its own part's log
 plus that part's `offset`, and the whole per-segment correction rule above
 depends on that identity. The overlap is published instead, as `overlaps` in
 `timeline.json` and as a paragraph above the beat table in `timeline.md`. Empty
-on a healthy merge. Read `video_overlap` first — the same difference with both
-instants put on the video's clock by the rule above. At or below zero the
-frames really are in order and only the log's column runs backwards, which is
-the mechanism in this section; above zero the recorded steps do not account for
-it; `null` means no correction was possible at all, which is not the same
-answer as zero.
+on a healthy merge, and only reported past 5 ms, which is the same slack this
+repo's suite grades a merged log's beat order against — a report tighter than
+the bar it is checked by would call a healthy take broken.
+
+Read `video_overlap` first — the same difference with both instants put on the
+video's clock by the rule above. At or below zero the frames really are in
+order and only the log's column runs backwards, which is the mechanism in this
+section; above zero the recorded steps do not account for it; `null` means no
+correction was possible at all, which is not the same answer as zero. Then read
+`no_video` and `previous_no_video`, which are each endpoint's `lost`:
+**"in order" is not "the frames are all there"**, because an endpoint the step
+deleted has no frame at all and its place on the video's clock is the last
+instant before the gap.
 
 ### Sixty seconds buys about twenty screens
 
