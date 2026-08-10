@@ -778,10 +778,21 @@ DURATION_TOLERANCE_S = 0.2
 # log's:
 #
 #   * MAX_LOG_EARLY_S — the video shows the caption *after* the log says
-#     (positive skew). Nothing about the capture can produce that: a webm
-#     that drops frames only ever makes events land earlier. So a positive
-#     skew is the log's own error, and the bar is tight. `_t0` set after
-#     `_start()` instead of at page creation measures +280 to +320 ms here.
+#     (positive skew). The bar is tight because on a take whose host clock
+#     held still the beat log is the only thing that can produce it, and it
+#     produces it measurably: `_t0` set after `_start()` instead of at page
+#     creation measures +280 to +320 ms here.
+#
+#     What this comment used to say next was that *nothing* about the capture
+#     can move an event later, "so a positive skew is the log's own error".
+#     That is false, and the thing that falsifies it is on this side of the
+#     line rather than the recorder's: correcting by a step the capture only
+#     partly lost over-shoots by the difference, and the remainder lands here.
+#     Measured in issue #255 — 0.17 s lost of a recorded 1.078 s step read as
+#     +906 ms of log-ahead, 0.53 s of 1.067 s as +540 ms. So the failure text
+#     asks `log_early_causes()` which cause to name, and on a stepping take it
+#     names the step first (issue #257). The bar itself is unchanged: what was
+#     wrong was the explanation, not the width.
 #
 #   * MAX_CAPTURE_LOSS_S — the video shows it *before* the log says (negative
 #     skew). Two separate things produce that, and the whole of issue #215 is
@@ -2097,8 +2108,8 @@ class HostClock:
     def total(self) -> float:
         return sum(delta for _, delta in self.steps)
 
-    def in_video(self, t: float) -> tuple[float, float]:
-        """(where `t` is in demo.mp4, how much of it has no video) — see below.
+    def applied(self, t: float) -> list[tuple[float, float]]:
+        """The steps that moved `t`, of the ones this take recorded.
 
         **Only the steps inside `t`'s own capture count.** A capture's first
         frame is where its clock starts, so a step during an earlier part
@@ -2110,13 +2121,21 @@ class HostClock:
         *after* its own part's last frame, which sits past the next part's
         boundary and is nobody's — is kept out of the list by `joined_clock`.
 
+        A list rather than the sum, because two of them cancel: a −1 s step
+        and a +1 s step before the same beat leave `before()` at zero while
+        the file still has a hole in it, and `log_early_causes` has to be able
+        to tell that take from one whose clock held still.
+        """
+        start = max((b for b in self.boundaries if b <= t), default=0.0)
+        return [(at, delta) for at, delta in self.steps if start <= at <= t]
+
+    def in_video(self, t: float) -> tuple[float, float]:
+        """(where `t` is in demo.mp4, how much of it has no video) — see below.
+
         Hand-written here rather than shared with the recorder: the two have
         to be able to disagree, or `capture_clock` is not being graded.
         """
-        start = max((b for b in self.boundaries if b <= t), default=0.0)
-        return video_instant(
-            [(at, delta) for at, delta in self.steps if start <= at <= t], t
-        )
+        return video_instant(self.applied(t), t)
 
     def before(self, t: float) -> float:
         """How much the wall clock had stepped by `t` seconds into the video.
@@ -2212,6 +2231,86 @@ def hole_clause(clock, t: float, at: float) -> str:
         f"stepped backwards over it, so {at:.3f}s is the last moment before a "
         f"gap the video only resumes from {gap * 1000:.0f} ms later, and the "
         f"recorder is expected to have clamped to the same place (issue #256)."
+    )
+
+
+def log_early_causes(clock, t: float) -> str:
+    """Where to look when a beat sits *ahead* of the frame showing it (#257).
+
+    What this replaces was a verdict, not a lead: "nothing about the capture
+    can move an event *later*, so this is the beat log: check where `_t0` is
+    taken and where `_beat` stamps `t_start`." That is false on a take whose
+    host stepped, and it is the *correction* rather than the capture that
+    makes it false — a take that lost only part of the step it recorded is
+    over-corrected by the difference, and the remainder arrives here as
+    log-ahead. Measured in issue #255: 0.17 s lost of a recorded 1.078 s step
+    read as +906 ms, 0.53 s of 1.067 s as +540 ms, ~0.46 s of 1.074 s as
+    +970 ms. A reader sent to `_t0` and `_beat` by any of those goes hunting
+    in the recorder's beat logging for a bug that is not there.
+
+    So the take decides which cause is named first. Four answers: the three
+    states this harness can be in about a host's wall clock — unmeasured,
+    measured with no step reaching this beat, measured with one — and, inside
+    the last, the case where the steps reaching the beat correct it by
+    nothing. Two cancelling steps and a step landing on the beat itself both
+    subtract 0 ms, so the over-correction cannot be what produced the skew,
+    and offering it there would hand a reader a mechanism that provably did
+    not run.
+    Keyed on the steps `applied()` hands back rather than on the correction
+    they sum to, because two steps that cancel sum to nothing and still leave
+    the file short — and because a step in another capture is already in the
+    offset `stitch()` laid this one out by, so it is not this beat's excuse.
+
+    A whole sentence returned to the caller rather than spliced into either
+    message, for `hole_clause`'s reason: neither call site is reachable on a
+    host whose clock holds still, so `LogEarlyCause` in `tests/unit` is the
+    only thing that runs the stepping branch at all.
+    """
+    if clock is None:
+        return (
+            "No wall-clock reading was kept for this take, so this harness "
+            "cannot say which end is at fault: an unmeasured backward step "
+            "leaves the video short and the beat log where it was, and reads "
+            "from here exactly like a log stamped early. Get a reading before "
+            "reading `_t0` and `_beat` (issues #215, #255)."
+        )
+    applied = clock.applied(t)
+    if not applied:
+        return (
+            "No step of this beat's own capture lands before it, so nothing "
+            "was subtracted from this reading and nothing in the capture can "
+            "have moved the event later: this is the beat log. Check where "
+            "`_t0` is taken and where `_beat` stamps `t_start`."
+        )
+    shift = clock.before(t)
+    if abs(shift) < HOST_CLOCK_MIN_STEP_S:
+        # Steps reach this beat and the correction still comes to nothing:
+        # two that cancel, or one landing on the beat itself, where the
+        # clamp gives back exactly what the step took. Naming the
+        # over-correction here would offer a reader a mechanism that
+        # provably did not run — nothing was subtracted to over-subtract.
+        return (
+            f"**This take's clock stepped, so the beat log is not the first "
+            f"place to look**: {clock.describe()}. Nothing was subtracted "
+            f"from this reading — the steps reaching this beat come to "
+            f"{shift * 1000:+.0f} ms, because they cancel or because one "
+            f"lands on the beat itself — so over-correction is not what "
+            f"produced this skew. Neither is the beat log established as "
+            f"what did: a backward step deletes its own width of wall time "
+            f"from the file whether or not a later step puts the offset "
+            f"back, and this harness has not read those frames. Check the "
+            f"step against demo.mp4 before reading `_t0` and `_beat` "
+            f"(issue #255)."
+        )
+    return (
+        f"**This take's clock stepped, so the beat log is not the first place "
+        f"to look**: {clock.describe()}, and {shift * 1000:+.0f} ms of that "
+        f"was subtracted from this reading. A capture that lost less wall "
+        f"time than the step it recorded is over-corrected by the "
+        f"difference, and what is left reads as log-ahead — measured at "
+        f"+540 to +970 ms on takes losing 16-50% of a ~1.07 s step (issue "
+        f"#255). Check the step against demo.mp4 before reading `_t0` and "
+        f"`_beat`."
     )
 
 
@@ -6446,9 +6545,7 @@ def check_timeline(
             failures.append(
                 f"{label}: {where} — the log is {skew * 1000:.0f} ms ahead of "
                 f"the frame, over the {MAX_LOG_EARLY_S * 1000:.0f} ms bar. "
-                f"Nothing about the capture can move an event *later*, so this "
-                f"is the beat log: check where `_t0` is taken and where `_beat` "
-                f"stamps `t_start`. ({note})"
+                f"{log_early_causes(clock, t_start)} ({note})"
             )
         elif skew < -MAX_CAPTURE_LOSS_S:
             failures.append(
@@ -9198,6 +9295,16 @@ def check_merge_offset(
         # segment's own log, on the same directional bars a single take gets.
         # The differential above divides this out by construction.
         if own > MAX_LOG_EARLY_S or own < -MAX_CAPTURE_LOSS_S:
+            # Which end to name is the same question `check_timeline` asks,
+            # and it has the same two answers: a negative skew is capture
+            # loss, and a positive one is the beat log *only* on a take whose
+            # clock held still (issue #257).
+            which = (
+                log_early_causes(segment_clock, float(alone["t_start"]))
+                if own > MAX_LOG_EARLY_S
+                else "The video is ahead of the log, which is capture loss "
+                "(issues #18 and #215)."
+            )
             failures.append(
                 f"segments: {name}'s probe caption is {own * 1000:+.0f} ms off "
                 f"its beat *within {part.name}*, outside the "
@@ -9205,8 +9312,7 @@ def check_merge_offset(
                 f"a single capture is allowed, with the host's measured "
                 f"wall-clock steps already taken out. The merge is not "
                 f"involved — this segment's own beat log and its own video "
-                f"disagree (a positive skew is the log's; a negative one is "
-                f"capture loss, issues #18 and #215)."
+                f"disagree. {which}"
             )
             continue
         print(

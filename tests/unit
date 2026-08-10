@@ -7276,6 +7276,184 @@ class BaselineRerecord(unittest.TestCase):
         self.assertIn("genuinely flaky", block)
 
 
+class LogEarlyCause(unittest.TestCase):
+    """Which end `tests/smoke` blames for a beat ahead of its frame (#257).
+
+    Here for `HostClockHole`'s reason, and it is the reason that made the
+    message wrong in the first place: **on a steady host the stepping branch
+    is unreachable**, so an arm of the smoke suite grades the one answer that
+    was never in doubt and prints nothing about the other. The wording it
+    replaces — "nothing about the capture can move an event *later*, so this
+    is the beat log" — was true of every take this suite has ever run green
+    and false of the four of six stepping runs issue #255 measured.
+
+    The distinction is the deliverable, so the assertions are written in
+    pairs: what the stepping answer must say, and what it must **not** say.
+    A message that names the step and still ends "so this is the beat log"
+    has not stopped sending the reader to `_t0`.
+
+    **What `VERDICTS` does and does not grade.** It is a list of literals:
+    the three wordings this repo has actually shipped for that verdict — the
+    failure text's, `MAX_LOG_EARLY_S`'s comment's, `check_merge_offset`'s own
+    copy — plus the imperative all of them end on, which is the part that
+    actually sends a reader into the recorder's beat logging. Restoring any
+    of those is caught. A verdict written in words that are not in this list
+    is **not** caught, and no assertion here could be: "does this paragraph
+    assert a cause" is not decidable from substrings. This is a tripwire
+    against reversion and against the softening that reaches for the shipped
+    phrasing, not a proof that the message asserts no verdict. Review is what
+    covers the rest, and a reviewer got past the single-phrase version of
+    this list, which is why it is a list.
+    """
+
+    # The wordings, then the imperative. The last entry is the load-bearing
+    # one: a message may end up naming the beat log in some new phrasing, but
+    # "check where `_beat` stamps `t_start`" is the instruction that costs the
+    # reader the diagnosis, and it survives a rewrite of the sentence above it.
+    VERDICTS = (
+        "this is the beat log",
+        "is the log's own error",
+        "a positive skew is the log's",
+        "`_beat` stamps",
+    )
+    VERDICT = VERDICTS[0]
+
+    def assertNoVerdict(self, said: str):
+        for phrase in self.VERDICTS:
+            self.assertNotIn(phrase, said, f"still asserts a cause: {phrase!r}")
+
+    def setUp(self):
+        self.smoke = _smoke_module()
+        self.because = self.smoke.log_early_causes
+
+    def clock(self, *steps: tuple[float, float], boundaries: list | None = None):
+        """A `HostClock` holding `steps`, sampled by nobody — see HostClockHole."""
+        clock = self.smoke.HostClock()
+        clock._t0 = 0.0
+        clock.raw = list(steps)
+        clock.boundaries = boundaries or []
+        return clock
+
+    def test_a_steady_take_is_still_told_to_read_the_beat_log(self):
+        """The control, and the answer that was always right.
+
+        Without it, "never blame the beat log" passes every assertion below
+        and throws away the diagnosis a steady take is entitled to — which is
+        the artifact-lies direction of this same fix.
+        """
+        said = self.because(self.clock(), 5.633)
+        self.assertIn("No step of this beat's own capture lands before it", said)
+        # Both halves of the diagnosis, not just the sentence: the verdict and
+        # the imperative that acts on it. A steady take is entitled to both.
+        self.assertIn(self.VERDICT, said)
+        self.assertIn("`_beat` stamps `t_start`", said)
+
+    def test_a_stepping_take_names_the_step_and_withdraws_the_verdict(self):
+        # The measured take: −1.073 s at 2.2 s, a beat at 5.633 s after it.
+        said = self.because(self.clock((2.2, -1.073)), 5.633)
+        self.assertIn("clock stepped", said)
+        self.assertIn("-1073 ms", said)
+        self.assertIn("over-corrected", said)
+        # The half that carries the meaning. A paragraph that names the step
+        # and then repeats the verdict has changed nothing for the reader.
+        self.assertNoVerdict(said)
+        self.assertNotIn("No step of this beat's own capture", said)
+
+    def test_a_step_after_the_beat_leaves_the_beat_log_named(self):
+        """The other side of the distinction, and why it is per-instant.
+
+        A step at 6.0 s took nothing out of the file before 5.633 s, so this
+        beat's reading had nothing subtracted from it and the verdict stands.
+        Keying the branch on "the take stepped" instead would withdraw the
+        one diagnosis this check can give, on any take that stepped at all.
+        """
+        said = self.because(self.clock((6.0, -1.073)), 5.633)
+        self.assertIn(self.VERDICT, said)
+
+    def test_two_steps_that_cancel_still_withdraw_the_verdict(self):
+        """The case a correction-sized test would miss.
+
+        −1.0 s at 2.0 s and +1.0 s at 4.0 s sum to a correction of zero, and
+        the file is still a second short between them. A branch keyed on the
+        number `before()` returns reads this take as steady and blames a beat
+        log that is fine.
+        """
+        clock = self.clock((2.0, -1.0), (4.0, 1.0))
+        self.assertEqual(clock.before(5.633), 0.0)
+        self.assertNoVerdict(self.because(clock, 5.633))
+
+    def test_a_correction_of_nothing_is_not_offered_the_over_correction(self):
+        """...and what that case may not say, which is the other half.
+
+        Over-correction is subtracting more than the capture lost. Nothing
+        was subtracted here, so it is a mechanism that provably did not run,
+        and printing "+0 ms was subtracted" beside it puts a number and its
+        explanation in the same paragraph contradicting each other. The
+        reader is owed the reason the correction came to nothing instead.
+        """
+        said = self.because(self.clock((2.0, -1.0), (4.0, 1.0)), 5.633)
+        self.assertIn("+0 ms", said)
+        self.assertIn("they cancel", said)
+        self.assertNotIn("over-corrected", said)
+        self.assertNoVerdict(said)
+
+    def test_a_step_landing_on_the_beat_itself_is_the_same_case(self):
+        """The other zero, and it is a different clock configuration.
+
+        A backward step at exactly the beat's own instant clamps to where the
+        beat already was, so the correction is again 0 ms while the file is
+        1.05 s short from that instant on. Two cancelling steps do not
+        exercise this: there is one step here, and its own hole opens at `t`.
+        """
+        clock = self.clock((5.633, -1.05))
+        self.assertEqual(clock.before(5.633), 0.0)
+        self.assertNotEqual(clock.applied(5.633), [])
+        said = self.because(clock, 5.633)
+        self.assertIn("lands on the beat itself", said)
+        self.assertNotIn("over-corrected", said)
+        self.assertNoVerdict(said)
+
+    def test_a_step_in_another_capture_is_not_this_beats_excuse(self):
+        # The attribution rule `applied()` carries: part one's step is already
+        # in the offset `stitch()` laid part two out by, so a beat 0.2 s into
+        # part two has no step of its own and the verdict stands.
+        clock = self.clock((5.151, -1.051), boundaries=[0.0, 5.5])
+        self.assertIn(self.VERDICT, self.because(clock, 5.7))
+
+    def test_a_take_nobody_measured_blames_neither_end(self):
+        # `check_timeline` drops an uncovered watcher and grades the take
+        # anyway with a zero correction (#247), so this state is reachable and
+        # is the one where the harness genuinely cannot say.
+        said = self.because(None, 5.633)
+        self.assertIn("No wall-clock reading was kept", said)
+        self.assertNoVerdict(said)
+
+    def test_both_failure_texts_ask_this_function_rather_than_deciding(self):
+        """The wiring, which no scripted clock can reach.
+
+        `check_merge_offset` carried its own copy of the verdict — "a positive
+        skew is the log's" — and a fix applied to `check_timeline` alone
+        leaves the segments arm saying the false thing. This is a structural
+        check and grades nothing about the wording; it grades that there is
+        one wording.
+        """
+        import ast
+
+        tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for name in ("check_timeline", "check_merge_offset"):
+            calls = {
+                node.func.id
+                for node in ast.walk(funcs[name])
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            self.assertIn(
+                "log_early_causes",
+                calls,
+                f"{name} decides for itself which end a positive skew is",
+            )
+
+
 # --------------------------------------------------------------------------
 
 # Issue #203, as the overlay shipped before it was fixed and after it was.
@@ -7716,6 +7894,88 @@ INJECTIONS = [
         "        if gap <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S or near_edge:",
         "        if gap <= MAX_CLOCK_STEP_TIME_DISAGREEMENT_S:",
         ["HostClockHole.test_a_midpoint_near_the_step_itself_is_left_alone"],
+    ),
+    (
+        # The verdict this repo shipped until #257, restored: one answer for
+        # every take, and it names the beat log. Nothing about a steady take
+        # changes — which is the point, and why the control below has to keep
+        # passing. What goes is the distinction, so a stepping take is sent to
+        # `_t0` and `_beat` for a skew the correction produced.
+        "a positive skew is the beat log's, whatever the host's clock did",
+        "tests/smoke",
+        "    if not applied:",
+        "    if True:",
+        [
+            "LogEarlyCause."
+            "test_a_stepping_take_names_the_step_and_withdraws_the_verdict",
+            "LogEarlyCause.test_two_steps_that_cancel_still_withdraw_the_verdict",
+        ],
+    ),
+    (
+        # A correction of nothing offered the over-correction anyway. The
+        # number printed beside it is +0 ms, so the paragraph contradicts
+        # itself: nothing was subtracted, and over-correction is subtracting
+        # more than the capture lost. Unreachable on a steady host and on most
+        # stepping ones — it needs two steps that cancel, or one landing on the
+        # beat — which is why it needs a scripted clock rather than an arm.
+        "a reading nothing was subtracted from is blamed on over-correction",
+        "tests/smoke",
+        "    if abs(shift) < HOST_CLOCK_MIN_STEP_S:",
+        "    if False:",
+        [
+            "LogEarlyCause."
+            "test_a_correction_of_nothing_is_not_offered_the_over_correction",
+            "LogEarlyCause.test_a_step_landing_on_the_beat_itself_is_the_same_case",
+        ],
+    ),
+    (
+        # The decay this is actually exposed to: not a revert, but somebody
+        # softening the message back toward the verdict a phrase at a time.
+        # This is the reviewer's own construction — it names the step, and
+        # then re-asserts the cause in words the shipped sentence never used.
+        # The single-phrase guard passed it; `VERDICTS` carries the imperative
+        # as well as the sentences, and the imperative is what survives a
+        # rewrite of the sentence above it.
+        "the stepping message names the step and then blames the beat log anyway",
+        "tests/smoke",
+        '        f"#255). Check the step against demo.mp4 before reading `_t0` and "\n'
+        '        f"`_beat`."',
+        '        f"#255). That said, the fault is the beat log: check where `_t0` "\n'
+        '        f"is taken and where `_beat` stamps `t_start`."',
+        [
+            "LogEarlyCause."
+            "test_a_stepping_take_names_the_step_and_withdraws_the_verdict",
+        ],
+    ),
+    (
+        # The other way to get this wrong, and the tempting one: withdraw the
+        # verdict on any take that stepped *at all*. A step after the beat
+        # took nothing out of the file before it, and a step in another
+        # capture is already in the offset `stitch()` laid this one out by —
+        # so this trades a message that blames the beat log too often for one
+        # that never does, and the arm stays green either way.
+        "any step anywhere in the take excuses the beat log",
+        "tests/smoke",
+        "    applied = clock.applied(t)",
+        "    applied = clock.steps",
+        [
+            "LogEarlyCause.test_a_step_after_the_beat_leaves_the_beat_log_named",
+            "LogEarlyCause.test_a_step_in_another_capture_is_not_this_beats_excuse",
+        ],
+    ),
+    (
+        # ...and the same verdict left behind in the *other* message. The
+        # segments arm carried its own copy of it, so a fix applied to
+        # `check_timeline` alone is a harness that says two different things
+        # about one phenomenon depending on which check found it.
+        "the segments arm decides for itself that a positive skew is the log's",
+        "tests/smoke",
+        '                log_early_causes(segment_clock, float(alone["t_start"]))',
+        '                "A positive skew is the log\'s (issues #18 and #215)."',
+        [
+            "LogEarlyCause."
+            "test_both_failure_texts_ask_this_function_rather_than_deciding",
+        ],
     ),
     (
         # The failure text going back to naming a second the file does not
