@@ -126,12 +126,29 @@ causes: `MAX_LOG_EARLY_S = 0.25` for the log running ahead of the frame and
 direction is the beat log's own error **on a take whose host clock held
 still**, and only then — this file used to say that nothing about capture can
 move an event later, full stop, and
-[#255](https://github.com/rogvid/skills/issues/255) measured two ways it can:
-an instant inside the window a backward step deletes, and a capture that lost
-less wall time than the step it recorded, which the correction then
-over-shoots by the difference (+540 to +970 ms on three takes). On a stepping
-take the suite now names the step first
+[#255](https://github.com/rogvid/skills/issues/255) measured +906, +540 and
++970 ms of it on takes whose clock stepped. The cause is an instant inside the
+window a backward step deletes: it has no frame of its own, so a reading that
+subtracts the whole step instead of clamping to the hole's edge is left with up
+to a whole step of log-ahead
+([#256](https://github.com/rogvid/skills/issues/256)). On a stitched demo there
+is a second cause, and it is the merge rather than the capture — see the seam
+below ([#263](https://github.com/rogvid/skills/issues/263)). On a stepping take
+the suite now names the step first
 ([#257](https://github.com/rogvid/skills/issues/257)).
+
+**What this file said between #257 and #255's retraction, which was wrong.** It
+explained the same skew as a capture losing a *fraction* of the step it
+recorded, over-shot by the difference. There is no such fraction. Playwright
+1.62.0 stamps `frameNumber = floor((wall_ts − first_wall_ts) · 25)` into the
+matroska clusters and CFR conversion drops everything until the wall clock
+climbs back, so the video's clock is the wall clock's high-water mark and the
+muxer cannot produce a partial shift — measured at **97.0–100.2 %** of the
+recorded step across 10 steps in 9 takes, at 2–60 Hz paint, through plain
+Playwright and through the real `Recorder`. The three figures above were
+in-hole instants read as though they were shifts, which reads as
+`(t − hole_start)/Δ` and is uniform on [0,1]. Do not correct by a proportion;
+there is nothing to take a proportion of.
 
 Both storyboards inject a small animated element for their whole length,
 which gives the capture frames to measure with — **not**, as this file
@@ -212,6 +229,29 @@ frame as *around* its beat, do not build anything that needs a beat timestamp
 to be exact to the frame, and when a frame and its caption disagree by a
 fraction of a second, suspect the capture before the
 storyboard ([#18](https://github.com/rogvid/skills/issues/18)).
+
+### A stitched beat log can run backwards at a seam, and says so
+
+`stitch()` moves each part's beats by that part's real **ffprobe duration**
+while the beats keep their own `time.monotonic()` timestamps. Those are two
+clocks. A part whose host clock stepped backwards has a video shorter than its
+own beat log by the size of the step, so its last beats run past where the next
+part begins and the merged log goes non-monotonic at the seam — reproduced at
+−1.4684 s as `beat 21 t_end 37.451` against `beat 22 t_start 37.441`. The
+overlap scales with the step less the capture's startup and tail, so a ~1.5 s
+step reaches most of a second
+([#263](https://github.com/rogvid/skills/issues/263)).
+
+Nothing is clamped: a beat's merged timestamp is exactly its own part's log
+plus that part's `offset`, and the whole per-segment correction rule above
+depends on that identity. The overlap is published instead, as `overlaps` in
+`timeline.json` and as a paragraph above the beat table in `timeline.md`. Empty
+on a healthy merge. Read `video_overlap` first — the same difference with both
+instants put on the video's clock by the rule above. At or below zero the
+frames really are in order and only the log's column runs backwards, which is
+the mechanism in this section; above zero the recorded steps do not account for
+it; `null` means no correction was possible at all, which is not the same
+answer as zero.
 
 ### Sixty seconds buys about twenty screens
 

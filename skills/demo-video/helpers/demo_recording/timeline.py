@@ -221,6 +221,29 @@ from .markdown import _fmt_t, _md_cell
 #                          On a stitched demo it is recomputed over the merged
 #                          beats, so its indices match this file. See
 #                          "acceptance criteria and coverage".
+#   overlaps      list?  — merged demos only (`stitch`), and **empty on a
+#                          healthy merge**, which is the merge saying it
+#                          looked. One record per adjacent pair of beats where
+#                          the later one starts before the earlier one ended:
+#                          `beat` / `previous_beat` (their `index` in this
+#                          file), `segment` / `previous_segment`, `seam` (do
+#                          the two belong to different parts), `overlap`
+#                          (seconds, on the clock the table above is on) and
+#                          `video_overlap` (the same difference with both
+#                          instants put on the *video's* clock by the rule
+#                          `capture_clock` documents; **null** when no
+#                          correction was possible, which is not zero).
+#                          A merged timestamp is its part's own
+#                          `time.monotonic()` plus that part's `offset`, and
+#                          the offset is the part's real ffprobe duration — a
+#                          wall clock. A part whose host clock stepped
+#                          backwards has a video shorter than its own beat log
+#                          by the size of the step, so its last beats run past
+#                          where the next part begins (issue #263). Nothing is
+#                          moved to fix it: `video_overlap` at or below zero
+#                          says the frames are in order and only this column
+#                          runs backwards. Absent from a timeline a single take
+#                          wrote.
 #   beats         list   — the beats, in the order they ran
 #   strict        bool   — whether strict mode was on for this take (on a
 #                          merged demo: only if it was on for every segment)
@@ -780,6 +803,66 @@ def _capture_clock_md(state: dict) -> list[str]:
     ]
 
 
+def _overlaps_md(overlaps: object) -> list[str]:
+    """What `timeline.md` says when its own beat table runs backwards (#263).
+
+    Silent on every take that has none, and on every take recorded in one
+    piece, which carries no such field at all. It speaks where a reader would
+    otherwise scroll past a row starting before the row above it ended and
+    conclude the log is corrupt — or, worse, not notice.
+
+    `stitch()` publishes the list; this only renders it. The sentence a reader
+    needs is the second one: whether the frames are in order even though the
+    column is not.
+    """
+    if not isinstance(overlaps, list) or not overlaps:
+        return []
+    out = [
+        f"**This stitched beat log is not monotonic**: "
+        f"{len(overlaps)} beat(s) below start before the beat before them "
+        f"ended. Nothing was moved to hide it — a merged timestamp is the "
+        f"part's own `time.monotonic()` log plus that part's `offset`, and "
+        f"the offset is the part's real ffprobe **duration**, which is on the "
+        f"wall clock the encoder stamped. A part whose host clock stepped "
+        f"backwards has a video shorter than its own beat log by the size of "
+        f"the step, so its last beats run past where the next part begins "
+        f"(issue #263). `timeline.json`'s `overlaps` carries the same list.",
+        "",
+    ]
+    for overlap in overlaps:
+        if not isinstance(overlap, dict):
+            continue
+        where = "at the seam" if overlap.get("seam") else "inside one segment"
+        video = overlap.get("video_overlap")
+        if not isinstance(video, (int, float)) or isinstance(video, bool):
+            verdict = (
+                "nothing here can say whether the video puts them in order: "
+                "this demo carries no `capture_clock` a reader could correct "
+                "them with"
+            )
+        elif video <= 0:
+            verdict = (
+                f"corrected by each capture's own steps they are "
+                f"{abs(float(video)):.3f}s apart and **in order** — the frames "
+                f"are fine and it is the log's column that runs backwards"
+            )
+        else:
+            verdict = (
+                f"corrected by each capture's own steps they **still** overlap "
+                f"by {float(video):.3f}s, which the recorded steps do not "
+                f"explain"
+            )
+        out.append(
+            f"- beat {_md_cell(overlap.get('previous_beat'))} → "
+            f"{_md_cell(overlap.get('beat'))} "
+            f"(`{_md_cell(overlap.get('previous_segment'))}` → "
+            f"`{_md_cell(overlap.get('segment'))}`, {where}) overlap by "
+            f"**{float(overlap.get('overlap') or 0.0):.3f}s**; {verdict}."
+        )
+    out.append("")
+    return out
+
+
 def _narration_md(narration: object) -> list[str]:
     """What `timeline.md` says about where the spoken lines ended up.
 
@@ -1075,6 +1158,11 @@ def render_timeline_md(doc: dict) -> str:
     # paragraph derived from the record would keep claiming a correction if
     # the mix ever stopped applying one.
     out += _narration_md(doc.get("narration"))
+    # Last before the table, because it is the sharpest statement about it: a
+    # reader who meets a row starting before the row above it ended without
+    # this paragraph concludes the log is corrupt, and one who does not meet it
+    # at all reads a number that is not where that beat is (issue #263).
+    out += _overlaps_md(doc.get("overlaps"))
     # The exit column only exists when something in this take has one — a web
     # timeline would otherwise carry an empty column on every row. A `run` beat
     # whose status could not be read shows "?" rather than blank, so the

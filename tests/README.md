@@ -600,7 +600,7 @@ really did lose 0.8 s of video says so.
 
 | | bound | why |
 |---|---|---|
-| log **ahead** of the frame | 250 ms | the beat log's own error, **on a take whose host clock held still** — and only then. This row used to say that nothing about the capture can move an event later, full stop; [#255](https://github.com/rogvid/skills/issues/255) measured the correction doing it, by subtracting a step the capture only partly lost. On a stepping take the failure text names the step first ([#257](https://github.com/rogvid/skills/issues/257)) |
+| log **ahead** of the frame | 250 ms | the beat log's own error, **on a take whose host clock held still** — and only then. This row used to say that nothing about the capture can move an event later, full stop; [#255](https://github.com/rogvid/skills/issues/255) measured the correction doing it, by subtracting the whole of a step from an instant inside the hole that step deleted, which has no frame of its own ([#256](https://github.com/rogvid/skills/issues/256)). On a stitched log the other cause is the merge seam ([#263](https://github.com/rogvid/skills/issues/263)). On a stepping take the failure text names the step first ([#257](https://github.com/rogvid/skills/issues/257)) |
 | video **ahead** of the log, host clock subtracted | 750 ms | what is left once the host's steps are out: the gap before the screencast's *first* frame, which the video's zero is, plus the 40 ms sampling grid and the caption's fade. Measured at 20-140 ms over fifteen idle takes and **500-540 ms at load 3.1** — it is how long Chromium takes to paint, so it stays wide on purpose ([#78](https://github.com/rogvid/skills/issues/78) is what tightening it would become) |
 | the two probes **drifting apart** | 250 ms | whatever the capture loses at the head, it loses for every frame equally, so it cancels here — and a wall-clock step landing *between* the probes is now subtracted per probe rather than reaching this bar. **This is the sharp one, and the correction is what made it sharp:** before it, 680 ms of drift on a healthy recorder was indistinguishable from a beat log that was not being read monotonically |
 
@@ -2003,21 +2003,25 @@ knows is missing is worse than one that is openly absent.
   `check_timeline`'s identical guard at `tests/smoke:6195` has been uninjected
   since #245 — and it is written down here rather than left to be noticed.
 
-  **And the correction narration applies can still be over-large on this
-  host, by an amount nothing here measures.** #224's diagnosis found two
-  things. The first — that a −Δ wall-clock step **deletes a Δ-wide hole** from
-  the file rather than sliding it, so a line spoken inside that hole was
-  placed up to a whole step early — is fixed at the source in
+  **And nothing here reads the recorded step back off the pixels.** #224's
+  diagnosis found that a −Δ wall-clock step **deletes a Δ-wide hole** from the
+  file rather than sliding it, so a line spoken inside that hole was placed up
+  to a whole step early. That is fixed at the source in
   [#256](https://github.com/rogvid/skills/issues/256), for the review frames,
   the smoke harness's own `before()` and the narration mix at once; a line in
-  a hole now carries `no_video` and `timeline.md` names it. The second is
-  open: some takes lose only **16–50 %** of the recorded step, so subtracting
-  all of it aims a clip Δ−loss too early even outside a hole. Nothing in this
-  repo checks the recorded step against the pixels, which is
+  a hole now carries `no_video` and `timeline.md` names it. What is open is
+  the check rather than a second mechanism: nothing in this repo compares the
+  step a take recorded against the frames it produced, which is
   [#259](https://github.com/rogvid/skills/issues/259).
-  [#255](https://github.com/rogvid/skills/issues/255) carries both
-  measurements. Nothing about either is narration-specific and nothing in
-  `narration.py` should chase them.
+
+  #224 also read three takes as losing a *proportion* of the recorded step,
+  and this list carried that as a second open defect. **It is retracted**
+  ([#255](https://github.com/rogvid/skills/issues/255)): the muxer stamps the
+  wall clock and will not rewrite a stamp, the shift measured 97.0–100.2 % of
+  the step across 10 steps in 9 takes, and the three readings were in-hole
+  instants measured as though they were shifts. There is no proportion, and a
+  correction scaled by one would be worse than none. Nothing about any of it
+  is narration-specific and nothing in `narration.py` should chase it.
 
 - **That a real Chromium hands a click's deferred document event to
   `evaluate("0")`.** [#214](https://github.com/rogvid/skills/issues/214) is
@@ -2436,6 +2440,32 @@ knows is missing is worse than one that is openly absent.
   and counted in the arm's output, because two samplers on their own 20 ms
   grids do not both know which side of that beat the step fell on — and the
   alternative, a bar as wide as a step, would grade nothing.
+
+- **~~A stitched beat log can go backwards at a seam and say nothing.~~
+  Reported** ([#263](https://github.com/rogvid/skills/issues/263)). The merge
+  moves each part's beats by that part's ffprobe **duration** while the beats
+  keep their own `time.monotonic()` stamps, so a part whose clock stepped
+  backwards has a video shorter than its own log and its last beats run past
+  where the next part begins — reproduced at −1.4684 s as `beat 21 t_end
+  37.451` against `beat 22 t_start 37.441`, which is what PR #261 saw in its
+  discarded take. Nothing is clamped: a merged timestamp is its part's own log
+  plus that part's offset, and every per-segment correction depends on that
+  identity. The merge publishes `overlaps` in `timeline.json` and a paragraph
+  above the beat table in `timeline.md`, each carrying `video_overlap` — the
+  same difference with both instants on the video's clock, which is at or
+  below zero when the frames are in order and only the log's column runs
+  backwards.
+
+  **Graded by `MergeOverlap` in `tests/unit` on hand-written documents, and by
+  nothing else.** Six `tests/unit` injections break it — detection off,
+  detection on for every seam, the verdict's sign, the verdict claimed where
+  nothing was measured, the clamp this change refused, and `timeline.md`
+  dropping the paragraph. There is **no arm**: the overlap needs a host that
+  steps its wall clock inside a segment, `--segments-only` cannot be made to
+  produce one, and an assertion that only bites on a stepping box grades the
+  box. What no assertion here can say is that a real stepping host produces
+  the arithmetic these documents assume; that was measured by hand on the
+  takes in #255 and #263.
 
 - **~~`--web-only` still goes red when the capture loses more than 0.75 s, and
   the bars were not widened to stop it.~~ Diagnosed and fixed** — the cause was

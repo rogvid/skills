@@ -2123,8 +2123,10 @@ SMOKE = Path(os.environ.get("UNIT_SMOKE", REPO / "tests" / "smoke"))
 
 # `tests/README.md`, overridable for the same reason `SMOKE` is: under
 # `--fault-inject` this file runs from a temp directory, where `REPO` points at
-# nothing. The runner passes the real path, so the figures below stay graded
-# while an injection is in place rather than going quiet exactly then.
+# nothing. The runner passes a copy, so the figures and the prose below stay
+# graded while an injection is in place rather than going quiet exactly then —
+# and so an injection can be aimed at this document, which is one of the three
+# that carried the retracted explanation of a positive skew.
 README = Path(os.environ.get("UNIT_README", REPO / "tests" / "README.md"))
 
 # `tests/smoke-inject`, on the same terms. Graded here rather than by its own
@@ -5164,6 +5166,219 @@ def clock_record(*steps: tuple[float, float], measured: bool = True) -> dict:
     }
 
 
+def merged_with_beats(
+    parts: list[list[tuple[float, float]]],
+    durations: list[float],
+    clocks: list[object] | None = None,
+) -> dict:
+    """A stitched timeline whose parts carry exactly the beats `parts` names.
+
+    `merged_of` above pins its beats at 0.5 s and 2.0 s, which is short of
+    every part's duration and so can never produce a seam that overlaps.
+    Here the spans are the input: a part's log is allowed to outrun its own
+    `.seg.mp4`, which is what a backward wall-clock step does to a capture and
+    is the only way to construct issue #263 on a host whose clock holds still.
+    """
+    names = [f"part{n + 1}" for n in range(len(parts))]
+    docs = [
+        {
+            "recorder": "Recorder",
+            "segment": name,
+            "beats": [
+                {
+                    "index": n,
+                    "segment": name,
+                    "verb": "caption",
+                    "caption": f"{name} beat {n}",
+                    "t_start": start,
+                    "t_end": end,
+                }
+                for n, (start, end) in enumerate(beats)
+            ],
+            "capture_clock": clock,
+        }
+        for name, beats, clock in zip(
+            names, parts, clocks or [None] * len(parts), strict=True
+        )
+    ]
+    return _merged_timeline(
+        names,
+        [Path(f"{name}.seg.mp4") for name in names],
+        docs,
+        durations,
+        Path("demo.mp4"),
+    )
+
+
+class MergeOverlap(unittest.TestCase):
+    """Whether a stitched log is monotonic, and what it says when it is not (#263).
+
+    `_merged_timeline` moves each part's beats by the part's real **ffprobe
+    duration** while the beats keep their own `time.monotonic()` timestamps.
+    Those are two clocks, and a part whose host clock stepped backwards has a
+    video shorter than its own beat log by the size of the step — so its last
+    beats run past where the next part begins, and the merged log goes
+    backwards at the seam. Measured at −1.4684 s: `beat 21 t_end 37.451`,
+    `beat 22 t_start 37.441`.
+
+    **Constructed, and it has to be.** A box either steps its wall clock or it
+    does not, and on one that does not every part's log ends inside its own
+    duration and this whole file is unreachable — which is exactly why the
+    defect survived to be found by hand in a discarded take (PR #261). The
+    parts below are hand-written documents; nothing here records anything.
+
+    What no assertion here can say is that a real stepping host produces the
+    arithmetic these documents assume. That was measured on the takes in
+    issues #255 and #263 and belongs to `tests/smoke`.
+    """
+
+    # A part 6.0 s long on disk whose beat log runs to 7.4 s, because its host
+    # clock stepped −1.5 s partway through: 7.4 − 1.5 = 5.9, inside the file.
+    STEPPED_BEATS = [(0.5, 0.6), (7.0, 7.4)]
+    STEADY_BEATS = [(0.5, 0.6), (4.0, 4.4)]
+    SECOND_PART = [(0.0, 0.4)]
+    DURATIONS = [6.0, 5.0]
+
+    def stitched(self, clocks: list[object] | None = None) -> dict:
+        return merged_with_beats(
+            [self.STEPPED_BEATS, self.SECOND_PART], self.DURATIONS, clocks
+        )
+
+    def measured(self) -> list[object]:
+        return [clock_record((3.0, -1.5)), clock_record()]
+
+    def test_a_seam_the_step_pushed_past_is_reported_with_its_size(self):
+        doc = self.stitched(self.measured())
+        self.assertEqual(len(doc["overlaps"]), 1)
+        found = doc["overlaps"][0]
+        self.assertEqual((found["previous_beat"], found["beat"]), (1, 2))
+        self.assertEqual(
+            (found["previous_segment"], found["segment"]), ("part1", "part2")
+        )
+        self.assertIs(found["seam"], True)
+        # 7.4 s of beat log against a 6.0 s file: the second part starts 1.4 s
+        # before the first part's last beat says it ended.
+        self.assertAlmostEqual(found["overlap"], 1.4, places=3)
+
+    def test_the_overlapping_beats_are_reported_rather_than_moved(self):
+        """The decision, graded rather than described.
+
+        Clamping would buy a rising column by putting a beat at an instant
+        neither its log nor its video has, and every consumer that corrects a
+        beat by its own capture's steps reads the merged timestamp as *its own
+        part's log plus that part's offset*. So the numbers stay, and the
+        overlap is published beside them.
+        """
+        doc = self.stitched(self.measured())
+        by_index = {b["index"]: b for b in doc["beats"]}
+        self.assertAlmostEqual(by_index[1]["t_end"], 7.4, places=3)
+        # part2's offset is part1's ffprobe duration, and its first beat is at
+        # 0.0 in its own log — so 6.0, unchanged by the overlap beside it.
+        self.assertAlmostEqual(by_index[2]["t_start"], 6.0, places=3)
+        self.assertEqual(doc["segments"][1]["offset"], 6.0)
+
+    def test_the_steps_that_caused_it_are_shown_to_put_the_frames_in_order(self):
+        """The sentence that makes the report worth reading.
+
+        The column runs backwards; the *frames* do not. Beat 1's end is at
+        7.4 − 1.5 = 5.9 s in the video and beat 2's start is at 6.0 s, so the
+        two are 0.1 s apart and in order. Without this a reader cannot tell
+        this from a merge that lost a second of somebody's demo.
+        """
+        found = self.stitched(self.measured())["overlaps"][0]
+        self.assertAlmostEqual(found["video_overlap"], -0.1, places=3)
+
+    def test_an_overlap_the_recorded_steps_do_not_explain_says_so(self):
+        # The same beats against a clock that watched and saw nothing. The
+        # correction is then the identity, the two instants stay 1.4 s out of
+        # order on the video's clock too, and the record must not report that
+        # as the benign case.
+        found = self.stitched([clock_record(), clock_record()])["overlaps"][0]
+        self.assertAlmostEqual(found["video_overlap"], 1.4, places=3)
+
+    def test_an_unmeasured_clock_leaves_the_verdict_null_rather_than_zero(self):
+        # Null is a third answer and the artifact has to be able to give it: a
+        # merge with no usable `capture_clock` cannot say whether the frames
+        # are in order, and 0.0 there would read as "checked, and they are".
+        found = self.stitched([None, None])["overlaps"][0]
+        self.assertIsNone(found["video_overlap"])
+
+    def test_a_merge_whose_parts_fit_their_own_videos_reports_none(self):
+        """The control, and the one that stops "always overlapping" passing.
+
+        Every assertion above is satisfied by a merge that reports an overlap
+        at every seam. This is the take a healthy host produces, and it has to
+        come back with an empty list — *empty*, not absent: the merge looked.
+        """
+        doc = merged_with_beats(
+            [self.STEADY_BEATS, self.SECOND_PART], self.DURATIONS, self.measured()
+        )
+        self.assertEqual(doc["overlaps"], [])
+
+    def test_a_pair_inside_one_segment_is_reported_and_not_called_a_seam(self):
+        # "This stitched log is monotonic" is a claim about the whole list, so
+        # every adjacent pair is compared — but only a seam is this merge's
+        # arithmetic, and a reader sent to `stitch()` for a segment's own log
+        # is sent to the wrong file.
+        doc = merged_with_beats(
+            [[(1.0, 2.0), (1.5, 1.8)], self.SECOND_PART],
+            self.DURATIONS,
+            self.measured(),
+        )
+        found = doc["overlaps"][0]
+        self.assertEqual((found["previous_beat"], found["beat"]), (0, 1))
+        self.assertIs(found["seam"], False)
+        self.assertAlmostEqual(found["overlap"], 0.5, places=3)
+
+    def test_a_beat_with_no_end_is_skipped_rather_than_raising(self):
+        # `beats` comes out of a segment's own timeline.json, so a missing
+        # `t_end` is reachable, and the failure mode is a stitch dying after
+        # the concat has already written demo.mp4.
+        doc = merged_with_beats(
+            [[(0.5, 0.6), (7.0, None)], self.SECOND_PART],  # type: ignore[list-item]
+            self.DURATIONS,
+            self.measured(),
+        )
+        self.assertEqual(doc["overlaps"], [])
+
+    # -- what timeline.md says about it -------------------------------------
+
+    def test_the_markdown_names_the_beats_the_size_and_the_verdict(self):
+        """`timeline.json` is not where a reviewer meets this.
+
+        The beat table is, and a row starting before the row above it ended
+        reads as a corrupt file unless the page says otherwise.
+        """
+        rendered = render_timeline_md(self.stitched(self.measured()))
+        self.assertIn("not monotonic", rendered)
+        self.assertIn("beat 1 → 2", rendered)
+        self.assertIn("1.400s", rendered)
+        self.assertIn("0.100s apart and **in order**", rendered)
+        self.assertIn("#263", rendered)
+        # Above the table it is about, not under it.
+        self.assertLess(rendered.index("not monotonic"), rendered.index("| # | start"))
+
+    def test_the_markdown_does_not_claim_an_order_nobody_could_check(self):
+        rendered = render_timeline_md(self.stitched([None, None]))
+        self.assertIn("not monotonic", rendered)
+        self.assertIn("no `capture_clock` a reader could correct them with", rendered)
+        # The affirmative verdict specifically. "in order" alone is in the
+        # header ("stitched from 2 segments, in order") and in the refusal
+        # above, so asserting on it would pass whatever this branch printed.
+        self.assertNotIn("apart and **in order**", rendered)
+
+    def test_a_healthy_merge_and_a_single_take_say_nothing_at_all(self):
+        # A paragraph on every timeline is a paragraph nobody reads, and a
+        # single take has no seams to have this problem at.
+        healthy = merged_with_beats(
+            [self.STEADY_BEATS, self.SECOND_PART], self.DURATIONS, self.measured()
+        )
+        self.assertNotIn("not monotonic", render_timeline_md(healthy))
+        alone = envelope(duration=9.0, beats=[beat(0, "caption", 0.5, t_end=1.0)])
+        self.assertNotIn("overlaps", alone)
+        self.assertNotIn("not monotonic", render_timeline_md(alone))
+
+
 class FrameClockCorrection(unittest.TestCase):
     """Where the review sheet cuts each frame, and what it says about it (#229).
 
@@ -7304,6 +7519,18 @@ class LogEarlyCause(unittest.TestCase):
     phrasing, not a proof that the message asserts no verdict. Review is what
     covers the rest, and a reviewer got past the single-phrase version of
     this list, which is why it is a list.
+
+    **`RETRACTED` is the same kind of list about the replacement**, and it is
+    here because the replacement was wrong too. #257 stopped blaming the beat
+    log and put a *partial loss* in its place — a capture that lost some
+    fraction of the step it recorded, over-shot by the difference. That
+    mechanism does not exist: the muxer stamps frames with the wall clock and
+    will not rewrite a stamp, so the video's clock is that clock's high-water
+    mark, and the shift is the whole step (97.0-100.2% over 10 steps in 9
+    takes, issue #255). The three figures it cited were in-hole instants read
+    as shifts. Same limits as `VERDICTS`, said plainly: this catches the
+    shipped wording coming back, in the three documents that carried it, and
+    it cannot catch the same claim written in new words.
     """
 
     # The wordings, then the imperative. The last entry is the load-bearing
@@ -7318,9 +7545,33 @@ class LogEarlyCause(unittest.TestCase):
     )
     VERDICT = VERDICTS[0]
 
+    # The false mechanism, in the words the three documents shipped it in. The
+    # summary terms for it — "a partial loss", "a fraction of the step" — are
+    # deliberately **not** here: a document has to be able to say what was
+    # retracted, and a ban on naming it would leave the next reader deriving
+    # the retraction from silence.
+    RETRACTED = (
+        "lost less wall time",
+        "only part of the step it recorded",
+        "partly lost",
+        "16-50",
+        "16–50",
+    )
+
+    # Where that claim was shipped. The smoke harness's failure text and its
+    # `MAX_LOG_EARLY_S` comment, the skill's published limits, and the suite's
+    # own README — three documents, one claim, and it was corrected in one
+    # place at a time twice before.
+    def carriers(self) -> list[Path]:
+        return [SMOKE, SKILL_DIR / "reference" / "limits.md", README]
+
     def assertNoVerdict(self, said: str):
         for phrase in self.VERDICTS:
             self.assertNotIn(phrase, said, f"still asserts a cause: {phrase!r}")
+
+    def assertNotRetracted(self, said: str):
+        for phrase in self.RETRACTED:
+            self.assertNotIn(phrase, said, f"retracted mechanism is back: {phrase!r}")
 
     def setUp(self):
         self.smoke = _smoke_module()
@@ -7353,11 +7604,86 @@ class LogEarlyCause(unittest.TestCase):
         said = self.because(self.clock((2.2, -1.073)), 5.633)
         self.assertIn("clock stepped", said)
         self.assertIn("-1073 ms", said)
-        self.assertIn("over-corrected", said)
+        self.assertIn("high-water mark", said)
         # The half that carries the meaning. A paragraph that names the step
         # and then repeats the verdict has changed nothing for the reader.
         self.assertNoVerdict(said)
+        self.assertNotRetracted(said)
         self.assertNotIn("No step of this beat's own capture", said)
+
+    def test_a_beat_inside_the_hole_is_told_how_wide_the_hole_is(self):
+        """The mechanism that is real, carried as a number rather than a claim.
+
+        A −1.05 s step at 2.2 s deletes the monotonic window (2.2, 3.25) from
+        the file, so a beat at 2.5 s has no frame: the video's clock stops at
+        2.2 s and resumes 750 ms of wall time later. That 750 ms is exactly
+        what a reading which subtracted the whole step instead of clamping is
+        left holding, so it is the size the skew has to be compared against —
+        and a message that only asserted a mechanism in prose would say the
+        same thing whatever the clock had done.
+        """
+        said = self.because(self.clock((2.2, -1.05)), 2.5)
+        self.assertIn("no frame for this instant", said)
+        self.assertIn("750 ms later", said)
+        self.assertIn("over-corrected", said)
+        self.assertNoVerdict(said)
+        self.assertNotRetracted(said)
+
+    def test_a_beat_with_a_frame_of_its_own_is_not_offered_a_hole(self):
+        """...and the other side of it, which is what makes the number mean
+        something.
+
+        The same take, a beat at 5.633 s: past the step's hole, so the file
+        does have a frame for it and the correction is exact. Offering a hole
+        here would send a reader looking for missing video that is not
+        missing, and a branch that always named one would satisfy the test
+        above on its own.
+        """
+        said = self.because(self.clock((2.2, -1.05)), 5.633)
+        self.assertIn("outside every hole", said)
+        self.assertNotIn("no frame for this instant", said)
+        self.assertNotIn("over-corrected", said)
+        self.assertNotRetracted(said)
+
+    def test_the_retracted_partial_loss_is_in_none_of_the_four_answers(self):
+        """Every branch, including the two that never mentioned it.
+
+        Mostly, but not wholly, covered by the document sweep below: this
+        message is a literal in `tests/smoke`, so a phrase pasted back into it
+        is visible in both. What only this can see is a message that assembles
+        the claim at run time — out of a constant, a variable, a `format` —
+        where the source carries no such substring and the reader still gets
+        the retracted mechanism.
+        """
+        for said in (
+            self.because(None, 5.633),
+            self.because(self.clock(), 5.633),
+            self.because(self.clock((2.0, -1.0), (4.0, 1.0)), 5.633),
+            self.because(self.clock((2.2, -1.073)), 5.633),
+        ):
+            self.assertNotRetracted(said)
+
+    def test_no_document_still_explains_a_positive_skew_as_a_partial_loss(self):
+        """The prose, not only the failure text (#257's correction missed it).
+
+        The claim was shipped in three documents and corrected in one of them
+        at a time, twice — so the guard reads all three. It is a substring
+        tripwire and nothing more: see the class docstring for what it cannot
+        see.
+        """
+        for path in self.carriers():
+            text = path.read_text(encoding="utf-8")
+            # The haystack, before anything is claimed about it: a path that
+            # moved would otherwise make every assertion below hold over an
+            # empty string.
+            self.assertGreater(len(text), 20_000, f"{path} is not the document")
+            for phrase in self.RETRACTED:
+                self.assertNotIn(
+                    phrase,
+                    text,
+                    f"{path.name} explains a positive skew as a partial loss "
+                    f"of the step ({phrase!r}), which issue #255 retracted",
+                )
 
     def test_a_step_after_the_beat_leaves_the_beat_log_named(self):
         """The other side of the distinction, and why it is per-instant.
@@ -7938,14 +8264,78 @@ INJECTIONS = [
         # rewrite of the sentence above it.
         "the stepping message names the step and then blames the beat log anyway",
         "tests/smoke",
-        '        f"#255). Check the step against demo.mp4 before reading `_t0` and "\n'
-        '        f"`_beat`."',
-        '        f"#255). That said, the fault is the beat log: check where `_t0` "\n'
-        '        f"is taken and where `_beat` stamps `t_start`."',
+        '        f"timeline.json says so (issues #255, #263). Check the step against "\n'
+        '        f"demo.mp4 before reading `_t0` and `_beat`."',
+        '        f"timeline.json says so (issues #255, #263). That said, the fault is "\n'
+        '        f"the beat log: check where `_beat` stamps `t_start`."',
         [
             "LogEarlyCause."
             "test_a_stepping_take_names_the_step_and_withdraws_the_verdict",
         ],
+    ),
+    (
+        # **The explanation #257 shipped in place of the verdict, restored.**
+        # It read as a measurement and it described a mechanism that does not
+        # exist: the muxer will not rewrite a frame stamp, so a capture loses
+        # the whole step or none of it (97.0-100.2% over 10 steps in 9 takes,
+        # issue #255). A reader handed this looks for a proportion to correct
+        # by, and there is nothing to take a proportion of.
+        "the stepping message goes back to blaming a partial loss of the step",
+        "tests/smoke",
+        '        f"was subtracted from this reading.{inside} A step is never lost by "',
+        '        f"was subtracted from this reading. A capture that lost less wall time "',
+        [
+            "LogEarlyCause.test_the_retracted_partial_loss_is_in_none_of_the_four_answers",
+            "LogEarlyCause."
+            "test_no_document_still_explains_a_positive_skew_as_a_partial_loss",
+            "LogEarlyCause.test_a_beat_inside_the_hole_is_told_how_wide_the_hole_is",
+        ],
+    ),
+    (
+        # ...and the same claim in the skill's published limits, which is the
+        # document a storyboard author reads and the one nothing in this suite
+        # watched until now. #257 corrected the harness and left this.
+        "reference/limits.md goes back to explaining the skew as a partial loss",
+        "reference/limits.md",
+        "muxer cannot produce a partial shift — measured at **97.0–100.2 %** of the",
+        "capture that lost less wall time than the step it recorded — at the",
+        [
+            "LogEarlyCause."
+            "test_no_document_still_explains_a_positive_skew_as_a_partial_loss",
+        ],
+    ),
+    (
+        # ...and in this suite's own README, the third document that carried
+        # it. Three documents, one claim, corrected one at a time twice.
+        "tests/README.md goes back to explaining the skew as a partial loss",
+        "tests/README.md",
+        "and this list carried that as a second open defect. **It is retracted**",
+        "and some takes lose only 16–50 % of it. **It is open**",
+        [
+            "LogEarlyCause."
+            "test_no_document_still_explains_a_positive_skew_as_a_partial_loss",
+        ],
+    ),
+    (
+        # The hole's width, which is the whole reason the corrected message is
+        # a lead rather than another paragraph: it is the number the skew has
+        # to be compared against. Zeroed, the message still names the step and
+        # still withdraws the verdict, and says nothing a reader can check.
+        "the stepping message stops measuring the hole it is about",
+        "tests/smoke",
+        "    gap = clock.hole(t)\n    inside = (",
+        "    gap = 0.0\n    inside = (",
+        ["LogEarlyCause.test_a_beat_inside_the_hole_is_told_how_wide_the_hole_is"],
+    ),
+    (
+        # ...and the other direction, which is what makes that number mean
+        # anything: a hole announced for every beat of a stepping take sends a
+        # reader looking for missing video on beats the file has frames for.
+        "every beat of a stepping take is told the video has no frame for it",
+        "tests/smoke",
+        '        if gap\n        else " This instant is outside every hole those steps',
+        '        if True\n        else " This instant is outside every hole those steps',
+        ["LogEarlyCause.test_a_beat_with_a_frame_of_its_own_is_not_offered_a_hole"],
     ),
     (
         # The other way to get this wrong, and the tempting one: withdraw the
@@ -10278,6 +10668,96 @@ INJECTIONS = [
         ],
     ),
     (
+        # **The defect issue #263 is about, restored**: a stitched log that
+        # goes backwards at the seam and says nothing. Every other assertion
+        # about the merge still passes — the beats are where they always were,
+        # and it is the report beside them that is gone.
+        "a stitched log overlaps at the seam and the artifact says nothing",
+        "stitching.py",
+        "        if overlap <= 0:\n            continue",
+        "        if True:\n            continue",
+        [
+            "MergeOverlap.test_a_seam_the_step_pushed_past_is_reported_with_its_size",
+            "MergeOverlap.test_the_markdown_names_the_beats_the_size_and_the_verdict",
+        ],
+    ),
+    (
+        # ...and the other way, which is the one a count would not catch: a
+        # merge that reports an overlap at every seam. Every assertion about
+        # the stepping case above passes against it, and `timeline.md` grows a
+        # paragraph about a defect on every healthy stitched demo.
+        "every seam is reported as an overlap, including the ones in order",
+        "stitching.py",
+        "        if overlap <= 0:\n            continue",
+        "        if False:\n            continue",
+        [
+            "MergeOverlap.test_a_merge_whose_parts_fit_their_own_videos_reports_none",
+            "MergeOverlap.test_a_healthy_merge_and_a_single_take_say_nothing_at_all",
+        ],
+    ),
+    (
+        # The verdict a reader acts on, reversed. A `video_overlap` with the
+        # wrong sign reports the benign case — the log's column runs backwards,
+        # the frames are in order — as an overlap the recorded steps cannot
+        # explain, and the unexplained one as benign. The list is still there
+        # and still the right length, which is why the count is not the check.
+        "the video's clock is read backwards, so the verdict is inverted",
+        "stitching.py",
+        "                    place(before, ends).at - place(after, starts).at, 3",
+        "                    place(after, starts).at - place(before, ends).at, 3",
+        [
+            "MergeOverlap.test_the_steps_that_caused_it_are_shown_to_put_the_frames_in_order",
+            "MergeOverlap.test_an_overlap_the_recorded_steps_do_not_explain_says_so",
+        ],
+    ),
+    (
+        # A demo nobody could correct told that its frames are in order. The
+        # correction is the identity when no record can supply one, so this
+        # prints a number computed from nothing where the honest answer is
+        # null — the artifact-lies direction, and the one that reads best.
+        "an overlap nobody could check is reported as if the clock had explained it",
+        "stitching.py",
+        '                if state.get("applied")\n                else None,',
+        "                if True\n                else None,",
+        [
+            "MergeOverlap.test_an_unmeasured_clock_leaves_the_verdict_null_rather_than_zero",
+            "MergeOverlap.test_the_markdown_does_not_claim_an_order_nobody_could_check",
+        ],
+    ),
+    (
+        # The option this change did **not** take, taken: clamp the beats up
+        # to the previous one's end and the column rises, the overlap list
+        # empties, and every beat of a stepping part is now at an instant
+        # neither its own log nor its video has. `timeline.json` reads clean
+        # and is further from the file a reviewer scrubs than it was before.
+        "the merge clamps the overlap away instead of reporting it",
+        "stitching.py",
+        '            merged["t_start"] = _shift(beat.get("t_start"), offset)',
+        '            merged["t_start"] = max(\n'
+        '                _shift(beat.get("t_start"), offset),\n'
+        '                beats[-1]["t_end"] if beats else 0.0,\n'
+        "            )",
+        [
+            "MergeOverlap.test_the_overlapping_beats_are_reported_rather_than_moved",
+            "MergeOverlap.test_a_seam_the_step_pushed_past_is_reported_with_its_size",
+        ],
+    ),
+    (
+        # And the rendering: the JSON keeps the list, `timeline.md` drops the
+        # paragraph. Nobody reviewing a demo through this skill opens the JSON,
+        # so this is the version of the defect a reviewer actually meets — a
+        # beat table with a row starting before the row above it ended and no
+        # sentence anywhere saying why.
+        "timeline.md stops saying its own beat table runs backwards",
+        "timeline.py",
+        "    if not isinstance(overlaps, list) or not overlaps:\n        return []",
+        "    if True:\n        return []",
+        [
+            "MergeOverlap.test_the_markdown_names_the_beats_the_size_and_the_verdict",
+            "MergeOverlap.test_the_markdown_does_not_claim_an_order_nobody_could_check",
+        ],
+    ),
+    (
         # The stated limit, in the artifact rather than only in the PR body.
         "the report stops naming the flaky failure it cannot rule out",
         "tests/smoke-inject",
@@ -10326,6 +10806,13 @@ def fault_inject() -> int:
             # decision nobody has watched go the wrong way is a claim.
             smoke_inject = Path(tmp) / "smoke-inject"
             shutil.copy(REPO / "tests" / "smoke-inject", smoke_inject)
+            # ...and this suite's own README, which used to be read straight
+            # out of the working tree. It carries prose that assertions here
+            # grade — a stated figure, and the explanation of a positive skew
+            # this repo shipped and retracted — and a document nothing can
+            # break is a document whose guard nobody has watched fire.
+            readme = Path(tmp) / "README.md"
+            shutil.copy(REPO / "tests" / "README.md", readme)
             unit = Path(tmp) / "unit"
             shutil.copy(Path(__file__).resolve(), unit)
             if module == "tests/smoke":
@@ -10334,6 +10821,10 @@ def fault_inject() -> int:
                 # Before the `"/" in module` branch below, which would send it
                 # into the skill directory and fail on a file that is not there.
                 target = smoke_inject
+            elif module == "tests/README.md":
+                # Before the `.md` branch below, which would look for it under
+                # the skill directory.
+                target = readme
             elif module == "tests/unit":
                 target = unit
             elif module == "__init__.py" or module.endswith(".py"):
@@ -10367,7 +10858,7 @@ def fault_inject() -> int:
                     "UNIT_SKILL_DIR": str(skill),
                     "UNIT_SMOKE": str(smoke),
                     "UNIT_SMOKE_INJECT": str(smoke_inject),
-                    "UNIT_README": str(REPO / "tests" / "README.md"),
+                    "UNIT_README": str(readme),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}
