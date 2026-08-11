@@ -2827,6 +2827,153 @@ class OneClassifier(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# No shipped source says something is masked (issues #138, #142, #144, #267)
+# --------------------------------------------------------------------------
+#
+# The masking layer was removed on purpose, and the prose describing it was
+# not. #267 found eleven sites: `failure.py:15` said "There is no mask (#138)"
+# and `failure.py:117` said every consumer "masks it on the way to its own
+# file"; `_failure_doc` said "masked and checked" 148 lines below
+# `_evidence_doc`'s "there is no masking anywhere in this recorder"; the
+# timeline builder said its coverage table was "built from the *scrubbed*
+# beats" one line after `beats = [dict(beat) for beat in self._beats]`.
+#
+# The dangerous one was `timeline.py`'s published schema, which told a reader
+# that a beat's `error.message` — up to a thousand characters of terminal
+# screen, in a **committed** file — arrives *scrubbed*.
+#
+# This sweep is not an exact-phrase denylist, which would only fail for
+# somebody re-typing a sentence nobody is going to re-type. It flags **every**
+# mention of the word family in the files this change owns, and requires each
+# one to be waivered by hand. New prose asserting a mask fails until a human
+# writes it down here, which is the decision the eleven sites never got.
+#
+# Its scope, stated: `helpers/demo_recording/*.py` and `SKILL.md`. Not
+# `reference/` or the skill README, and not whether the surviving prose is
+# right about anything other than masking — see tests/README.md's Known gaps.
+
+MASK_WORDS = re.compile(
+    r"\b(?:mask|masks|masked|masker|maskers|masking"
+    r"|scrub|scrubs|scrubbed|scrubber|scrubbing"
+    r"|redact|redacts|redacted|redaction)\b",
+    re.I,
+)
+
+# Waivered like `tests/lint`'s `KNOWN_FRAGMENTS`: an entry whose line has gone
+# **fails** rather than being ignored, so the list can only shrink. Keyed by
+# file and by the line exactly as it appears stripped, because editing the
+# sentence at all takes it back out of the waiver and into the check.
+#
+# Every entry below is a denial ("no masking, no scrubbing and no redaction",
+# "this recorder scrubs nothing"), a past-tense note about machinery that was
+# removed (#142's carve-out, #144's verifier), or the video sense of the word
+# — a reviewer scrubbing a timeline, which has nothing to do with secrets.
+MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
+    "SKILL.md": (
+        "- The tool has **no masking, no scrubbing and no redaction**. It does not hide",
+        "used to look like one was removed rather than improved. A masking system that",
+    ),
+    "core.py": (
+        "# The redaction verifier that used to run last was what this sequence",
+        "# The one thing that used to keep *nothing* was an unverifiable mask,",
+        "# A third way in — a take whose mask could not be verified, which",
+        "# through verbatim — this recorder scrubs nothing (#138).",
+        '`{"omitted": reason}` payload for text the mask could not vouch for,',
+        "went with the mask in #144. A capture that *raises* still gets a file,",
+        "masking anywhere in this recorder.",
+        "redaction verifier, the hole PR #58 was blocked on — went with that",
+        "recorded — all of it as it came, because there is no masking anywhere",
+    ),
+    "failure.py": (
+        'if the mask cannot be vouched for". There is no mask (#138); a document is built',
+    ),
+    "frames.py": (
+        "long enough to record in parts is a demo nobody wants to scrub by hand.",
+    ),
+    "stitching.py": (
+        "not a defect in the file a reviewer scrubs. Above zero means the recorded",
+        "only one that matches the file a reviewer scrubs: Chromium's screencast",
+        "# the one nobody wants to review by scrubbing. Written here rather than in",
+    ),
+    "target.py": (
+        "whole design (issue #138): the skill has no masking, no scrubbing and no",
+        "redaction, because a masker that works almost always is what persuades somebody",
+    ),
+    "web.py": (
+        "# The mask-elision arm went with #142. What is left is a statement about what",
+        "# **Kept deliberately when the masking went** — #142's carve-out.",
+        "# is a statement about a mask and about nothing else.",
+        'the mask". There is no mask, so nothing consumes it. The *listener* is',
+        "job and has nothing to do with masking.",
+        "the snapshot, retried until they agreed — because the mask had to be",
+        "between the two reads produced a mask with a hole in it. With no mask",
+    ),
+}
+
+# Everything the sweep is supposed to open: the thirteen package modules and
+# SKILL.md. Set to the whole set rather than to a comfortable floor — a module
+# that stops being read makes "no file says it is masked" hold over a file
+# nobody opened, and this is the only assertion that would notice.
+MASK_SWEEP_FILE_FLOOR = 14
+
+
+class MaskProse(unittest.TestCase):
+    """The removed masking layer is not described as though it were there."""
+
+    def swept(self):
+        yield SKILL_DIR / "SKILL.md"
+        yield from sorted((_PKG_PARENT / "demo_recording").glob("*.py"))
+
+    def hits(self) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        for path in self.swept():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if MASK_WORDS.search(line):
+                    found.setdefault(path.name, []).append(line.strip())
+        return found
+
+    def test_no_shipped_source_claims_a_mask_that_does_not_exist(self):
+        found = self.hits()
+        unwaived = sorted(
+            f"{name}: {line}"
+            for name, lines in found.items()
+            for line in lines
+            if line not in MASK_PROSE_WAIVED.get(name, ())
+        )
+        self.assertEqual(
+            unwaived,
+            [],
+            f"{len(unwaived)} line(s) name a mask, a scrub or a redaction that "
+            f"this skill does not have: {unwaived}. There is none of it (#138) "
+            f"— say what the field actually carries, and that it carries it "
+            f"verbatim. If the line denies masking or describes machinery that "
+            f"was removed, waive it in MASK_PROSE_WAIVED with that reason.",
+        )
+
+    def test_the_sweep_read_the_files_it_claims_to_have_read(self):
+        # The haystack, both halves. Every assertion above is satisfied by a
+        # sweep that opened nothing, and by one that found no occurrences at
+        # all — which is also what a regex that stopped matching looks like.
+        self.assertGreaterEqual(len(list(self.swept())), MASK_SWEEP_FILE_FLOOR)
+        found = self.hits()
+        self.assertIn("SKILL.md", found, "SKILL.md's own denial was not found")
+        self.assertGreater(sum(len(v) for v in found.values()), 15)
+
+    def test_a_waiver_cannot_outlive_the_line_it_waives(self):
+        # Otherwise the list only grows, and a stale entry silently permits a
+        # sentence somebody re-adds later. It is also the tightest control on
+        # the sweep itself: one line the regex stops seeing turns this red.
+        found = self.hits()
+        stale = sorted(
+            f"{name}: {line}"
+            for name, lines in MASK_PROSE_WAIVED.items()
+            for line in lines
+            if line not in found.get(name, [])
+        )
+        self.assertEqual(stale, [], f"waivers for lines that are gone: {stale}")
+
+
+# --------------------------------------------------------------------------
 # The beat log says what was true of the screen (issues #134, #177)
 # --------------------------------------------------------------------------
 #
@@ -9581,6 +9728,18 @@ INJECTIONS = [
         "import argparse\nimport sys",
         "import argparse\nimport ipaddress\nimport sys",
         ["OneClassifier.test_the_classification_lives_in_exactly_one_shipped_file"],
+    ),
+    (
+        # **The line #267 was actually about**, restored exactly. It is the
+        # published schema for `error.message`, in the file a consumer reads
+        # to learn what `timeline.json` means, and it tells them a committed
+        # artifact holding up to a thousand characters of terminal screen has
+        # been cleaned. Nothing about the take changes; only the reader does.
+        "the beat schema goes back to calling a beat's error message scrubbed",
+        "timeline.py",
+        "#                      exception's `type` and its `message` **verbatim**, on a",
+        "#                      exception's `type` and its scrubbed `message`, on a",
+        ["MaskProse.test_no_shipped_source_claims_a_mask_that_does_not_exist"],
     ),
     (
         # The CI path, and the one no other assertion here walks: every other

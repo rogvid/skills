@@ -67,8 +67,8 @@ def media_duration(path: Path) -> float:
 # Two independent arms, because the failure above defeats one of them:
 #
 #   score       median luma standard deviation over the content rect. Catches
-#               a recording that never rises above blank — a black take, a page
-#               that never painted, a mask that covered everything.
+#               a recording that never rises above blank — a black take, or a
+#               page that never painted.
 #   static_for  the longest run of consecutive sampled frames that do not
 #               change, in seconds. Catches a recording that is *covered* or
 #               frozen, which the score cannot: the #91 card is dark with a
@@ -749,9 +749,9 @@ def _content_report(
     report["static_from"] = round(began, 2)
 
     # What the storyboard was doing while the picture stood still. Verb and
-    # index only — never the selector: a selector can hold a value somebody
-    # registered as a secret, and this string goes to stderr before the take's
-    # scrubbing has run. The index is enough; the beat is in the same file.
+    # index only — never the selector: this line goes to stderr, where it ends
+    # up in build logs nobody prunes, and nothing anywhere in this recorder
+    # would filter it (#138). The index is enough; the beat is in the same file.
     spanned = None if beats is None else _beats_within(beats, began, ended)
     acting = [b for b in (spanned or []) if b["acting"]]
     if spanned is not None:

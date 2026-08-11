@@ -299,8 +299,11 @@ from .markdown import _fmt_t, _md_cell
 #   exit_code int?   — TerminalRecorder `run` beats only: the shell's status
 #                      for that command, or null if it could not be read
 #   error     dict?  — **absent** on a verb that returned. Present, with the
-#                      exception's `type` and its scrubbed `message`, on a verb
-#                      that raised. Absent-on-success rather than
+#                      exception's `type` and its `message` **verbatim**, on a
+#                      verb that raised — `wait_for_text()` puts a thousand
+#                      characters of terminal screen in there and nothing
+#                      filters it, which is a reason not to point the recorder
+#                      at anything real (#138). Absent-on-success rather than
 #                      `error: null`-on-success on purpose: a consumer asking
 #                      "did this beat do what it says" wants the answer to be
 #                      structurally missing when there is nothing to say, and

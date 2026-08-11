@@ -30,15 +30,22 @@ works almost always is worse than none, because it is what persuades somebody
 it is safe to point the recorder at production. The absence is the stronger
 guarantee ([#138](https://github.com/rogvid/skills/issues/138)).
 
-**The recorder refuses a public target, in CI and on your machine**, at
-construction, before a browser opens. `Recorder` classifies its `base_url`;
-*both* recorders classify `DEMO_VIDEO_BASE_URL`, which is the only target a
-`TerminalRecorder` has and is checked **even when a storyboard passes a
-loopback `base_url`** — a shell exporting production and a storyboard saying
-otherwise is refused rather than quietly resolved. Loopback passes, a private
-host needs `allow_private=True`, a public one is refused and no option permits
-it. CI runs the same classifier over `extra-env` and each storyboard's source
+**The recorder classifies its target at construction, in CI and on your
+machine, before a browser opens** — and it classifies exactly two strings.
+`Recorder` classifies the `base_url` it resolved; *both* recorders classify
+`DEMO_VIDEO_BASE_URL`, which is the only target a `TerminalRecorder` has and is
+checked **even when a storyboard passes a loopback `base_url`** — a shell
+exporting production and a storyboard saying otherwise is refused rather than
+quietly resolved. Loopback passes, a private host needs `allow_private=True`, a
+public one is refused and no option permits it. CI runs the same classifier
+over `extra-env` and each storyboard's source
 ([reference/ci.md](reference/ci.md)).
+
+**Nothing else is classified, and `goto()` is where that shows.** It passes an
+absolute URL straight through, so `rec.goto("https://app.acme.com/")` records
+production and nothing refuses it; `rec.page` is further out still. The guard
+catches a target you *misconfigured*, not one you *named* — it is not a
+control, and the paragraphs above are still the whole of the guidance.
 
 ## Overview
 
@@ -53,8 +60,8 @@ Two subjects, one engine. **`Recorder`** drives a **web app** through a
 Playwright page. **`TerminalRecorder`** runs a **CLI or TUI** in a real PTY
 rendered by an in-browser terminal — so captions, narration, stills,
 segments, and verification all work identically. This document leads with
-the web recorder; the **Terminal demos** section below covers what differs.
-Terminal recording is **Unix-only** (it uses a PTY).
+the web recorder; the **Terminal demos** section below covers what differs,
+and is **Unix-only** because it uses a PTY.
 
 Both record into a **framed window on a soft pastel background** (rounded
 window, title bar, traffic-light buttons) so the eye has an obvious focus —
@@ -95,20 +102,20 @@ behind every one, are in [reference/limits.md](reference/limits.md).
 - **It will not tell you a card was left up.** A held picture is reported only
   when a verb that *acts on the app* ran while it was held, so a demo that
   raises an `interlude()` and then only captions, holds and takes stills behind
-  it passes in silence — measured at 31.5 s of a 34 s take. Take cards down
-  explicitly. A caption long enough to wrap can also silence the same warning
-  on an app's own modal, so keep captions to one line.
+  it passes in silence for almost its whole length. Take cards down explicitly.
+  A caption long enough to wrap can also silence the same warning on an app's
+  own modal, so keep captions to one line.
 - **A frame is aimed at a beat, not stamped with one.** Chromium stamps frames
   with the host's **wall** clock, the beat log uses a monotonic one, so on a
   host whose clock steps an event lands earlier in `demo.mp4` — by the step,
-  once per step, and no measured figure keeps — one WSL2 box gave −0.78 s
-  every 32.2 s, then −0.50 s every 5.5 s. `timeline.json`'s `capture_clock`
-  records each: correct with it once its `measured` flag says it watched.
+  once per step, and no measured figure keeps. `timeline.json`'s
+  `capture_clock` records each: correct with it once its `measured` flag says
+  it watched.
 - **Sixty seconds buys about twenty screens.** At the pacing floors below, a
-  demo shows roughly one new screen every 3 s — 69% of a real 61.2 s take was
-  a picture already shown. A feature spanning two surfaces does not fit the
-  30–60 s target, and the honest answers are a longer video or two demos, not
-  faster captions.
+  demo shows roughly one new screen every 3 s, and two thirds of a measured
+  61 s take was a picture already shown. A feature spanning two surfaces does
+  not fit the 30–60 s target, and the honest answers are a longer video or two
+  demos, not faster captions.
 - **A demo of an error path records a problem.** A non-zero exit is logged as
   an issue and is fatal under `strict=True`, with no way to say it was the
   point — so leave strict off for that demo, and say in the pull request which
@@ -168,11 +175,10 @@ skill's folder, so it must be installed wherever demos are re-recorded.
 Each `record.py` is a self-contained uv script — PEP 723 metadata brings
 Playwright without any project environment. You are writing this file,
 and you know where this skill is installed (you are reading it) — so
-**fill `_DEFAULT_SKILL_DIR` with that actual location**. Prefer a
-repo-relative expression via `Path(__file__)` when the skill lives in
-the same repo (survives clones), an absolute path otherwise. Do not
-assume any particular layout — `.claude/skills/`, `.agents/`, a global
-directory are all just whatever path happens to be true.
+**replace `_DEFAULT_SKILL_DIR` with that actual location**. What ships in
+it is a guess at the commonest one, not a layout to assume: prefer a
+repo-relative expression via `Path(__file__)` when the skill lives in the
+same repo (survives clones), an absolute path otherwise.
 `DEMO_VIDEO_SKILL_DIR` overrides the constant at runtime, covering moves
 and unusual setups.
 
@@ -185,10 +191,12 @@ and unusual setups.
 import os, sys
 from pathlib import Path
 
-# Filled in by the writing agent with the skill's real location;
-# DEMO_VIDEO_SKILL_DIR takes precedence.
-_DEFAULT_SKILL_DIR = "<fill in: the demo-video skill folder>"
-SKILL_DIR = Path(os.environ.get("DEMO_VIDEO_SKILL_DIR") or _DEFAULT_SKILL_DIR)
+# Replace with this skill's real location; DEMO_VIDEO_SKILL_DIR wins at
+# runtime. To find it:  find . ~ -name demo-video -type d 2>/dev/null
+_DEFAULT_SKILL_DIR = "~/.claude/skills/demo-video"
+SKILL_DIR = Path(
+    os.environ.get("DEMO_VIDEO_SKILL_DIR") or _DEFAULT_SKILL_DIR
+).expanduser()
 if not (SKILL_DIR / "helpers" / "demo_recording" / "__init__.py").exists():
     sys.exit(f"demo-video skill not found at {SKILL_DIR} — set DEMO_VIDEO_SKILL_DIR")
 sys.path.insert(0, str(SKILL_DIR / "helpers"))
@@ -349,8 +357,7 @@ with TerminalRecorder(Path(__file__).parent) as rec:
 **Read [reference/terminal.md](reference/terminal.md) before writing one.** It
 carries the full verb table (`run`, `send`, `key`, `wait_for_prompt`,
 `wait_for_text`), how to open a segment on a title card, the four patterns a
-terminal demo takes, and the gotchas — pagers, echo, prompts that never
-return.
+terminal demo takes, and the gotchas — pagers, echo, prompts that never return.
 
 ## Process
 
@@ -365,12 +372,10 @@ return.
    `Recorder(out_dir, segment="part1")`, poll between segments until the
    work is done, open the next segment with `rec.interlude("…a few minutes
    later…")` on `about:blank` before navigating, and
-   `from demo_recording import stitch` to concatenate them into
-   demo.mp4. A **terminal** segment takes its opening card as
+   `from demo_recording import stitch` to concatenate them into demo.mp4. A
+   **terminal** segment takes its opening card as
    `TerminalRecorder(interlude="…")` instead — see
-   [reference/terminal.md](reference/terminal.md). `stitch()` also merges the segments' beat logs into one
-   `timeline.json` / `timeline.md`, so a segmented demo commits the same two
-   files as any other — you do not have to do anything for that.
+   [reference/terminal.md](reference/terminal.md).
 2. **Write `record.py`** in the demo folder as a short storyboard. Capture
    a still (`rec.shot("NN-name")`) at each moment a written guide would
    narrate. Make retakes idempotent — clean up state earlier takes created,
@@ -513,11 +518,10 @@ return.
    of that name anywhere in the repo), `.tts/` narration caches, and
    `<demo folder>/evidence/` — the last two are **working files**, inputs to
    a review that happens once, and the file table at the top of this skill
-   says so in the same column that says the mp4 is not committed.
-
-   **`evidence/` is not committed either, and for a stronger reason than the
-   mp4** — it is greppable plaintext of a real app's DOM; `timeline.md` is what
-   a reader six months from now gets ([reference/review.md](reference/review.md)).
+   says so in the same column that says the mp4 is not committed. `evidence/`
+   has the stronger reason of the two: it is greppable plaintext of a real
+   app's DOM, and `timeline.md` is what a reader six months from now gets
+   ([reference/review.md](reference/review.md)).
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
    comment box — GitHub hosts it and renders a real player. That upload has
@@ -564,17 +568,13 @@ return.
   timeline over a recording nobody can watch. Check `content` in the same file
   — that is the field that describes the frames
   ([reference/timeline.md](reference/timeline.md)).
-- **Reading `content.score` as "the app was visible".** It is luma variance
-  over the app rect, so a translucent overlay *adds* to it: a scrim left over
-  the app measured **32.94** against a clean take's **26.74**, and both printed
-  `demo.mp4 shows a picture`. `warnings` is the field that answers the
-  question. An interlude *this recorder* raised and you did not clear is named
-  there by element id; an app's own modal is named by nothing
-  ([reference/limits.md](reference/limits.md)).
-- **Reading `content.static_for` as a score.** It is not one. A healthy demo
-  that narrates a rendered screen holds it for 20s or more, which is what a
-  covering card also measures. Read `warnings`; the number alone means nothing
-  without the beats beside it.
+- **Reading `content.score` or `content.static_for` as "the app was visible".**
+  Neither is a verdict. The score is luma variance over the app rect, so a
+  translucent overlay left over the app *raises* it, and a healthy demo
+  narrating one screen holds as still as a covering card does — both measured,
+  both in [reference/limits.md](reference/limits.md). `warnings` is the field
+  that answers the question: an interlude *this recorder* raised and you did
+  not clear is named there by element id, an app's own modal by nothing.
 - **Embedding video in markdown.** Repo-relative mp4s don't play inline in
   rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
   with a still and point at the re-record command instead. GitHub plays only
@@ -584,17 +584,17 @@ return.
 ## Sharing this skill
 
 The skill is self-contained: this file, the `reference/` directory it links
-into, the `helpers/demo_recording/` package, `scripts/` with `ensure.sh`, the
-vendored `helpers/assets/xterm/` terminal assets, and `README.md`. Install it with the `skills` CLI — into the current project:
+into, the `helpers/demo_recording/` package, `ensure.sh` at the skill root,
+`scripts/demo-target-guard`, the vendored `helpers/assets/xterm/` terminal
+assets, and `README.md`. Install it with the `skills` CLI — into the current project:
 
 ```sh
 npx skills add https://github.com/rogvid/skills/tree/main/skills/demo-video
 ```
 
 add `-g` to install it globally (`~/`) so it is available everywhere. Then run
-Setup in the project where you record. The skill is not tied to the
-`.claude/skills/` convention: each storyboard embeds the skill's location as
-written at creation time, and `DEMO_VIDEO_SKILL_DIR` overrides it — so
-`.agents/` folders, global installs, or any other harness layout work the same
-way. Re-recording a committed storyboard requires the skill to be installed —
-that is the one setup step a fresh clone needs.
+Setup in the project where you record. No layout is assumed — a storyboard
+embeds the skill's location as written and `DEMO_VIDEO_SKILL_DIR` overrides it,
+so `.agents/`, a global install, or any other harness works the same way.
+Re-recording a committed storyboard requires the skill to be installed, which
+is the one setup step a fresh clone needs.
