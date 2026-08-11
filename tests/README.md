@@ -2740,10 +2740,27 @@ knows is missing is worse than one that is openly absent.
   And the standing one, which is a scope statement rather than a gap:
   **anything the take reaches other than its classified target.** A page that
   fetches another origin, a terminal storyboard that curls one, a URL computed
-  at run time. This is a static classifier over configuration and source text,
-  not an egress control, and `target.py`'s docstring says so in the same
-  words. `scripts/demo-target-guard` is also outside mypy's scope, which runs
-  over `skills/demo-video/helpers/` only.
+  at run time — and, named because it is the one a storyboard author reaches
+  for by accident, **`goto()`'s own argument**: `web.py` passes an absolute URL
+  straight through, so `rec.goto("https://app.acme.com/")` records production
+  and no assertion here notices
+  ([#268](https://github.com/rogvid/skills/issues/268)). This is a static
+  classifier over configuration and source text, not an egress control, and
+  `target.py`'s docstring says so in the same words. `SKILL.md` now says it too
+  ([#267](https://github.com/rogvid/skills/issues/267)), which is what stops a
+  caller reading the guard as one. `scripts/demo-target-guard` is also outside
+  mypy's scope, which runs over `skills/demo-video/helpers/` only.
+
+- **Whether prose about masking is *otherwise* true, and prose anywhere but
+  the two places `MaskProse` reads.** `tests/unit`'s sweep flags every mention
+  of mask/scrub/redact in `helpers/demo_recording/*.py` and `SKILL.md` and
+  makes each one earn a hand-written waiver, which is what catches a sentence
+  asserting a layer that #138 removed. It does not read `reference/*.md` or the
+  skill's `README.md`, and it cannot tell a waivered denial that is accurate
+  from one that has quietly gone stale about *something else* — a waiver saying
+  "#142's carve-out" stays green after #142's carve-out is deleted. The list
+  can only shrink, so a stale entry surfaces the moment its line is edited;
+  nothing surfaces one whose line is edited nowhere.
 
 Failures accumulate and print together, each naming the file or interaction and
 the number that was wrong. The process exits non-zero if there is even one, and

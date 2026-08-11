@@ -114,8 +114,13 @@ def failure_summary(
 ) -> dict:
     """What came out of the `with`, and which beat it came out of.
 
-    Unscrubbed: every consumer (`_timeline_doc`, the dump, the marker)
-    masks it on the way to its own file, and each has a different mask.
+    Verbatim, and every consumer (`_timeline_doc`, the dump, the marker)
+    writes it out that way — nothing between here and any of those three
+    files removes anything (#138). `str(exc)` on a `wait_for_text()` timeout
+    is a thousand characters of terminal screen, and it lands in each of them
+    as the program printed it. Only the length caps act — this one's is
+    `FAILURE_MESSAGE_CHARS` and the marker's is tighter still — and a length
+    cap is not a filter.
     """
     beat = failed_beat(beats)
     message = str(exc) if exc is not None else ""
@@ -128,8 +133,8 @@ def failure_summary(
 
 
 def render_failure_md(doc: dict) -> str:
-    """The human half. Pure function of the document above, so it inherits
-    its masking rather than re-deriving it."""
+    """The human half. Pure function of the document above, so it says
+    exactly what that document says and derives nothing of its own."""
     failure = doc.get("failure") or {}
     beat = doc.get("beat") or {}
     where = (

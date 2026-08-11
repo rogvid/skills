@@ -1644,9 +1644,10 @@ class _DemoBase:
             yield None
             return
         self._in_beat = True
-        # Scrubbed rather than fatal, because none of these is text a viewer
-        # reads off the screen. Caption text reaches the screen through
-        # caption(), which refuses it outright.
+        # Every field goes in as the storyboard gave it — the caption, the
+        # selector, the still's name. Nothing here filters, and `caption()`
+        # refuses nothing either (#138), so `timeline.json` is committed
+        # carrying whatever the storyboard put in these arguments.
         record: dict = {
             "index": len(self._beats),
             "t_start": round(time.monotonic() - self._t0, 3),
@@ -1735,9 +1736,11 @@ class _DemoBase:
         """Extract this take's review frames (a no-op for a segment).
 
         The frames come out of the recording rather than being re-derived
-        it: every one of them is a frame of `demo.mp4`, which is masked in the
-        page before it is ever captured. `tests/smoke` measures that on the
-        frames themselves instead of taking this paragraph's word for it.
+        from the page: every one of them is a frame of `demo.mp4`, so a
+        reviewer reads what the video showed and not a second render that
+        could differ from it. `tests/smoke` requires each PNG to be
+        byte-identical to that second cut out of the mp4 again, instead of
+        taking this paragraph's word for it.
         """
         write_beat_frames(self.out_dir, doc, "this take")
 
@@ -1908,14 +1911,15 @@ take with fewer beats than the last one would otherwise leave the
     def _failure_screen(self) -> str | None:
         """The medium's page text, for a failure dump. None if it has none.
 
-        Called on the failure path only, **after `_stop()` and before
-        the medium has been stopped** — that slot is the whole design. After
-        `_stop()` because a medium can be sitting on output (the terminal
-        scrubber withholds a trailing fragment and flushes it there), so an
+        Called on the failure path only, **after `_stop()` and before the
+        medium has been stopped** — that slot is the whole design. After
+        `_stop()` because a medium can be sitting on output (`TerminalRecorder`
+        holds back a possible half exit-marker and flushes it there), so an
         earlier reading is not the screen the recording ends on. Before the
-        verifier because the verifier is what decides whether any of this may
-        be kept: read after it, this would be page text nothing has vouched
-        for, which is the exact hole PR #58 was blocked on.
+        browser goes away, because there is no page to read afterwards. The
+        third constraint this slot used to satisfy — read it *before* the
+        redaction verifier, the hole PR #58 was blocked on — went with that
+        verifier in #144, and nothing vouches for this text now.
         """
         return None
 
@@ -1936,13 +1940,14 @@ take with fewer beats than the last one would otherwise leave the
             )
 
     def _failure_doc(self, failure: dict) -> dict:
-        """The machine-readable half of `failure/`, masked and checked.
+        """The machine-readable half of `failure/`.
 
-        Same order and same reasons as `_evidence_doc`: mask first, check the
-        serialized bytes last, raise rather than write. Nothing in here is read
-        from the page — `screen` was buffered before the verifier ran, the
-        issues and the beats have been in memory since they happened, and the
-        media is named rather than opened.
+        Envelope, the failing beat in full, the issue log, and what was
+        recorded — all of it as it came, because there is no masking anywhere
+        in this recorder (#138). Nothing in here is read from the page either:
+        the page text was buffered by `_capture_failure_screen` and only its
+        presence is reported here, the issues and the beats have been in memory
+        since they happened, and the media is named rather than opened.
         """
         beat = failed_beat(self._beats)
         doc: dict = {
@@ -2263,9 +2268,9 @@ take with fewer beats than the last one would otherwise leave the
             # it could not be measured. Never silently absent.
             #
             # It carries no selector today and deliberately so (see
-            # `_content_report`): this file is committed, and a field that
-            # grows a quoted string
-            # later must not be the one place the mask does not reach.
+            # `_content_report`): this file is committed, nothing in this
+            # recorder filters what goes into it, so a field that grows a
+            # quoted string later publishes that string as it was written.
             "content": self._content,
             # The clock demo.mp4 is actually on, and the only field here that
             # is not a reading of `time.monotonic()` (issues #18, #215). See
@@ -2282,9 +2287,9 @@ take with fewer beats than the last one would otherwise leave the
             # track this could describe. Taken from `_convert`, not recomputed
             # here: what belongs in the artifact is what the mix did.
             "narration": self._narration,
-            # Built from the *scrubbed* beats, not from `self._beats`, so a
-            # still path or a caption that the mask reached is masked here too
-            # rather than reappearing in the coverage table (issue #12).
+            # Built from the same `beats` list this document publishes, not
+            # from `self._beats` again, so the coverage table and the beat log
+            # can never disagree about what a beat claimed (issue #12).
             # Null on a take recorded outside a ticket.
             "coverage": coverage_report(self._criteria, beats),
             "beats": beats,
