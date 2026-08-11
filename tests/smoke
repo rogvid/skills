@@ -785,14 +785,30 @@ DURATION_TOLERANCE_S = 0.2
 #
 #     What this comment used to say next was that *nothing* about the capture
 #     can move an event later, "so a positive skew is the log's own error".
-#     That is false, and the thing that falsifies it is on this side of the
-#     line rather than the recorder's: correcting by a step the capture only
-#     partly lost over-shoots by the difference, and the remainder lands here.
-#     Measured in issue #255 — 0.17 s lost of a recorded 1.078 s step read as
-#     +906 ms of log-ahead, 0.53 s of 1.067 s as +540 ms. So the failure text
-#     asks `log_early_causes()` which cause to name, and on a stepping take it
+#     That is false on a take whose host clock stepped, and what falsifies it
+#     is on this side of the line rather than the recorder's: a backward step
+#     of Δ deletes the window (T, T+Δ) from the file, and an instant inside
+#     that hole has no frame of its own — subtract the whole step from it
+#     instead of clamping to the hole's edge and the remainder, up to a whole
+#     Δ, lands here as log-ahead (issue #256). Measured in issue #255 at +906,
+#     +540 and +970 ms on stepping takes. So the failure text asks
+#     `log_early_causes()` which cause to name, and on a stepping take it
 #     names the step first (issue #257). The bar itself is unchanged: what was
 #     wrong was the explanation, not the width.
+#
+#     **The explanation #257 put here in place of that one was also wrong**,
+#     and it is worth naming because it read as a measurement. It
+#     said a capture could lose a fraction of the step it recorded and be
+#     over-shot by the difference. There is no such fraction. Playwright
+#     1.62.0 stamps `frameNumber = floor((wall_ts − first_wall_ts) · 25)` into
+#     the clusters and CFR conversion drops everything until the wall clock
+#     climbs back, so the video's clock is the wall clock's high-water mark and
+#     the muxer cannot produce a partial shift: measured at 97.0-100.2% of the
+#     recorded step over 10 steps in 9 takes, at 2-60 Hz paint, through plain
+#     Playwright and through the real `Recorder`. The three figures above were
+#     in-hole instants read as though they were shifts — `(t − hole_start)/Δ`,
+#     uniform on [0,1] — and not three measurements of a mechanism (issue
+#     #255).
 #
 #   * MAX_CAPTURE_LOSS_S — the video shows it *before* the log says (negative
 #     skew). Two separate things produce that, and the whole of issue #215 is
@@ -2241,12 +2257,27 @@ def log_early_causes(clock, t: float) -> str:
     can move an event *later*, so this is the beat log: check where `_t0` is
     taken and where `_beat` stamps `t_start`." That is false on a take whose
     host stepped, and it is the *correction* rather than the capture that
-    makes it false — a take that lost only part of the step it recorded is
-    over-corrected by the difference, and the remainder arrives here as
-    log-ahead. Measured in issue #255: 0.17 s lost of a recorded 1.078 s step
-    read as +906 ms, 0.53 s of 1.067 s as +540 ms, ~0.46 s of 1.074 s as
-    +970 ms. A reader sent to `_t0` and `_beat` by any of those goes hunting
-    in the recorder's beat logging for a bug that is not there.
+    makes it false — a backward step of Δ deletes the window `(T, T+Δ)` from
+    the file, so an instant inside that hole has no frame of its own, and a
+    reading that subtracts the whole step from it instead of clamping to the
+    hole's edge is left with up to a whole Δ of log-ahead (issue #256).
+    Measured in issue #255 at +906, +540 and +970 ms. A reader sent to `_t0`
+    and `_beat` by any of those goes hunting in the recorder's beat logging
+    for a bug that is not there.
+
+    **The lead #257 first gave instead was itself false**, which is why the
+    branch below now names the hole and its width rather than a proportion. It
+    said a capture could lose a fraction of the step it recorded and be
+    over-shot by the difference. The muxer cannot do that: Playwright 1.62.0
+    stamps `frameNumber = floor((wall_ts − first_wall_ts) · 25)` and CFR
+    conversion drops frames until the wall clock climbs back, so the video's
+    clock is the wall clock's **high-water mark** — measured at 97.0-100.2% of
+    the recorded step over 10 steps in 9 takes, both code paths, 2-60 Hz
+    paint. The three figures above were in-hole instants read as though they
+    were shifts, `(t − hole_start)/Δ` and uniform on [0,1] (issue #255). The
+    other cause a stepping take has is the merge seam, where a part's beats
+    run past where the next part's offset puts it — published as `overlaps` in
+    a stitched `timeline.json` (issue #263).
 
     So the take decides which cause is named first. Four answers: the three
     states this harness can be in about a host's wall clock — unmeasured,
@@ -2302,15 +2333,35 @@ def log_early_causes(clock, t: float) -> str:
             f"step against demo.mp4 before reading `_t0` and `_beat` "
             f"(issue #255)."
         )
+    # The hole, in milliseconds, because it is the number the skew should be
+    # compared against rather than a paragraph the reader has to believe: an
+    # instant a backward step deleted from the file is over-corrected by
+    # exactly this much when the whole step is subtracted from it instead of
+    # clamping, so a skew of this size is that mechanism and a skew of some
+    # other size is not.
+    gap = clock.hole(t)
+    inside = (
+        f" **The file has no frame for this instant at all**: the step "
+        f"deleted the wall time it happened in, and the video only resumes "
+        f"{gap * 1000:.0f} ms later — so a reading over-corrected by the "
+        f"whole step instead of clamping to the hole's edge is left with "
+        f"exactly that much log-ahead (issue #256)."
+        if gap
+        else " This instant is outside every hole those steps left, so the "
+        "video has a frame of its own for it and the correction above is the "
+        "whole of what the steps took."
+    )
     return (
         f"**This take's clock stepped, so the beat log is not the first place "
         f"to look**: {clock.describe()}, and {shift * 1000:+.0f} ms of that "
-        f"was subtracted from this reading. A capture that lost less wall "
-        f"time than the step it recorded is over-corrected by the "
-        f"difference, and what is left reads as log-ahead — measured at "
-        f"+540 to +970 ms on takes losing 16-50% of a ~1.07 s step (issue "
-        f"#255). Check the step against demo.mp4 before reading `_t0` and "
-        f"`_beat`."
+        f"was subtracted from this reading.{inside} A step is never lost by "
+        f"halves — the video's clock is the wall clock's high-water mark, "
+        f"measured at 97.0-100.2% of the recorded step over 10 steps in 9 "
+        f"takes — so the two things that produce a skew here are the hole "
+        f"above and, on a stitched log, the merge seam, where a part's beats "
+        f"run past where the next part's offset puts it and `overlaps` in "
+        f"timeline.json says so (issues #255, #263). Check the step against "
+        f"demo.mp4 before reading `_t0` and `_beat`."
     )
 
 

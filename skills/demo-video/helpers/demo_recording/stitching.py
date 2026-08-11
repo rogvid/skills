@@ -16,7 +16,13 @@ from pathlib import Path
 from .content import _common, media_duration, merge_content, print_content_summary
 from .coverage import _merged_coverage
 from .frames import write_beat_frames
-from .timeline import MAX_ISSUES, TIMELINE_SCHEMA, timeline_paths, write_timeline
+from .timeline import (
+    MAX_ISSUES,
+    TIMELINE_SCHEMA,
+    capture_clock_correction,
+    timeline_paths,
+    write_timeline,
+)
 
 
 def _shift(value: object, offset: float) -> float | None:
@@ -326,6 +332,113 @@ def _check_stream_shapes(parts: list[Path]) -> None:
         )
 
 
+# How far a merged beat may start before the previous one ended without being
+# called an overlap. **This is `tests/smoke`'s `BEAT_ORDER_SLACK_S`, and the two
+# have to stay equal**: that is the bar the suite grades a stitched log's
+# monotonicity against, so a tighter number here prints "this stitched beat log
+# is not monotonic" over a take the suite calls healthy, and a wider one stays
+# quiet about a log the suite fails. Measured at 0.4 ms and 0.6 ms seams either
+# side of it. `MergeOverlap.test_the_slack_here_is_the_slack_the_suite_grades`
+# in tests/unit is what keeps them equal; a check that cries wolf is a check
+# that gets ignored, and then it protects nothing.
+MERGE_OVERLAP_SLACK_S = 0.005
+
+
+def _merge_overlaps(doc: dict) -> list[dict]:
+    """Where a stitched beat log runs backwards, and what the video's clock says.
+
+    **The merge lays the parts out on two different clocks and the seam is where
+    they meet** (issue #263). Each part's beats keep their own
+    `time.monotonic()` timestamps; the offset that moves them is the part's real
+    **ffprobe duration**, which is on the wall clock the encoder stamped. Those
+    agree until a part's host clock steps backwards — a step of −Δ deletes Δ of
+    wall time from that part's video without taking a millisecond out of its
+    beat log, so the part's log outruns its own file and the next part's first
+    beat is offset to a moment the previous part's last beat has not reached
+    yet. Reproduced at −1.4684 s: `beat 21 t_end 37.451`, `beat 22 t_start
+    37.441`. The overlap scales with Δ less the capture's startup and tail, so a
+    ~1.5 s step reaches most of a second.
+
+    **Reported, not clamped, and that is the decision here.** Moving the beats
+    to make the numbers rise would put them at instants neither the log nor the
+    video has: the merged timestamp of a beat is exactly its own log's plus its
+    own part's offset, and every consumer that corrects a beat by its own
+    capture's steps (see `_merge_capture_clock`) depends on that identity. A
+    clamp would buy a monotonic column by making the column mean nothing. So the
+    overlap is published instead, with the one thing a reader actually needs:
+
+    `video_overlap` is the same difference **after** putting both instants on
+    the video's clock by the documented rule — each corrected by the steps of
+    its own capture. Zero or below means the two frames really are in order and
+    only the log's column runs backwards, which is the mechanism above and is
+    not a defect in the file a reviewer scrubs. Above zero means the recorded
+    steps do not account for it and something else moved the beats. **Null**
+    when no correction was possible at all, which is not the same answer as
+    zero and must not read like one.
+
+    `no_video` and `previous_no_video` carry the other half of each `Placed`,
+    and they are not decoration: an endpoint inside a hole has **no frame at
+    all**, and `at` for it is the last instant the file has rather than where
+    that instant is. Publishing `video_overlap` alone would let a reader be
+    told the two beats are in order — which is true — beside a claim that the
+    frames are fine, which is false for a beat the step deleted. That is
+    exactly the defect `Placed.lost` exists to prevent (issue #256), and a
+    conservative direction does not make a false sentence acceptable.
+
+    Every adjacent pair is compared, not only the pairs at a seam, because
+    "this stitched log is monotonic" is a claim about the whole list — `seam`
+    says which kind each one is, since only the seams are this merge's
+    arithmetic. **`seam` is read off the parts' beat counts, not off the two
+    beats' `segment` strings**: nothing stops `stitch()` being handed one
+    segment name twice (`tests/smoke` treats "merged segment one twice" as a
+    real failure mode), and a genuine seam reported as "inside one segment"
+    sends the reader to the wrong file.
+
+    Empty on a healthy merge: the list is the merge saying it looked. The bar
+    is `MERGE_OVERLAP_SLACK_S`, which is the suite's own.
+    """
+    place, state = capture_clock_correction(doc)
+    beats = doc.get("beats") or []
+    # Where each part's first beat lands in the merged list, by running total
+    # of the parts' own beat counts. Independent of what the parts are called.
+    seams: set[int] = set()
+    at = 0
+    for record in doc.get("segments") or []:
+        at += int((record or {}).get("beats") or 0)
+        seams.add(at)
+    found: list[dict] = []
+    for before, after in zip(beats, beats[1:], strict=False):
+        ends = _shift(before.get("t_end"), 0.0)
+        starts = _shift(after.get("t_start"), 0.0)
+        if ends is None or starts is None:
+            continue
+        overlap = round(ends - starts, 3)
+        if overlap <= MERGE_OVERLAP_SLACK_S:
+            continue
+        placed_before = place(before, ends) if state.get("applied") else None
+        placed_after = place(after, starts) if state.get("applied") else None
+        found.append(
+            {
+                "beat": after.get("index"),
+                "previous_beat": before.get("index"),
+                "segment": after.get("segment"),
+                "previous_segment": before.get("segment"),
+                "seam": after.get("index") in seams,
+                "overlap": overlap,
+                "video_overlap": round(placed_before.at - placed_after.at, 3)
+                if placed_before is not None and placed_after is not None
+                else None,
+                "previous_no_video": round(placed_before.lost, 3)
+                if placed_before is not None
+                else None,
+                "no_video": round(placed_after.lost, 3)
+                if placed_after is not None
+                else None,
+            }
+        )
+    return found
+
+
 def _merged_timeline(
     segments: list[str],
     parts: list[Path],
@@ -416,7 +529,7 @@ def _merged_timeline(
             total = round(media_duration(demo), 3)
         except (subprocess.CalledProcessError, ValueError, OSError):
             total = None  # a timeline without it still beats none
-    return {
+    doc = {
         "schema": TIMELINE_SCHEMA,
         "generated_by": "demo-video",
         "recorder": _common([r["recorder"] for r in records], "mixed"),
@@ -446,6 +559,12 @@ def _merged_timeline(
         "issues": issues[:MAX_ISSUES],
         "issue_count": issue_count,
     }
+    # Last, and off the assembled document rather than off the loop above: the
+    # answer needs the merged `capture_clock` this function has only just
+    # finished building, and a reader asking "is this log monotonic" is asking
+    # about the list as it shipped.
+    doc["overlaps"] = _merge_overlaps(doc)
+    return doc
 
 
 def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None:
