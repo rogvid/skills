@@ -156,7 +156,13 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 import demo_recording.core as core_module  # noqa: E402
 import demo_recording.frames as frames_module  # noqa: E402
-from demo_recording.core import _beat_verb, _CaptureClock, _DemoBase  # noqa: E402
+from demo_recording.core import (  # noqa: E402
+    CRITERION_HOLD_MAX_S,
+    CRITERION_HOLD_MIN_S,
+    _beat_verb,
+    _CaptureClock,
+    _DemoBase,
+)
 from demo_recording.terminal import TerminalRecorder  # noqa: E402
 from demo_recording.web import _CURSOR_JS, Recorder  # noqa: E402
 
@@ -3797,6 +3803,7 @@ GUARANTEED = frozenset(
         "_beat",
         "shot",
         "caption",
+        "criterion",
         "interlude",
         "_capture_evidence",
         "_write_evidence",
@@ -4016,6 +4023,226 @@ class VerbTarget(unittest.TestCase):
         rec.pause(0)
         rec.hold(min_s=0)
         self.assertEqual([b["selector"] for b in rec._beats], [None, None])
+
+
+# --------------------------------------------------------------------------
+# core.py — the ticket's own sentence, on screen (issue #280)
+# --------------------------------------------------------------------------
+#
+# Until `criterion()` the binding between a demo and its ticket lived only in
+# files a viewer never opens — the storyboard, `timeline.json`, `timeline.md`.
+# The video, which is the artifact the skill exists to produce, never said which
+# clause it was demonstrating, so a reviewer had to hold the ticket in their
+# head. `criterion("AC-2")` raises a card carrying AC-2's declared text.
+#
+# Every assertion below is written from the **viewer's or the reader's** side:
+# what string reached the page, and what string the coverage table ends up
+# carrying. None of them asks the recorder what it believes it drew. The
+# property being graded is that those two strings cannot differ, because there
+# is only one — a storyboard author has no way to put a different sentence in
+# front of a viewer from the one the ticket quote carries.
+#
+# **What none of this grades, stated rather than faked:** whether the clause is
+# *legible* in the recorded frame. "The text was set" is not "a human can read
+# it" — a card that renders off-frame, clipped, or under another element passes
+# every assertion here. That gap is in tests/README.md's Known gaps, and the
+# demo video recorded for #280 is what answers it.
+
+
+class DrawingPage(FakePage):
+    """A page that remembers every script the recorder ran, and its argument.
+
+    `FakePage.evaluate` returns None and forgets, which is enough for the beat
+    log but not for this: the question here is what text the *page* was handed,
+    which is the closest a browser-free suite gets to what a viewer saw.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.drawn: list[tuple[str, object]] = []
+
+    def evaluate(self, script, arg=None, **kwargs):
+        self.drawn.append((script, arg))
+        return None
+
+
+# A clause with the shape of a real one: a whole sentence out of a ticket, long
+# enough that showing its id instead would be an obvious difference and short
+# enough to be a card. Taken from ticket #129's AC-1, which the reference
+# storyboard in examples/ticket-queue is recorded against.
+CLAUSE = (
+    "A search box above the queue narrows the list as you type, "
+    "case-insensitively, with no button to press."
+)
+
+
+class CriterionCard(unittest.TestCase):
+    CRITERIA = {
+        "AC-1": CLAUSE,
+        "AC-2": "Search and the status filter combine.",
+    }
+
+    def raised(self, *args, **settings):
+        """A take that raised one criterion card. Returns (recorder, page)."""
+        page = DrawingPage()
+        rec = recorder(self, page=page, criteria=self.CRITERIA, **settings)
+        rec.criterion(*args)
+        return rec, page
+
+    def shown(self, page: DrawingPage) -> list[str]:
+        """Every string handed to the full-screen card, in order.
+
+        The clear passes no argument, so it is not one of these — which is what
+        makes "the card showed exactly this" a claim about what was raised.
+        """
+        return [
+            arg
+            for script, arg in page.drawn
+            if "__demoInterlude" in script and isinstance(arg, str)
+        ]
+
+    def test_the_card_shows_the_declared_clause_and_not_its_id(self):
+        # The whole feature in one assertion. `["AC-1"]` here — the id on
+        # screen, or a summary of it, or an empty card — is a demo that still
+        # makes the reviewer go and read the ticket.
+        _, page = self.raised("AC-1")
+        self.assertEqual(self.shown(page), [self.CRITERIA["AC-1"]])
+
+    def test_the_beat_claims_the_criterion_the_card_shows(self):
+        rec, _ = self.raised("AC-2")
+        self.assertEqual(
+            [(b["verb"], b["selector"], b["caption"], b.get("ac")) for b in rec._beats],
+            [("criterion", "AC-2", self.CRITERIA["AC-2"], ["AC-2"])],
+        )
+
+    def test_the_coverage_table_carries_the_sentence_that_was_on_screen(self):
+        # End to end, and from the consumer's side rather than the producer's:
+        # take the string the *page* was handed, and find it in the report a
+        # reviewer reads. A test comparing the report against `CRITERIA` would
+        # pass on a card that drew something else entirely.
+        rec, page = self.raised("AC-1")
+        report = coverage_report(rec._criteria, rec._beats)
+        self.assertEqual(
+            [row["index"] for row in report["claimed"]["AC-1"]],
+            [rec._beats[0]["index"]],
+            "the card is on screen and the coverage table does not list it",
+        )
+        self.assertEqual(report["criteria"]["AC-1"], self.shown(page)[0])
+
+    def test_a_card_claims_only_itself_and_never_the_beats_after_it(self):
+        # Deliberately left out of the design: an implicit claim is a label
+        # nobody typed, and it would be indistinguishable in `coverage` from
+        # one somebody did.
+        rec, _ = self.raised("AC-1")
+        rec.caption("Typing invoice narrows the list.")
+        rec.pause(0)
+        self.assertEqual([b.get("ac") for b in rec._beats], [["AC-1"], None, None])
+
+    def test_the_ordinary_clear_takes_the_clause_down(self):
+        # The card is the element `interlude()` raises, so the storyboard rule
+        # and the "card left up" warning are the ones that already exist. A
+        # card of its own would need both written again.
+        rec, page = self.raised("AC-1")
+        before = len(page.drawn)
+        rec.interlude("")
+        self.assertTrue(
+            any("__demoInterlude('')" in s for s, _ in page.drawn[before:]),
+            "interlude('') does not clear what criterion() raised, so a "
+            "storyboard has no way to take the clause off the screen",
+        )
+
+    def test_an_undeclared_criterion_is_refused_at_the_line_that_called_it(self):
+        rec = recorder(self, page=DrawingPage(), criteria=self.CRITERIA)
+        with self.assertRaises(ValueError) as refused:
+            rec.criterion("AC-9")
+        self.assertIn("criterion()", str(refused.exception))
+        self.assertEqual(
+            rec._beats, [], "a refused card still recorded a beat claiming it"
+        )
+
+    def test_a_take_that_declared_no_criteria_has_no_sentence_to_show(self):
+        # Refused for the reason `ac=` is: there is no declared text to put on
+        # screen, and inventing one is the retyped string this verb removes.
+        rec = recorder(self, page=DrawingPage())
+        with self.assertRaises(ValueError):
+            rec.criterion("AC-1")
+
+    def test_a_list_of_ids_is_refused_because_a_card_shows_one_sentence(self):
+        # `_checked_ac` accepts a list — that is right for `caption(ac=[...])`
+        # and wrong here, and a card handed two clauses would have to pick one
+        # silently.
+        rec = recorder(self, page=DrawingPage(), criteria=self.CRITERIA)
+        with self.assertRaises(TypeError):
+            rec.criterion(["AC-1", "AC-2"])
+        self.assertEqual(rec._beats, [])
+
+
+class CriterionHold(unittest.TestCase):
+    """How long the clause stays up, and what pins the two constants.
+
+    The catalogue's "ungraded constant": a hold nothing tests at its boundary
+    can be set to any value inside the window the tests happen to use. Both
+    bounds are graded one word either side of where they take over.
+    """
+
+    class Held(WebRec):
+        """A recorder that writes down what it was asked to hold for."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.held: list[float] = []
+
+        def _idle(self, seconds: float) -> None:
+            self.held.append(seconds)
+
+    def held_for(self, text: str, spoken: float | None = None, **call) -> float:
+        rec = recorder(self, cls=self.Held, page=DrawingPage(), criteria={"AC-1": text})
+        if spoken is not None:
+            # What `_start_line` does for a real narration clip, without one:
+            # the line is now known to end `spoken` seconds from here.
+            rec._start_line = lambda clip: setattr(  # type: ignore[method-assign]
+                rec, "_line_end", time.monotonic() + spoken
+            )
+        rec.criterion("AC-1", **call)
+        self.assertEqual(
+            len(rec.held), 1, f"the card held {len(rec.held)} times, not once"
+        )
+        return rec.held[0]
+
+    def words(self, n: int) -> str:
+        return " ".join(["queue"] * n)
+
+    def test_a_short_clause_still_holds_the_floor(self):
+        self.assertEqual(self.held_for("It works."), CRITERION_HOLD_MIN_S)
+
+    def test_the_floor_gives_way_to_reading_speed_one_word_later(self):
+        # The boundary of the floor, not comfortably inside it. 0.6 + 0.34w
+        # crosses 2.8 s between six words and seven.
+        self.assertEqual(self.held_for(self.words(6)), CRITERION_HOLD_MIN_S)
+        self.assertAlmostEqual(self.held_for(self.words(7)), 0.6 + 7 * 0.34)
+
+    def test_a_clause_too_long_to_read_is_capped_at_the_boundary(self):
+        # The other boundary. 0.6 + 0.34w crosses 9.0 s between 24 words and
+        # 25, and a card that ate a fifth of a 45 s demo would be the cure
+        # being worse than the disease.
+        self.assertAlmostEqual(self.held_for(self.words(24)), 0.6 + 24 * 0.34)
+        self.assertEqual(self.held_for(self.words(25)), CRITERION_HOLD_MAX_S)
+        self.assertEqual(self.held_for(self.words(400)), CRITERION_HOLD_MAX_S)
+
+    def test_a_storyboard_that_says_how_long_gets_exactly_that(self):
+        self.assertEqual(self.held_for(CLAUSE, hold=0.25), 0.25)
+
+    def test_the_clause_stays_up_for_the_whole_spoken_line(self):
+        # With narration on, a card that leaves mid-sentence is the one thing
+        # this verb must not do: the voice is still reading the clause and the
+        # screen has moved on.
+        self.assertAlmostEqual(self.held_for("It works.", spoken=7.5), 7.5, delta=0.2)
+
+    def test_a_line_that_already_finished_does_not_shorten_the_card(self):
+        # The control for the test above: without it, "the card rides the
+        # spoken line" is satisfied by a hold that is *always* whatever
+        # `_line_end` says, including a negative one.
+        self.assertEqual(self.held_for("It works.", spoken=-30.0), CRITERION_HOLD_MIN_S)
 
 
 # --------------------------------------------------------------------------
@@ -9935,8 +10162,8 @@ INJECTIONS = [
         # `declared - classified` and cannot see this direction at all.
         "a verb no recorder logs is left sitting in the passive set",
         "content.py",
-        '        "caption",\n        "hold",',
-        '        "bridge",\n        "caption",\n        "hold",',
+        '        "caption",\n        "criterion",',
+        '        "bridge",\n        "caption",\n        "criterion",',
         [
             "VerbClassification.test_every_classified_verb_is_one_a_recorder_actually_logs"
         ],
@@ -11174,6 +11401,94 @@ INJECTIONS = [
         [
             "BaselineRerecord.test_the_report_also_says_what_the_discarded_attempt_had_reported"
         ],
+    ),
+    # -- the ticket's own sentence, on screen (issue #280) --------------------
+    (
+        # The defect the verb exists to make impossible, in the only form it
+        # can still take: a card that puts *something* on screen which is not
+        # the declared clause. Nothing downstream notices — the beat is
+        # recorded, `coverage` lists it, `timeline.md` renders the ticket's
+        # text — and the only place the difference exists is the frame.
+        "the card shows the criterion's id instead of its declared sentence",
+        "core.py",
+        "        text = self._criteria[key]",
+        "        text = key",
+        [
+            "CriterionCard.test_the_card_shows_the_declared_clause_and_not_its_id",
+            "CriterionCard.test_the_beat_claims_the_criterion_the_card_shows",
+            "CriterionCard."
+            "test_the_coverage_table_carries_the_sentence_that_was_on_screen",
+        ],
+    ),
+    (
+        # A card on screen that the coverage table does not list. The reviewer
+        # sees the clause in the video and reads "nothing claims this" in the
+        # report — the two artifacts of one take disagreeing about it.
+        "the card claims nothing, so coverage never lists the clause it showed",
+        "core.py",
+        '        with self._beat("criterion", selector=key, caption=text, '
+        "**_ac_field([key])):",
+        '        with self._beat("criterion", selector=key, caption=text):',
+        [
+            "CriterionCard.test_the_beat_claims_the_criterion_the_card_shows",
+            "CriterionCard."
+            "test_the_coverage_table_carries_the_sentence_that_was_on_screen",
+            "CriterionCard.test_a_card_claims_only_itself_and_never_the_beats_after_it",
+        ],
+    ),
+    (
+        # The refusals `caption(ac=…)` already makes, skipped on this path. An
+        # undeclared id then dies on a KeyError from inside the recorder rather
+        # than at the line the storyboard wrote.
+        "an id nobody declared reaches the card without being checked",
+        "core.py",
+        '        key = self._checked_ac(ac, "criterion()")[0]',
+        "        key = ac",
+        [
+            "CriterionCard."
+            "test_an_undeclared_criterion_is_refused_at_the_line_that_called_it",
+            "CriterionCard.test_a_take_that_declared_no_criteria_has_no_sentence_to_show",
+        ],
+    ),
+    (
+        # Two clauses handed to a card that can show one. Accepting the list
+        # drops the second silently, and the storyboard reads as though both
+        # were shown.
+        "a card handed a list of ids shows the first and drops the rest",
+        "core.py",
+        "        if not isinstance(ac, str):",
+        "        if False:",
+        [
+            "CriterionCard."
+            "test_a_list_of_ids_is_refused_because_a_card_shows_one_sentence",
+        ],
+    ),
+    (
+        # The pacing collapsed onto its floor: every clause flashes for 2.8 s
+        # whatever it says. A twenty-word clause is then on screen for a third
+        # of the time it takes to read, which is the failure this card exists
+        # to remove wearing the clothes of the fix.
+        "every clause is held for the floor, whatever it takes to read",
+        "core.py",
+        "        reading = min(\n"
+        "            CRITERION_HOLD_MAX_S,\n"
+        "            max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),\n"
+        "        )",
+        "        reading = CRITERION_HOLD_MIN_S",
+        [
+            "CriterionHold.test_the_floor_gives_way_to_reading_speed_one_word_later",
+            "CriterionHold.test_a_clause_too_long_to_read_is_capped_at_the_boundary",
+        ],
+    ),
+    (
+        # The card leaves while the narrator is still reading the clause off
+        # it. Silent on a take recorded without speech, which is every take in
+        # CI — so the assertion that catches it has to script the line.
+        "the card comes down mid-sentence when the clause is being spoken",
+        "core.py",
+        "        return max(reading, self._line_end - time.monotonic())",
+        "        return reading",
+        ["CriterionHold.test_the_clause_stays_up_for_the_whole_spoken_line"],
     ),
 ]
 

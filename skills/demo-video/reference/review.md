@@ -299,6 +299,57 @@ with Recorder(OUT, criteria={
 **1 of 3 criteria have no beat claiming them: `AC-3`.**
 ```
 
+### Put the clause on screen: `criterion()`
+
+Everything above lives in files a viewer never opens. The video — the artifact
+this skill exists to produce — never says which clause it is demonstrating, so a
+reviewer watching it has to hold the ticket in their head and map what they see
+onto it. That mapping is the work the coverage table exists to remove.
+
+`rec.criterion("AC-2")` raises a full-screen card carrying **AC-2's declared
+text**, read out of the `criteria=` map:
+
+```python
+rec.criterion("AC-1")          # the clause, on screen, in the ticket's words
+rec.caption("Typing invoice in lower case narrows the list.", ac="AC-1")
+rec.type_into(SEARCH, "invoice")
+rec.wait_for(".ticket")
+rec.shot("02-invoice", ac="AC-1")
+rec.interlude("")              # take the card down before the next scene
+```
+
+The point is that the sentence is **not a string the storyboard retyped**. There
+is one string, and the card, the coverage table and the quote a drift check
+compares against the ticket are all reading it — so a storyboard cannot show a
+viewer one requirement while claiming another.
+
+- **The card claims its own criterion** (`ac=["AC-1"]`) and appears in
+  `coverage` like any other claim. It is the cheapest claim to make and the
+  weakest evidence there is: it proves the clause was *said*, not shown. Tag a
+  `shot()` as well, or the reviewer has a sentence and no picture.
+- **It tags nothing after it.** The beats that follow are untouched. An implicit
+  claim is a label nobody typed, and in `coverage` it is indistinguishable from
+  one somebody did.
+- **One id, not a list.** A card shows one sentence; handed two it would have to
+  drop one silently. `caption(ac=[...])` is where a screen claims several.
+- **Refused** when the id was never declared, and when the take declared no
+  `criteria=` — the same two refusals `ac=` makes, at the line that made them.
+- **It is the `interlude()` card.** `interlude("")` takes it down, and the "card
+  left up" warning applies unchanged: take it down explicitly, because a card
+  over the rest of the demo is the one thing no check reliably notices
+  ([limits.md](limits.md)).
+- **`hold` defaults to reading speed** over the words in the clause (floored at
+  2.8 s, capped at 9 s), and to the whole spoken line when narration is on. A
+  clause too long to read inside the cap is a clause too long for a card: quote
+  the sentence rather than the paragraph, or pass `hold=` and accept the cost.
+
+**What nothing here grades: whether the clause is legible in the frame.** "The
+text reached the page" is not "a human can read it" — a card that renders
+off-frame, clipped, or under an app overlay satisfies every assertion this
+skill's own suites make (they live in this repository, in `tests/`). That is a
+judgement about pixels, and it is answered the way this skill answers every
+such question: somebody watches the video (Process step 6).
+
 ### What this does and does not tell you
 
 **The report is what the storyboard *claimed*, never what it proved**, and every

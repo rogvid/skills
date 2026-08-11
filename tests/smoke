@@ -4662,6 +4662,17 @@ COVERAGE_CRITERIA = {
 }
 COVERAGE_UNCLAIMED = "AC-3"
 
+# The criterion the take puts on screen as a card (issue #280). Not
+# COVERAGE_UNCLAIMED — the card claims what it shows, and pointing it at AC-3
+# would take away the finding the whole axis exists to produce.
+COVERAGE_CARD = "AC-1"
+
+# A string the fixture page renders and nothing in this harness writes. It is
+# the control for the page-snapshot assertion below: without it, an evidence
+# file that was empty, stubbed or truncated would make "the clause is not on
+# the page" fire for a reason that has nothing to do with the card.
+COVERAGE_APP_MARKER = "Northwind Ops"
+
 
 def record_coverage(out_dir: Path, base_url: str) -> list[str]:
     """A take recorded against COVERAGE_CRITERIA, with one left undemonstrated."""
@@ -4678,6 +4689,12 @@ def record_coverage(out_dir: Path, base_url: str) -> list[str]:
     ) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
+        # The ticket's own sentence, on screen, before the beats that show it
+        # (issue #280). Taken down explicitly on the next line: a card left up
+        # occludes everything after it and almost nothing notices, which is
+        # what `--overlay-only` is about.
+        rec.criterion(COVERAGE_CARD)
+        rec.interlude("")
         rec.caption("The current figures.", ac="AC-1")
         rec.shot("01-figures", ac="AC-1")
         # Two ids on one beat: a single screen can be the evidence for more
@@ -4688,6 +4705,57 @@ def record_coverage(out_dir: Path, base_url: str) -> list[str]:
         # has to count them without any of them reaching `claimed`.
         rec.caption("")
     return b.problems
+
+
+def _criterion_page_failures(out_dir: Path, card: dict, declared: str) -> list[str]:
+    """Was the clause on the page, and not only in the beat log? (issue #280)
+
+    Not a helper for tidiness — a different *source*. Every other assertion
+    about the card reads `timeline.json`, which the recorder writes out of the
+    same values it drew from; they agree by construction and would all pass on
+    a verb that logged a perfect beat and evaluated nothing. The evidence
+    file's `aria` is Playwright's snapshot of the live document at the end of
+    the beat, so it is the one artifact in this take that can disagree.
+
+    **`aria` and not the file.** The evidence envelope also carries a copy of
+    the beat record, caption and all, so searching the whole document would
+    find the clause on a take whose card never reached the browser — the
+    catalogue's wrong-scope search, in the file written to avoid it.
+
+    It still grades **presence, not legibility**: a card rendered off-frame, at
+    zero opacity, or under an app overlay puts exactly this text in exactly
+    this snapshot. That gap is stated in tests/README.md rather than papered
+    over.
+    """
+    path = card.get("evidence")
+    if not path:
+        return [
+            "coverage: the criterion beat names no evidence file, so nothing "
+            "here reads the page — every other assertion about the card is "
+            "the beat log agreeing with itself"
+        ]
+    on_disk = out_dir / path
+    if not on_disk.is_file():
+        return [f"coverage: the criterion beat's evidence {path} was not written"]
+    aria = json.loads(on_disk.read_text()).get("aria")
+    # The haystack, before anything is claimed about it. An empty or stubbed
+    # snapshot makes "the clause is not in it" fire for the wrong reason and
+    # "the clause is in it" impossible; the marker is a string the fixture page
+    # renders and nothing in this harness writes.
+    if not isinstance(aria, str) or COVERAGE_APP_MARKER not in aria:
+        return [
+            f"coverage: the criterion beat's evidence ({path}) carries no "
+            f"snapshot of the fixture page, so whether the clause reached the "
+            f"browser cannot be read out of it either way"
+        ]
+    if declared not in aria:
+        return [
+            f"coverage: {declared!r} is not in the page snapshot the criterion "
+            f"beat recorded ({path}) — the beat log says a card carried the "
+            f"clause and the document the recorder was driving never had those "
+            f"words in it"
+        ]
+    return []
 
 
 def check_coverage(out_dir: Path) -> list[str]:
@@ -4757,6 +4825,58 @@ def check_coverage(out_dir: Path) -> list[str]:
                     f"beat {row.get('index')}, the beat names "
                     f"{beat.get('still')!r}"
                 )
+
+    # Arm 4 — the clause is on the screen, in the ticket's own words (#280).
+    #
+    # Four things have to hold together, and each alone is satisfied by a
+    # broken card: the beat exists, it carries the **declared** text rather
+    # than one somebody retyped, it names and claims the clause it showed, and
+    # the coverage table lists it. A card carrying the wrong sentence is
+    # invisible in every other artifact this take writes — `timeline.md`
+    # renders the declared text whatever went on screen.
+    #
+    # A fifth reads the *page* rather than the beat log, and it is the only one
+    # that can disagree with the recorder: the four above are read out of
+    # `timeline.json`, which the recorder writes from the same values it draws
+    # from. What none of the five grades is whether the clause was *legible* —
+    # see tests/README.md, under the coverage axis.
+    cards = [b for b in doc.get("beats") or [] if b.get("verb") == "criterion"]
+    if len(cards) != 1:
+        failures.append(
+            f"coverage: this take raises one criterion card and its timeline "
+            f"holds {len(cards)} `criterion` beats — nothing about the card "
+            f"is graded below"
+        )
+    else:
+        card = cards[0]
+        declared = COVERAGE_CRITERIA[COVERAGE_CARD]
+        if card.get("caption") != declared:
+            failures.append(
+                f"coverage: the criterion card's line is "
+                f"{card.get('caption')!r}, not {COVERAGE_CARD}'s declared "
+                f"{declared!r}. The card reads the criteria map so that a "
+                f"second wording of a clause cannot exist"
+            )
+        if card.get("selector") != COVERAGE_CARD:
+            failures.append(
+                f"coverage: the criterion beat names {card.get('selector')!r}, "
+                f"so the beat log does not say which clause was on screen"
+            )
+        if card.get("ac") != [COVERAGE_CARD]:
+            failures.append(
+                f"coverage: the criterion beat claims {card.get('ac')!r}, "
+                f"expected [{COVERAGE_CARD!r}] — a card claims the clause it "
+                f"shows, and only that one"
+            )
+        shown_by = [row.get("index") for row in claimed.get(COVERAGE_CARD) or []]
+        if card.get("index") not in shown_by:
+            failures.append(
+                f"coverage: the clause was on screen at beat "
+                f"{card.get('index')} and `claimed[{COVERAGE_CARD!r}]` lists "
+                f"{shown_by!r} — the video and the coverage table disagree "
+                f"about whether the ticket was quoted"
+            )
+        failures += _criterion_page_failures(out_dir, card, declared)
 
     # No beat may claim a criterion that was never declared — the report is
     # built from the beats, so an undeclared tag reaching one would be a row

@@ -211,7 +211,7 @@ inside the stretch?**
 
 | beats inside the held stretch | verdict |
 |---|---|
-| `caption`, `interlude`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
+| `caption`, `criterion`, `interlude`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
 | `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to` | worth looking at — warns |
 
 Both interlude styles log as the verb `interlude`, with `selector` carrying the
