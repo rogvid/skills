@@ -53,9 +53,10 @@ from .timeline import capture_clock_correction, timeline_paths
 # All three are the same mistake — guessing which pixel change was the caption.
 # The sound fix is for the recorder to *state* the mapping rather than have it
 # inferred, by rendering the beat index into the frame where extraction can
-# read it back. That changes every recording's pixels, so it is its own change:
-# issue #60. Until then these frames are handed over bare, which is what the
-# uniform sampling they replace did too — they are simply aimed better.
+# read it back. That changes every recording's pixels, so it was raised as its
+# own change — issue #60, closed as not planned for exactly that reason. So
+# these frames are handed over bare, which is what the uniform sampling they
+# replace did too; they are simply aimed better.
 #
 # `frames.md` therefore prints no caption, no verb and no selector. It is the
 # sheet handed to a **context-free** reviewer who is asked what story the
@@ -101,9 +102,10 @@ FRAMES_SCHEMA = 1
 # of these is the app: the recorder's own chrome is a fifth to a third of the
 # picture and never moves. Measured over the reference takes — a page's first
 # paint 0.041, a caption appearing 0.022-0.025, a table filtering to one row
-# 0.013, an idle hold 0.007 and under. Issue #57 proposes scoring the app's own
-# rect instead, which would make one threshold mean the same thing in both
-# media.
+# 0.013, an idle hold 0.007 and under. Scoring the app's own rect instead would
+# make one threshold mean the same thing in both media; that was issue #57, and
+# it is closed as not planned, so this threshold is the answer and not a
+# placeholder for one.
 SCENE_MIN_SPAN_S = 3.0
 SCENE_THRESHOLD = 0.02
 SCENE_MAX_EXTRA = 3

@@ -176,9 +176,11 @@ demo-video/
 
 **SKILL.md is loaded whole into an agent's context whenever the skill triggers;
 `reference/` is read on demand.** That is why the split exists and why it is
-worth keeping: the entry point is 33 kB (~12k tokens) against the 90 kB (~33k)
-of SKILL.md plus `reference/` together, and nothing was deleted to get there.
-`tests/unit --budget` prints the current figure.
+worth keeping: the always-loaded entry point is the smaller part of the skill's
+prose by a wide margin — `reference/` is the larger — and nothing was deleted to
+get there. No figure is quoted here because it goes stale on every edit;
+`wc -c SKILL.md reference/*.md` in the installed skill directory is the current
+one.
 
 The package and every generated storyboard carry PEP 723 metadata, so the
 dependency declaration travels with the files. Each storyboard embeds

@@ -6,9 +6,13 @@
 """Ruff at exactly the version CI pins, over exactly the files CI sees (#189).
 
     tests/lint                # ruff check + ruff format --check + doc fences
+                              #   + the paths the shipped skill points at
     tests/lint --github       # ...with GitHub annotations; what ci.yml runs
-    tests/lint --self-test    # prove the pin, the file set and the fence
-                              #   checker are live rather than decorative
+    tests/lint --issues       # the half that needs the network: every issue
+                              #   a document presents as pending is still open
+    tests/lint --self-test    # prove the pin, the file set, the fence checker
+                              #   and both pointer checks are live rather than
+                              #   decorative
 
 **Why this file exists rather than a line in a README.** `.github/workflows/
 ci.yml` pins ruff and runs it as `uv run --with "ruff==$RUFF_VERSION" ruff …`.
@@ -41,11 +45,25 @@ by `def f(:` and it prints "1 file already formatted" and exits 0 — and its
 checker does not look at `.md` at any version. So the examples an agent copies
 out of a SKILL.md were the one Python in this repo nothing parsed (#211).
 `check_fences()` compiles them.
+
+**Nor does anything read where the documentation points.** A skill is installed
+by copying `skills/<name>/` out of this repo, so a shipped document naming
+`tests/smoke` or `tests/README.md` is addressing a reader who does not have the
+file — and an audit found ten such symbols inside `demo-video` alone, plus two
+issue pointers of the `Tracked in …` shape aimed at issues that are closed.
+That second family had been filed and fixed once already, as #209, and came
+back. `check_pointers()` is the offline half: every
+repo-shaped path a shipped document names must resolve inside the installed
+skill, unless the sentence naming it says it is in this repository.
+`check_issue_refs()` is the half that needs the network, hence `--issues`
+rather than a step of the ordinary run.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import json
 import re
 import shutil
 import subprocess
@@ -380,6 +398,480 @@ def check_fences(github: bool = False) -> int:
     return len(problems)
 
 
+# --- where the shipped documentation points ----------------------------------
+
+
+def shipped_prose() -> list[tuple[str, str, int]]:
+    """(path, prose, the file line the prose starts on) for a consumer's reading.
+
+    `npx skills add` copies `skills/<name>/` and nothing else, so this is the
+    Markdown under `skills/`, plus each shipped module's **docstring** — which
+    ships too, and is what a reader meets on an import error.
+
+    The third element exists so a finding in a docstring is reported at the
+    line it is on **in the file**, not at its offset inside the string. An
+    annotation pointing at the wrong line is a worse artifact than no
+    annotation: a reader who opens it and finds nothing distrusts the check
+    rather than the document. `clean=False` for the same reason — the cleaned
+    form re-indents, and a shifted column is the same lie one axis over.
+
+    Comments, and docstrings below module level, are deliberately out of
+    scope: `# measured by tests/smoke` beside the constant it explains is read
+    by somebody already inside the source. Twenty-eight such mentions remain in
+    `demo_recording/` — twenty-two comments and six function docstrings — and
+    that boundary is stated in tests/README.md under *Known gaps*, with the
+    count, rather than left implied.
+    """
+    out: list[tuple[str, str, int]] = []
+    for rel in tracked("skills/*"):
+        path = REPO / rel
+        if path.is_symlink() or not path.is_file():
+            continue
+        if rel.endswith(".md"):
+            out.append((rel, path.read_text(encoding="utf-8"), 1))
+        elif rel.endswith(".py"):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # ruff check above is what reports this
+                continue
+            doc = ast.get_docstring(tree, clean=False)
+            if doc and isinstance(first := tree.body[0], ast.Expr):
+                out.append((rel, doc, first.lineno))
+    return out
+
+
+# A skill's documentation may name a path outside the installed set when it
+# says where that path is. This is the "say so" the audit asked for: the
+# sentence carries the fact that the reader is being told about this repository
+# rather than about their own checkout.
+REPO_MARKER = re.compile(
+    r"(?i)\bthis (?:repo|repository)\b|\bthis skill's (?:own )?repo"
+)
+
+# A markdown link with an absolute target resolves for any reader, so neither
+# it nor anything in its label is a pointer into a checkout. Removed before the
+# scan rather than special-cased inside it.
+ABSOLUTE_LINK = re.compile(r"\[[^\]\n]*\]\((?:https?:|mailto:)[^)\s]*\)")
+
+# What is left: an inline code span, or a link with a relative target.
+POINTER = re.compile(r"`([^`\n]+)`|\[[^\]\n]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
+
+# Path-shaped: a `./` or `../` prefix, or at least one interior `/`. A trailing
+# `:123` (a line reference) and surrounding punctuation are stripped before this
+# is applied.
+#
+# **A bare `review.md` is therefore not checked**, and that is a deliberate
+# limit rather than an oversight: the shipped documents name `frames.md`,
+# `frames.json`, `record.py` and `demo.mp4` constantly, and every one of those
+# is a file the *take* writes, which cannot exist in the repository and must
+# not be reported as dead. A one-segment name carries nothing that tells the
+# two apart. Stated in tests/README.md under *Known gaps*.
+PATH_SHAPED = re.compile(
+    r"^(?:\.{1,2}/)+[\w.@*-]+(?:/[\w.@*-]+)*$|^[\w.@-]+(?:/[\w.@*-]+)+$"
+)
+
+# A blank line, or the start of a list item — the two things that end a block
+# of prose. Sentence scope is computed inside a block so that a marker in one
+# bullet cannot license a path named in another.
+BLOCK_BREAK = re.compile(r"^\s*$|^\s*(?:[-*+]|\d+\.)\s")
+
+# The floors. Every finding below is the absence of a problem, and an absence
+# holds perfectly over an empty haystack: a walker that stopped finding
+# documents, or a regex that stopped matching code spans, reports a clean tree
+# in exactly the same words a clean tree does. Measured at 25 documents and 75
+# path-shaped pointers; the floors are controls rather than targets, and sit
+# well under both.
+MIN_SHIPPED_DOCS = 15
+MIN_POINTERS = 40
+
+# Pointers that are prose *about* a path rather than a pointer to one, each
+# with the reason. Graded exactly like `KNOWN_FRAGMENTS` above: an entry whose
+# document no longer names that token, or names it without a problem, **fails**
+# rather than being ignored, so the list can only shrink and no entry outlives
+# its cause. Keyed by (repo-relative document, the token as extracted).
+KNOWN_ABSENT: dict[tuple[str, str], str] = {
+    (
+        "skills/script-conventions/SKILL.md",
+        "./scripts/mytool",
+    ): "the sentence exists to say this path does not resolve from where an "
+    "agent starts; a reader who found the file would have missed the point",
+}
+
+
+def strip_fences(text: str) -> str:
+    """The prose, with fenced blocks blanked and the line count preserved.
+
+    A fence is an example, not a pointer: `# .github/workflows/demo.yml` in the
+    YAML a consumer is told to copy names a file in *their* repository.
+    """
+    lines = text.splitlines()
+    for line, _lang, body in fences(text):
+        for i in range(line - 1, min(line + len(body.splitlines()) + 1, len(lines))):
+            lines[i] = ""
+    return "\n".join(lines)
+
+
+def blocks(text: str) -> list[tuple[int, str]]:
+    """(1-based first line, text) for each block of prose."""
+    found: list[tuple[int, str]] = []
+    current: list[str] = []
+    start = 1
+    for n, line in enumerate(text.splitlines(), 1):
+        if BLOCK_BREAK.match(line):
+            if current:
+                found.append((start, "\n".join(current)))
+            current = [line] if line.strip() else []
+            start = n
+            continue
+        if not current:
+            start = n
+        current.append(line)
+    if current:
+        found.append((start, "\n".join(current)))
+    return found
+
+
+def sentence_at(block: str, pos: int) -> str:
+    """The sentence of `block` containing character `pos`, on one line.
+
+    Collapsed, because a sentence in Markdown is wrapped wherever the column
+    ran out: "and this\\nrepo's `tests/smoke`" is the same sentence as "and
+    this repo's `tests/smoke`", and a marker that only matched the second
+    would grade the line width.
+    """
+    cuts = [0] + [m.end() for m in re.finditer(r"(?<=[.!?])\s+", block)] + [len(block)]
+    for lo, hi in zip(cuts, cuts[1:], strict=True):
+        if lo <= pos < hi:
+            return " ".join(block[lo:hi].split())
+    return " ".join(block.split())
+
+
+def pointers(text: str) -> list[tuple[int, str, str]]:
+    """(1-based line, path-shaped token, the sentence naming it)."""
+    found: list[tuple[int, str, str]] = []
+    for first, block in blocks(strip_fences(text)):
+        scanned = ABSOLUTE_LINK.sub(lambda m: " " * len(m.group(0)), block)
+        for match in POINTER.finditer(scanned):
+            span = match.group(1) or match.group(2) or ""
+            token = span.split()[0] if span.split() else ""
+            # Trailing dots go; leading ones must not, or `../SKILL.md` — the
+            # one shape every reference document uses to name the entry point
+            # — comes out as `/SKILL.md` and resolves to the filesystem root.
+            #
+            # **And the trailing slash**, which is how a document names a
+            # directory. Without this line `PATH_SHAPED` sees an empty last
+            # segment and refuses the token outright, so the check goes quiet
+            # on exactly the pointers written as directories — which is how
+            # `examples/ticket-queue/demos/…/` survived the first version of
+            # this file. `fence_guard`'s lesson, one check over: the shape that
+            # hid a defect has to be in the table beside the shape that caught
+            # one.
+            token = re.sub(r":\d+$", "", token.strip("`,;:'\"()[]").rstrip("./"))
+            if not PATH_SHAPED.match(token):
+                continue
+            line = first + scanned[: match.start()].count("\n")
+            found.append((line, token, sentence_at(block, match.start())))
+    return found
+
+
+def resolve(rel: str, token: str) -> tuple[Path | None, Path]:
+    """(the file `token` names, the skill it was named from).
+
+    Tried against the naming document's own directory first, then the skill
+    root, which is how both a `../SKILL.md` and a bare `reference/ci.md` are
+    written in this tree. `None` when nothing of that name exists anywhere.
+    """
+    skill = REPO / "/".join(rel.split("/")[:2])
+    for base in ((REPO / rel).parent, skill, REPO):
+        candidate = (base / token).resolve()
+        if candidate.exists():
+            return candidate, skill
+    return None, skill
+
+
+def verdict(rel: str, token: str, sentence: str) -> tuple[str, str]:
+    """(verdict, why) for one pointer. The whole rule, in one place.
+
+    `--self-test` calls this rather than restating the branches, because a
+    guard holding its own copy of the logic grades the copy.
+
+    Four answers, and only the last is a problem twice over:
+
+    * `inside` — it resolves within the installed skill;
+    * `marked` — it is elsewhere in this repository and the sentence says so;
+    * `elsewhere` — it is not a repository path at all (`frames/frames.md` is
+      written by the take, not by anybody's checkout);
+    * `unreachable` / `dead` — the reader cannot open it.
+    """
+    target, skill = resolve(rel, token)
+    if target is not None and target.is_relative_to(skill):
+        return "inside", ""
+    if target is not None:
+        if REPO_MARKER.search(sentence):
+            return "marked", ""
+        return "unreachable", (
+            f"`{token}` is in this repository but not in the installed skill, "
+            f"and the sentence naming it does not say so — a reader who ran "
+            f"`npx skills add` has no such path"
+        )
+    head = token.split("/")[0]
+    if (REPO / head).is_dir() or (skill / head).is_dir():
+        return "dead", f"`{token}` does not exist, here or in the skill"
+    return "elsewhere", ""
+
+
+def check_pointers(github: bool = False) -> int:
+    """Does a shipped document point at anything its reader cannot open?"""
+    problems: list[tuple[str, int, str]] = []
+    docs = shipped_prose()
+    waived: set[tuple[str, str]] = set()
+    seen = 0
+    outside = 0
+
+    for rel, text, at in docs:
+        for line, token, sentence in pointers(text):
+            seen += 1
+            said, why = verdict(rel, token, sentence)
+            outside += 1 if said == "marked" else 0
+            if not why:
+                continue
+            if (rel, token) in KNOWN_ABSENT:
+                waived.add((rel, token))
+                continue
+            problems.append((rel, at + line - 1, why))
+
+    for key in KNOWN_ABSENT:
+        if key not in waived:
+            problems.append(
+                (
+                    key[0],
+                    1,
+                    f"KNOWN_ABSENT waives `{key[1]}`, which this document no "
+                    f"longer names as a problem — delete the entry",
+                )
+            )
+
+    # The controls. Both numbers below are what tells "nothing is wrong" apart
+    # from "nothing was read", and the second is the sharper one: every check
+    # above is skipped for a token that resolves inside the skill, so a walker
+    # that only ever found those would also be silent.
+    if len(docs) < MIN_SHIPPED_DOCS:
+        problems.append(
+            (
+                "tests/lint",
+                1,
+                f"only {len(docs)} shipped document(s) were read, under the "
+                f"{MIN_SHIPPED_DOCS} floor — this reads as a walker that stopped "
+                f"finding `skills/`, not as a skill that ships no prose",
+            )
+        )
+    if seen < MIN_POINTERS:
+        problems.append(
+            (
+                "tests/lint",
+                1,
+                f"only {seen} path-shaped pointer(s) were examined, under the "
+                f"{MIN_POINTERS} floor — the extractor is not reading what it "
+                f"used to, so a clean result here means nothing",
+            )
+        )
+
+    print(
+        f"pointers: {seen} path(s) named across {len(docs)} shipped document(s); "
+        f"{outside} named as this repository's"
+        + (f", {len(waived)} waived" if waived else "")
+    )
+    for rel, line, message in problems:
+        if github:
+            print(f"::error file={rel},line={line}::{message}")
+        print(f"pointers: {rel}:{line}: {message}", file=sys.stderr)
+    if problems:
+        print(f"lint: {len(problems)} pointer problem(s)")
+    return len(problems)
+
+
+# --- issue references that are presented as pending work ----------------------
+
+# Phrasings that tell a reader "this is known and somebody is on it". Kept
+# deliberately small and literal: the family the audit found was "Tracked in
+# #N", twelve of them and every one closed, and a vocabulary wide enough to
+# guess at intent would fire on every issue this repo cites as a measurement.
+PENDING = re.compile(
+    r"(?i)\b(?:tracked (?:in|at|as)|is tracked|until then|still open|"
+    r"remains open|will be fixed)\b"
+)
+
+# `#12` and the long form of the same link. Both, because a document may write
+# either, and the check would be trivially avoidable if it read only one.
+ISSUE_REF = re.compile(r"#(\d{1,5})\b|/issues/(\d{1,5})\b")
+
+# Sweeping every tracked document, not only the shipped ones: this repo's own
+# `tests/README.md` held ten of the twelve, and a contributor reading a closed
+# issue as open wastes the same afternoon a consumer would.
+#
+# **Two floors, because one of them is satisfiable without reading the tree.**
+# The references cluster hard: of 1,428 across 47 files, the top five carry
+# 1,087 and all of `skills/` carries 349. Narrowing the sweep to `tests/` reads
+# 1,047 from 6 files — five times the reference floor, and none of the shipped
+# documents this check exists for. Depth is not breadth; the file floor is the
+# only one that says so.
+MIN_ISSUE_REFS = 200
+MIN_ISSUE_FILES = 30
+
+# Real pointers the vocabulary above must still match: sentences that both read
+# as pending **and name an issue**, anywhere in the tracked Markdown. Two today,
+# both at open issues. The number is deliberately not the count — a control
+# sitting exactly on its measurement fires when somebody legitimately closes one
+# of them, and this claim only needs to be "the regex still describes how this
+# repository writes". Requiring a number is what keeps `tests/README.md`'s own
+# listing of the vocabulary, which quotes every phrase and points at no issue,
+# from satisfying the control that grades that vocabulary.
+MIN_PENDING_SENTENCES = 1
+
+
+def issue_states() -> dict[int, str]:
+    """Every issue in this repository, by number. Needs the network.
+
+    Every way this can go wrong raises `Refused`, which `main()` turns into
+    exit 3 and a one-line reason — including `gh` not being installed, which
+    otherwise came out as a `FileNotFoundError` traceback and exit 1. Four
+    failure modes reported four different ways is three chances for somebody
+    to read one of them as "the check ran and found nothing".
+    """
+    try:
+        done = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "all",
+                "--limit",
+                "1000",
+                "--json",
+                "number,state",
+            ],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise Refused(
+            f"`gh` could not be run, so no issue pointer was graded: {exc}"
+        ) from exc
+    if done.returncode != 0:
+        raise Refused(
+            f"`gh issue list` failed, so nothing below was graded: "
+            f"{done.stderr.strip()[:200]}"
+        )
+    try:
+        rows = json.loads(done.stdout)
+    except json.JSONDecodeError as exc:
+        raise Refused(f"`gh issue list` did not return JSON: {exc}") from exc
+    states = {int(row["number"]): str(row["state"]).upper() for row in rows}
+    if not any(s == "OPEN" for s in states.values()) or not any(
+        s == "CLOSED" for s in states.values()
+    ):
+        raise Refused(
+            f"the issue list came back with {len(states)} issue(s) and not both "
+            f"states in it — a list that is all one state cannot distinguish a "
+            f"live pointer from a dead one"
+        )
+    return states
+
+
+def stale_refs(text: str, states: dict[int, str]) -> list[tuple[int, str, list[int]]]:
+    """(line, sentence, the closed issues) for each pointer presented as pending.
+
+    A sentence is only reported when **every** issue it names is closed. One
+    naming an open issue beside a closed one is a history, not a dead pointer,
+    and a number the list does not carry at all is a pull request — neither is
+    graded here, and both are counted by the caller.
+    """
+    found: list[tuple[int, str, list[int]]] = []
+    for first, block in blocks(text):
+        for hit in PENDING.finditer(block):
+            sentence = sentence_at(block, hit.start())
+            numbers = sorted(
+                {int(a or b) for a, b in ISSUE_REF.findall(sentence)} & states.keys()
+            )
+            if not numbers or any(states[n] == "OPEN" for n in numbers):
+                continue
+            line = first + block[: hit.start()].count("\n")
+            found.append((line, " ".join(sentence.split())[:160], numbers))
+    return found
+
+
+def check_issue_refs(github: bool = False) -> int:
+    """Every issue a document presents as pending work is an issue that is open."""
+    states = issue_states()
+    problems: list[tuple[str, int, str]] = []
+    refs = 0
+    docs = 0
+
+    for rel in tracked():
+        path = REPO / rel
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not rel.endswith((".md", ".py")) and not _is_uv_script(path):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        docs += 1
+        refs += len(ISSUE_REF.findall(text))
+        for line, sentence, numbers in stale_refs(text, states):
+            closed = ", ".join(f"#{n}" for n in numbers)
+            problems.append(
+                (
+                    rel,
+                    line,
+                    f"presented as pending work, but {closed} "
+                    f"{'is' if len(numbers) == 1 else 'are'} closed: {sentence!r}",
+                )
+            )
+
+    if refs < MIN_ISSUE_REFS:
+        problems.append(
+            (
+                "tests/lint",
+                1,
+                f"only {refs} issue reference(s) were read across {docs} file(s), "
+                f"under the {MIN_ISSUE_REFS} floor — the sweep is not reading "
+                f"this repository's documents",
+            )
+        )
+    # Depth is not breadth. Five files carry 1,017 of the references here, so a
+    # sweep that had narrowed to `tests/` would clear the floor above five
+    # times over while reading none of `skills/`.
+    if docs < MIN_ISSUE_FILES:
+        problems.append(
+            (
+                "tests/lint",
+                1,
+                f"only {docs} file(s) were swept, under the {MIN_ISSUE_FILES} "
+                f"floor — {refs} reference(s) out of a handful of documents is "
+                f"what a sweep narrowed to one directory also reports",
+            )
+        )
+
+    print(
+        f"issues: {refs} reference(s) across {docs} file(s), against "
+        f"{len(states)} issue(s) on the tracker"
+    )
+    for rel, line, message in problems:
+        if github:
+            print(f"::error file={rel},line={line}::{message}")
+        print(f"issues: {rel}:{line}: {message}", file=sys.stderr)
+    if problems:
+        print(f"lint: {len(problems)} dead issue pointer(s)")
+    return len(problems)
+
+
+def _is_uv_script(path: Path) -> bool:
+    with path.open("rb") as handle:
+        first = handle.readline(200).decode("utf-8", "replace").strip()
+    return first.startswith("#!") and "uv run" in first and "--script" in first
+
+
 def run(github: bool) -> int:
     version = pinned_version(CI.read_text(encoding="utf-8"))
     print(f"lint: ruff {version}, pinned by .github/workflows/ci.yml")
@@ -414,6 +906,11 @@ def run(github: bool) -> int:
     # check` at every version, and the formatter reads one without validating
     # it (#211). Run last so its one summary line is not lost above ruff's.
     failed += 1 if check_fences(github) else 0
+
+    # And the half ruff would not have an opinion about either: where the
+    # shipped documentation points. Offline, so it belongs here; the issue
+    # half needs the tracker and is `--issues`.
+    failed += 1 if check_pointers(github) else 0
     return 1 if failed else 0
 
 
@@ -568,6 +1065,159 @@ def fence_guard() -> int:
     return bad
 
 
+def pointer_guard() -> int:
+    """Prove the pointer checker can fail, and on exactly the right documents.
+
+    Every case fixes **two** numbers, how many path-shaped pointers the document
+    contains and how many of them are problems, for the reason `fence_guard`
+    does: "no problems" is what an extractor that found nothing also says. The
+    cases that expect a pointer and no problem are the ones that keep the
+    marker rule from being an unconditional pass.
+
+    Graded against a real file's position in the tree — `skills/demo-video/
+    reference/limits.md` — because resolution is relative to the naming
+    document, and a synthetic path would grade nothing about that.
+    """
+    bad = 0
+    here = "skills/demo-video/reference/limits.md"
+    cases = (
+        ("a sibling reference file", "See `reference/review.md` for it.", 1, 0),
+        ("a one-segment name, out of scope", "`frames.md` embeds them.", 0, 0),
+        (
+            "the skill's own helpers",
+            "`helpers/demo_recording/frames.py` cuts them.",
+            1,
+            0,
+        ),
+        ("a path up out of reference/", "`../SKILL.md` is the entry point.", 1, 0),
+        ("a suite the reader does not have", "`tests/smoke` measures this.", 1, 1),
+        # The same pointer written both ways, because the second is the shape
+        # that hid a live one: `PATH_SHAPED` saw an empty last segment and
+        # refused the token, so the check went quiet rather than red on
+        # `examples/ticket-queue/demos/…/`. A table holding only the first
+        # would still pass with the `.rstrip("/")` deleted.
+        ("a directory the reader does not have", "`examples/ticket-queue`.", 1, 1),
+        (
+            "the same directory, with the trailing slash it is written with",
+            "`examples/ticket-queue/`.",
+            1,
+            1,
+        ),
+        (
+            "the same suite, said to be this repository's",
+            "Measured by this repo's `tests/smoke`.",
+            1,
+            0,
+        ),
+        (
+            "a marker in a different sentence",
+            "This repo is where it was measured. `tests/smoke` grades it.",
+            1,
+            1,
+        ),
+        (
+            "a marker in a different bullet",
+            "- Measured in this repository.\n- `tests/smoke` grades it.",
+            1,
+            1,
+        ),
+        ("a file that exists nowhere", "`reference/gone.md` says why.", 1, 1),
+        ("an output the take writes, seen and allowed", "`frames/frames.md`.", 1, 0),
+        (
+            "an absolute link, label and all",
+            "see [`tests/README.md`](https://github.com/rogvid/skills/blob/main/tests/README.md)",
+            0,
+            0,
+        ),
+        (
+            "a fenced example naming the reader's own tree",
+            "```yaml\n# .github/workflows/demo.yml\non: [push]\n```\n",
+            0,
+            0,
+        ),
+    )
+    for what, document, expect_seen, expect_bad in cases:
+        found = pointers(document)
+        problems = sum(
+            1 for _line, token, sentence in found if verdict(here, token, sentence)[1]
+        )
+        if (len(found), problems) == (expect_seen, expect_bad):
+            print(f"{'CATCHES ' if expect_bad else 'ALLOWS  '} {what}")
+        else:
+            bad += 1
+            print(
+                f"BLIND    {what}: {len(found)} pointer(s) and {problems} "
+                f"problem(s), expected {expect_seen} and {expect_bad}"
+            )
+
+    # And the sweep over the real tree, which is where the floors live. Run
+    # here rather than trusted from `run()`: a --self-test that graded only
+    # synthetic documents would pass on a repository with no `skills/` in it.
+    bad += 1 if check_pointers() else 0
+    return bad
+
+
+def issue_guard() -> int:
+    """Prove the issue checker reads the state, and only fires on pending prose.
+
+    Offline: the states are supplied rather than fetched, so the grading of
+    `stale_refs` runs on every push while the fetch itself only runs where
+    there is a network. What the table pins is the two ways this check could
+    be hollow — firing on any mention of a closed issue (it must not), and
+    never firing at all (the last case is a real "Tracked in" against a closed
+    number).
+    """
+    bad = 0
+    states = {26: "CLOSED", 255: "OPEN"}
+    cases = (
+        ("a closed issue presented as pending", "Tracked in [#26](x).", 1),
+        ("an open issue presented as pending", "Tracked in [#255](x).", 0),
+        ("a closed issue cited as a measurement", "Measured in #26.", 0),
+        ("a closed issue beside an open one", "Tracked in #26 and #255.", 0),
+        ("a number the tracker does not carry", "Tracked in PR #9001.", 0),
+        ("a closed issue named only by URL", "Until then, see /issues/26.", 1),
+        (
+            "pending prose two sentences from the number",
+            "It is tracked in the usual place. Nobody reads #26.",
+            0,
+        ),
+    )
+    for what, document, expect in cases:
+        found = len(stale_refs(document, states))
+        if found == expect:
+            print(f"{'CATCHES ' if expect else 'ALLOWS  '} {what}")
+        else:
+            bad += 1
+            print(f"BLIND    {what}: {found} finding(s), expected {expect}")
+
+    # The control the table cannot give: that the vocabulary above still
+    # matches this repository's prose at all. A `PENDING` that stopped matching
+    # would pass every case above by finding nothing, twice. Counted as
+    # `stale_refs` counts — a pending sentence that names an issue — with every
+    # number treated as open, so what is measured is the reach of the regex and
+    # not the state of the tracker.
+    live = 0
+    for rel in tracked("*.md"):
+        if (REPO / rel).is_symlink():
+            continue
+        text = (REPO / rel).read_text(encoding="utf-8", errors="replace")
+        for _first, block in blocks(text):
+            for hit in PENDING.finditer(block):
+                sentence = sentence_at(block, hit.start())
+                live += 1 if ISSUE_REF.search(sentence) else 0
+    if live >= MIN_PENDING_SENTENCES:
+        print(f"OK       {live} pending sentence(s) in this tree name an issue")
+    else:
+        bad += 1
+        print(
+            f"DEAD     only {live} sentence(s) in the whole tree match the pending "
+            f"vocabulary, under the {MIN_PENDING_SENTENCES} floor — it has stopped "
+            f"describing how this repo writes, so every case above is being graded "
+            f"on synthetic text alone"
+        )
+    return bad
+
+
 def _compiles(body: str) -> bool:
     try:
         compile(body, "<fence>", "exec")
@@ -653,6 +1303,14 @@ def self_test() -> int:
     # 6. The documentation checker can fail, and only for the right reason.
     bad += fence_guard()
 
+    # 7. And the two that grade where the documentation points: that a path a
+    #    reader cannot open is caught, that saying where it is clears it, and
+    #    that a closed issue offered as pending work is caught. Both are run
+    #    against synthetic documents whose answers are known, plus a control
+    #    that the vocabulary still matches this tree.
+    bad += pointer_guard()
+    bad += issue_guard()
+
     if bad:
         print(f"\n{bad} guard(s) did not hold: this command cannot be trusted.")
         return 1
@@ -666,14 +1324,21 @@ def main() -> int:
         "--github", action="store_true", help="GitHub annotations (what ci.yml runs)"
     )
     parser.add_argument(
+        "--issues",
+        action="store_true",
+        help="the network half: no document points at a closed issue as pending",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
-        help="prove the pin, the file set and the fence checker are live",
+        help="prove the pin, the file set and both doc checkers are live",
     )
     args = parser.parse_args()
     if args.self_test:
         return self_test()
     try:
+        if args.issues:
+            return 1 if check_issue_refs(args.github) else 0
         return run(args.github)
     except Refused as exc:
         print(f"lint: {exc}", file=sys.stderr)

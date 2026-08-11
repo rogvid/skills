@@ -2887,8 +2887,8 @@ def check_caption(b: Beats, page, expected: str) -> None:
 #
 # 3/3 idle takes stalled; 3/3 ticking takes did not. So the harness removes the
 # confound rather than widening a bar around it — the drift itself is the
-# recorder's problem to solve, tracked in issue #18, and tests/README.md says
-# plainly that this axis no longer sees it.
+# recorder's problem, which issue #18 measured and closed, and tests/README.md
+# says plainly that this axis no longer sees it.
 #
 # Sized so it cannot be mistaken for content: 8x8 px at 2-6% opacity is about
 # one pixel of the 160x90 luma reduction, moving a handful of levels. It adds

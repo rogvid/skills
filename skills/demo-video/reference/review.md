@@ -67,9 +67,10 @@ cut on the raw beat log and the sheet says so; treat their aim as unbounded.
 The practical consequence, for what is left: for a beat comfortably longer
 than that, the frame is of that beat; **for a beat shorter than the drift — a
 bare `shot()`, a `wait_for()` that returned immediately — the frame can be of
-the beat after it.** `tests/smoke` measures exactly this and shows it: with the
-drift allowance removed, the frame for a 50 ms `shot()` beat that sits against
-a caption change is already showing the next beat's screen.
+the beat after it.** This was measured directly, by this repo's `tests/smoke`
+rather than by anything shipped with the skill: with the drift allowance
+removed, the frame for a 50 ms `shot()` beat that sits against a caption change
+is already showing the next beat's screen.
 
 Read the frames as *"roughly here in the demo"*, not as *"exactly this beat"*.
 When a specific short moment matters, use `shot()` — `images/*.png` are
@@ -155,7 +156,8 @@ reviewer is asked to name the frames it checked.
 ### A caption the app contradicts is not a recording defect
 
 The verdict used to carry this too, and it was unstable. On the reference take
-at `examples/ticket-queue/demos/2026-07-28-queue-search/` — recorded against a
+kept in this repository at `examples/ticket-queue/demos/2026-07-28-queue-search/`
+— recorded against a
 ticket one of whose criteria the app does not satisfy, with the beat claiming it
 kept and captioned in the ticket's own words — two independent reviewers given
 the same frames and the same instructions returned **UNCLEAR** and **CLEAR**.
@@ -236,8 +238,8 @@ Two things are dropped, and neither is a security control:
   narration clip, so serializing it would make evidence the only place it
   exists.
 
-Both are statements about what belongs in a text dump of an element, and
-`tests/smoke` grades them directly: the evidence take injects an element
+Both are statements about what belongs in a text dump of an element, and this
+repo's `tests/smoke` grades them directly: its evidence take injects an element
 holding a `<script>` and a `srcdoc` and requires neither in the markup.
 
 **Fields are capped** — 12 000 characters of ARIA or screen text, 8 000 of
