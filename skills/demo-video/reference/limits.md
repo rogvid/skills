@@ -26,8 +26,8 @@ nothing, and when a move can be dropped outright — [determinism.md](determinis
 ### A demo of an error path always records a problem, and `strict=True` cannot be told it was wanted
 
 Demonstrating that a program rejects bad input is an ordinary thing to demo,
-and the recorder logs it as a fault. Measured on `examples/ticket-queue`, a
-48-beat take on 2026-07-26:
+and the recorder logs it as a fault. Measured on this repo's
+`examples/ticket-queue`, a 48-beat take on 2026-07-26:
 
 ```
 demo-video: 1 problem(s) recorded during this take (nonzero_exit x1)
@@ -58,8 +58,8 @@ rendering is how a demo comes to claim something it never showed. But
 both sees `button[data-status='open']` in one file and, in the other, that same
 button carrying only `type` and `aria-pressed`.
 
-Measured from a reviewing agent's own words on the 48-beat
-`examples/ticket-queue` take: it spent a paragraph on the discrepancy, called
+Measured from a reviewing agent's own words on that 48-beat take of this repo's
+`examples/ticket-queue`: it spent a paragraph on the discrepancy, called
 it an "unresolved inconsistency in the artifacts themselves", and could not
 settle it — the three resolutions available to it were "the app is wrong", "the
 log is wrong", "the dump is wrong", and all three are false. Nothing in the
@@ -159,9 +159,13 @@ rather than by widening a bar, which is why `MAX_SKEW_DRIFT_S` could be
 restored at 250 ms after being deleted in
 [#217](https://github.com/rogvid/skills/issues/217).
 
-Three things in the recorder already apply this for you, and reading them as
-uncorrected is the way to get it wrong twice
-([#229](https://github.com/rogvid/skills/issues/229)): **the review frames
+The recorder already applies this for you wherever it publishes an instant on
+the video's clock, and reading one of those as uncorrected is the way to get it
+wrong twice ([#229](https://github.com/rogvid/skills/issues/229)). Each place
+is named below rather than counted, because a count went wrong here at three
+commits running — "Two", then "Three", then "Three" with a fourth added
+underneath it — and a reader who trusts one stops looking once they have found
+that many: **the review frames
 under `frames/` are cut on the video's clock**, midpoint plus that beat's own
 capture's steps before *that midpoint* (the rule is indexed by the instant you
 are converting, not by the beat — a step inside a beat's first half moves its
@@ -181,8 +185,14 @@ earlier than the step that moved it, and the recorder's sampler starts at frame
 zero, so `at` cannot come out negative. The floor and the field stay because
 `adelay` refuses a negative delay outright and would cost the take its whole
 audio track; read `clamped` as a guard against a malformed record, not as
-something to expect; and `timeline.md` says above its beat table when the
-clock stepped and by how much, and what that meant for the audio. `timeline.json`'s beat
+something to expect; and **a stitched take's `overlaps` are graded on the
+video's clock**, which is what `video_overlap` is and why it answers a
+different question from the raw difference beside it (described under *A
+stitched beat log can run backwards at a seam* below).
+
+`timeline.md` says above its beat table when the clock stepped and by how much,
+and what that meant for the audio — but it *reports* the correction rather than
+applying one: every timestamp in that table is the raw beat log. `timeline.json`'s beat
 timestamps are untouched — they are the log, and the log is `time.monotonic()`.
 
 **A backward step is not a slide, and correcting one as though it were puts an
@@ -237,10 +247,12 @@ while the beats keep their own `time.monotonic()` timestamps. Those are two
 clocks. A part whose host clock stepped backwards has a video shorter than its
 own beat log by the size of the step, so its last beats run past where the next
 part begins and the merged log goes non-monotonic at the seam — reproduced at
-−1.4684 s as `beat 21 t_end 37.451` against `beat 22 t_start 37.441`. The
-overlap scales with the step less the capture's startup and tail, so a ~1.5 s
-step reaches most of a second
-([#263](https://github.com/rogvid/skills/issues/263)).
+−1.4684 s as `beat 21 t_end 37.451` against `beat 22 t_start 37.441` — a
+**10 ms** overlap out of a 1.4684 s step, which is 0.7% of it
+([#263](https://github.com/rogvid/skills/issues/263)). That is the only
+measurement there is. What sets the size is not known from one point, so do not
+work out an expected overlap from the size of the step; read the number the
+take published.
 
 Nothing is clamped: a beat's merged timestamp is exactly its own part's log
 plus that part's `offset`, and the whole per-segment correction rule above
@@ -265,8 +277,8 @@ instant before the gap.
 SKILL.md says to aim for 30–60 s. That holds for a feature on one surface and
 does not hold for one that spans two, and the difference is arithmetic rather
 than discipline. Measured on the first real feature this skill was pointed at
-(`examples/ticket-queue`, PR #94, four acceptance criteria across a web UI and
-a CLI): **61.2 s**, with every caption already shortened once; the first-pass
+(this repo's `examples/ticket-queue`, PR #94, four acceptance criteria across a
+web UI and a CLI): **61.2 s**, with every caption already shortened once; the first-pass
 storyboard was 60.2 s. Neither is padded — they are one beat per criterion plus
 the two the skill's own pacing rules require around each.
 
@@ -386,8 +398,8 @@ against one app, from a clean standalone install:
 | 3 | clean, nothing covering the app | **26.74** |
 
 The two broken takes scored **23% higher** than the correct one, and stderr
-printed `demo.mp4 shows a picture` for all three. `tests/smoke`'s own overlay
-pair reproduces it harder against the fixture app: **28.07** with the scrim up
+printed `demo.mp4 shows a picture` for all three. An overlay pair recorded
+against a fixture app reproduces it harder: **28.07** with the scrim up
 against **17.02** without, 65% the wrong way round. There is no threshold that
 separates those numbers in the right direction, and restricting the rect cannot
 help — the overlay is exactly where the app is. This is the same
@@ -469,10 +481,10 @@ segment's `.seg.timeline.json` before believing the beat it names — pass
 
 `coverage_report` copies each claimed beat's `segment` into the coverage table
 (`coverage.py:117`), and `timeline.md` renders a claim as ``beat 5 (`part2`)``.
-Nothing used to pin it: `check_coverage` graded `index`, `t_start` and `still`
-against the beat list, and `check_coverage_merge` *constructed* beats carrying
-`part1` and `part2` and then asserted only on `index`. Replacing that line with
-`"segment": None` left `tests/smoke --coverage-only` green — one of six
+Nothing used to pin it: this skill's own suite graded a claimed beat's `index`,
+`t_start` and `still` against the beat list, and its merge case *constructed*
+beats carrying `part1` and `part2` and then asserted only on `index`. Replacing
+that line with `"segment": None` left the coverage arm green — one of six
 injections against that arm, and the only survivor
 ([#137](https://github.com/rogvid/skills/issues/137)).
 
@@ -480,9 +492,9 @@ Beat indices are per-segment before merging, so a reviewer of a stitched demo
 handed "beat 5" with no segment has no way to know which beat 5. Pointing a
 conformance reviewer at the right frame is the coverage table's whole job.
 
-`check_coverage_merge` now asserts the segment of each claimed beat as well as
-its index, and that exact injection is registered in `tests/smoke-inject`, so
-it runs nightly rather than having been performed once.
+That merge case now asserts the segment of each claimed beat as well as its
+index, and that exact injection is registered in the nightly manifest, so it
+runs nightly rather than having been performed once.
 
 ## What CI will and will not do for you
 
@@ -523,17 +535,16 @@ measuring 47.5 dB locally. Only one of the two readings is stable:
 
 The moved reading is content-determined and barely travels. The held one is a
 still frame, so it is entirely at the mercy of how a given x264 build
-re-quantises — 7.7 dB of spread across two machines. `CONTENT_PSNR_GAP_DB = 8.0`
-(`tests/smoke:329`) therefore has 5.9 dB of margin on the worse of the two
-encoders anyone has run it on, which is fine today and is not obviously fine on
-a third ([#122](https://github.com/rogvid/skills/issues/122)).
+re-quantises — 7.7 dB of spread across two machines. The gate the suite applies,
+`CONTENT_PSNR_GAP_DB = 8.0`, therefore has 5.9 dB of margin on the worse of the
+two encoders anyone has run it on, which is fine today and is not obviously fine
+on a third ([#122](https://github.com/rogvid/skills/issues/122)).
 
 ## Paths that only your recording takes
 
-Two branches of the recorder run nowhere in the test suite, so the first
-program to exercise either is yours. Both are listed in `tests/README.md`'s
-Known gaps, and both are stated here because they are reached by an ordinary
-storyboard rather than by a maintainer.
+These branches of the recorder run nowhere in the test suite, so the first
+program to exercise either is yours. They are stated here rather than left to a
+maintainer's notes because they are reached by an ordinary storyboard.
 
 **Nothing has ever called the ElevenLabs API.** The narration take grades
 everything a cache *hit* reaches — the key, the pacing, whether the mix carries

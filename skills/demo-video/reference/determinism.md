@@ -110,7 +110,9 @@ no matter what this section does:
   never assert on a frame that only exists while something is in flight.
 - **The terminal recorder's program.** `TerminalRecorder` runs a real PTY
   child; it does not see the frozen clock, so `date` in a terminal demo prints
-  the real time. Tracked in [#26](https://github.com/rogvid/skills/issues/26).
+  the real time. This is settled rather than pending —
+  [#26](https://github.com/rogvid/skills/issues/26) is closed, and the
+  behaviour above is the answer it closed on.
 - **Animation the browser does not drive with CSS.** `element.animate()` (Web
   Animations), `requestAnimationFrame` loops, canvas and WebGL keep running —
   no stylesheet can reach them
@@ -142,7 +144,7 @@ no matter what this section does:
   position, never delivered. No rule in the overlay can place a dot for an
   event the page never sees, so the take records no cursor for its whole
   length. [#230](https://github.com/rogvid/skills/issues/230) measured 12
-  `Recorder` takes per build against `tests/fixture`: the move never reached
+  `Recorder` takes per build against this repo's `tests/fixture` app: the move never reached
   the document in 3 of 12 takes on Chromium 136, 4 of 12 on 147, 2 of 12 on 149
   and 7 of 12 on 151. The recorder's own verbs do not reach this — `rec.goto()`
   waits for `load` before it returns, so `move_to`, `click` and `scroll_to` are

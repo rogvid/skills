@@ -68,9 +68,9 @@ jobs:
 
 It records only storyboards whose application changed, sets an explicit
 artifact retention and says it in the comment, and **refuses to record against
-a public host** — see *Recording on a pull request (CI)* in
-[`skills/demo-video/SKILL.md`](skills/demo-video/SKILL.md) for the trigger
-policy, what is published, and what the target guard does not cover.
+a public host** — see
+[`skills/demo-video/reference/ci.md`](skills/demo-video/reference/ci.md) for the
+trigger policy, what is published, and what the target guard does not cover.
 
 ## Examples
 

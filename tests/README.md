@@ -773,9 +773,9 @@ happens to the web frame is the caption bar arriving, at 0.023–0.026 against
 the recorder's 0.02 threshold, while *nothing* in the terminal take reaches it:
 its largest change is two lines of shell output on a dark background at 0.011,
 against an idle 0.004. At a threshold separating those, an ordinary terminal
-repaint would be reported as a cut. Tracked in
-[#57](https://github.com/rogvid/skills/issues/57), which proposes scoring the
-app's rect instead of the whole composited frame.
+repaint would be reported as a cut. Scoring the app's rect instead of the whole
+composited frame was raised as [#57](https://github.com/rogvid/skills/issues/57)
+and closed as not planned, so this is a declared limit rather than queued work.
 
 The quiet half runs on both, over the stretch after the **last beat's logged
 end** — where the recording holds its closing frame until it stops. Anchored
@@ -2136,20 +2136,20 @@ knows is missing is worse than one that is openly absent.
   floor toward 15 would risk flake from CI font rendering. Mitigated, not
   solved, by the `getComputedStyle` check on `#refresh` — which catches the
   fixture's own stylesheet failing, but is one assertion about one property and
-  will not notice arbitrary visual regressions. Tracked in
-  [#16](https://github.com/rogvid/skills/issues/16).
+  will not notice arbitrary visual regressions. Raised as
+  [#16](https://github.com/rogvid/skills/issues/16) and closed as not planned.
 - **The terminal caption check has the thinnest margin in the harness** — 2.7
   healthy against a 1.0 floor, where everything else has 4x or better. The
   terminal's caption is a dark box on a dark terminal, so only its text carries
   any luma change. If CI font rendering ever drops it under 1.0 this will flake;
-  the DOM caption assertions would still hold. Tracked in
-  [#16](https://github.com/rogvid/skills/issues/16).
+  the DOM caption assertions would still hold. Raised as
+  [#16](https://github.com/rogvid/skills/issues/16) and closed as not planned.
 - **The content rects couple to recorder internals** (`Recorder._geom`, and the
   `#__term_host` id). Reading them at runtime means a geometry change follows
   automatically, and a *removed* `_geom` fails loudly — but a change that keeps
   the attribute while moving the app elsewhere would silently score the wrong
-  pixels. Tracked in [#17](https://github.com/rogvid/skills/issues/17), which
-  proposes the recorder expose its geometry as public API.
+  pixels. Exposing the recorder's geometry as public API was raised as
+  [#17](https://github.com/rogvid/skills/issues/17) and closed as not planned.
 - **The video and the beat log are on different clocks, and this harness
   corrects for that rather than fixing it.** Chromium stamps every screencast
   frame with the host's *wall* clock and Playwright turns that into the frame's
@@ -2386,8 +2386,10 @@ knows is missing is worse than one that is openly absent.
   the jump and the closing caption is compressed. The most likely candidate is
   what ffmpeg does with the non-monotonic cluster timestamps Playwright writes
   after Chromium's clock goes backwards, which is not something this repo can
-  measure from outside. Tracked in
-  [#224](https://github.com/rogvid/skills/issues/224).
+  measure from outside. [#224](https://github.com/rogvid/skills/issues/224) is
+  closed as not reproducing — its −900 ms was an artifact of the sampler #250
+  fixed — and the live defect at that magnitude is tracked in
+  [#255](https://github.com/rogvid/skills/issues/255), with the opposite sign.
 
   **The bars were not widened for it.** `MAX_SKEW_DRIFT_S` at 250 ms is the
   sharp claim this whole correction exists to make usable, and a bar wide
@@ -2556,9 +2558,9 @@ knows is missing is worse than one that is openly absent.
   shows" gap only as far as one bit goes: a captioned beat's frame must show a
   bar and an uncaptioned one's must not. Two beats carrying *different* captions
   are indistinguishable to it, so a stall that slid a frame from one captioned
-  beat to another captioned beat still passes. Tracked in
-  [#60](https://github.com/rogvid/skills/issues/60), which would make the
-  mapping readable off the frame instead of inferred.
+  beat to another captioned beat still passes. Making the mapping readable off
+  the frame instead of inferred was raised as
+  [#60](https://github.com/rogvid/skills/issues/60) and closed as not planned.
 - **Frames within 750 ms of a caption change are not graded for content at
   all**, and on these storyboards that is 8-9 of every take's frames. The
   exclusion is real coverage lost, not a formality: it is exactly where #18's
@@ -2599,11 +2601,12 @@ knows is missing is worse than one that is openly absent.
   `verb` and one `caption` are asserted; `t`, `url`, `line`, `status`, `method`
   are not. `t` is knowingly the *observation* time and can sit outside the beat
   it names — measured at 3.53 s for a `nonzero_exit` whose `run` beat ended at
-  3.4 s. Tracked in [#34](https://github.com/rogvid/skills/issues/34).
+  3.4 s. Raised as [#34](https://github.com/rogvid/skills/issues/34) and closed
+  as not planned.
 - **Nothing checks popups or new tabs.** The recorder watches one page, so a
   demo that opens a second one records nothing about it and `strict=True`
-  cannot refuse it. Tracked in
-  [#33](https://github.com/rogvid/skills/issues/33).
+  cannot refuse it. Raised as
+  [#33](https://github.com/rogvid/skills/issues/33) and closed as not planned.
 - **Nothing checks the 200-issue cap, or a `run()` that is never waited on.**
   `issue_count` is asserted equal to `len(issues)`, which is the uncapped case
   only — so the path where a fatal issue arrives past the cap and is counted
@@ -2643,8 +2646,11 @@ knows is missing is worse than one that is openly absent.
   issue's `t` and re-points its `beat` at the merged beat list, and the
   segmented take is a recording of a *healthy* app under `strict=True` — so it
   records no issues at all and none of that runs. An issue attributed to the
-  wrong beat of the wrong segment would pass this suite. Tracked in
-  [#51](https://github.com/rogvid/skills/issues/51).
+  wrong beat of the wrong segment would pass this suite. Raised as
+  [#51](https://github.com/rogvid/skills/issues/51), which was closed by
+  *declaring* the gap rather than covering it: the measurement lives in
+  `skills/demo-video/reference/limits.md` under *What a stitched demo's
+  artifacts promise*.
 - **The merge's error is measured at one beat per segment, not all of them.**
   Every other beat in a segment is carried by that segment's single offset, so
   one being right makes the rest right — but a merge that moved some of a
@@ -2761,6 +2767,83 @@ knows is missing is worse than one that is openly absent.
   "#142's carve-out" stays green after #142's carve-out is deleted. The list
   can only shrink, so a stale entry surfaces the moment its line is edited;
   nothing surfaces one whose line is edited nowhere.
+
+- **Most of where the shipped documentation points.** `tests/lint`'s
+  `check_pointers()` resolves every repo-shaped path named in `skills/**/*.md`
+  and in each shipped module's **docstring** — 75 of them across 25 documents
+  when it was written — and requires each to resolve inside the installed skill
+  or to be introduced as this repository's. Six things it deliberately does
+  not see:
+
+  1. **Comments, and docstrings below module level.** Twenty-eight `tests/`
+     mentions remain inside `skills/demo-video/helpers/demo_recording/` —
+     twenty-two in comments beside the constants they explain, six in function
+     docstrings. They ship with the skill, but they are read by somebody
+     already inside the source rather than handed to a reader as somewhere to
+     go, which is why the **module** docstring is in scope and these are not.
+     Counted here, not rewritten. The six in function docstrings are the ones
+     worth revisiting first, since `help()` reaches them.
+  2. **A one-segment name.** `frames.md`, `record.py` and `demo.mp4` are files
+     the *take* writes, and a bare name carries nothing that separates them
+     from a mistyped `revew.md`, so only paths containing a `/` are checked.
+  3. **A path whose first segment is not an existing directory.** That is what
+     keeps `frames/frames.md` from being reported as dead, and it would let a
+     typo in a directory name through for the same reason.
+  4. **A heading.** Root `README.md` sent its reader to a section of `SKILL.md`
+     that lives in `reference/ci.md`; the link resolved, the section did not.
+     Only reading it found that, and only reading it would find the next one.
+  5. **A path not inside a code span or a link.** `See tests/README.md for the
+     roster.` in a module docstring leaves the pointer count unmoved and lint
+     green; the same sentence with the path backticked is caught. Reproduced.
+     A backtick-free sweep of all shipped prose found **no live instance** —
+     this repo writes paths in code spans — so it is a gap without a defect
+     behind it, which is the only reason it is written here instead of fixed.
+  6. **Every word of a multi-word code span but the first.** `` `wc -c
+     SKILL.md reference/*.md` `` must not report `reference/*.md` as dead, and
+     taking only the first word is what buys that — at the cost of missing
+     `` `cd tests/fixture` ``. Three non-first path-shaped tokens exist today,
+     all benign.
+
+  The **trailing slash** was a seventh until round 2 of #270 found a live
+  pointer hiding behind it: `PATH_SHAPED` saw an empty last segment and refused
+  the token outright, so `examples/ticket-queue/demos/…/` in `review.md` was
+  invisible to a check written to catch exactly that. Normalisation strips it
+  now, and `pointer_guard` holds the same directory written both ways — with
+  the slash and without — so the shape that hid one is graded beside the shape
+  that caught one.
+
+- **Two shapes of dead issue pointer.** `tests/lint --issues` requires every
+  sentence that presents an issue as pending work to name at least one **open**
+  issue, over every tracked Markdown file, Python file and uv script. What it
+  does not grade: a sentence whose only number is a **pull request** — the
+  tracker's issue list does not carry those, so the number is skipped rather
+  than guessed at — and any phrasing outside the fixed vocabulary in `PENDING`,
+  which is `tracked in/at/as`, `is tracked`, `until then`, `still open`,
+  `remains open` and `will be fixed`. A document that invents a new way to say
+  "somebody is on this" is invisible to it. `--self-test` holds a floor under
+  how many sentences in this tree that vocabulary still matches, so it cannot
+  quietly stop matching anything, and the sweep floors **both** its axes —
+  references and files. Measured here: 1,428 references across 47 files, of
+  which the top five files carry **1,087** and all of `skills/` carries 349. A
+  sweep narrowed to `tests/` reads 1,047 references from 6 files — five times
+  the reference floor, and none of the shipped documents this check exists for.
+  Depth is not breadth, and only the file floor says so.
+
+- **The issue check runs in one direction only.** It catches a *closed* issue
+  presented as pending. It says nothing about an *open* issue presented as
+  settled — "raised as #34 and closed as not planned" — and PR #270 added
+  **fourteen** such statements across **twelve** distinct issues (`frames.py`
+  two, `determinism.md` one, `failures.md` one covering #18/#215/#247,
+  this file nine, `tests/smoke` one). All fourteen are correct as written; none
+  is graded, so a reopened issue would leave a document claiming a decision
+  that no longer holds, which is the same defect class one direction over.
+
+  The obvious symmetric rule is unsound and this file contains the
+  counterexample: the `#224` entry above says "closed" in a sentence that also
+  names `#255`, which is open and must stay open. Grading this needs the
+  settled claim **attributed to a number** rather than to a sentence, and that
+  is a design question rather than a vocabulary, which is why it is recorded
+  here rather than bolted on.
 
 Failures accumulate and print together, each naming the file or interaction and
 the number that was wrong. The process exits non-zero if there is even one, and

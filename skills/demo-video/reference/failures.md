@@ -157,7 +157,9 @@ paints. That was measured and is not what happens; see `limits.md`.) The beat
 log itself is good to ~100–200 ms of the frame it describes on a host whose
 clock holds still. `timeline.json`'s `capture_clock` records the movement, and
 `capture_clock.measured` says whether the recorder could watch for it at all.
-Tracked in [#18](https://github.com/rogvid/skills/issues/18),
+[#18](https://github.com/rogvid/skills/issues/18),
 [#215](https://github.com/rogvid/skills/issues/215) and
-[#247](https://github.com/rogvid/skills/issues/247) — read them before relying
+[#247](https://github.com/rogvid/skills/issues/247) are where this was measured,
+and all three are closed: the rule they settled on is in `limits.md` under *A
+frame is aimed at a beat; it is not stamped with one*. Read that before relying
 on a beat timestamp to extract a frame.

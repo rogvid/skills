@@ -16,9 +16,10 @@ picture. Those six are what SKILL.md and `reference/` describe, and they are the
 contract.
 
 It used to be fifty. The package re-exported every threshold, schema constant
-and writer the recorder owns, because `tests/smoke` read the recorder's own
-internals back through the front door to grade itself — the shallow module in
-its plainest form, an interface as wide as its implementation. A storyboard
+and writer the recorder owns, because the end-to-end suite in this skill's own
+repository read the recorder's internals back through the front door to grade
+itself — the shallow module in its plainest form, an interface as wide as its
+implementation. A storyboard
 author opening this file met `CONTENT_MOVED_PIXELS` before `Recorder`.
 
 **Nothing became unreachable.** Every one of those names still lives in the
@@ -29,8 +30,9 @@ module that owns it and is imported from there:
     from demo_recording.frames import scene_times
 
 That is the distinction being drawn, and it is the only one: **a test may reach
-into the module it is testing; a storyboard may not.** `tests/smoke` and
-`tests/unit` both import through the owning module now. If you are consuming
+into the module it is testing; a storyboard may not.** Those suites live in
+this skill's repository and are not installed with it; they import through the
+owning module now. If you are consuming
 `timeline.json` programmatically from outside this repository, its schema and
 its renderer are `demo_recording.timeline`'s and always were — they are not
 private, they are simply not part of the storyboard surface, and this package

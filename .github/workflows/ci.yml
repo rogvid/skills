@@ -26,6 +26,11 @@ jobs:
   lint:
     name: lint (ruff, shellcheck)
     runs-on: ubuntu-latest
+    # `tests/lint --issues` reads the tracker; the workflow-level default is
+    # `contents: read` alone, which would give it a token that cannot list one.
+    permissions:
+      contents: read
+      issues: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -56,8 +61,25 @@ jobs:
       # ruff cannot: its checker does not read `.md` at any version, and its
       # formatter reads a fence without validating it — `def f(:` comes back
       # "1 file already formatted", exit 0 (#211).
-      - name: ruff check + ruff format --check + doc fences
+      #
+      # And it resolves every repo-shaped path the *shipped* documents name,
+      # which is a claim about the installed skill rather than about this
+      # checkout: `npx skills add` copies `skills/<name>/` and nothing else, so
+      # a reference document naming `tests/smoke` is telling its reader to open
+      # a file they do not have. Offline, hence this step and not the one below.
+      - name: ruff check + ruff format --check + doc fences + shipped pointers
         run: tests/lint --github
+
+      # The other half of the same question, split off because it is the only
+      # thing in this job that needs the network: an issue reference presented
+      # as pending work must be an issue that is still open. Twelve "Tracked in
+      # #N" pointers in this repo all resolved to closed issues, a defect filed
+      # and fixed once already as #209 — a reader is told somebody is on it
+      # when nobody is. One `gh issue list` call and a regex sweep, ~2 s.
+      - name: tests/lint --issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tests/lint --issues --github
 
       # shellcheck comes from PyPI rather than apt so this is the same binary
       # a contributor gets from the same command locally.

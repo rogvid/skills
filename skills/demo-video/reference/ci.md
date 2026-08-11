@@ -84,9 +84,9 @@ invisible to it.
 `DEMO_VIDEO_ALLOW_PRIVATE` on the `Record` step. It has to be: they classify
 the target again at construction, so an input that widened only the pre-check
 would pass the guard and then refuse the take one Chromium download later.
-That is not hypothetical — it is what this workflow did until
-`WorkflowGates` in `tests/ci-unit` was written, which now requires every fact
-the guard step classifies on to reach the recorder from the same input.
+That is not hypothetical — it is what this workflow did until a check in this
+repo's own suite was written, which now requires every fact the guard step
+classifies on to reach the recorder from the same input.
 
 **The classifier is the skill's, not the workflow's, and CI is not the only
 place it runs.** The rules live in `helpers/demo_recording/target.py`, which

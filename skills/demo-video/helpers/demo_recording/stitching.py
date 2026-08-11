@@ -356,8 +356,9 @@ def _merge_overlaps(doc: dict) -> list[dict]:
     beat log, so the part's log outruns its own file and the next part's first
     beat is offset to a moment the previous part's last beat has not reached
     yet. Reproduced at −1.4684 s: `beat 21 t_end 37.451`, `beat 22 t_start
-    37.441`. The overlap scales with Δ less the capture's startup and tail, so a
-    ~1.5 s step reaches most of a second.
+    37.441` — a 10 ms overlap out of a 1.4684 s step, 0.7% of it, and the only
+    measurement of the size there is. Do not derive an expected overlap from Δ;
+    one point fixes no relationship.
 
     **Reported, not clamped, and that is the decision here.** Moving the beats
     to make the numbers rise would put them at instants neither the log nor the
