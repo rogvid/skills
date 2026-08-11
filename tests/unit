@@ -1090,6 +1090,12 @@ class TtsKey(unittest.TestCase):
 
 SKILL_DIR = Path(os.environ.get("UNIT_SKILL_DIR", REPO / "skills" / "demo-video"))
 
+# The storyboards in the proving ground. Shipped in this repository rather than
+# by `npx skills add`, and read here for the same reason `SKILL.md` is: they are
+# prose a reader trusts. Overridable for the same reason `SKILL_DIR` is — an
+# injection has to be able to break a copy of them (see `fault_inject`).
+_EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
+
 # Lines SKILL.md may occupy before `--budget` says so. It is 510 today. The
 # headroom is for ordinary growth — a verb, a mistake worth naming — and the
 # number is deliberately tight enough that a *section* cannot fit inside it.
@@ -2827,7 +2833,8 @@ class OneClassifier(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# No shipped source says something is masked (issues #138, #142, #144, #267)
+# No shipped source says something is masked (issues #138, #142, #144, #267,
+# #281)
 # --------------------------------------------------------------------------
 #
 # The masking layer was removed on purpose, and the prose describing it was
@@ -2848,14 +2855,34 @@ class OneClassifier(unittest.TestCase):
 # one to be waivered by hand. New prose asserting a mask fails until a human
 # writes it down here, which is the decision the eleven sites never got.
 #
-# Its scope, stated: `helpers/demo_recording/*.py` and `SKILL.md`. Not
-# `reference/` or the skill README, and not whether the surviving prose is
-# right about anything other than masking — see tests/README.md's Known gaps.
+# **The vouch/verifier half is #281**, and it is why the word family is not
+# just the three mask words. #267's list was enumerated by eye, so a sentence
+# that asserted the *same removed protection* without using any of those words
+# was structurally unreachable: `_write_failure` told a reader the failure
+# frame "is a frame of the recording the take already vouched for, so it
+# inherits that guarantee whole and reads nothing after the verifier ran" —
+# 88 lines below the same module's correct "nothing vouches for this text now".
+# Both shipped. A protection named by the machinery that used to enforce it is
+# the same claim as one named by the machinery's verb, so both are swept.
+#
+# Its scope, stated: `helpers/demo_recording/*.py`, `SKILL.md`, the shipped
+# `scripts/`, and the storyboards under `examples/`. The last two were added by
+# #281 — both ship, neither was read, and `# The URL is redacted in the log.`
+# added to `scripts/demo-target-guard` left the suite green when that was
+# reproduced. Not `reference/` or the skill README, and not whether the
+# surviving prose is right about anything other than masking — see
+# tests/README.md's Known gaps.
+#
+# Synonyms are **deliberately out of scope**: `sanitized`, `obscured` and the
+# rest defeat this by design. Chasing the full word family trades a bounded
+# check for an unbounded one, and the boundary is written down rather than
+# widened.
 
 MASK_WORDS = re.compile(
     r"\b(?:mask|masks|masked|masker|maskers|masking"
     r"|scrub|scrubs|scrubbed|scrubber|scrubbing"
-    r"|redact|redacts|redacted|redaction)\b",
+    r"|redact|redacts|redacted|redaction"
+    r"|vouch|vouches|vouched|vouching|verifier|verifiers)\b",
     re.I,
 )
 
@@ -2864,11 +2891,22 @@ MASK_WORDS = re.compile(
 # file and by the line exactly as it appears stripped, because editing the
 # sentence at all takes it back out of the waiver and into the check.
 #
+# That key is brittle on purpose and brittle in one direction that is worth
+# knowing before you reflow a paragraph: re-wrapping a waived line, changing
+# nothing about what it says, turns this suite red until the waiver is retyped.
+# The alternative — matching a fragment, or normalising whitespace — is what
+# lets an edited sentence keep a waiver written for a sentence it no longer is.
+#
 # Every entry below is a denial ("no masking, no scrubbing and no redaction",
 # "this recorder scrubs nothing"), a past-tense note about machinery that was
-# removed (#142's carve-out, #144's verifier), or the video sense of the word
-# — a reviewer scrubbing a timeline, which has nothing to do with secrets.
+# removed (#142's carve-out, #144's verifier — including the two lines that say
+# in so many words that nothing vouches for a thing any more), or the video
+# sense of the word — a reviewer scrubbing a timeline, which has nothing to do
+# with secrets.
 MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
+    "content.py": (
+        "# heuristic that misses one. That argument once scoped a terminal verifier to",
+    ),
     "SKILL.md": (
         "- The tool has **no masking, no scrubbing and no redaction**. It does not hide",
         "used to look like one was removed rather than improved. A masking system that",
@@ -2882,6 +2920,7 @@ MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
         "went with the mask in #144. A capture that *raises* still gets a file,",
         "masking anywhere in this recorder.",
         "redaction verifier, the hole PR #58 was blocked on — went with that",
+        "verifier in #144, and nothing vouches for this text now.",
         "recorded — all of it as it came, because there is no masking anywhere",
     ),
     "failure.py": (
@@ -2910,26 +2949,42 @@ MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Everything the sweep is supposed to open: the thirteen package modules and
-# SKILL.md. Set to the whole set rather than to a comfortable floor — a module
-# that stops being read makes "no file says it is masked" hold over a file
-# nobody opened, and this is the only assertion that would notice.
-MASK_SWEEP_FILE_FLOOR = 14
+# Everything the sweep is supposed to open: the thirteen package modules,
+# `SKILL.md`, `scripts/demo-target-guard`, and the three example storyboards.
+# Set to the whole set rather than to a comfortable floor — a module that stops
+# being read makes "no file says it is masked" hold over a file nobody opened,
+# and this is the only assertion that would notice. It was 14 before #281 added
+# the last four; a fourth demo directory raises the real count without needing
+# this number moved, which is why it is a floor and not an equality.
+MASK_SWEEP_FILE_FLOOR = 18
 
 
 class MaskProse(unittest.TestCase):
     """The removed masking layer is not described as though it were there."""
 
     def swept(self):
-        yield SKILL_DIR / "SKILL.md"
-        yield from sorted((_PKG_PARENT / "demo_recording").glob("*.py"))
+        """`(label, path)` for every file the sweep opens.
+
+        The label, not `path.name`, is what waivers are keyed on: three
+        different `record.py` files are swept, and keying on the bare name
+        would merge them into one bucket where a waiver written for one file
+        silently covers the other two.
+        """
+        yield "SKILL.md", SKILL_DIR / "SKILL.md"
+        for path in sorted((_PKG_PARENT / "demo_recording").glob("*.py")):
+            yield path.name, path
+        for path in sorted((SKILL_DIR / "scripts").glob("*")):
+            if path.is_file():
+                yield f"scripts/{path.name}", path
+        for path in sorted(_EXAMPLES.rglob("record.py")):
+            yield f"examples/{path.relative_to(_EXAMPLES).as_posix()}", path
 
     def hits(self) -> dict[str, list[str]]:
         found: dict[str, list[str]] = {}
-        for path in self.swept():
+        for label, path in self.swept():
             for line in path.read_text(encoding="utf-8").splitlines():
                 if MASK_WORDS.search(line):
-                    found.setdefault(path.name, []).append(line.strip())
+                    found.setdefault(label, []).append(line.strip())
         return found
 
     def test_no_shipped_source_claims_a_mask_that_does_not_exist(self):
@@ -9742,6 +9797,65 @@ INJECTIONS = [
         ["MaskProse.test_no_shipped_source_claims_a_mask_that_does_not_exist"],
     ),
     (
+        # **The line #281 was actually about**, restored exactly. It is the
+        # docstring of the method that writes `failure/last-frame.png`, and it
+        # tells a reader that the PNG inherited a guarantee from a verifier
+        # #144 deleted — 88 lines below the same module saying nothing vouches
+        # for anything now. Both shipped. It contains no mask, scrub or redact
+        # word, which is why the sweep could not reach it until #281 widened
+        # the family; this is the entry that proves the widening grades.
+        "the failure frame goes back to claiming a verifier vouched for it",
+        "core.py",
+        "        because by the time this runs there is no page: `__exit__` closes the\n"
+        "        context, the browser and Playwright before `_convert`, and this is\n"
+        "        called after all of it. It used to be argued for the other way round —\n"
+        "        the frame inheriting a guarantee the take had already earned — and the\n"
+        "        machinery that issued that guarantee went in #144. The PNG carries none\n"
+        "        now: it is the last frame of this take's recording, as it was recorded,\n"
+        "        and no more is claimed for it than for any other artifact here. Gated on\n",
+        "        it is a frame of the recording the take already vouched for, so it\n"
+        "        inherits that guarantee whole and reads nothing after the verifier\n"
+        "        ran. Gated on\n",
+        ["MaskProse.test_no_shipped_source_claims_a_mask_that_does_not_exist"],
+    ),
+    (
+        # The shipped CLI, which the sweep did not open before #281. Reproduced
+        # by hand during the review of #271: this exact line left the whole
+        # suite green, because `scripts/` was outside the glob.
+        "the shipped guard CLI says it redacts a URL it prints verbatim",
+        "scripts/demo-target-guard",
+        "import argparse\nimport sys",
+        "import argparse\nimport sys\n\n# The URL is redacted in the log.",
+        ["MaskProse.test_no_shipped_source_claims_a_mask_that_does_not_exist"],
+    ),
+    (
+        # And a storyboard, the other half of the #281 extension. An example is
+        # the first thing somebody copies, so a sentence here promising a mask
+        # travels straight into their own recorder.
+        "an example storyboard promises the recorder scrubs what it records",
+        "examples/ticket-queue/demos/2026-07-27-empty-state/record.py",
+        '"""A filter that matches nothing explains itself instead of going blank.',
+        '"""A filter that matches nothing explains itself instead of going blank.\n\n'
+        "The recorder scrubs the queue contents before they reach the video.",
+        ["MaskProse.test_no_shipped_source_claims_a_mask_that_does_not_exist"],
+    ),
+    (
+        # The floor, not the content. Narrow the sweep back to its pre-#281
+        # scope and the mask assertion stays green over the files it stopped
+        # opening — which is the vacuous sweep, and this is the only assertion
+        # that notices. Injected into this file because that is where the glob
+        # lives; the inner run is the copy, so it reads the narrowed version.
+        "the sweep quietly stops opening the files #281 added to it",
+        "tests/unit",
+        '        for path in sorted((SKILL_DIR / "scripts").glob("*")):\n'
+        "            if path.is_file():\n"
+        '                yield f"scripts/{path.name}", path\n'
+        '        for path in sorted(_EXAMPLES.rglob("record.py")):\n'
+        '            yield f"examples/{path.relative_to(_EXAMPLES).as_posix()}", path\n',
+        "        return\n",
+        ["MaskProse.test_the_sweep_read_the_files_it_claims_to_have_read"],
+    ),
+    (
         # The CI path, and the one no other assertion here walks: every other
         # test writes `"1"`, which a workflow never sends. Dropping `true`
         # leaves both suites green and puts the pre-check and the recorder
@@ -11214,9 +11328,19 @@ def fault_inject() -> int:
             # break is a document whose guard nobody has watched fire.
             readme = Path(tmp) / "README.md"
             shutil.copy(REPO / "tests" / "README.md", readme)
+            # ...and the proving ground, which `MaskProse` now sweeps. Copied
+            # for the same reason as everything above: an injection has to be
+            # able to break one of these storyboards, and a sweep reading the
+            # working tree would grade the pristine file instead.
+            examples = Path(tmp) / "examples"
+            shutil.copytree(REPO / "examples", examples)
             unit = Path(tmp) / "unit"
             shutil.copy(Path(__file__).resolve(), unit)
-            if module == "tests/smoke":
+            if module.startswith("examples/"):
+                # Before the `"/" in module` branch below, which would send it
+                # into the skill directory.
+                target = examples / module[len("examples/") :]
+            elif module == "tests/smoke":
                 target = smoke
             elif module == "tests/smoke-inject":
                 # Before the `"/" in module` branch below, which would send it
@@ -11260,6 +11384,7 @@ def fault_inject() -> int:
                     "UNIT_SMOKE": str(smoke),
                     "UNIT_SMOKE_INJECT": str(smoke_inject),
                     "UNIT_README": str(readme),
+                    "UNIT_EXAMPLES": str(examples),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}

@@ -2793,16 +2793,53 @@ knows is missing is worse than one that is openly absent.
   caller reading the guard as one. `scripts/demo-target-guard` is also outside
   mypy's scope, which runs over `skills/demo-video/helpers/` only.
 
-- **Whether prose about masking is *otherwise* true, and prose anywhere but
-  the two places `MaskProse` reads.** `tests/unit`'s sweep flags every mention
-  of mask/scrub/redact in `helpers/demo_recording/*.py` and `SKILL.md` and
-  makes each one earn a hand-written waiver, which is what catches a sentence
-  asserting a layer that #138 removed. It does not read `reference/*.md` or the
-  skill's `README.md`, and it cannot tell a waivered denial that is accurate
-  from one that has quietly gone stale about *something else* — a waiver saying
-  "#142's carve-out" stays green after #142's carve-out is deleted. The list
-  can only shrink, so a stale entry surfaces the moment its line is edited;
-  nothing surfaces one whose line is edited nowhere.
+- **Whether prose about masking is *otherwise* true, and prose anywhere
+  `MaskProse` does not read.** `tests/unit`'s sweep flags every mention of
+  mask/scrub/redact — and, since
+  [#281](https://github.com/rogvid/skills/issues/281), vouch/verifier — in
+  `helpers/demo_recording/*.py`, `SKILL.md`, `scripts/*` and the storyboards
+  under `examples/`, and makes each one earn a hand-written waiver, which is
+  what catches a sentence asserting a layer that #138 removed. It does not read
+  `reference/*.md` or the skill's `README.md`, and it cannot tell a waivered
+  denial that is accurate from one that has quietly gone stale about
+  *something else* — a waiver saying "#142's carve-out" stays green after
+  #142's carve-out is deleted. The list can only shrink, so a stale entry
+  surfaces the moment its line is edited; nothing surfaces one whose line is
+  edited nowhere. Three further limits, all deliberate:
+
+  1. **Synonyms defeat it, by design.** `sanitized`, `obscured`, `cleaned`,
+     `verified` and the rest are not in the family and were reproduced passing
+     during #281. The word list is bounded on purpose: "no prose ever implies a
+     protection" has no done state, and chasing it trades a check that
+     terminates for one that does not. The two families in it are the two that
+     have actually shipped a false claim here — three times.
+  2. **The waivers are keyed on exact line text, so a pure reflow turns the
+     suite red.** Re-wrapping a waived paragraph without changing a word costs
+     a retyped waiver. That is the price of the property in the sentence above:
+     any looser key — a fragment, normalised whitespace — lets an edited
+     sentence keep a waiver written for a sentence it no longer is.
+  3. **It grades the word, not the claim.** A sentence that describes a
+     removed protection in words nobody thought to list reads exactly like
+     prose. #281's site — a failure frame the take "already vouched for" —
+     shipped for that reason and was found by a human, not by this.
+
+- **Whether the reference names the right *stream* for a line the recorder
+  prints.** `ContentSummaryStreams` pins each half of the content summary to
+  its stream in both directions, with four injections behind it, so the *code*
+  is graded. Nothing grades the sentence in `reference/timeline.md` that tells
+  a reader which stream to watch, and for a long time that sentence was wrong:
+  it said `held` arrives "on stderr as it finishes", where in fact
+  `print_content_summary` says it in one place only — the `opened` clause of
+  the healthy `shows a picture` line, which carries no `file=` and therefore
+  goes to **stdout** — and `opening_warning` names `gap` and never mentions
+  `held` at all, so on a take that warned the number is in `timeline.json` and
+  nowhere else. Corrected under
+  [#281](https://github.com/rogvid/skills/issues/281); still ungraded. A
+  string-matching assertion over the document would be decoration — it would
+  pin today's wording rather than the claim, and pass just as happily on a
+  reworded sentence naming the wrong stream. This is written down instead,
+  because an honest gap beats a check that cannot fail for the reason it
+  claims.
 
 - **Most of where the shipped documentation points.** `tests/lint`'s
   `check_pointers()` resolves every repo-shaped path named in `skills/**/*.md`

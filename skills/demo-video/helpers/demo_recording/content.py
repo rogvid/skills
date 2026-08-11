@@ -93,10 +93,11 @@ def media_duration(path: Path) -> float:
 #
 # **Warn, never refuse.** A demo legitimately holding one frame through a long
 # narrated beat is ordinary, and a heuristic that fails takes is worse than a
-# heuristic that misses one — the same argument that scoped the terminal
-# verifier to registered values only (issue #5). Nothing here raises, nothing
-# here deletes an artifact, and a check that cannot run says so in `content`
-# rather than being silently absent.
+# heuristic that misses one. That argument once scoped a terminal verifier to
+# registered values only (issue #5) — machinery #144 removed, so it is
+# precedent for this decision and not a live claim about anything this recorder
+# does. Nothing here raises, nothing here deletes an artifact, and a check that
+# cannot run says so in `content` rather than being silently absent.
 #
 # **What this deliberately does not do** is judge whether the demo shows the
 # *right* thing. That is issue #12's job, and a human's. This answers exactly
