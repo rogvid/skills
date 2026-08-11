@@ -1386,6 +1386,25 @@ Injections caught:
 | a merged demo is judged against only the first segment's ticket | the merge arm's union assertion |
 | timeline.md stops stating the finding | the markdown arm — the one the weaker assertion slept through |
 
+**The rendering a reviewer actually reads is graded in `tests/ci-unit`**
+([#273](https://github.com/rogvid/skills/issues/273)). Everything above is
+about `timeline.json` and `timeline.md`; the pull-request comment is the one
+artifact a human is guaranteed to open, and until #273 it rendered none of
+this and said so by pointing at an issue that had been closed for months. Its
+`Coverage` class grades four things and nothing more: that the clauses nothing
+claimed are named **before** the table of what was claimed, that every declared
+clause reaches the comment with its own text, that a clause's row names *its
+own* beats rather than another clause's, and that no sentence in the comment
+promotes a claim to a verdict. The last one is a word sweep with a control
+beside it, because a sweep for absent words passes just as happily on a comment
+that renders no coverage at all.
+
+Nine injections cover it, and two are worth naming: *the acceptance section
+leads with what was claimed instead of the gap* — which is the whole ordering
+claim, and nothing else in the suite can see it — and *every clause is pointed
+at the first claim in the report*, which leaves the table its shape, its row
+per clause and its beat numbers, and points every row at the wrong one.
+
 **What this deliberately does not grade**: whether a tagged beat *shows* what it
 claims. That is the reviewer's judgement, and the artifact is written to say so
 rather than to assert it.
@@ -2106,6 +2125,23 @@ knows is missing is worse than one that is openly absent.
   `--polish-only` run is its only exercise in the repo (see **Why the four
   middle arms stayed on the push**, which is the measurement that kept it
   there).
+
+- **Nothing here grades whether a tagged beat's frames show its criterion.**
+  `tests/unit` grades the coverage report's arithmetic, `tests/smoke
+  --coverage-only` grades that a real take emits it, and `tests/ci-unit`'s
+  `Coverage` grades that the pull-request comment renders it gap first and
+  never as a verdict. All three grade the mapping's *shape*. The mapping's
+  *truth* is a judgement over prose and pixels, the artifact says so in every
+  column name, and no suite in this repo promotes a tag to a verdict. This is
+  not a gap waiting to be filled: a check that graded it would be written from
+  the same `ac=` tags it was grading, which is the catalogue's *check that
+  shares the bug's blind spot*. The reasoning is
+  [#272](https://github.com/rogvid/skills/issues/272), question 2.
+
+  So what a green `tests/ci-unit` says about a demo's acceptance criteria is
+  exactly: the comment named every clause the storyboard declared, and named
+  first the ones no beat claimed. It says nothing about whether the beats that
+  did claim one showed it.
 
 - **Nothing calls the ElevenLabs API.** The narration take grades everything a
   cache hit reaches — the key, the pacing, the mix — and by construction never

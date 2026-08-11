@@ -747,12 +747,256 @@ class Render(unittest.TestCase):
         self.assertIn("no video", body)
         self.assertNotIn("· 0s ·", body)
 
+    def test_a_run_with_nothing_to_footnote_ends_on_no_empty_footnote(self):
+        # The footnote used to be unconditional because it always carried the
+        # acceptance-criteria sentence #273 deleted. Without a sha, a run url
+        # or an evidence retention there is nothing left to say, and an empty
+        # `<sub></sub>` renders as a blank line a reader has to account for.
+        body = self.body(sha=None, run_url=None, evidence_retention_days=None)
+        self.assertNotIn("<sub>", body)
+        # The control: with one fact to state, the footnote is still there.
+        self.assertIn("<sub>Recorded from `abcdef1`.", self.body())
+
     def test_a_caption_containing_a_pipe_does_not_break_the_table(self):
         piped = dict(TIMELINE, beats=beats((1.0, "run: cat x | wc -l")))
         rows = [ln for ln in self.body(piped).splitlines() if ln.startswith("| 1 |")]
         self.assertEqual(len(rows), 1)
         unescaped = re.sub(r"\\\|", "", rows[0])
         self.assertEqual(unescaped.count("|"), 4, rows[0])  # 4 delimiters, 3 cells
+
+
+def claim(index: int, still: str | None = None, segment: str | None = None) -> dict:
+    """One row of `coverage.claimed[id]`, shaped as `coverage_report` writes it."""
+    return {
+        "index": index,
+        "segment": segment,
+        "segment_index": index,
+        "t_start": float(index),
+        "still": still,
+    }
+
+
+# Four clauses, and the two nothing claims are **not** the last two: an
+# assertion that reads the headline as "the tail of the list" would pass on
+# this by accident, and a renderer that dropped the unclaimed rows would leave
+# a table that still looked ordered.
+COVERAGE = {
+    "criteria": {
+        "AC-1": "A search box above the queue narrows the list as you type.",
+        "AC-2": "Search and the status filter combine, and the heading agrees.",
+        "AC-3": "Search matches the requester as well as the title.",
+        "AC-4": "A search matching nothing shows the empty line.",
+    },
+    "claimed": {
+        "AC-1": [claim(3, "images/01-search-box.png")],
+        "AC-2": [],
+        "AC-3": [claim(6), claim(9, "images/03-requester.png")],
+        "AC-4": [],
+    },
+    "unclaimed": ["AC-2", "AC-4"],
+    "tagged_beats": 3,
+    "untagged_beats": 4,
+}
+TAGGED = dict(TIMELINE, coverage=COVERAGE)
+
+# Every clause claimed. Same criteria, so the two documents differ in exactly
+# the thing the headline is a statement about.
+ALL_CLAIMED = dict(
+    TIMELINE,
+    coverage=dict(
+        COVERAGE,
+        claimed={key: [claim(i)] for i, key in enumerate(COVERAGE["criteria"])},
+        unclaimed=[],
+    ),
+)
+
+# Words that would turn a claim into a verdict. `coverage.py` names its columns
+# `claimed`/`unclaimed` on purpose — an `ac=` tag is a string the storyboard
+# author typed — so the most-read artifact must not be the one place that says
+# a clause was shown. `[x]` is here because a ticked box reads as a verdict
+# even with no verb attached to it.
+VERDICT_WORDS = (
+    "demonstrat",
+    "verified",
+    "verifies",
+    "validated",
+    "proves",
+    "proven",
+    "confirmed",
+    "satisfied",
+    "[x]",
+    "✅",
+    "✔",
+)
+
+
+class Coverage(unittest.TestCase):
+    """The ticket's clauses in the pull-request comment, gap first (#273).
+
+    **What none of this grades:** whether a beat's frames show the clause it
+    tagged. That is a judgement over prose and pixels, no assertion here goes
+    near it, and the rendering these tests hold to its wording is the reason
+    the comment cannot be read as having made it.
+    """
+
+    def body(self, timeline):
+        return comment.render(
+            [("demos/x", timeline)],
+            artifact_url=None,
+            artifact_bytes=None,
+            retention_days=30,
+            evidence_retention_days=None,
+            failure_artifact_url=None,
+            run_url=None,
+            sha="abcdef1234567890",
+        )
+
+    def headline(self, body: str) -> str:
+        """The one sentence naming the clauses nothing claimed."""
+        found = [ln for ln in body.splitlines() if "no beat claiming" in ln]
+        self.assertEqual(len(found), 1, f"no single gap headline in:\n{body}")
+        return found[0]
+
+    def cell(self, body: str, key: str) -> str:
+        """The `claimed at` cell of one clause's row, and only that.
+
+        Read narrowly on purpose: `"3" in row` is satisfied by the id `AC-3`
+        itself, so a whole-row search would agree with a renderer that had lost
+        the beat indices entirely.
+        """
+        rows = [ln for ln in body.splitlines() if ln.startswith(f"| **{key}** ")]
+        self.assertEqual(len(rows), 1, f"no single row for {key}: {rows}")
+        # Escaped pipes out first, the way a markdown renderer reads them: an
+        # unescaped one in the clause text would otherwise split this row into
+        # more cells than the table has columns, which is the failure the
+        # escaping exists to prevent and is asserted below.
+        cells = re.sub(r"\\\|", "", rows[0]).split("|")
+        self.assertEqual(len(cells), 4, rows[0])  # "", clause, claimed at, ""
+        return cells[2].strip()
+
+    def test_the_gap_is_stated_before_anything_that_was_claimed(self):
+        body = self.body(TAGGED)
+        self.assertIn("| clause | claimed at |", body)  # control: a section ran
+        headline = body.index(self.headline(body))
+        self.assertLess(headline, body.index("| clause | claimed at |"))
+        self.assertLess(headline, body.index("**AC-1**"))
+        # And before the beat table, which is the rest of the comment: a
+        # reviewer who has scrolled past nine captions has already formed the
+        # impression this section exists to test.
+        self.assertLess(headline, body.index("| # | at | Caption |"))
+
+    def test_the_headline_names_the_clauses_nothing_claimed_and_only_those(self):
+        body = self.body(TAGGED)
+        line = self.headline(body)
+        self.assertIn("AC-2", line)
+        self.assertIn("AC-4", line)
+        self.assertNotIn("AC-1", line)
+        self.assertNotIn("AC-3", line)
+
+    def test_every_declared_clause_reaches_the_comment_with_its_own_text(self):
+        # Named, not counted: a row per clause is free to satisfy, and the text
+        # is what a reviewer judges the frames against.
+        body = self.body(TAGGED)
+        for key, text in COVERAGE["criteria"].items():
+            row = [ln for ln in body.splitlines() if ln.startswith(f"| **{key}** ")]
+            self.assertEqual(len(row), 1, f"{key}: {row}")
+            self.assertIn(text, row[0])
+
+    def test_a_claimed_clause_names_its_own_beats_and_not_another_clauses(self):
+        body = self.body(TAGGED)
+        self.assertEqual(self.cell(body, "AC-1"), "beat 3")
+        self.assertEqual(self.cell(body, "AC-3"), "beats 6, 9")
+
+    def test_a_clause_no_beat_claimed_says_so_where_the_beat_would_be(self):
+        body = self.body(TAGGED)
+        for key in ("AC-2", "AC-4"):
+            self.assertEqual(self.cell(body, key), "*nothing claims this*")
+
+    def test_no_sentence_promotes_a_claim_to_a_verdict(self):
+        body = self.body(TAGGED)
+        # The control on the sweep: without it every assertion below holds over
+        # a comment that renders no coverage at all.
+        self.assertIn("AC-1", body)
+        self.assertIn("claimed at", body)
+        for word in VERDICT_WORDS:
+            self.assertNotIn(word, body.lower(), f"{word!r} reads as a verdict")
+
+    def test_the_same_words_are_refused_on_a_take_that_claimed_everything(self):
+        # The clean path is where a coverage claim is most tempting to print,
+        # and it is a different branch of the renderer from the one above.
+        body = self.body(ALL_CLAIMED)
+        self.assertIn("claimed at", body)
+        for word in VERDICT_WORDS:
+            self.assertNotIn(word, body.lower(), f"{word!r} reads as a verdict")
+
+    def test_a_take_whose_clauses_are_all_claimed_prints_no_headline(self):
+        body = self.body(ALL_CLAIMED)
+        self.assertNotIn("no beat claiming", body)
+        self.assertNotIn("nothing claims this", body)
+        self.assertIn("Nothing in this comment graded a claim", body)
+
+    def test_a_take_where_no_beat_tagged_anything_still_names_every_clause(self):
+        # The third branch of the headline, and the one a reader is likeliest
+        # to meet on a storyboard written before anybody tagged a beat.
+        none_claimed = dict(
+            TIMELINE,
+            coverage=dict(
+                COVERAGE,
+                claimed={key: [] for key in COVERAGE["criteria"]},
+                unclaimed=list(COVERAGE["criteria"]),
+            ),
+        )
+        body = self.body(none_claimed)
+        line = self.headline(body)
+        for key in COVERAGE["criteria"]:
+            self.assertIn(key, line)
+            self.assertEqual(self.cell(body, key), "*nothing claims this*")
+        self.assertIn("no beat claims any of them", body)
+        for word in VERDICT_WORDS:
+            self.assertNotIn(word, body.lower(), f"{word!r} reads as a verdict")
+
+    def test_a_take_recorded_without_criteria_prints_no_acceptance_section(self):
+        # The ordinary case, and the one that must read exactly as it did
+        # before this section existed.
+        body = self.body(TIMELINE)
+        self.assertIn("| # | at | Caption |", body)  # control: still a comment
+        for absent in ("clause", "claimed at", "nothing claims this", "AC-"):
+            self.assertNotIn(absent, body)
+
+    def test_the_comment_no_longer_reports_the_binding_as_unwritten(self):
+        # The footnote this replaced said acceptance criteria were "not
+        # reported yet" and pointed at #12, which has been closed since the
+        # recorder-side feature shipped.
+        body = self.body(TAGGED)
+        self.assertIn("AC-1", body)  # control: the binding is rendered instead
+        self.assertNotIn("not reported yet", body)
+        self.assertEqual(re.findall(r"/issues/12\b", body), [])
+
+    def test_a_clause_containing_a_pipe_does_not_break_the_table(self):
+        # Criterion text is quoted from a ticket, so it is prose somebody else
+        # wrote. One `|` shifts every later column of a table a reviewer reads
+        # as the ticket's own words.
+        piped = dict(
+            TIMELINE,
+            coverage={
+                "criteria": {"AC-1": "the count is `wc -l` | not the row count"},
+                "claimed": {"AC-1": [claim(3)]},
+            },
+        )
+        cells = self.cell(self.body(piped), "AC-1")
+        self.assertEqual(cells, "beat 3")
+
+    def test_a_claim_from_a_named_segment_says_which_segment(self):
+        # A stitched demo renumbers beats, so "beat 6" alone points at the
+        # wrong picture when the reader goes back to a segment's own timeline.
+        stitched = dict(
+            TIMELINE,
+            coverage={
+                "criteria": {"AC-1": "A search box above the queue."},
+                "claimed": {"AC-1": [claim(6, segment="part2")]},
+            },
+        )
+        self.assertEqual(self.cell(self.body(stitched), "AC-1"), "beat 6 (`part2`)")
 
 
 class CommentCli(unittest.TestCase):
@@ -979,6 +1223,129 @@ INJECTIONS = [
         [
             "Cell.test_a_pipe_in_a_caption_is_escaped_so_the_table_survives",
             "Render.test_a_caption_containing_a_pipe_does_not_break_the_table",
+            # The acceptance table quotes a ticket's own prose through the same
+            # helper, so one break has to redden both tables or the second one
+            # is riding on the first's test.
+            "Coverage.test_a_clause_containing_a_pipe_does_not_break_the_table",
+        ],
+    ),
+    (
+        # The whole point of the section, and the one thing about it that is
+        # not a matter of layout: a rendering that opens with the claimed table
+        # *is* a coverage claim, whatever the sentence under it says.
+        "the acceptance section leads with what was claimed instead of the gap",
+        "demo-comment",
+        "    return gap + table + note",
+        "    return table + gap + note",
+        ["Coverage.test_the_gap_is_stated_before_anything_that_was_claimed"],
+    ),
+    (
+        # The failure mode every coverage tool has: print the covered half and
+        # call it a report. The headline survives this, so a check that only
+        # read the headline would pass.
+        "the table prints only the clauses something claimed",
+        "demo-comment",
+        "    for key, text in criteria.items():",
+        "    for key, text in [(k, v) for k, v in criteria.items() if claimed.get(k)]:",
+        [
+            "Coverage.test_every_declared_clause_reaches_the_comment_with_its_own_text",
+            "Coverage.test_a_clause_no_beat_claimed_says_so_where_the_beat_would_be",
+        ],
+    ),
+    (
+        # Correspondence, not existence: every clause is handed the first
+        # non-empty claim in the report, so the table keeps its shape, keeps a
+        # row per clause, and points every one of them at the wrong beat.
+        "every clause is pointed at the first claim in the report",
+        "demo-comment",
+        "        rows = claimed.get(key) or []",
+        "        rows = next((v for v in claimed.values() if v), [])",
+        [
+            "Coverage.test_a_claimed_clause_names_its_own_beats_and_not_another_clauses",
+            "Coverage.test_a_clause_no_beat_claimed_says_so_where_the_beat_would_be",
+        ],
+    ),
+    (
+        # The beat index is the only coordinate the comment gives a reviewer to
+        # go and look at. "a beat" is still a cell, still a table, still a row
+        # per clause.
+        "a claim stops naming the beat it points at",
+        "demo-comment",
+        '        part = "an unnumbered beat" if index is None else str(index)',
+        '        part = "an unnumbered beat" if index is None else "a beat"',
+        [
+            "Coverage.test_a_claimed_clause_names_its_own_beats_and_not_another_clauses",
+            "Coverage.test_a_claim_from_a_named_segment_says_which_segment",
+        ],
+    ),
+    (
+        # The promotion this whole rendering exists to refuse. `coverage.py`
+        # calls the columns claimed/unclaimed deliberately, and the comment is
+        # the most-read artifact — saying it here would make the manifest's
+        # caution decorative.
+        "the comment promotes a claim to a verdict",
+        "demo-comment",
+        '            f"call. Nothing in this comment graded a claim."',
+        '            f"call. Each of them was demonstrated on video."',
+        [
+            "Coverage.test_no_sentence_promotes_a_claim_to_a_verdict",
+            "Coverage.test_the_same_words_are_refused_on_a_take_that_claimed_everything",
+        ],
+    ),
+    (
+        # The same promotion in the branch a reviewer meets when nothing was
+        # tagged at all, which the two documents above never reach.
+        "the zero-claim sentence promotes the clauses instead",
+        "demo-comment",
+        '            f"comment graded a claim."',
+        '            f"comment says all {total} were demonstrated."',
+        ["Coverage.test_a_take_where_no_beat_tagged_anything_still_names_every_clause"],
+    ),
+    (
+        # The ordinary take is the one recorded outside a ticket, and an empty
+        # acceptance table on it would read as a ticket it covered none of.
+        "a take that declared no criteria gets the section anyway",
+        "demo-comment",
+        "    if not isinstance(criteria, dict) or not criteria:",
+        "    criteria = criteria if isinstance(criteria, dict) else {}\n    if False:",
+        ["Coverage.test_a_take_recorded_without_criteria_prints_no_acceptance_section"],
+    ),
+    (
+        # The wiring, which no injection above touches: `render_coverage` can
+        # be perfect and never be called.
+        "render_demo stops rendering the coverage section",
+        "demo-comment",
+        '    lines += render_coverage(timeline.get("coverage"))',
+        "    lines += []",
+        [
+            "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
+            "Coverage.test_every_declared_clause_reaches_the_comment_with_its_own_text",
+        ],
+    ),
+    (
+        # What the deleted sentence was quietly holding up: it was the one
+        # footnote entry that was always present.
+        "the footnote is printed even when there is nothing to put in it",
+        "demo-comment",
+        "    if footnote:\n        lines.append",
+        "    if True:\n        lines.append",
+        ["Render.test_a_run_with_nothing_to_footnote_ends_on_no_empty_footnote"],
+    ),
+    (
+        # The sentence this change deletes: true about the comment, false about
+        # the skill, and pointing at an issue closed since the recorder-side
+        # feature shipped.
+        "the footnote pointing at the closed #12 comes back",
+        "demo-comment",
+        '    lines.append("<sub>" + " ".join(footnote) + "</sub>")',
+        "    footnote.append(\n"
+        '        "Which acceptance criterion each beat demonstrates is not reported yet "\n'
+        '        "([#12](https://github.com/rogvid/skills/issues/12))."\n'
+        "    )\n"
+        '    lines.append("<sub>" + " ".join(footnote) + "</sub>")',
+        [
+            "Coverage.test_the_comment_no_longer_reports_the_binding_as_unwritten",
+            "Coverage.test_no_sentence_promotes_a_claim_to_a_verdict",
         ],
     ),
     (
