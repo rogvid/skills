@@ -107,6 +107,22 @@ paying for a browser first. `--allow-private` mirrors
 `allow-private-network-target`; there is no `--allow-public`, and adding one
 to the workflow would not help, because the recorder refuses independently.
 
+**A guard run that checked nothing says so.** `--url ""` — a step passing a
+variable nobody exported — prints `0 URL(s) checked — nothing was verified` and
+exits 0, where it used to print `all loopback`. Exit 0 is deliberate: a terminal
+storyboard has no URL, and a guard that failed those would be turned off. A
+caller who knows a URL should have been there passes `--require`, which turns
+the empty run into a refusal. The workflow does not, for the terminal-storyboard
+reason above; a job whose target is always a URL should add it.
+
+**A host that is a number is refused, not read as a service name.**
+`http://3639549472/`, `http://0x8080808/` and `http://127.1/` are all IPv4
+addresses to a browser (the first is 216.239.30.32), and they carry no dot, so
+they used to classify as a container service name — which
+`allow-private-network-target` permits. They are malformed now: write the
+address as a dotted quad. The same applies to a host whose labels are separated
+by U+3002, U+FF0E or U+FF61 rather than `.`, which Chromium reads as full stops.
+
 **Two things the recorders check that the CLI does not**, so a clean guard run
 is not a promise the take will start. `DEMO_VIDEO_BASE_URL` in the *recording*
 environment is classified by both recorders even when the storyboard passes a

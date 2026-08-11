@@ -12,11 +12,34 @@ So the target is classified, not trusted:
 | loopback | `127.0.0.1`, `localhost`, `[::1]` | always allowed |
 | private | `10.x`, `192.168.x`, `svc.internal`, a bare hostname | allowed only with the private opt-in |
 | public | `demo.example.com`, `93.184.216.34` | **refused, with no option that permits it** |
+| malformed | `ftp://x`, `3639549472`, `0x8080808` | refused, and no opt-in reaches it either |
 
 There is deliberately **no `allow_public`**, in any form — no parameter, no
 environment variable, no workflow input. Recording against a public host is not
 a thing this skill should make easy to configure; a team that truly needs it has
 to write their own runner and own that decision explicitly.
+
+**A host that is a number is malformed, not a bare hostname.** `3639549472`,
+`0x8080808` and `127.1` carry no dot, and reading them as single-label service
+names is how a public host got through the guard: the WHATWG URL parser, every
+browser and every resolver read a host whose last label is a number as an IPv4
+address, so `http://3639549472/` is `216.239.30.32`. This module does not decode
+those forms, it refuses them — a second implementation of that parser (decimal,
+octal, hex, and the 1-, 2- and 3-part shorthands) would be another thing to get
+right, and getting it wrong in the permissive direction is exactly the failure
+being fixed. The caller writes the address out as a dotted quad or a bracketed
+IPv6 literal, and the classifier grades the address rather than a guess at it.
+
+**Two edges that are correct and surprising**, so they are written down rather
+than rediscovered:
+
+- `100.64.0.0/10` — the CGNAT range — is **public**, and therefore refused with
+  no way to permit it. A team whose test network hands out addresses in that
+  range cannot record against them at all; give the host a name under one of the
+  reserved suffixes above, or record against loopback.
+- `169.254.169.254` — cloud instance metadata — is link-local and therefore
+  **private**, so the private opt-in allows it. The opt-in exists for a service
+  name on a container network, and it permits this too.
 
 **This is a target classifier, not a secret scanner.** The distinction is the
 whole design (issue #138): the skill has no masking, no scrubbing and no
@@ -30,12 +53,24 @@ environment variable this module was not given, from a config file, by string
 concatenation — is invisible to `scan`, and a recorder guarded on `base_url`
 does not see a `fetch` the page makes to somewhere else. This is a static check
 on the configuration and the source text, not a network egress control.
+
+**The second limit: this is not a UTS-46 implementation.** A host is folded with
+`unicodedata.normalize` and the three full stops UTS-46 maps to `.` before the
+dot test, because `evil。com` has no ASCII dot and used to classify as a bare
+hostname while Chromium navigated to `evil.com`. What that stdlib fold does
+*not* do, and a third-party `idna` dependency in a shipped skill would: decode
+`xn--` labels, reject characters IDNA disallows, apply the bidi and
+joiner rules, or notice a homoglyph (`gοogle.com` with a Greek omicron is a
+different name from `google.com` and both classify public here, which is the
+harmless direction). Every gap listed is a host that classifies *public* or
+*malformed* — refused — rather than one that slips through as private.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 LOOPBACK, PRIVATE, PUBLIC, MALFORMED = "loopback", "private", "public", "malformed"
@@ -52,6 +87,24 @@ _PRIVATE_SUFFIXES = (
 )
 
 URL_LITERAL = re.compile(r"https?://[^\s'\"`<>)\]}\\]+")
+
+# The three characters UTS-46 (and RFC 3490 §3.1) map to `.`, spelled out
+# rather than left to `unicodedata.normalize`: that turns U+FF0E into a full
+# stop and U+FF61 into U+3002, but nothing in the stdlib turns U+3002 into `.`,
+# and a host with no ASCII dot in it used to read as a bare hostname.
+_FULL_STOPS = str.maketrans(
+    {
+        "。": ".",  # IDEOGRAPHIC FULL STOP
+        "．": ".",  # FULLWIDTH FULL STOP
+        "｡": ".",  # HALFWIDTH IDEOGRAPHIC FULL STOP
+    }
+)
+
+# A label a URL parser reads as an IPv4 number: decimal or octal (`0100`) as
+# digits, or `0x`-prefixed hex — `0x` alone is a valid zero. Anchored with
+# `fullmatch` at the call site.
+_DECIMAL_LABEL = re.compile(r"[0-9]+")
+_HEX_LABEL = re.compile(r"0x[0-9a-f]*")
 
 # How a caller words the way out of a *private* refusal. There is no equivalent
 # for a public one, and that asymmetry is the point of the module.
@@ -72,6 +125,24 @@ class TargetRefused(RuntimeError):
     """The recorder will not be pointed at this host."""
 
 
+def _fold(host: str) -> str:
+    """A host in the form the rules below read: dotted, width-folded, lower."""
+    host = unicodedata.normalize("NFKC", host)
+    return host.translate(_FULL_STOPS).rstrip(".").lower()
+
+
+def _ends_in_a_number(host: str) -> bool:
+    """Whether a URL parser would read this host as an address, not a name.
+
+    The WHATWG rule, and the one browsers implement: a host whose **last** label
+    is a number is an IPv4 address in some notation, never a DNS name. Callers
+    reach this only after `ipaddress` has already declined the host, so anything
+    it answers True for is a notation this module refuses to decode.
+    """
+    last = host.rpartition(".")[2]
+    return bool(_DECIMAL_LABEL.fullmatch(last) or _HEX_LABEL.fullmatch(last))
+
+
 def classify(url: str) -> tuple[str, str]:
     """Return (class, why) for a URL string."""
     try:
@@ -86,7 +157,9 @@ def classify(url: str) -> tuple[str, str]:
         return MALFORMED, f"unparseable host ({exc})"
     if not host:
         return MALFORMED, "no host"
-    host = host.rstrip(".").lower()
+    host = _fold(host)
+    if not host:
+        return MALFORMED, "no host"
 
     try:
         ip = ipaddress.ip_address(host)
@@ -99,6 +172,15 @@ def classify(url: str) -> tuple[str, str]:
             return PRIVATE, f"private address {ip}"
         return PUBLIC, f"publicly routable address {ip}"
 
+    if _ends_in_a_number(host):
+        # Before the single-label branch below, which is what used to answer
+        # for these: `ipaddress` has already declined the host, so this is a
+        # number written in a notation this module will not decode.
+        return MALFORMED, (
+            f"{host} is a number, not a host name — a browser reads it as an "
+            "IPv4 address, and this classifier will not guess which one. "
+            "Write it as a dotted quad, or as a bracketed IPv6 literal"
+        )
     if host == "localhost" or host.endswith(".localhost"):
         return LOOPBACK, f"{host} resolves to loopback by RFC 6761"
     if host.endswith(_PRIVATE_SUFFIXES):

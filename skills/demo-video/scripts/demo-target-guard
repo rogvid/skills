@@ -21,6 +21,14 @@ same rule to `http(s)://` literals inside a storyboard (or any other file, such
 as a workflow's `extra-env` block), so a hardcoded production URL is refused
 before the browser opens.
 
+**Checking nothing is not a pass.** A step that passes an unset variable —
+`--url "$DEMO_VIDEO_BASE_URL"` with nothing exported — used to print
+`0 URL(s) checked, all loopback` and exit 0, a green line asserting a property
+of a set it never looked at. It now says that nothing was verified, and
+`--require` turns that into a refusal for a caller who knows a URL should have
+been there. The default stays 0 because a terminal storyboard legitimately has
+no URL at all, and a guard that failed those would be turned off.
+
 Exit status: 0 when everything checked may be recorded against, 2 when
 something may not, and 1 for a usage error.
 """
@@ -50,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--allow-private", action="store_true", help="permit private/internal hosts"
     )
+    ap.add_argument(
+        "--require",
+        action="store_true",
+        help="refuse if no URL was checked at all (an unset variable is not a target)",
+    )
     args = ap.parse_args(argv)
 
     problems: list[str] = []
@@ -72,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
             if (reason := check(url, args.allow_private)) is not None:
                 problems.append(f"{path}: {reason}")
 
+    if args.require and checked == 0:
+        problems.append(
+            "no URL reached the classifier, and --require says one should have. "
+            "An empty --url is an unset variable, not a loopback target."
+        )
+
     if problems:
         print(
             "Refusing to record. A demo recorded in CI is an outbound artifact.",
@@ -80,6 +99,15 @@ def main(argv: list[str] | None = None) -> int:
         for line in problems:
             print(f"  - {line}", file=sys.stderr)
         return 2
+
+    if checked == 0:
+        # Not "all loopback": there was no "all". Saying so is the difference
+        # between a guard that ran and a guard that had nothing to look at.
+        print(
+            "target guard: 0 URL(s) checked — nothing was verified. "
+            "Pass --require to make that a refusal."
+        )
+        return 0
 
     print(
         f"target guard: {checked} URL(s) checked, all loopback"
