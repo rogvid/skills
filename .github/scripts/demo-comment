@@ -22,6 +22,11 @@ The comment carries two tiers, decided in issue #2:
 Tier 1 is what survives artifact retention. Tier 2 is what a reviewer clicks
 today. Neither substitutes for the other.
 
+A take recorded against a ticket carries a third thing above the beat table:
+the ticket's clauses, the ones no beat claimed named first (issue #273). It is
+a rendering of `timeline.json`'s `coverage` and it grades nothing — see
+`render_coverage`.
+
 The body opens with an HTML marker so the workflow can find and rewrite this
 comment rather than appending a new one on every push.
 """
@@ -62,6 +67,113 @@ def story_beats(beats: list[dict]) -> list[tuple[float, str]]:
     return out
 
 
+def _plural(n: int, one: str, many: str) -> str:
+    return one if n == 1 else many
+
+
+def _and_list(items: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c` — the headline is read, not parsed."""
+    if len(items) < 3:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _claim_label(rows: list[dict]) -> str:
+    """Where a clause was claimed, as beat indices — never as a time to seek to.
+
+    `coverage.claimed[*].t_start` is `time.monotonic()` and the video is on the
+    host's wall clock, so a seek printed off it would be issue #229 reproduced
+    in the artifact a reviewer actually opens. The beat index is the one
+    coordinate both the manifest and `frames/` already agree on.
+    """
+    parts: list[str] = []
+    for row in rows:
+        index = row.get("index")
+        part = "an unnumbered beat" if index is None else str(index)
+        if row.get("segment"):
+            part += f" (`{_cell(str(row['segment']))}`)"
+        parts.append(part)
+    return _plural(len(parts), "beat ", "beats ") + ", ".join(parts)
+
+
+def render_coverage(coverage: object) -> list[str]:
+    """The ticket's clauses and what claimed them, **gap first** (issue #273).
+
+    Nothing here is a verdict, and the wording is load-bearing rather than a
+    matter of taste. `coverage.py` names its columns `claimed`/`unclaimed`
+    because an `ac=` tag is a string the storyboard author typed, not evidence
+    that the frames show the clause — so this rendering says "claimed", says
+    out loud that it graded nothing, and **never says a clause was
+    demonstrated**. A comment that promoted the tag to a verdict would make the
+    manifest's caution decorative in the one artifact a reviewer is guaranteed
+    to read.
+
+    The gap leads for the same reason `timeline.md`'s section does: a reader
+    who meets the claimed table first has already formed the impression the
+    report exists to test. `unclaimed` needs no judgement — nobody even
+    asserted those clauses — which is what makes it the one line here that can
+    be stated flatly.
+
+    Which clauses nothing claimed is derived from `claimed`, not read out of
+    the manifest's own `unclaimed`, so the headline and the table below it
+    cannot disagree about the same take.
+    """
+    doc = coverage if isinstance(coverage, dict) else {}
+    criteria = doc.get("criteria")
+    if not isinstance(criteria, dict) or not criteria:
+        # No criteria declared, which is the ordinary take: it was not recorded
+        # against a ticket, and an empty acceptance section would read as a
+        # ticket it covered nothing of.
+        return []
+    claimed = doc.get("claimed") or {}
+    unclaimed = [key for key in criteria if not (claimed.get(key) or [])]
+    total, covered = len(criteria), len(criteria) - len(unclaimed)
+
+    gap: list[str] = []
+    if unclaimed:
+        ids = _and_list([f"`{_cell(key)}`" for key in unclaimed])
+        gap += [
+            f"**{ids} {_plural(len(unclaimed), 'has', 'have')} no beat "
+            f"claiming {_plural(len(unclaimed), 'it', 'them')}.**",
+            "",
+        ]
+    if covered:
+        gap.append(
+            f"{total} {_plural(total, 'clause', 'clauses')}. "
+            f"{covered} {_plural(covered, 'has', 'have')} a beat that claims "
+            f"{_plural(covered, 'it', 'them')}; whether the frames show what "
+            f"{_plural(covered, 'it claims', 'they claim')} is the reviewer's "
+            f"call. Nothing in this comment graded a claim."
+        )
+    else:
+        gap.append(
+            f"{total} {_plural(total, 'clause', 'clauses')}, and no beat "
+            f"claims any of {_plural(total, 'it', 'them')}. Nothing in this "
+            f"comment graded a claim."
+        )
+    gap.append("")
+
+    table = ["| clause | claimed at |", "|---|---|"]
+    for key, text in criteria.items():
+        rows = claimed.get(key) or []
+        where = _claim_label(rows) if rows else "*nothing claims this*"
+        table.append(f"| **{_cell(key)}** — {_cell(str(text))} | {where} |")
+    table.append("")
+
+    note = [
+        "<sub>A claim points at a beat, not at a moment to seek to: the "
+        "coverage timestamps are on the recorder's monotonic clock and the "
+        "video is on the host's wall clock, so a seek printed from them would "
+        "be [#229](https://github.com/rogvid/skills/issues/229) in a new "
+        "artifact ([#277](https://github.com/rogvid/skills/issues/277)).</sub>",
+        "",
+    ]
+    # The gap first, and the order is the whole point rather than a layout
+    # choice: a rendering that opened with the claimed table would *be* a
+    # coverage claim, whatever the words under it said.
+    return gap + table + note
+
+
 def _human_size(n: int | None) -> str:
     if not n:
         return "size unknown"
@@ -90,6 +202,12 @@ def render_demo(name: str, timeline: dict) -> str:
         f"{len(rows)} beats · {_duration(timeline)} · recorded by `{timeline.get('recorder', '?')}`"
     )
     lines.append("")
+
+    # Above the beat table, because on a take recorded against a ticket it is
+    # the reason somebody opened the comment — and a reviewer who scrolls past
+    # twenty captions first has already formed the impression the coverage
+    # report exists to test (issue #273, the same ordering `timeline.md` uses).
+    lines += render_coverage(timeline.get("coverage"))
 
     if rows:
         lines.append("| # | at | Caption |")
@@ -190,11 +308,12 @@ def render(
             f"`evidence/` and `frames/` are uploaded separately and kept "
             f"{evidence_retention_days} days, long enough to check a disputed finding."
         )
-    footnote.append(
-        "Which acceptance criterion each beat demonstrates is not reported yet "
-        "([#12](https://github.com/rogvid/skills/issues/12))."
-    )
-    lines.append("<sub>" + " ".join(footnote) + "</sub>")
+    # Only when there is something to say. Until #273 the footnote always
+    # carried the acceptance-criteria sentence, so this could not be empty;
+    # with that sentence gone, a run invoked without `--sha`, `--run-url` or an
+    # evidence retention would otherwise end the comment on a bare `<sub></sub>`.
+    if footnote:
+        lines.append("<sub>" + " ".join(footnote) + "</sub>")
     return "\n".join(lines) + "\n"
 
 

@@ -50,6 +50,21 @@ jobs:
 2. **A deep link to the artifact** — `…/actions/runs/<id>/artifacts/<id>`, so
    watching is one click and an unzip.
 
+On a take recorded against a ticket — `Recorder(criteria={"AC-1": "…"})`, beats
+tagged `ac="AC-1"` — a third thing sits **above** the beat table: the ticket's
+clauses, with the ones **no beat claimed named first**, then a table of what
+claimed the rest and at which beat. That order is deliberate. A rendering that
+opened with the covered half would be a coverage claim whatever the sentence
+under it said, and the one finding here that needs no judgement is the clause
+nobody even asserted.
+
+**It says "claimed", never "demonstrated", and it says out loud that it graded
+nothing.** An `ac=` tag is a string the storyboard author typed; whether the
+frames show the clause is the reviewer's call, and the comment is written so it
+cannot be mistaken for having made it. A claim points at a **beat index**
+rather than a timestamp, because the coverage timestamps are on the recorder's
+monotonic clock while the video is on the host's wall clock.
+
 `demo.mp4`, `timeline.md`/`.json` and `images/` upload as the `demo-video`
 artifact on an explicit `retention-days`; `evidence/` and `frames/` upload
 separately on a short one (1–7 days, long enough to check a disputed finding
