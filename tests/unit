@@ -2555,6 +2555,11 @@ class VendoredAssets(unittest.TestCase):
 TARGET_LOOPBACK = "http://127.0.0.1:8901"
 TARGET_PRIVATE = "http://10.0.0.4:8080"
 TARGET_PUBLIC = "https://tickets.acme.com"
+# Two public hosts that carry no ASCII dot, which is what a bare hostname was
+# recognised by. `3639549472` is 216.239.30.32 to every URL parser there is,
+# and U+3002 is a label separator to UTS-46, so Chromium loads evil.com.
+TARGET_NUMERIC = "http://3639549472"
+TARGET_UNICODE_DOT = "http://evil。com"
 
 # The variables the guard reads. Pinned rather than inherited wherever a
 # recorder is constructed in this file: a suite whose recorders refuse or allow
@@ -2637,6 +2642,23 @@ class TargetGuard(unittest.TestCase):
             ).base_url,
             TARGET_PRIVATE,
         )
+
+    def test_the_private_opt_in_does_not_reach_a_host_that_is_a_number(self):
+        # The configuration this got through under, and it is the ordinary
+        # one: `allow_private=True` is what a container service name needs, and
+        # a host with no dot in it used to be read as exactly that. Written
+        # from the caller's side like everything else here — what is graded is
+        # that the recorder refuses, not which class the rule assigns.
+        for settings in ({}, {"allow_private": True}):
+            with self.subTest(settings=settings):
+                with self.assertRaises(TargetRefused) as caught:
+                    self.build(base_url=TARGET_NUMERIC, **settings)
+                self.assertIn(TARGET_NUMERIC, str(caught.exception))
+
+    def test_the_private_opt_in_does_not_reach_a_unicode_label_separator(self):
+        with self.assertRaises(TargetRefused) as caught:
+            self.build(base_url=TARGET_UNICODE_DOT, allow_private=True)
+        self.assertIn(TARGET_UNICODE_DOT, str(caught.exception))
 
     def test_the_spelling_a_boolean_workflow_input_renders_is_accepted(self):
         # Every other test here writes `"1"`, and the CI path never does. The
@@ -9472,6 +9494,25 @@ INJECTIONS = [
         '    if kind == PUBLIC:\n        return f"{url} — classified {PUBLIC}: {why}. {PUBLIC_REFUSAL}"',
         "    if kind == PUBLIC:\n        return None",
         ["TargetGuard.test_nothing_gets_a_public_target_through"],
+    ),
+    (
+        # The fail-open, at the recorder rather than at the CLI: without this
+        # branch a host that is a number falls through to "no dot, so a
+        # single-label service name", which the private opt-in permits.
+        "the rule reads a numeric host as a bare hostname again",
+        "target.py",
+        "    if _ends_in_a_number(host):",
+        "    if False:",
+        ["TargetGuard.test_the_private_opt_in_does_not_reach_a_host_that_is_a_number"],
+    ),
+    (
+        "the rule stops folding the Unicode label separators",
+        "target.py",
+        '    return host.translate(_FULL_STOPS).rstrip(".").lower()',
+        '    return host.rstrip(".").lower()',
+        [
+            "TargetGuard.test_the_private_opt_in_does_not_reach_a_unicode_label_separator"
+        ],
     ),
     (
         "the web recorder resolves base_url and never classifies it",

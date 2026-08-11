@@ -231,6 +231,70 @@ class Classify(unittest.TestCase):
         self.assertEqual(guard.classify("file:///etc/passwd")[0], guard.MALFORMED)
         self.assertEqual(guard.classify("not a url")[0], guard.MALFORMED)
 
+    def test_a_numeric_host_is_not_a_bare_hostname(self):
+        # The fail-open this class shipped: no dot, so "a single label, so
+        # private", so `--allow-private` — the ordinary CI setting for a
+        # container service name — let it through. Each of these is an IPv4
+        # address to the WHATWG parser and to every browser and resolver:
+        # `3639549472` is 216.239.30.32, `010.0.0.1` is 8.0.0.1 read as octal.
+        for url in (
+            "http://3639549472/",
+            "http://127.1/",
+            "http://010.0.0.1/",
+            "http://1.2.3.4.5/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(guard.classify(url)[0], guard.MALFORMED)
+
+    def test_a_hex_host_is_a_number_too(self):
+        # Graded apart from the decimal forms because it is a separate pattern
+        # in the module, and a rule that read only digits would leave the hex
+        # spelling of the same address classified private.
+        for url in ("http://0x8080808/", "http://1.2.3.0x4/"):
+            with self.subTest(url=url):
+                self.assertEqual(guard.classify(url)[0], guard.MALFORMED)
+
+    def test_a_name_that_merely_contains_digits_is_not_a_number(self):
+        # The control on the two above, and the boundary the rule is drawn at:
+        # "the last label is a number" is the browsers' rule, so digits
+        # anywhere else are part of a name. Without this, a classifier that
+        # called *everything* malformed would satisfy both tests above.
+        self.assertEqual(guard.classify("http://api2/")[0], guard.PRIVATE)
+        self.assertEqual(guard.classify("http://3com.com/")[0], guard.PUBLIC)
+        self.assertEqual(guard.classify("http://127.0.0.1:8901/")[0], guard.LOOPBACK)
+
+    def test_a_unicode_full_stop_separates_labels_like_an_ascii_one(self):
+        # UTS-46 maps all three to `.`, so Chromium navigates to evil.com.
+        # None of them contains an ASCII dot, so all three used to classify as
+        # a single-label private name. The reason is asserted as well as the
+        # class: what makes this public is the fold, and a verdict alone would
+        # also be reached by a rule that called every unparseable host public.
+        for url in ("http://evil。com/", "http://evil．com/", "http://evil｡com/"):
+            with self.subTest(url=url):
+                kind, why = guard.classify(url)
+                self.assertEqual(kind, guard.PUBLIC)
+                self.assertIn("evil.com", why)
+
+    def test_a_fullwidth_number_is_still_a_number(self):
+        # The other half of the fold, and the reason it is not three character
+        # substitutions: the digits have widths too, and a browser reads
+        # U+FF13… as 3639549472 before it reads it as an address.
+        self.assertEqual(
+            guard.classify("http://３６３９５４９４７２/")[0],
+            guard.MALFORMED,
+        )
+
+    def test_the_two_edges_the_module_documents(self):
+        # Both are correct, both surprise people, and neither was pinned by a
+        # test before. CGNAT is publicly routable as far as this module is
+        # concerned — so a team whose test network uses 100.64/10 cannot record
+        # against it at all, with no opt-in that helps.
+        self.assertEqual(guard.classify("http://100.64.1.1/")[0], guard.PUBLIC)
+        # Cloud instance metadata is link-local, so it is private, so the
+        # private opt-in reaches it. The opt-in exists for a service name on a
+        # container network and it permits this too.
+        self.assertEqual(guard.classify("http://169.254.169.254/")[0], guard.PRIVATE)
+
 
 class Check(unittest.TestCase):
     def test_loopback_passes_without_any_opt_in(self):
@@ -295,6 +359,31 @@ class GuardExitCode(unittest.TestCase):
         done = self._run("--url", "https://tickets.acme.com", "--allow-private")
         self.assertEqual(done.returncode, 2)
         self.assertIn("tickets.acme.com", done.stderr)
+
+    def test_a_numeric_host_exits_two_even_with_the_private_opt_in(self):
+        # `--allow-private` is what a workflow passes for a container service
+        # name, and it is the configuration this host reached exit 0 under.
+        done = self._run("--url", "http://3639549472/", "--allow-private")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("3639549472", done.stderr)
+
+    def test_checking_nothing_is_not_reported_as_checking_everything(self):
+        # A step that passes an unset variable. Exit 0 is deliberate — a
+        # terminal storyboard has no URL — but the line must not claim a
+        # property of the empty set it never looked at.
+        done = self._run("--url", "")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("all loopback", done.stdout)
+        self.assertIn("0 URL(s) checked", done.stdout)
+
+    def test_require_refuses_when_nothing_reached_the_classifier(self):
+        done = self._run("--url", "", "--require")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("no URL reached the classifier", done.stderr)
+        # And it is about the count, not about --require itself: a run that
+        # did check something is unaffected by the flag.
+        checked = self._run("--url", "http://127.0.0.1:8901", "--require")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -790,6 +879,85 @@ INJECTIONS = [
         ],
     ),
     (
+        # The fail-open as it shipped: with this branch gone, a host that is a
+        # number falls through to "no dot, so a single-label service name",
+        # which `--allow-private` permits. Graded through both doors again.
+        "a numeric host reads as a bare hostname the private opt-in covers",
+        "target.py",
+        "    if _ends_in_a_number(host):",
+        "    if False:",
+        [
+            "Classify.test_a_numeric_host_is_not_a_bare_hostname",
+            "Classify.test_a_hex_host_is_a_number_too",
+            "Classify.test_a_fullwidth_number_is_still_a_number",
+            "GuardExitCode.test_a_numeric_host_exits_two_even_with_the_private_opt_in",
+        ],
+    ),
+    (
+        # One notation deep rather than the whole branch: the decimal forms
+        # keep classifying, and only the hex spelling of the same address
+        # stops. A single break at the branch above would not tell them apart.
+        "the hex notation stops being read as a number",
+        "target.py",
+        '_HEX_LABEL = re.compile(r"0x[0-9a-f]*")',
+        '_HEX_LABEL = re.compile(r"(?!x)x")',
+        ["Classify.test_a_hex_host_is_a_number_too"],
+    ),
+    (
+        "the Unicode label separators stop being folded to a dot",
+        "target.py",
+        '    return host.translate(_FULL_STOPS).rstrip(".").lower()',
+        '    return host.rstrip(".").lower()',
+        ["Classify.test_a_unicode_full_stop_separates_labels_like_an_ascii_one"],
+    ),
+    (
+        # The other half of the fold, and it is invisible to the test above,
+        # which U+FF0E survives on the explicit table alone.
+        "the width fold goes, so a fullwidth number is a name again",
+        "target.py",
+        '    host = unicodedata.normalize("NFKC", host)',
+        "    host = host",
+        ["Classify.test_a_fullwidth_number_is_still_a_number"],
+    ),
+    (
+        # The documented edge, broken the way somebody would actually break
+        # it: a carve-out for the metadata endpoint, which reads as hardening
+        # and silently makes the module's table wrong. Deleting `is_link_local`
+        # instead was tried and grades nothing — every IPv4 link-local address
+        # is also `is_private`, so the branch answers the same either way.
+        "the link-local range is carved out of private",
+        "target.py",
+        "        if ip.is_private or ip.is_link_local or ip.is_unspecified:",
+        '        if ip.is_link_local:\n            return PUBLIC, f"link-local {ip}"\n'
+        "        if ip.is_private or ip.is_unspecified:",
+        ["Classify.test_the_two_edges_the_module_documents"],
+    ),
+    (
+        # And the same edge broken the other way: CGNAT quietly permitted
+        # under the private opt-in, which is what the documented verdict
+        # exists to say does not happen.
+        "the CGNAT range starts classifying private",
+        "target.py",
+        "        if ip.is_private or ip.is_link_local or ip.is_unspecified:",
+        "        if ip.is_private or ip.is_link_local or ip.is_unspecified or ip.version == 4 and ip in ipaddress.ip_network('100.64.0.0/10'):",
+        ["Classify.test_the_two_edges_the_module_documents"],
+    ),
+    (
+        "checking nothing reports as checking everything",
+        "scripts/demo-target-guard",
+        '        print(\n            "target guard: 0 URL(s) checked — nothing was verified. "\n'
+        '            "Pass --require to make that a refusal."\n        )\n        return 0\n',
+        "        pass\n",
+        ["GuardExitCode.test_checking_nothing_is_not_reported_as_checking_everything"],
+    ),
+    (
+        "--require is accepted and ignored",
+        "scripts/demo-target-guard",
+        "    if args.require and checked == 0:",
+        "    if False:",
+        ["GuardExitCode.test_require_refuses_when_nothing_reached_the_classifier"],
+    ),
+    (
         "the guard forgets the --allow-private opt-in and lets private through",
         "target.py",
         "    if kind == PRIVATE and allow_private:\n        return None",
@@ -948,6 +1116,10 @@ def fault_inject() -> int:
             shutil.copy(Path(__file__).resolve(), inner)
             if script == "target.py":
                 target = skill / "helpers" / "demo_recording" / script
+            elif script == "scripts/demo-target-guard":
+                # The CLI ships with the skill rather than under
+                # `.github/scripts/`, and `GuardExitCode` runs the copy.
+                target = skill / script
             elif script == "demo-video.yml":
                 target = workflow
             elif script == "tests/ci-unit":
