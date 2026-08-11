@@ -2003,12 +2003,16 @@ take with fewer beats than the last one would otherwise leave the
     def _write_failure(self) -> None:
         """Put the built dump on disk, plus the last frame of the recording.
 
-        The frame comes out of the mp4 with ffmpeg rather than off the page:
-        it is a frame of the recording the take already
-        vouched for, so it inherits that guarantee whole and reads nothing
-        after the verifier ran. Gated on `self._converted`, not on the file
-        existing — a previous run's demo.mp4 is not a picture of this crash
-        (issue #20).
+        The frame comes out of the mp4 with ffmpeg rather than off the page
+        because by the time this runs there is no page: `__exit__` closes the
+        context, the browser and Playwright before `_convert`, and this is
+        called after all of it. It used to be argued for the other way round —
+        the frame inheriting a guarantee the take had already earned — and the
+        machinery that issued that guarantee went in #144. The PNG carries none
+        now: it is the last frame of this take's recording, as it was recorded,
+        and no more is claimed for it than for any other artifact here. Gated on
+        `self._converted`, not on the file existing — a previous run's demo.mp4
+        is not a picture of this crash (issue #20).
         """
         if self._failure_json is None:
             return

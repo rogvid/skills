@@ -134,6 +134,16 @@ the encoded frame, and writes down what it found:
   recorder did about it. Read the next section: `held` above zero means the
   first frames of your video are not frames the recording captured.
 
+**What the take says out loud, and on which stream.** Which line the take
+prints decides the stream: **anything wrong — a warning, or the note that the
+check could not run — goes to stderr; the healthy `shows a picture` line goes
+to stdout.** A take takes at most one of those branches and never both: a take
+that warned prints no `shows a picture` line, a take that printed one recorded
+no warnings, and a take that encoded no mp4 has no `content` to report and says
+nothing here at all. So capturing one stream in a script never gives you half a
+summary; it gives you the whole summary of one kind of take and silence for
+the other, which is the thing to know before redirecting either.
+
 ### `opening` — the first frames of a web take are a hold
 
 Chromium starts recording when the page is created, and the page is
@@ -150,8 +160,11 @@ to.
 **Two things follow, and neither is hidden from you:**
 
 - Those opening frames show the app slightly before it painted. `held` is how
-  many seconds were covered, it is in `timeline.json`, and the take says it on
-  stderr as it finishes. Nothing else in the video is touched — the duration,
+  many seconds were covered, and it is in `timeline.json` on every take that
+  measured one. Spoken, it is a clause of the healthy `shows a picture` line —
+  **stdout**, and the only place the recorder ever says it. A take that warned
+  does not print that line, so on a take with warnings `held` is in this file
+  and nowhere else. Nothing else in the video is touched — the duration,
   the audio and every beat timestamp are exactly what they were, because the
   hold is an overlay switched off rather than a trim.
 - The video is therefore not a measurement of your app's load time, and was
