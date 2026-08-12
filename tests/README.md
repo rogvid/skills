@@ -1472,10 +1472,6 @@ second and third rows each have an injection that reddens
 which is the measurement that says their fixtures are carrying those sentences
 rather than decorating an existing test.
 
-What none of this says is that the picture shows the clause. It says a file
-exists, resolves, and belongs to the beat that claimed it — the same boundary
-as everything else here.
-
 **The sweep grades the sentences the renderer writes, not the ones it quotes**
 ([#283](https://github.com/rogvid/skills/issues/283)). Clause text belongs to
 whoever wrote the ticket and captions to whoever wrote the storyboard, and both
@@ -1513,8 +1509,12 @@ per clause and its beat numbers, and points every row at the wrong one.
 
 **What this deliberately does not grade**, two things:
 
-- Whether a tagged beat *shows* what it claims. That is the reviewer's
-  judgement, and the artifact is written to say so rather than to assert it.
+- Whether a tagged beat *shows* what it claims — including, since
+  [#274](https://github.com/rogvid/skills/issues/274), whether the picture
+  linked beside a clause is a picture *of* it. What the link grades is that a
+  file exists, resolves, and belongs to the beat that claimed it. That is the
+  reviewer's judgement, and the artifact is written to say so rather than to
+  assert it.
 - **Whether the criterion card is legible.** "The clause reached the page" is
   not "a human can read it": a card rendered off-frame, under an app overlay,
   or clipped by an over-long clause puts exactly the same text in exactly the
