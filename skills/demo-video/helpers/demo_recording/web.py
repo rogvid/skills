@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .content import OPENING_HOLD_LIMIT_S, content_rect, opening_gap
-from .core import _beat_verb, _DemoBase, _env
+from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, _beat_verb, _DemoBase, _env
 from .target import guard_target
 
 # Pastel gradient behind the window — matches the terminal recorder's
@@ -39,13 +39,20 @@ _WEB_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
 # The window frame drawn behind the recording: gradient background + a dark
 # rounded window with a title bar and traffic-light buttons. Screenshotted
 # once per run; the app video is composited into its body by ffmpeg.
+#
+# `__WINBG__` is `core.WEB_WINDOW_BODY`, and it is a shared constant rather
+# than a literal because the interlude card is painted to match this colour in
+# the encoded frame (issue #291) — see `core.WEB_CARD_BODY`, which is this value
+# compensated for the extra encoder the card goes through (#301). Paint this
+# from a literal and the two drift apart on the next edit, with nothing left
+# tying the card's compensation to the thing it compensates for.
 _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 <style>
   html, body { margin: 0; height: 100%; }
   body { background: __BG__; }
   #win { position: fixed; left: __WINX__px; top: __WINY__px;
     width: __WINW__px; height: __WINH__px; border-radius: 14px;
-    overflow: hidden; background: #181825;
+    overflow: hidden; background: __WINBG__;
     box-shadow: 0 34px 90px rgba(20,16,40,.40), 0 8px 22px rgba(20,16,40,.28); }
   #bar { height: 36px; display: flex; align-items: center; gap: 8px;
     padding: 0 14px; background: #232334;
@@ -510,6 +517,12 @@ class Recorder(_DemoBase):
         # The recording is composited into a window and scaled down (~0.8),
         # so captions are rendered larger to stay readable in the final mp4.
         self._caption_font_px = 34
+        # And the same composite is why the interlude card is not the default
+        # one: the terminal palette is the colour of a *terminal*, and inside
+        # this window frame a full-bleed field of it reads as one — the whole
+        # of issue #291. The web card is the window's own body colour instead,
+        # as it lands in demo.mp4. See core.INTERLUDE_CSS_WEB.
+        self._interlude_css = INTERLUDE_CSS_WEB
         # What spotlight() is currently pointing at, which is what a beat's
         # evidence is scoped to. Held here rather than read back out of the
         # page: `window.__spotEl` is an element handle, not a selector, and the
@@ -617,6 +630,7 @@ class Recorder(_DemoBase):
         title = urlparse(self.base_url).netloc or "app"
         html = (
             _FRAME_HTML.replace("__BG__", _WEB_BG)
+            .replace("__WINBG__", WEB_WINDOW_BODY)
             .replace("__WINX__", str(g["winx"])).replace("__WINY__", str(g["winy"]))
             .replace("__WINW__", str(g["winw"])).replace("__WINH__", str(g["winh"]))
             .replace("__TITLE__", title)

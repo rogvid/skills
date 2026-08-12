@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~44 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~45 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -182,8 +182,8 @@ grades, the manifest that proves it can still fail:
 ```sh
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
-tests/smoke-inject --arm coverage # one arm's entries (~165 s)
-tests/smoke-inject                # all 56 entries, ~44 min
+tests/smoke-inject --arm coverage # one arm's entries (~225 s)
+tests/smoke-inject                # all 60 entries, ~45 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1390,6 +1390,10 @@ Injections caught:
 | the card claims nothing | the card arm's `ac`, and the claimed-rows assertion |
 | the criterion beat does not record which clause it showed | the card arm's `selector` |
 | the fixture stops raising a card at all | the card arm's control |
+| a web take is painted the terminal's card (#291) | the colour reading, at 16 levels off a bar of 6 |
+| the card is built in the right colour and never made visible | the colour reading, at 214 levels off |
+| the window frame is repainted out from under the card | **only** the card-against-window reading, at 32 levels apart against a bar of 2 — the card itself is exactly the colour it was dispatched in |
+| the card drops its encoder compensation and declares the window's own colour | **only** the card-against-window reading, at 5 levels apart — the colour reading measures 6 against a bar of 6 and lets it through |
 
 **The card arm reads two sources on purpose** (issue #280). Four of its
 assertions read `timeline.json`, which the recorder writes out of the same
@@ -1451,13 +1455,58 @@ per clause and its beat numbers, and points every row at the wrong one.
 - Whether a tagged beat *shows* what it claims. That is the reviewer's
   judgement, and the artifact is written to say so rather than to assert it.
 - **Whether the criterion card is legible.** "The clause reached the page" is
-  not "a human can read it": a card rendered off-frame, at zero opacity, under
-  an app overlay, or clipped by an over-long clause puts exactly the same text
-  in exactly the same snapshot. Nothing here reads a pixel of the card, and
-  nothing here can. That question is answered the way this skill answers every
+  not "a human can read it": a card rendered off-frame, under an app overlay,
+  or clipped by an over-long clause puts exactly the same text in exactly the
+  same snapshot. That question is answered the way this skill answers every
   question about how a recording looks — somebody watches the video (SKILL.md
   Process step 6) — and the demo recorded for #280 is that answer for this
   verb.
+
+  **Two pixel readings are taken** (issue #291), both across the card's own
+  beat and both out of `demo.mp4`. `check_criterion_card` samples a strip of the
+  app rect and requires that it is the colour the package dispatched —
+  `#181726`, `WEB_CARD_BODY` — and it samples the pad of window body below the
+  app rect and requires the two to be **within 2 levels per channel**. The
+  shipped pair reads `(24, 21, 36)` against `(23, 22, 37)`: one level.
+
+  **What that second reading is for, and why it took four rounds to write.**
+  #291 is *a web take's card is indistinguishable from the window it sits in* —
+  the reverse of a distance. An earlier round pinned the two at least 12 luma
+  levels apart, which the person who found #291 rejected: they asked for the
+  card to **match** the window. The round after that pinned the card's *declared*
+  colour equal to the window's, and they rejected that too, by sampling a
+  shipped frame and finding the two five levels apart in blue. Both readings
+  were honest and both graded the wrong thing — one the wrong direction, one a
+  string. The window frame reaches `demo.mp4` as a screenshot and the card
+  reaches it through Chromium's VP8, so one declared colour arrives as two
+  ([#301](https://github.com/rogvid/skills/issues/301)); the card is therefore
+  declared two levels off the window *so that it lands on it*, and what is
+  graded is where the two land.
+
+  **A failure of that reading is not a flake.** The compensation is measured
+  against one encoder path — this Chromium's VP8, this ffmpeg, `yuv420p`. If any
+  of them moves, the two layers really do stop matching on screen and the bar
+  going red is correct. The fix is to re-measure `core.WEB_CARD_BODY` against
+  the window, never to widen `CARD_WINDOW_TOLERANCE`. **Where the constant was
+  measured, precisely:** one Linux developer box, sweeping 100 declared colours
+  through real takes. Two platforms then read the *shipped* value identically
+  off `demo.mp4` — that box and `ubuntu-latest` under `smoke (web, content and
+  terminal takes)`, both `(24, 21, 36)` for the card and `(23, 22, 37)` for the
+  window, not merely both under the bar. That is two hosts agreeing exactly,
+  which is evidence and not a guarantee: no Windows or macOS runner has ever
+  recorded a take here, and only this box was swept.
+
+  **What is still not graded: whether a viewer reads the result as a card.**
+  Sameness is measurable and now measured; recognition is not. Nor is:
+
+  - **Whether the card is legible.** The strip is chosen to sit *above* the
+    text, so a card whose clause is clipped, mis-hyphenated or rendered in an
+    unreadable face passes exactly as a good one does.
+  - **Whether the frame around it reads as a window** rather than as one flat
+    surface with a title bar, which is the sentence #291 was filed in. The same
+    element, text and snapshot are produced either way.
+
+  A human still has to watch.
 
 ### Whether the recorder notices that the recording shows nothing (issue #97)
 
@@ -1782,7 +1831,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-56 entries, 12 arms, ~43.6 min of takes
+60 entries, 12 arms, ~44.6 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1811,7 +1860,7 @@ paragraph whose job is to say what this manifest does not cover.
 |---|---|---|
 | `--lock-only` | 3 | a run the machine lock refuses goes back to building an output directory it will never write to and printing `recordings left in` under `smoke: FAILED`, naming it ([#105](https://github.com/rogvid/skills/issues/105)) — or the fix overshoots and no failing run is told where its recordings are, which the third entry is the control for |
 | `--narration-only` | 6 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for. Two more are about *where* the voice went ([#226](https://github.com/rogvid/skills/issues/226)), which no window bar can see: the mix landing 250 ms from the second the take's own record names, and the record naming a second the mix did not use — caught only because the arm now watches the host's wall clock itself and compares |
-| `--coverage-only` | 10 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade |
+| `--coverage-only` | 14 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade. Four more grade the *picture* of that card ([#291](https://github.com/rogvid/skills/issues/291)) — pixels read off `demo.mp4`, not values read out of a document: a web take given the terminal's near-black card, which is the defect and which every artifact of the take describes correctly; a card dispatched in the right colour and never made visible; and two that only the card-against-window reading catches — the recorder's window repainted out from under a card that is exactly what it should be, and the card's encoder compensation dropped so that one declared colour serves both layers and they arrive five levels apart |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
@@ -1824,7 +1873,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 42 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 43 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 

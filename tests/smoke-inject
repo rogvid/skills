@@ -432,6 +432,105 @@ INJECTIONS = [
         sites=("check_coverage",),
         must_contain=("states a finding about unclaimed criteria",),
     ),
+    # -- the card is the window's own colour, in demo.mp4 (issue #291) --------
+    #
+    # Four entries against the two claims in the one assertion here that reads
+    # *pixels* out of the encoded frame. `tests/unit` grades the dispatch —
+    # which stylesheet each medium hands the page — at 0.2 s an injection; what
+    # it cannot see is what the composite did with it, which is the half a
+    # viewer meets, and after #301 it is the *only* half that can say whether
+    # the card and the window are one colour on screen.
+    #
+    # The first entry is the defect as it shipped: a terminal card on a web
+    # take, caught as a wrong *colour* at 16 levels against a bar of 6. The
+    # second is a card dispatched perfectly and never painted, at 214. The last
+    # two carry the claim that the card and the window body agree in the
+    # encoded frame, one from each side — the frame repainted under a card that
+    # is exactly what it should be, and the card's encoder compensation
+    # removed. Note what the second of those means for the bar next door: the
+    # uncompensated card is 6 levels off its own declared colour, which
+    # `CARD_RGB_TOLERANCE` lets through at exactly the bound, so the entry is
+    # caught by the window reading and by nothing else.
+    Injection(
+        # #291 restored. Injected at the import so the module still loads: a
+        # `NameError` here would fail the arm before it recorded anything, and
+        # the entry would be graded by an exception rather than by the pixels.
+        name="a web take is painted the terminal's card",
+        module="web.py",
+        old="from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, "
+        "_beat_verb, _DemoBase, _env",
+        new="from .core import (  # noqa: I001\n"
+        "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
+        "    WEB_WINDOW_BODY,\n"
+        "    _beat_verb,\n"
+        "    _DemoBase,\n"
+        "    _env,\n"
+        ")",
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=("off the *terminal* card's",),
+    ),
+    Injection(
+        # The card raised at zero opacity: the element is in the tree with the
+        # right text and the right stylesheet, so the aria snapshot, the beat
+        # log and the coverage table are all exactly as they should be, and the
+        # app is what a viewer sees. Every other assertion in this arm passes.
+        name="the card is built with the right colour and never shown",
+        module="core.py",
+        # The card's own two lines and not the caption bar's: `__demoCaption`
+        # ends in the same pair, so a shorter search string matches twice and
+        # the harness refuses the entry.
+        old="    el.style.cssText = '__CSS__';\n"
+        "    document.body.appendChild(el);\n"
+        "  }\n"
+        "  el.textContent = text;\n"
+        "  el.style.opacity = text ? '1' : '0';",
+        new="    el.style.cssText = '__CSS__';\n"
+        "    document.body.appendChild(el);\n"
+        "  }\n"
+        "  el.textContent = text;\n"
+        "  el.style.opacity = '0';",
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=(" levels off the web card's ",),
+    ),
+    Injection(
+        # **The window is repainted under a card that is exactly right.** This
+        # is the entry #297 had and the round after it deleted with the check it
+        # existed for. It is back because there is a check again: the card's own
+        # colour claim passes here — the strip really is `WEB_CARD_RGB` — and
+        # the *only* thing that fires is the reading that says the card and the
+        # window body are one colour on screen, which is #291's own property.
+        name="the window frame is repainted out from under the card",
+        module="core.py",
+        old='WEB_WINDOW_BODY = "#181825"',
+        new='WEB_WINDOW_BODY = "#050505"',
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=(
+            "levels apart (bar",
+            "that a viewer cannot tell a web take's card",
+        ),
+    ),
+    Injection(
+        # **The compensation is removed**, which is the third rejected fix
+        # restored: one declared colour for both, the thing a reader expects
+        # "the card is the window's colour" to mean. Every stylesheet is
+        # consistent, `tests/unit` is green, and the card lands 5 levels of blue
+        # off the window in `demo.mp4` because it went through Chromium's VP8
+        # and the window did not (#301). A human found this by sampling a
+        # shipped frame; this is the entry that says a machine can now find it.
+        name="the card drops its encoder compensation and declares the window's colour",
+        module="core.py",
+        old='WEB_CARD_BODY = "#181726"',
+        new='WEB_CARD_BODY = "#181825"',
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=(
+            "levels apart (bar",
+            "that a viewer cannot tell a web take's card",
+        ),
+    ),
     # -- what strict=True refuses (issue #3), 21 s an entry -------------------
     #
     # These two are why `--strict-only` exists. The assertions were reachable

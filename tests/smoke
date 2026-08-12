@@ -169,9 +169,12 @@ MIN_CONTENT_STDDEV = {
 #   web         25.6          0.00
 #   terminal     2.7          0.00
 #
-# The terminal margin is the thinnest number in this file — 2.7x over its
-# floor, against 4x or better for everything else. tests/README.md calls that
-# out under "Known gaps".
+# The terminal margin is 2.7x over its floor. It was the thinnest number in
+# this file when it was written (871eac3, against 4x or better everywhere
+# else) and it is now tied: `CARD_RGB_TOLERANCE` clears the terminal card by
+# 2.7x too, since #291 put two dark palettes next to each other. Both are
+# stated where they are set, and tests/README.md calls this one out under
+# "Known gaps".
 MIN_CAPTION_BAND_DIFF = {"web": 8.0, "terminal": 1.0, "segments": 8.0}
 
 # Consecutive stills must differ by at least this mean absolute luma, on the
@@ -4673,9 +4676,146 @@ COVERAGE_CARD = "AC-1"
 # the page" fire for a reason that has nothing to do with the card.
 COVERAGE_APP_MARKER = "Northwind Ops"
 
+# -- the window is still visible around the card, on a web take (issue #291) --
+#
+# The card `criterion()` and `interlude()` raise used to be one colour for both
+# media, and it was the terminal's: a near-black field, inside the web
+# recorder's own dark window frame with its title bar and traffic lights. A
+# human watching a demo read it as a terminal window rather than as a card over
+# the app, and **no artifact of that take was wrong** — the element, the beat,
+# the aria snapshot and the frames all said exactly what they should.
+#
+# **What the defect was not: geometry.** The card has always been `inset: 0`,
+# so the recorder's 14 px pad and its title bar have always been drawn around
+# it — the window frame was there the whole time. `#1c1a17` is 0.4 luma levels
+# from that frame *as encoded*, so the boundary existed and nobody could see it.
+#
+# Three fixes were rejected by the person who found it — warm paper (205 levels
+# off the window), black in a gutter of the window's colour (23.5), and then a
+# card declaring the window's own constant. What they asked for was the opposite
+# of a distance: *"I want the interlude to match the window, without a need for
+# a border of another colour, or an additional edge of a third colour."*
+#
+# **The third was rejected from a shipped frame, and that is what this file now
+# grades.** One declared colour painted in both layers arrives in `demo.mp4` as
+# two: the frame is a Playwright *screenshot* and the card is inside Playwright's
+# *video*, so the pad read `#171625` and the card `#181620`, five levels of blue
+# apart (issue #301). The reviewer sampled a frame and saw it. So the card
+# declares `WEB_CARD_BODY`, `WEB_WINDOW_BODY` compensated for that extra encoder
+# by measurement, and what is graded here is the thing they were looking at:
+#
+#   tests/unit   which stylesheet a recorder of each medium hands the page, that
+#                the terminal's is still the value #110's blend was tuned to,
+#                and that the frame is painted from the shared constant. It
+#                cannot grade the match: the two declarations differ on purpose,
+#                and a pin between them would be green on the build that was
+#                rejected.
+#   here         that the dispatched colour reached the encoded mp4 at all, and
+#                that **in that mp4 the card's field and the window's pad are
+#                within `CARD_WINDOW_TOLERANCE` levels per channel**. That is a
+#                reading of the artifact a viewer meets, and it is the check
+#                #297's 12-level bar was deleted to make room for.
+#
+# What is still graded nowhere: whether a viewer **reads the result as a card**
+# rather than as one flat surface. Sameness is measurable and now measured;
+# recognition is not. tests/README.md says so under Known gaps.
 
-def record_coverage(out_dir: Path, base_url: str) -> list[str]:
-    """A take recorded against COVERAGE_CRITERIA, with one left undemonstrated."""
+# The two cards in decimal, hand-written. `tests/unit` pins the package's
+# stylesheets to the same two colours, so a palette changed in one place and
+# not the other is a failure rather than a check that grades nothing.
+#
+# `WEB_CARD_RGB` is `core.WEB_CARD_BODY` and **not** `WEB_WINDOW_BODY`: the
+# card is declared two levels off the window so that it lands on the window in
+# the encoded frame. The window body is read too, and graded against the card
+# below.
+WEB_CARD_RGB = (0x18, 0x17, 0x26)
+TERMINAL_CARD_RGB = (0x1C, 0x1A, 0x17)
+
+# How far a channel may sit from the card's own value before the strip is not
+# that card.
+#
+# Measured on this arm rather than chosen. A flat `#efe7d8` or `#000000` card
+# reads **2** levels off its own colour in this pipeline, and so does the
+# compensated `#181726` — it arrives at `(24, 21, 36)` against a declared
+# `(24, 23, 38)`. The previous round declared `#181825` here, which read **5**
+# off itself, and the bar was widened to 10 to hold it; with the card
+# compensated the reading is back to 2 and so is the bar.
+#
+# The two states the reading has to be told apart from, both injected and both
+# caught: **214** — the fixture app's own header strip, `(236, 237, 242)`, which
+# is what a card that never painted leaves there — and **16**, the terminal card
+# on a web take, `(25, 25, 22)`, which is #291 itself.
+#
+# Note the margins, because they are the honest part. Against a card that never
+# painted the bar is 36x clear. Against the *terminal* card it is 2.7x, restored
+# from 1.5x when this stood at 10 — the two cards are a dark blue and a dark
+# brown, and blue is the only channel that separates them.
+#
+# What this bar does **not** catch, and why the one below exists: a card that
+# drops the encoder compensation and declares `WEB_WINDOW_BODY` reads 6 off its
+# own declared colour, which this would let through at exactly the bound. It is
+# a defect a reviewer found by eye, and it is caught next door.
+CARD_RGB_TOLERANCE = 6
+
+# How far the card's field and the window's pad may sit apart, per channel, in
+# the encoded frame. **This is #291's own property, and it is the only check in
+# this repo that reads it.**
+#
+# The card and the window are one colour on screen by design (see the section
+# header), and this is what "on screen" is worth: a reading of `demo.mp4`, not
+# of the two constants, because the two constants differ on purpose and an
+# equality between them was green on the build a human rejected.
+#
+# Measured, not chosen. The shipped pair reads `(24, 21, 36)` against
+# `(23, 22, 37)` — **1** level per channel, at every instant sampled. The state
+# it has to rule out is the previous round's, one colour declared for both,
+# which reads **5** levels of blue apart. So the bar is 2: twice the healthy
+# reading, and 2.5x clear of the defect.
+#
+# **A failure here is not a flake and must not be widened away.** The card's
+# compensation is tuned to one encoder path, so this reading going red means
+# either the card was repainted, or the frame was, or Chromium/ffmpeg/the pixel
+# format changed under it. The first two are bugs; the third is a re-measurement
+# of `core.WEB_CARD_BODY`. None of the three is answered by a bigger number
+# here.
+CARD_WINDOW_TOLERANCE = 2
+
+# Where in the app rect the strip is read: a band across the top, inset from
+# every edge. Above the centred text on purpose — glyphs move the mean by ~5
+# levels and by however many words the clause has, which is a reading of the
+# sentence and not of the card. Inset from the left and right because the
+# composite's edges blend the app into the window frame, and from the top for
+# the same reason: the outermost rows of the app video are a chroma blend into
+# the window's pad, ~2 px wide once the page is scaled into the window.
+CARD_STRIP = (0.10, 0.06, 0.80, 0.12)  # x, y, w, h as fractions of the app rect
+
+# And where the window's body is read: a band below the app rect, inset from
+# the left and right so the window's rounded corners and its drop shadow stay
+# out of the mean. Below rather than above because the title bar up there is a
+# different colour again and carries text and three coloured dots; this band is
+# flat window body and nothing else.
+#
+# **Nothing the card does can paint here** — the pad is part of the frame still
+# ffmpeg composites the app video *onto*, a different layer entirely. That is
+# what makes the reading worth grading against the card: the two bands are the
+# two encoder paths of #301, one each, and the claim is that they agree.
+FRAME_BAND = (0.15, 0.70)  # x offset and width, as fractions of the app rect
+
+# Where in the card's beat the frames are read, as fractions of its span. Three
+# rather than one: a card that arrives late, or leaves early, is a card a
+# viewer sees the wrong thing under, and one sample in the middle is true of
+# both.
+CARD_SAMPLE_FRACTIONS = (0.3, 0.5, 0.7)
+
+
+def record_coverage(out_dir: Path, base_url: str) -> tuple[list[str], Rect, Rect]:
+    """A take recorded against COVERAGE_CRITERIA, with one left undemonstrated.
+
+    Returns the app's rect and the window's rect in the encoded frame as well
+    as the problems: the card assertions read pixels of both — the card, and
+    the frame drawn around it — and where either lands in the composite is
+    something only the recorder knows (issue #17).
+    """
     from demo_recording import Recorder
 
     b = Beats("coverage")
@@ -4704,7 +4844,11 @@ def record_coverage(out_dir: Path, base_url: str) -> list[str]:
         # Untagged on purpose: most beats claim nothing, and `untagged_beats`
         # has to count them without any of them reaching `claimed`.
         rec.caption("")
-    return b.problems
+
+        g = rec._geom
+        app: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
+        win: Rect = (g["winx"], g["winy"], g["winw"], g["winh"])
+    return b.problems, app, win
 
 
 def _criterion_page_failures(out_dir: Path, card: dict, declared: str) -> list[str]:
@@ -4756,6 +4900,254 @@ def _criterion_page_failures(out_dir: Path, card: dict, declared: str) -> list[s
             f"words in it"
         ]
     return []
+
+
+def strip_rgb(mp4: Path, at: float, rect: Rect) -> tuple[float, float, float] | None:
+    """Mean R, G and B over `rect` of the frame at `at` seconds.
+
+    Colour, not luma: the state this has to be told apart from is a card that
+    never painted, over a **white** page, and white and warm paper are 8 levels
+    apart in red and 31 in blue. A grayscale reading throws away the channel
+    that carries the answer.
+    """
+    x, y, w, h = rect
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{at:.3f}",
+            "-i",
+            str(mp4),
+            "-vf",
+            f"crop={w}:{h}:{x}:{y}",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+    )
+    raw = proc.stdout
+    if proc.returncode != 0 or len(raw) < 3:
+        return None
+    channels = tuple(sum(raw[i::3]) / len(raw[i::3]) for i in range(3))
+    return channels  # type: ignore[return-value]
+
+
+def card_strip(app: Rect) -> Rect:
+    """The band of the app rect this reads the card's colour out of."""
+    x, y, w, h = app
+    fx, fy, fw, fh = CARD_STRIP
+    return (
+        x + int(w * fx),
+        y + int(h * fy),
+        max(8, int(w * fw)),
+        max(8, int(h * fh)),
+    )
+
+
+def frame_band(app: Rect, win: Rect) -> Rect | None:
+    """The band of the window's body this reads the frame's colour out of.
+
+    Between the bottom of the app rect and the bottom of the window — the pad
+    the recorder leaves so the window's rounded corners stay visible around the
+    video. `None` when there is no pad to read.
+
+    Graded against the card by `check_criterion_card`'s second claim, and
+    printed beside it on a healthy run.
+    """
+    ax, ay, aw, ah = app
+    _, wy, _, wh = win
+    top, bottom = ay + ah, wy + wh
+    if bottom - top < 6:
+        return None
+    fx, fw = FRAME_BAND
+    # Inset from the pad's own edges: the outermost row blends into the drop
+    # shadow, and the innermost into the video above it.
+    return (ax + int(aw * fx), top + 2, max(8, int(aw * fw)), bottom - top - 4)
+
+
+def off_card(rgb: tuple[float, float, float], card: tuple[int, int, int]) -> float:
+    """How far a reading is from a card's colour, worst channel."""
+    return max(abs(value - want) for value, want in zip(rgb, card, strict=True))
+
+
+def channels_apart(
+    one: tuple[float, float, float], other: tuple[float, float, float]
+) -> float:
+    """How far two *readings* sit apart, worst channel.
+
+    Separate from `off_card` because both sides are measured here rather than
+    declared: this is the card against the window body, two encodings compared
+    with each other and neither of them a constant.
+    """
+    return max(abs(a - b) for a, b in zip(one, other, strict=True))
+
+
+def check_criterion_card(out_dir: Path, app: Rect, win: Rect) -> list[str]:
+    """A web take's card is the window's own colour, in `demo.mp4` (#291).
+
+    Read off `demo.mp4` and not off a still: `shot()` screenshots the page,
+    which is the layer *before* the composite, and what a viewer meets is the
+    card once it is inside the recorder's window frame. That distinction is the
+    whole of this function — the two things compared below reach the file by
+    two different encoders (#301), and a still can only ever show one of them.
+
+    Two claims:
+
+      1. **the card painted, in the colour the package dispatched.** The strip
+         reads `WEB_CARD_RGB`. That separates a card from the app underneath it
+         — 36x from the state it has to rule out — and the two palettes at 16
+         levels against a bar of 6.
+
+      2. **the card and the window body are the same colour on screen.** The
+         strip and a band of the window's pad are within `CARD_WINDOW_TOLERANCE`
+         levels per channel, at every instant sampled. This is #291's own
+         property and the reason the fix has a compensated constant at all: a
+         human sampled a shipped frame, found the card and the window five
+         levels apart in blue, and rejected the build. Claim 1 cannot see that —
+         the card was exactly the colour it was dispatched in.
+
+    **Neither claim can be satisfied by reading a declaration.** #297 pinned
+    these two at least 12 luma levels *apart*, which the reviewer's decision
+    inverts, and the round after it pinned the card's declared colour equal to
+    the window's, which was green on the build that was rejected. Claim 2
+    replaces both, and grades the artifact instead.
+
+    What is still graded nowhere: whether a viewer reads the result as a
+    **card** rather than as one flat surface. tests/README.md says so under
+    Known gaps.
+
+    Three premises have to hold before the claims say anything:
+
+      * every strip decodes, at every instant sampled;
+      * the window leaves a pad wide enough to read, or claim 2 has nothing to
+        compare the card against and says so instead of passing quietly;
+      * the card's strip is **not** the card's colour at an instant when no card
+        is up. Without that, a fixture app that happened to be this dark blue
+        would satisfy the claim with no card in the recording at all.
+
+    That second one is read **after** the card, halfway between the end of its
+    beat and the end of the take, and not just before it. The beat log's clock
+    and the encoded video's are ~130 ms apart on this arm, so a sample a
+    quarter-second ahead of `t_start` lands on the card about as often as it
+    lands on the app — a premise that trips at random, on a healthy build, and
+    says the app is the wrong colour. After the card there is a wide margin to
+    aim at, and the reading proves something the earlier one did not: that the
+    strip goes back to the app when the card comes down.
+    """
+    mp4 = out_dir / "demo.mp4"
+    if not mp4.is_file():
+        return ["coverage: the take wrote no demo.mp4, so no frame carries a card"]
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    cards = [b for b in doc.get("beats") or [] if b.get("verb") == "criterion"]
+    if len(cards) != 1:
+        return [
+            f"coverage: the take logged {len(cards)} criterion beats, expected "
+            f"1 — there is no card span to read the colour out of"
+        ]
+    start, end = float(cards[0]["t_start"]), float(cards[0]["t_end"])
+    strip = card_strip(app)
+    band = frame_band(app, win)
+
+    duration = float(doc.get("duration") or 0.0)
+    if duration - end < 1.0:
+        return [
+            f"coverage: the criterion beat ends at {end:.2f}s of a {duration:.2f}s "
+            f"take, so there is no stretch after it to read the app out of and "
+            f"nothing to tell the card apart from"
+        ]
+    if band is None:
+        return [
+            f"coverage: the window {win} leaves no pad around the app rect "
+            f"{app} wide enough to read, so nothing here can say whether the "
+            f"card is the window's own colour on screen — which is #291"
+        ]
+    before_at = end + (duration - end) * 0.5
+    before = strip_rgb(mp4, before_at, strip)
+    if before is None:
+        return [
+            f"coverage: {mp4.name} decodes no frame at {before_at:.2f}s over "
+            f"{strip}, so there is no no-card reading to compare with"
+        ]
+    if off_card(before, WEB_CARD_RGB) <= CARD_RGB_TOLERANCE:
+        return [
+            f"coverage: the strip at {strip} reads "
+            f"{tuple(round(v) for v in before)} at {before_at:.2f}s, with the "
+            f"card down since {end:.2f}s — that is the card's own colour "
+            f"{WEB_CARD_RGB}. Either this app cannot be told from the card, so "
+            f"the reading below would pass with no card in the recording, or the "
+            f"card was never taken down"
+        ]
+
+    failures: list[str] = []
+    read: list[tuple[tuple[float, float, float], float]] = []
+    apart: list[tuple[tuple[float, float, float], float]] = []
+    for fraction in CARD_SAMPLE_FRACTIONS:
+        at = start + (end - start) * fraction
+        got = strip_rgb(mp4, at, strip)
+        if got is None:
+            failures.append(
+                f"coverage: {mp4.name} decodes no frame at {at:.2f}s over {strip}"
+            )
+            continue
+        drift = off_card(got, WEB_CARD_RGB)
+        read.append((got, drift))
+        if drift > CARD_RGB_TOLERANCE:
+            failures.append(
+                f"coverage: {(fraction * 100):.0f}% through the criterion beat "
+                f"the card reads {tuple(round(v) for v in got)} over {strip}, "
+                f"{drift:.0f} levels off the web card's {WEB_CARD_RGB} (bar "
+                f"{CARD_RGB_TOLERANCE}). It reads "
+                f"{off_card(got, TERMINAL_CARD_RGB):.0f} off the *terminal* "
+                f"card's {TERMINAL_CARD_RGB} — a web take painting that one is "
+                f"issue #291, where the card reads as a terminal window inside "
+                f"the recorder's own window frame."
+            )
+        # Claim 2, at the same instant and out of the same frame: the pad the
+        # window leaves around the app video, which the card cannot paint.
+        chrome = strip_rgb(mp4, at, band)
+        if chrome is None:
+            failures.append(
+                f"coverage: {mp4.name} decodes no frame at {at:.2f}s over the "
+                f"window body {band}, so the card has nothing to be the colour of"
+            )
+            continue
+        gap = channels_apart(chrome, got)
+        apart.append((chrome, gap))
+        if gap > CARD_WINDOW_TOLERANCE:
+            failures.append(
+                f"coverage: {(fraction * 100):.0f}% through the criterion beat "
+                f"the card reads {tuple(round(v) for v in got)} over {strip} and "
+                f"the window body {tuple(round(v) for v in chrome)} over {band}, "
+                f"{gap:.0f} levels apart (bar {CARD_WINDOW_TOLERANCE}). #291 is "
+                f"that a viewer cannot tell a web take's card from the window it "
+                f"sits in, and this is the reading that says so — the card is "
+                f"declared {WEB_CARD_RGB} to land on the window through a "
+                f"different encoder (#301), so either that compensation is gone, "
+                f"one of the two was repainted, or the encoder moved under it."
+            )
+    if not failures:
+        worst = max(drift for _, drift in read)
+        print(
+            f"smoke: coverage card is the web palette {WEB_CARD_RGB} — strip "
+            f"{strip} reads {tuple(round(v) for v in read[0][0])} under it "
+            f"({worst:.0f} off over {len(read)} samples, bar "
+            f"{CARD_RGB_TOLERANCE}) and "
+            f"{tuple(round(v) for v in before)} once it is down "
+            f"({off_card(before, WEB_CARD_RGB):.0f} off); the window body {band} "
+            f"reads {tuple(round(v) for v in apart[0][0])}, "
+            f"{max(gap for _, gap in apart):.0f} off the card as encoded over "
+            f"{len(apart)} samples (bar {CARD_WINDOW_TOLERANCE}) — the two are "
+            f"one colour on screen, declared two levels apart so that they land "
+            f"there (#291, #301)"
+        )
+    return failures
 
 
 def check_coverage(out_dir: Path) -> list[str]:
@@ -8698,7 +9090,7 @@ def run_coverage(out_root: Path) -> list[str]:
     out_dir = fresh_take_dir(out_root, "coverage")
     with fixture_server() as base_url:
         try:
-            problems = record_coverage(out_dir, base_url)
+            problems, app, win = record_coverage(out_dir, base_url)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"coverage: Recorder raised {type(exc).__name__}: {exc}"]
     if not (out_dir / "timeline.json").is_file():
@@ -8706,6 +9098,7 @@ def run_coverage(out_root: Path) -> list[str]:
     return (
         problems
         + check_coverage(out_dir)
+        + check_criterion_card(out_dir, app, win)
         + check_coverage_refusals(out_root)
         + check_coverage_merge()
     )

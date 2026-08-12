@@ -1,0 +1,380 @@
+{
+  "schema": 1,
+  "generated_by": "demo-video",
+  "recorder": "Recorder",
+  "segment": null,
+  "media": "demo.mp4",
+  "duration": 29.64,
+  "determinism": {
+    "deterministic": false,
+    "clock": null,
+    "timezone_id": "UTC",
+    "locale": "en-US"
+  },
+  "content": {
+    "measured": true,
+    "note": null,
+    "rect": [
+      128,
+      90,
+      1024,
+      460
+    ],
+    "sample_fps": 2,
+    "frames": 59,
+    "score": 21.56,
+    "floor": 1.0,
+    "static_for": 6.0,
+    "static_from": 5.0,
+    "static_beats": [
+      {
+        "index": 4,
+        "verb": "shot",
+        "acting": false
+      },
+      {
+        "index": 5,
+        "verb": "caption",
+        "acting": false
+      },
+      {
+        "index": 6,
+        "verb": "criterion",
+        "acting": false
+      }
+    ],
+    "static_limit": 15.0,
+    "opening": {
+      "gap": 0.0,
+      "held": 0.3,
+      "limit": 1.5,
+      "note": null
+    },
+    "warnings": []
+  },
+  "capture_clock": {
+    "measured": true,
+    "note": null,
+    "steps": [
+      {
+        "t": 2.038,
+        "delta": -0.6343
+      }
+    ],
+    "total": -0.6343,
+    "sample_interval": 0.02,
+    "min_step": 0.005,
+    "max_gap": 0.0218,
+    "max_gap_limit": 0.25
+  },
+  "narration": null,
+  "coverage": {
+    "criteria": {
+      "AC-1": "A search box above the queue narrows the list as you type, case-insensitively, with no button to press."
+    },
+    "claimed": {
+      "AC-1": [
+        {
+          "index": 4,
+          "segment": null,
+          "segment_index": 4,
+          "t_start": 5.146,
+          "still": "images/01-queue.png"
+        },
+        {
+          "index": 6,
+          "segment": null,
+          "segment_index": 6,
+          "t_start": 5.52,
+          "still": null
+        },
+        {
+          "index": 7,
+          "segment": null,
+          "segment_index": 7,
+          "t_start": 12.252,
+          "still": "images/02-criterion-card.png"
+        },
+        {
+          "index": 13,
+          "segment": null,
+          "segment_index": 13,
+          "t_start": 19.333,
+          "still": "images/03-invoice.png"
+        }
+      ]
+    },
+    "unclaimed": [],
+    "tagged_beats": 4,
+    "untagged_beats": 17
+  },
+  "beats": [
+    {
+      "index": 0,
+      "t_start": 0.382,
+      "t_end": 0.955,
+      "caption": "",
+      "verb": "goto",
+      "selector": "/",
+      "still": null,
+      "segment": null,
+      "segment_index": 0,
+      "evidence": "evidence/beat-00.json"
+    },
+    {
+      "index": 1,
+      "t_start": 0.955,
+      "t_end": 0.982,
+      "caption": "",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 1,
+      "evidence": "evidence/beat-01.json"
+    },
+    {
+      "index": 2,
+      "t_start": 0.982,
+      "t_end": 3.636,
+      "caption": "Seven tickets, in a browser window.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 2,
+      "evidence": "evidence/beat-02.json"
+    },
+    {
+      "index": 3,
+      "t_start": 3.636,
+      "t_end": 5.146,
+      "caption": "Seven tickets, in a browser window.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 3,
+      "evidence": "evidence/beat-03.json"
+    },
+    {
+      "index": 4,
+      "t_start": 5.146,
+      "t_end": 5.205,
+      "caption": "Seven tickets, in a browser window.",
+      "verb": "shot",
+      "selector": "01-queue",
+      "still": "images/01-queue.png",
+      "segment": null,
+      "segment_index": 4,
+      "evidence": "evidence/beat-04.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 5,
+      "t_start": 5.205,
+      "t_end": 5.52,
+      "caption": "",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 5,
+      "evidence": "evidence/beat-05.json"
+    },
+    {
+      "index": 6,
+      "t_start": 5.52,
+      "t_end": 12.252,
+      "caption": "A search box above the queue narrows the list as you type, case-insensitively, with no button to press.",
+      "verb": "criterion",
+      "selector": "AC-1",
+      "still": null,
+      "segment": null,
+      "segment_index": 6,
+      "evidence": "evidence/beat-06.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 7,
+      "t_start": 12.252,
+      "t_end": 12.299,
+      "caption": "",
+      "verb": "shot",
+      "selector": "02-criterion-card",
+      "still": "images/02-criterion-card.png",
+      "segment": null,
+      "segment_index": 7,
+      "evidence": "evidence/beat-07.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 8,
+      "t_start": 12.299,
+      "t_end": 12.912,
+      "caption": "",
+      "verb": "interlude",
+      "selector": "card",
+      "still": null,
+      "segment": null,
+      "segment_index": 8,
+      "evidence": "evidence/beat-08.json"
+    },
+    {
+      "index": 9,
+      "t_start": 12.912,
+      "t_end": 16.583,
+      "caption": "The card is gone, and the queue is back.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 9,
+      "evidence": "evidence/beat-09.json"
+    },
+    {
+      "index": 10,
+      "t_start": 16.583,
+      "t_end": 17.812,
+      "caption": "The card is gone, and the queue is back.",
+      "verb": "type_into",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 10,
+      "evidence": "evidence/beat-10.json"
+    },
+    {
+      "index": 11,
+      "t_start": 17.812,
+      "t_end": 17.823,
+      "caption": "The card is gone, and the queue is back.",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 11,
+      "evidence": "evidence/beat-11.json"
+    },
+    {
+      "index": 12,
+      "t_start": 17.823,
+      "t_end": 19.333,
+      "caption": "The card is gone, and the queue is back.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 12,
+      "evidence": "evidence/beat-12.json"
+    },
+    {
+      "index": 13,
+      "t_start": 19.333,
+      "t_end": 19.386,
+      "caption": "The card is gone, and the queue is back.",
+      "verb": "shot",
+      "selector": "03-invoice",
+      "still": "images/03-invoice.png",
+      "segment": null,
+      "segment_index": 13,
+      "evidence": "evidence/beat-13.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 14,
+      "t_start": 19.387,
+      "t_end": 19.697,
+      "caption": "",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 14,
+      "evidence": "evidence/beat-14.json"
+    },
+    {
+      "index": 15,
+      "t_start": 19.697,
+      "t_end": 22.506,
+      "caption": "Same card, no clause — this is what bridges a time skip.",
+      "verb": "interlude",
+      "selector": "card",
+      "still": null,
+      "segment": null,
+      "segment_index": 15,
+      "evidence": "evidence/beat-15.json"
+    },
+    {
+      "index": 16,
+      "t_start": 22.506,
+      "t_end": 22.547,
+      "caption": "",
+      "verb": "shot",
+      "selector": "04-interlude-card",
+      "still": "images/04-interlude-card.png",
+      "segment": null,
+      "segment_index": 16,
+      "evidence": "evidence/beat-16.json"
+    },
+    {
+      "index": 17,
+      "t_start": 22.547,
+      "t_end": 23.155,
+      "caption": "",
+      "verb": "interlude",
+      "selector": "card",
+      "still": null,
+      "segment": null,
+      "segment_index": 17,
+      "evidence": "evidence/beat-17.json"
+    },
+    {
+      "index": 18,
+      "t_start": 23.155,
+      "t_end": 27.506,
+      "caption": "Queue, card, queue again — the card sits over the app.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 18,
+      "evidence": "evidence/beat-18.json"
+    },
+    {
+      "index": 19,
+      "t_start": 27.506,
+      "t_end": 29.023,
+      "caption": "Queue, card, queue again — the card sits over the app.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 19,
+      "evidence": "evidence/beat-19.json"
+    },
+    {
+      "index": 20,
+      "t_start": 29.023,
+      "t_end": 29.333,
+      "caption": "",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 20,
+      "evidence": "evidence/beat-20.json"
+    }
+  ],
+  "strict": false,
+  "issues": [],
+  "issue_count": 0
+}

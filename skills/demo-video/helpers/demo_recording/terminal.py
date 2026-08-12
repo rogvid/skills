@@ -36,7 +36,7 @@ from collections import deque
 from pathlib import Path
 
 from .content import content_rect
-from .core import INTERLUDE_CSS, INTERLUDE_ID, _beat_verb, _DemoBase, _env
+from .core import INTERLUDE_ID, _beat_verb, _DemoBase, _env
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
 
@@ -369,7 +369,12 @@ class TerminalRecorder(_DemoBase):
         if self._opening is not None:
             context.add_init_script(
                 _OPENING_CARD_JS.replace("__ID__", INTERLUDE_ID)
-                .replace("__CSS__", INTERLUDE_CSS)
+                # `self._interlude_css`, not the constant it defaults to: the
+                # opening card and the card `interlude()` raises later in the
+                # same take are the same element, and reading them off one
+                # attribute is what keeps a per-medium palette (#291) from
+                # arriving in one of the two places.
+                .replace("__CSS__", self._interlude_css)
                 .replace("__TEXT__", json.dumps(self._opening))
             )
 

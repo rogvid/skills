@@ -350,6 +350,26 @@ skill's own suites make (they live in this repository, in `tests/`). That is a
 judgement about pixels, and it is answered the way this skill answers every
 such question: somebody watches the video (Process step 6).
 
+That is not a theoretical gap. This card was painted the same near-black on a
+web demo as on a terminal one from the day the recorder had two media until
+[#291](https://github.com/rogvid/skills/issues/291), so inside the web
+recorder's own dark window frame — title bar, traffic lights — a viewer read it
+as *a terminal window* rather than as a card over the app. The element, the
+beat, the coverage row, the snapshot and the frames were all correct
+throughout, and the person who found it was watching. Note what the defect
+was *not*: the card had always stopped at the app rect, with the frame drawn
+around it. It was 1.3 luma levels from that frame, so the boundary existed and
+nobody could see it. A web card is now the window's own body colour, which is
+what that same person asked for after seeing three rounds of alternatives —
+and "the same colour" turned out to mean *in the encoded video*, not in the
+stylesheet. The window frame reaches `demo.mp4` as a screenshot and the card
+reaches it through the page recording, so one declared colour arrives as two
+([#301](https://github.com/rogvid/skills/issues/301)); the card is declared a
+couple of levels off the window so that the two land together, and what
+`tests/` grades is where they land. **Nothing grades whether a viewer reads
+the result as a card** rather than as one flat surface; watching is the only
+thing covering that.
+
 ### What this does and does not tell you
 
 **The report is what the storyboard *claimed*, never what it proved**, and every

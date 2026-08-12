@@ -115,12 +115,120 @@ window.__demoCaption = (text) => {
 # an element `__demoInterlude` will then recognise and fade out, which means
 # one id and one stylesheet, in one place.
 INTERLUDE_ID = "__demo_interlude"
-INTERLUDE_CSS = (
+
+# Everything about the card except its two colours. Split out so the palettes
+# below cannot drift apart in the properties other things depend on: the card
+# is **opaque**, it covers the viewport, and it sits one level above the
+# caption bar (2147483646) so no caption is drawn while it is up. All three are
+# load-bearing outside this file — reference/limits.md reasons from them about
+# what the picture check can and cannot see.
+_INTERLUDE_LAYOUT = (
     "position: fixed; inset: 0; display: flex; align-items: center;"
-    " justify-content: center; background: #1c1a17; color: #f7f4ee;"
+    " justify-content: center;"
     " font: 500 30px/1.5 system-ui, sans-serif; text-align: center;"
     " padding: 0 12%; z-index: 2147483647; opacity: 0;"
     " transition: opacity .45s ease; pointer-events: none;"
+)
+
+# The body of the window web.py composites a page into — its `#win` fill, and
+# the colour of the pad that shows around the app video on every side. It is
+# defined here rather than there because the web card below is painted to match
+# it *as encoded*, so the two numbers have to be read together.
+# `web._FRAME_HTML` paints the window with it.
+WEB_WINDOW_BODY = "#181825"
+
+# **The card's own field, and it is deliberately not `WEB_WINDOW_BODY`. Do not
+# "fix" it to be.** The card has to match the window in `demo.mp4`, and the two
+# reach that file by different encoders, so matching there means declaring two
+# slightly different colours here (issue #301).
+#
+# The frame is a Playwright **screenshot** — a lossless PNG that ffmpeg encodes
+# once. The card is a DOM element in the page, so it goes through Chromium's
+# **VP8** screencast encoder first, and VP8 quantises subsampled chroma onto a
+# coarse grid. Declare one colour for both and the window arrives at
+# `(23, 22, 37)` while the card arrives at `(24, 22, 32)`: five levels of blue,
+# which a human reviewer of #291's fix spotted by eye in a shipped frame.
+#
+# `#181726` is not arithmetic on a colour-space model — it is the value that
+# **measured** closest. A hundred declared colours around `#181825` were swept
+# through real takes and read back out of the encoded mp4, and this one arrives
+# at `(24, 21, 36)` against the window's `(23, 22, 37)`: one level per channel,
+# down from five.
+#
+# **One level is the floor, not a stopping point somebody chose.** Those 100
+# declared colours produce only 20 distinct encoded ones — VP8 quantises the
+# chroma planes, so the card can only land on a coarse grid — and `(23, 22, 37)`
+# is not on it. Of the twenty, three land 1 level off the window and seventeen
+# land 2 or more. None lands 0.
+#
+# **A drift here is a real failure, not a flake.** The compensation is tuned to
+# one encoder path (this Chromium's VP8, this ffmpeg, `yuv420p`). Change any of
+# them and `tests/smoke`'s card-against-window reading goes red, which is the
+# correct outcome: the two layers really have stopped matching on screen, and
+# the answer is to re-measure this constant, never to widen that bar.
+# tests/README.md says so where the bar is described.
+WEB_CARD_BODY = "#181726"
+
+# The palette, per medium — and the split is issue #291.
+#
+# One palette used to serve both, and it was the terminal's: `#f7f4ee` text on
+# a `#1c1a17` field, the same near-black as the on-screen terminal card web.py
+# draws for `Recorder.terminal()`. On a terminal take that match is the feature.
+# `eca42c5` made this card the thing a terminal segment *opens on* (#110), so
+# it has to blend with what is behind it and with what replaces it; tuned to
+# blend with a terminal, it blends with a terminal.
+#
+# On a **web** take that is the wrong thing to blend with. The web recorder
+# composites the page into a dark window frame with a title bar and traffic
+# lights, so a full-bleed near-black field with a line of centred text inside
+# that frame reads as *a terminal window*, not as a card over an app — which is
+# what a human watching `examples/ticket-queue/demos/2026-08-11-criterion-card`
+# read it as. Nothing in an artifact could say so: the element, the beat, the
+# aria snapshot and the frames were all exactly right.
+#
+# **So the web card is the window's own body colour, on screen.** Not a palette
+# chosen to stand out from the window: a human watched three rounds of
+# candidates and asked for exactly this — *"I want the interlude to match the
+# window, without a need for a border of another colour, or an additional edge
+# of a third colour."* The content area simply becomes the window's colour with
+# the sentence on it; whitish text, because that is what is legible on it. The
+# card declares `WEB_CARD_BODY` rather than `WEB_WINDOW_BODY` **so that it can
+# match** — see that constant for the encoder path the two levels of difference
+# pay for.
+#
+# Two earlier answers to #291 are recorded here because both were rejected by
+# the person watching, and a later reader will otherwise re-propose them:
+#
+#   * **warm paper** (`#efe7d8`), 205 luma levels off the window. Unmistakably
+#     a card, and a flashbang in the middle of a dark recording.
+#   * **black inside an 18 px border in the window's colour**, 23.5 levels off.
+#     Read as a card in a frame in a window — three colours where the reviewer
+#     wanted one, and the border and the recorder's own pad measured as two
+#     different colours in the encoded frame (#301 again).
+#
+# A third answer was rejected by the same person after it shipped: **one colour
+# declared for both**, which is what a reader expects "the card is the window's
+# colour" to mean. It reached `demo.mp4` as two colours five levels apart and
+# they saw it in a frame. That is why the two declarations differ, and why the
+# thing that grades this is a reading of the **encoded video**, not a reading of
+# these strings: `tests/smoke`'s `check_criterion_card` requires the card's
+# field and the window's pad to be within 2 levels per channel in `demo.mp4`.
+# An equality pinned between two declarations would be green on exactly the
+# build the reviewer rejected.
+#
+# What is still not graded anywhere: whether a viewer **reads the result as a
+# card**. Sameness is now measurable; recognition is not, and tests/README.md
+# says so under Known gaps rather than implying otherwise with a green check.
+#
+# The card stays **opaque and full-bleed** — `inset: 0`, one flat `#rrggbb`,
+# above the caption bar. That is not decoration: `reference/limits.md` reasons
+# from all three, and with no border there is no second box whose corners or
+# alpha could put the app back on screen at the edges.
+INTERLUDE_CSS_TERMINAL = (
+    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"
+)
+INTERLUDE_CSS_WEB = (
+    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"
 )
 _INTERLUDE_JS = """
 window.__demoInterlude = (text) => {
@@ -994,6 +1102,13 @@ class _DemoBase:
         # non-composited media (terminal) raise this so the caption lands at
         # the same height, keeping caption placement uniform across media.
         self._caption_bottom_px = 44
+        # The interlude card's stylesheet, which is per-medium (issue #291) for
+        # the same reason the two numbers above are: the card is composited
+        # into the medium's own chrome, and what reads as a card there is a
+        # property of that chrome. The terminal palette is the default because
+        # it is the one a medium can *open* on (#110); the web recorder swaps
+        # it in its own `__init__`.
+        self._interlude_css = INTERLUDE_CSS_TERMINAL
         self._lines: list[tuple[float, Path]] = []  # (video offset s, clip)
         # Both are readings of time.monotonic(). Nothing in this package
         # measures elapsed time any other way — not the beat log, not narration
@@ -1113,6 +1228,19 @@ class _DemoBase:
                 file=sys.stderr,
             )
 
+    def _interlude_script(self) -> str:
+        """`__demoInterlude`, carrying **this medium's** card (issue #291).
+
+        A method rather than an expression inside `__enter__` because that is
+        where the dispatch would otherwise be, and `__enter__` needs a browser:
+        this is the whole of the per-medium choice, and it is the largest part
+        of it a browser-free test can reach. `tests/unit` reads what it returns
+        for a recorder of each medium.
+        """
+        return _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID).replace(
+            "__CSS__", self._interlude_css
+        )
+
     # -- subclass hooks -----------------------------------------------------
 
     def _init_context(self, context) -> None:
@@ -1182,10 +1310,7 @@ class _DemoBase:
                 _CAPTION_JS.replace("__CAPFONT__", str(self._caption_font_px))
                 .replace("__CAPBOTTOM__", str(self._caption_bottom_px))
             )
-            self._context.add_init_script(
-                _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID)
-                .replace("__CSS__", INTERLUDE_CSS)
-            )
+            self._context.add_init_script(self._interlude_script())
             self._context.add_init_script(_BRIDGE_JS.replace("__ID__", BRIDGE_ID))
             # Medium-specific init scripts (cursor, spotlight, ...).
             self._init_context(self._context)
