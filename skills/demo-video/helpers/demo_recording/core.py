@@ -950,6 +950,7 @@ class _DemoBase:
             "_evidence_payload",
             "_failure_screen",
             "_media_path",
+            "_opening_card",
             # extension points, each beside the sealed member it extends
             "_watch_extra",
             "_before_shot",
@@ -2315,6 +2316,23 @@ take with fewer beats than the last one would otherwise leave the
         if isinstance(up, list):
             self._overlay_note = overlay_warning([str(i) for i in up])
 
+    def _opening_card(self) -> dict | None:
+        """What this take's **first frame** showed, for a medium that can say.
+
+        A hook rather than an override (issue #235): `_measure_content` is
+        sealed, because it is what guarantees every take a `content` block —
+        and the medium seam's whole rule is that a medium extends by
+        implementing a hook it was offered.
+
+        Only `TerminalRecorder` answers. Its segments open on a card raised
+        before capture starts, and the strip of background beside its window
+        says in one number whether the card was up when the recording began.
+        A web take has neither the card nor the window, so None here is
+        "this medium has nothing to say" and lands in the artifact as
+        `content.opening.card: null`.
+        """
+        return None
+
     def _measure_content(self) -> None:
         """Fill in `self._content` off the mp4 this take just encoded.
 
@@ -2335,6 +2353,23 @@ take with fewer beats than the last one would otherwise leave the
                 f"frame ({type(exc).__name__}: {exc}), so nothing about the "
                 f"picture was measured"
             )
+            # The opening frame is *not* measured over the app rect — a medium
+            # that can read its own window still knows where to look — so a
+            # take that lost one measurement does not have to lose the other
+            # (issue #235). Without this the whole `opening` block was null on
+            # this path, which is an absence with no reason in it: a terminal
+            # take that could read `#__term_win` and not `#__term_host` said
+            # nothing at all about the frame it opened on, and nothing said
+            # why. `gap` genuinely could not be measured here, and the note is
+            # where that is written down.
+            self._content["opening"] = opening_report(
+                None,
+                "the app rect could not be worked out, so the opening gap was "
+                "not measured; `card` below is read off this medium's own "
+                "window and is unaffected",
+                self._opening_held,
+            )
+            self._content["opening"]["card"] = self._opening_card()
         else:
             # The beat log goes in, and it is what makes the held-picture arm
             # mean anything: without it a demo narrating over a rendered screen
@@ -2347,6 +2382,11 @@ take with fewer beats than the last one would otherwise leave the
             # silently did nothing leaves a non-zero gap right here (#119).
             gap, note = opening_gap(self._media_path(), rect)
             self._content["opening"] = opening_report(gap, note, self._opening_held)
+            # And what that first frame *was*, from the medium that can read
+            # its own (issue #235). Reported, never enforced: it appends no
+            # warning here, and see `opening_card_report` for the loaded-runner
+            # measurement that decided it.
+            self._content["opening"]["card"] = self._opening_card()
             warning = opening_warning(self._content["opening"])
             if warning:
                 self._content["warnings"].append(warning)

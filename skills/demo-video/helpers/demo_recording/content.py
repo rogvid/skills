@@ -379,7 +379,7 @@ def content_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
 def _content_frames(
     mp4: Path,
     rect: tuple[int, int, int, int],
-    sample_fps: int,
+    sample_fps: int | None,
     limit_s: float | None = None,
 ) -> list[bytes]:
     """`mp4`'s content rect, sampled and reduced to grayscale frames.
@@ -387,11 +387,20 @@ def _content_frames(
     `limit_s` stops after that many seconds of video — the opening check looks
     at the first few seconds and decoding a whole 60 s take to answer a question
     about its first 400 ms is waste. None reads the file to the end.
+
+    `sample_fps` of None drops the `fps` filter and returns the file's own
+    frames, which is the only way to be sure of getting **frame zero**: the
+    filter quantises to its own output slots and hands back whichever source
+    frame lands nearest the middle of slot zero. That cost `tests/smoke`'s web
+    opening check a real defect once — at 1 fps it was reading a frame from
+    around 0.5 s and scoring a take whose first frame was flat white as
+    healthy. Pair it with a short `limit_s`.
     """
     x, y, w, h = rect
     chain = (
-        f"fps={sample_fps},crop={w}:{h}:{x}:{y},"
-        f"scale={_CONTENT_W}:{_CONTENT_H},format=gray"
+        (f"fps={sample_fps}," if sample_fps else "")
+        + f"crop={w}:{h}:{x}:{y},"
+        + f"scale={_CONTENT_W}:{_CONTENT_H},format=gray"
     )
     window = [] if limit_s is None else ["-t", f"{limit_s:.3f}"]
     proc = subprocess.run(
@@ -500,8 +509,138 @@ def opening_report(
     `held` is null for a recorder that does not cover its opening — see the
     section header for why the two numbers come from different passes over
     different files.
+
+    `card` is filled in afterwards by a recorder that can read its own opening
+    frame (`TerminalRecorder`, issue #235) and stays null for one that cannot.
+    Present and null rather than absent, so `opening` has the same shape on
+    every take — the same reason `held` is null rather than missing.
     """
-    return {"gap": gap, "held": held, "limit": limit, "note": note}
+    return {"gap": gap, "held": held, "limit": limit, "note": note, "card": None}
+
+
+# -- the frame a terminal segment opens on (issue #235) -----------------------
+#
+# The same 290 ms of bare terminal at a segment boundary has been reported by
+# three people watching a video ([#110], [#114]'s re-report, [#206]), and each
+# time it was a person who caught it, because nothing machine-readable ever saw
+# it. A demo directory commits `record.py`, `timeline.json`, `timeline.md` and
+# `images/`; it does not commit `demo.mp4` or the `.seg.mp4` parts, so no
+# committed artifact carries the frame the question is about. `tests/smoke`'s
+# `check_opening_card` sweeps this same corner and grades a take that suite
+# records itself, which is a claim about the *recorder* rather than about
+# anything anybody ships.
+#
+# So the recorder reads it, at the one moment the video exists: after the
+# segment is encoded, off that segment's own first frame, over a strip of the
+# background beside the terminal window. Outside the window on purpose —
+# inside it the card and the terminal are both dark and telling them apart
+# means reading text, which is not a robust thing to measure. Outside it the
+# two are an order of magnitude apart, and neither number is a threshold
+# anybody tuned; they are two constants in the recorder's own styling:
+#
+#   the card         a full-bleed #1c1a17 rectangle          luma ~26
+#   bare terminal    the _TERM_BG pastel gradient            luma ~226
+#
+# **Reported, never enforced**, and the measurement behind that decision is
+# [#128]: one CI run in nine read **128** and 0.00 s of cover on a loaded
+# runner — neither state. A refusal or a warning built on this bar would be
+# flaky on exactly the runner it most needs to be trusted on, and a bar retuned
+# until it was not would be grading the box it was tuned on. Nothing here
+# raises, warns, or fails a take. It writes down what the first frame was, in
+# the file a reviewer already reads.
+#
+# The band between the two bars is left deliberately empty, for the reason
+# `check_opening_card` leaves it empty: a frame that lands inside it is a card
+# still becoming opaque, and calling that "the card" or "bare" would be the
+# artifact claiming something it does not know. There are three answers here
+# and `"between"` is one of them.
+#
+# [#110]: https://github.com/rogvid/skills/issues/110
+# [#114]: https://github.com/rogvid/skills/issues/114
+# [#128]: https://github.com/rogvid/skills/issues/128
+# [#206]: https://github.com/rogvid/skills/issues/206
+OPENING_CARD_MAX_LUMA = 60.0
+OPENING_BARE_MIN_LUMA = 150.0
+
+# How much of the video is decoded to get its first frame. Shorter than one
+# frame at any rate this recorder encodes, so what comes back is frame zero and
+# at most one neighbour — and it is read with `-t` rather than with an `fps`
+# filter, because the filter answers with whatever frame lands nearest the
+# middle of its first slot rather than with the first frame. The question here
+# is *what did a viewer see when the segment started*, and that is frame zero
+# or it is nothing.
+OPENING_CARD_READ_S = 0.03
+
+
+def opening_card_state(luma: float | None) -> str | None:
+    """Which of the three states `luma` is, or None when there is no reading.
+
+    Not a boolean, and the third state is the point — see the section header.
+    """
+    if not isinstance(luma, (int, float)) or isinstance(luma, bool):
+        return None
+    if luma <= OPENING_CARD_MAX_LUMA:
+        return "card"
+    if luma >= OPENING_BARE_MIN_LUMA:
+        return "bare"
+    return "between"
+
+
+def opening_card_report(
+    mp4: Path | str,
+    rect: tuple[int, int, int, int] | None,
+    *,
+    raised: bool,
+    read_s: float = OPENING_CARD_READ_S,
+) -> dict:
+    """`content.opening.card`: what this segment's **first frame** showed.
+
+    `rect` is the strip beside the terminal window, in video pixels; `raised`
+    is whether this take asked the recorder for an opening card at all, which
+    is what tells a reader whether `"bare"` is the defect or the arrangement.
+
+    `state` is derived from the **rounded** `luma` this dict publishes, so the
+    number and the word can never disagree with each other.
+
+    Never raises, for the reason `content_report` does not: this runs inside
+    the encode path, and a measurement must never be able to cost somebody a
+    recording. A reading that could not be taken is a `note`, not an absence
+    and never a guess.
+    """
+    report: dict = {
+        "luma": None,
+        "state": None,
+        "raised": raised,
+        "rect": list(rect) if rect else None,
+        "card_max": OPENING_CARD_MAX_LUMA,
+        "bare_min": OPENING_BARE_MIN_LUMA,
+        "note": None,
+    }
+    try:
+        if rect is None:
+            report["note"] = (
+                "this recorder does not know where its window sits in the "
+                "frame, so the strip an opening card would cover could not be "
+                "read"
+            )
+            return report
+        mp4 = Path(mp4)
+        if not mp4.is_file():
+            report["note"] = f"there is no {mp4.name} to measure"
+            return report
+        frames = _content_frames(mp4, rect, None, limit_s=read_s)
+        if not frames:
+            report["note"] = (
+                f"no frame came back from the first {read_s:.2f}s of "
+                f"{mp4.name} over {tuple(rect)}, so nothing is claimed about "
+                f"the frame this segment opens on"
+            )
+            return report
+        report["luma"] = round(sum(frames[0]) / len(frames[0]), 1)
+        report["state"] = opening_card_state(report["luma"])
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        report["note"] = f"{type(exc).__name__}: {exc}"
+    return report
 
 
 def opening_warning(opening: dict | None) -> str | None:

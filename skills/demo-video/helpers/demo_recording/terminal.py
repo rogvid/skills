@@ -35,7 +35,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from .content import content_rect
+from .content import content_rect, opening_card_report
 from .core import INTERLUDE_ID, _beat_verb, _DemoBase, _env
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
@@ -197,6 +197,19 @@ _OPENING_CARD_JS = """
 # doing the same job.
 OPENING_CARD_HOLD_S = 2.8
 
+# Where the card is read back off the finished video (issue #235): a strip of
+# the background beside the terminal window, in the top corner opposite the
+# caption bar. See `_opening_card_rect`, and "the frame a terminal segment
+# opens on" in `content` for why it is outside the window rather than in it.
+#
+# The margin clears the window's rounded corner and the near side of its drop
+# shadow; the height keeps the strip well above the window's top inset (70 px),
+# so nothing but the background — or whatever is covering it — is in the read.
+# `_TERM_HOST_JS` insets the window by 74 px, so this is a 58x50 strip on the
+# stock geometry, and that is the rect `tests/smoke` has swept since #110.
+OPENING_CARD_MARGIN_PX = 8
+OPENING_CARD_STRIP_PX = 50
+
 # Named keys -> the bytes a terminal program expects. Ctrl-<letter> is
 # handled generically (C-a..C-z -> 0x01..0x1a).
 _KEYMAP = {
@@ -340,6 +353,10 @@ class TerminalRecorder(_DemoBase):
         # Where the xterm.js screen sits in the frame, read off the live
         # element once the terminal exists (issue #97). See `_content_rect`.
         self._host_box: tuple[int, int, int, int] | None = None
+        # Where the window's right edge is, which is what says where the
+        # background stops being the window (issue #235). See
+        # `_opening_card_rect`.
+        self._win_right: int | None = None
 
     # -- setup / teardown ---------------------------------------------------
 
@@ -428,6 +445,7 @@ class TerminalRecorder(_DemoBase):
         )
         self._set_winsize(int(dims["rows"]), int(dims["cols"]))
         self._read_host_box()
+        self._read_win_edge()
         # Just enough to catch the shell's first prompt. It used to be kept
         # short so a segment opening on a transition would not dwell on a bare
         # terminal; with `interlude=` that dwell happens behind the card, and
@@ -466,6 +484,87 @@ class TerminalRecorder(_DemoBase):
                 int(box["x"]), int(box["y"]),
                 int(box["width"]), int(box["height"]),
             )
+
+    def _read_win_edge(self) -> None:
+        """Remember where `#__term_win` ends, for the opening card (#235).
+
+        Read off the live element for the reason `_read_host_box` is: the
+        window's insets are in `_TERM_HOST_JS` and the strip beside it is
+        derived from them, so a hardcoded copy would go on describing a
+        geometry somebody had already changed. Read **once**, here, because
+        nothing after this moves the window and the page is gone by the time
+        there is an mp4 to measure.
+
+        **`int(x + width)`, not `int(x) + int(width)`.** Two truncations of a
+        fractional box land a column apart from one truncation of their sum,
+        and this rect is compared against `tests/smoke`'s own reading of the
+        same strip. One column out of 58 moves the mean by a fraction of a
+        luma level — not enough to change the answer, easily enough to be a
+        latent flake in an agreement check with a 1.0 bar. So the two derive
+        the edge the same way, and the harness's way is the truer one.
+
+        Not fatal and not silent, again like `_read_host_box`: without it the
+        card report says it could not be measured, which is a truthful
+        artifact. Losing a recording over a strip of background would be the
+        measurement costing somebody the thing it exists to describe.
+        """
+        try:
+            box = self.page.locator("#__term_win").bounding_box()
+        except Exception as exc:  # noqa: BLE001 - a measurement is not a take
+            print(
+                f"demo-video: WARNING — could not read the terminal window's "
+                f"box ({type(exc).__name__}: {exc}), so this take's timeline "
+                f"will say the opening frame was not measured.",
+                file=sys.stderr,
+            )
+            return
+        if box:
+            self._win_right = int(box["x"] + box["width"])
+
+    def _opening_card_rect(self) -> tuple[int, int, int, int] | None:
+        """The strip of background the opening card is read off (issue #235).
+
+        Beside the window, not inside it: an opening card and a bare terminal
+        are both dark inside the window and are told apart there by their text.
+        Outside it they are the card's flat `#1c1a17` against the pastel
+        `_TERM_BG`, which is an order of magnitude of luma and needs no
+        threshold anybody had to choose.
+
+        None when the window's edge was never read, or when the geometry
+        leaves no strip worth reading — a take whose window fills the frame has
+        no background to measure, and inventing a rect there would produce a
+        confident number about the wrong pixels.
+        """
+        if self._win_right is None:
+            return None
+        left = self._win_right + OPENING_CARD_MARGIN_PX
+        width = self._size["width"] - left - OPENING_CARD_MARGIN_PX
+        if left < 0 or width < OPENING_CARD_MARGIN_PX:
+            return None
+        return (left, 0, width, OPENING_CARD_STRIP_PX)
+
+    def _opening_card(self) -> dict | None:
+        """What this segment's first frame showed (issue #235).
+
+        The medium's half of `_DemoBase._opening_card`, and the reason the
+        hook exists here rather than in the base: the strip it reads is
+        defined by *this* recorder's window, and the card it looks for is this
+        recorder's own opening. A web take has neither.
+
+        Reported and not enforced — nothing here appends to `warnings`, raises
+        or refuses. See "the frame a terminal segment opens on" in `content`
+        for the loaded-runner reading that decided that.
+
+        Answered on **every** terminal take, not only one opened with
+        `interlude=`: a segment that opens on a bare prompt is exactly what
+        three people reported by watching, and `raised` is what tells a reader
+        whether `"bare"` is the defect or the arrangement.
+        """
+        return opening_card_report(
+            self._media_path(),
+            self._opening_card_rect(),
+            raised=self._opening is not None,
+        )
 
     def _content_rect(self) -> tuple[int, int, int, int] | None:
         """The xterm.js screen's region of the frame (issue #97).

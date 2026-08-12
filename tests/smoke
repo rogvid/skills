@@ -1390,6 +1390,21 @@ MIN_OPENING_CARD_S = 1.0
 # sweep of three frames would satisfy every assertion below by accident.
 MIN_OPENING_FRAMES = 40
 
+# How far the recorder's own reading of its opening frame (issue #235) may sit
+# from this harness's reading of the same frame.
+#
+# Not a tolerance for the answer being roughly right. The two readings are the
+# same crop of the same frame of the same file, reduced the same way, and they
+# come out equal to the rounding the timeline publishes (0.05) — the strip is
+# computed twice, once by the recorder off `#__term_win` and once by
+# `record_terminal_opening` off the same live box, and both then read frame
+# zero with `-t` and no `fps` filter. What this has to be far under is the
+# thing it exists to catch: a number that describes something other than this
+# video, which is 200 luma levels away when the card is not up. An order of
+# magnitude either side, which is the shape to prefer over a comfortable
+# margin.
+OPENING_CARD_AGREEMENT = 1.0
+
 OPENING_DURATION_S = (5.0, 30.0)
 
 # -- per-beat evidence (issue #9) ---------------------------------------------
@@ -8496,6 +8511,136 @@ def check_opening_card(out_dir: Path, info: dict) -> list[str]:
     return failures
 
 
+def check_reported_opening_card(out_dir: Path, info: dict) -> list[str]:
+    """The take's **own** record of the frame it opened on (issue #235).
+
+    Everything above grades the video. This grades what the recorder wrote
+    down about it, and the difference is the whole of #235: a demo directory
+    commits `record.py`, `timeline.json`, `timeline.md` and `images/` and never
+    `demo.mp4` or its `.seg.mp4` parts, so the flash three separate people
+    reported by watching (#110, #114's re-report, #206) is in no committed
+    artifact. `check_opening_card` above sweeps a take *this suite* records, in
+    a directory nobody ships. The number in `content.opening.card` is the one a
+    reviewer of somebody else's demo can actually read.
+
+    Four statements, and each is broken by a different mistake:
+
+      * the field is **there and complete** — a recorder that measured nothing
+        and said nothing leaves a reviewer back at the video;
+      * the number **describes this video**, re-read here off frame zero of the
+        same mp4 over this harness's own strip. A plausible constant agrees
+        with itself forever otherwise, and 25.8 is a very plausible constant;
+      * on this take it says **card**, which is the acceptance criterion and is
+        what a card raised late breaks;
+      * and it says the card was **asked for**, without which `"bare"` cannot
+        be told from a segment that never wanted one.
+
+    The second is what keeps the rest from being a document agreeing with
+    itself, and its independence is deliberately narrow: the strip comes from
+    `record_terminal_opening`'s own reading of the live `#__term_win` box, and
+    the frame is decoded here rather than taken from the take's word for it.
+    What it cannot see is a recorder and a harness making the same mistake
+    about which corner to read; the sweep above, which reads the whole take
+    rather than one frame, is what makes that mistake visible.
+
+    **What is deliberately not asserted here**: that `state` follows the `luma`
+    beside it. Every take this arm records opens on the card, so a `state`
+    pinned to `"card"` would satisfy any such assertion — it could only fail
+    together with the "it says card" statement below, which the catalogue calls
+    a dominated assertion. What carries that claim instead is structural (one
+    expression in `opening_card_report` derives the word from the number it
+    publishes) plus `tests/unit`'s `OpeningCard`, which grades the mapping at
+    both bars. `tests/README.md`'s Known gaps has it with its measurement.
+    """
+    from demo_recording.content import (
+        OPENING_BARE_MIN_LUMA as PKG_BARE_MIN,
+    )
+    from demo_recording.content import (
+        OPENING_CARD_MAX_LUMA as PKG_CARD_MAX,
+    )
+
+    label = "terminal-opening"
+    failures: list[str] = []
+    # The recorder classifies at record time against the package's copy of
+    # these two bars; every statement below is written against this file's.
+    # A bar quietly widened on one side has to fail here rather than pass by
+    # agreeing with itself.
+    if (PKG_CARD_MAX, PKG_BARE_MIN) != (OPENING_CARD_MAX_LUMA, OPENING_BARE_MIN_LUMA):
+        failures.append(
+            f"{label}: the recorder classifies its opening frame against "
+            f"card <= {PKG_CARD_MAX}, bare >= {PKG_BARE_MIN}; this harness "
+            f"grades card <= {OPENING_CARD_MAX_LUMA}, bare >= "
+            f"{OPENING_BARE_MIN_LUMA} — one of them moved without the other"
+        )
+
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    opening = ((doc.get("content") or {}).get("opening")) or {}
+    card = opening.get("card")
+    if not isinstance(card, dict):
+        return failures + [
+            f"{label}: this take wrote content.opening.card = {card!r}, so its "
+            f"timeline says nothing about the frame the segment opened on. "
+            f"That is the state issue #235 is about: the mp4 is not committed "
+            f"anywhere, so a reviewer with only this directory is back to "
+            f"taking somebody's word for it"
+        ]
+    luma, state = card.get("luma"), card.get("state")
+    if not isinstance(luma, (int, float)) or state not in ("card", "bare", "between"):
+        return failures + [
+            f"{label}: content.opening.card reports luma={luma!r} and "
+            f"state={state!r} over rect={card.get('rect')!r} — no reading, so "
+            f"nothing below can be graded. The take says: {card.get('note')!r}"
+        ]
+
+    # The number against the file. Read here, off frame zero, over the
+    # strip this harness worked out for itself — `-t` and no `fps` filter, for
+    # the reason check_opening() spells out.
+    try:
+        first = gray_frames(
+            out_dir / "demo.mp4", info["corner"], duration=OPENING_FIRST_FRAME_S
+        )
+    except RuntimeError as exc:
+        return failures + [f"{label}: {exc}"]
+    if not first:
+        return failures + [
+            f"{label}: nothing decoded from the first {OPENING_FIRST_FRAME_S}s "
+            f"of demo.mp4 over {info['corner']}, so the reported reading has "
+            f"nothing to be checked against"
+        ]
+    measured = sum(first[0]) / len(first[0])
+    if abs(measured - luma) > OPENING_CARD_AGREEMENT:
+        failures.append(
+            f"{label}: the take reports its first frame at {luma} mean luma "
+            f"over {card.get('rect')}, and frame zero of demo.mp4 reads "
+            f"{measured:.1f} over {info['corner']} — {abs(measured - luma):.1f} "
+            f"apart, over the {OPENING_CARD_AGREEMENT} these two readings of "
+            f"one frame are allowed. The number in the timeline is not a "
+            f"measurement of this video"
+        )
+
+    # The acceptance criterion, and the control beside it: this take asked for
+    # a card, so "bare" here is the defect rather than the arrangement.
+    if state != "card":
+        failures.append(
+            f"{label}: this take opened with TerminalRecorder(interlude=…) and "
+            f"reports its first frame as {state!r} at {luma} mean luma — the "
+            f"segment opens on the terminal and the card arrives afterwards "
+            f"(issue #110), and this time the take's own report says so"
+        )
+    if card.get("raised") is not True:
+        failures.append(
+            f"{label}: content.opening.card says raised={card.get('raised')!r} "
+            f"on a take constructed with interlude=… — without that flag "
+            f"'bare' cannot be told from a segment that never asked for a card"
+        )
+    if not failures:
+        print(
+            f"smoke: terminal-opening reports its own opening frame as "
+            f"{state} ({luma} mean luma, frame zero here reads {measured:.1f})"
+        )
+    return failures
+
+
 def evidence_docs(
     label: str, out_dir: Path, segment: str | None = None
 ) -> tuple[list[dict], list[dict], list[str]]:
@@ -8968,6 +9113,10 @@ def run_terminal_opening(out_root: Path) -> list[str]:
             "terminal-opening", mp4, OPENING_DURATION_S, keep_top(info["app"])
         )
         + check_opening_card(out_dir, info)
+        # The same frame, from the other side: what the *take* says it opened
+        # on, which is the only account of it a demo directory ever ships
+        # (issue #235).
+        + check_reported_opening_card(out_dir, info)
         + check_healthy("terminal-opening", out_dir)
     )
 

@@ -65,10 +65,14 @@ from demo_recording.content import (  # noqa: E402
     CONTENT_ACTING_VERBS,
     CONTENT_CAPTION_TRIM,
     CONTENT_PASSIVE_VERBS,
+    OPENING_BARE_MIN_LUMA,
+    OPENING_CARD_MAX_LUMA,
     OPENING_WARN_S,
     _beats_within,
     content_rect,
     merge_content,
+    opening_card_report,
+    opening_card_state,
     opening_report,
     opening_warning,
     overlay_warning,
@@ -1195,6 +1199,99 @@ class OpeningWarning(unittest.TestCase):
 
     def test_a_healthy_take_whose_hold_landed_is_silent(self):
         self.assertIsNone(opening_warning(opening_report(0.0, None, 0.42)))
+
+
+class OpeningCard(unittest.TestCase):
+    """issue #235 — the number that says what a terminal segment opened on.
+
+    Three people watching found the same flash of bare terminal, because the
+    only thing that ever graded it was `tests/smoke` sweeping a take the suite
+    records itself. The recorder now reads its own first frame and writes the
+    answer into `content.opening.card`.
+
+    The pixels are smoke's — this file grades nothing measured off real frames,
+    and says so at the bottom. What is here is the classifier and the shape of
+    the record: whether a reader can tell *the card was up* from *the card was
+    not* from *nobody could say*, which is the half that decides whether the
+    artifact can lie.
+    """
+
+    def test_the_two_states_the_recorder_paints(self):
+        # The measured readings, from #128 and #207: ~26 with the card up,
+        # ~226 bare. Neither is a tuned bar — they are the card's `#1c1a17`
+        # and the recorder's pastel gradient, an order of magnitude apart.
+        self.assertEqual(opening_card_state(25.8), "card")
+        self.assertEqual(opening_card_state(226.5), "bare")
+
+    def test_a_card_part_way_up_is_called_neither(self):
+        # 128.0 is a real reading, not a hypothetical: one CI run in nine, on
+        # a loaded runner (#128). It is the reason nothing here enforces, and
+        # calling it either state would be the artifact claiming something
+        # nobody measured.
+        self.assertEqual(opening_card_state(128.0), "between")
+
+    def test_both_bars_are_graded_at_their_boundary(self):
+        # The catalogue's "ungraded constant": either side of each bar rather
+        # than comfortably inside one of them.
+        self.assertEqual(opening_card_state(OPENING_CARD_MAX_LUMA), "card")
+        self.assertEqual(opening_card_state(OPENING_CARD_MAX_LUMA + 0.1), "between")
+        self.assertEqual(opening_card_state(OPENING_BARE_MIN_LUMA), "bare")
+        self.assertEqual(opening_card_state(OPENING_BARE_MIN_LUMA - 0.1), "between")
+
+    def test_the_band_between_the_bars_stays_wide_and_empty(self):
+        # If the two bars ever met, "between" would be unreachable and a card
+        # mid-fade would have to be reported as one of the other two — which
+        # is the whole thing this measurement refuses to do.
+        self.assertGreater(OPENING_BARE_MIN_LUMA - OPENING_CARD_MAX_LUMA, 50.0)
+
+    def test_no_reading_is_no_state(self):
+        # Not "bare". A frame nobody could read is not a frame that showed the
+        # terminal, and the difference is the whole of #128's third answer.
+        self.assertIsNone(opening_card_state(None))
+
+    def test_a_recorder_that_cannot_place_its_window_says_so(self):
+        card = opening_card_report("demo.mp4", None, raised=True)
+        self.assertIsNone(card["luma"])
+        self.assertIsNone(card["state"])
+        self.assertIn("does not know where its window sits", card["note"] or "")
+
+    def test_a_take_with_no_mp4_is_a_note_rather_than_an_exception(self):
+        # This runs inside `__exit__`, after the encode: an exception escaping
+        # it costs the take every artifact written after it.
+        card = opening_card_report(
+            Path(tempfile.gettempdir()) / "demo-video-no-such-take.mp4",
+            (0, 0, 8, 8),
+            raised=False,
+        )
+        self.assertIsNone(card["state"])
+        self.assertIn("demo-video-no-such-take.mp4", card["note"] or "")
+
+    def test_whether_a_card_was_asked_for_is_in_the_record(self):
+        # "bare" is the defect on a segment opened with `interlude=` and the
+        # arrangement on one that was not, and no luma can tell them apart.
+        self.assertIs(
+            opening_card_report("demo.mp4", None, raised=True)["raised"], True
+        )
+        self.assertIs(
+            opening_card_report("demo.mp4", None, raised=False)["raised"], False
+        )
+
+    def test_the_bars_the_reading_was_classified_against_are_published(self):
+        # A number is not a verdict unless the reader can see what it was
+        # compared with — and these two move (see the boundary test above),
+        # so a document carrying the number and not the bars ages into a
+        # number nobody can interpret.
+        card = opening_card_report("demo.mp4", None, raised=True)
+        self.assertEqual(card["card_max"], OPENING_CARD_MAX_LUMA)
+        self.assertEqual(card["bare_min"], OPENING_BARE_MIN_LUMA)
+
+    def test_the_opening_block_carries_the_key_on_every_take(self):
+        # Present and null on a recorder that cannot read its own first frame,
+        # rather than absent — the same reason `held` is null on a terminal
+        # take. A consumer that has to distinguish "no card" from "this key
+        # did not exist yet" is reading a shape that changes under it.
+        self.assertIn("card", opening_report(0.0, None, 0.4))
+        self.assertIsNone(opening_report(0.0, None, 0.4)["card"])
 
 
 class OverlayWarning(unittest.TestCase):
@@ -4672,6 +4769,85 @@ class TerminalStill(unittest.TestCase):
         self.assertEqual(
             [(b["verb"], b["selector"], b.get("ac")) for b in rec._beats],
             [("shot", "01-done", ["AC-2"])],
+        )
+
+
+class OpeningCardOnATake(unittest.TestCase):
+    """The take-level half of issue #235, without a browser or a frame.
+
+    `OpeningCard` above grades the classifier and the record. These two grade
+    the recorder around it: where the strip it reads comes from, and whether
+    the reading survives the *other* measurement failing. Both are arithmetic
+    and control flow — no ffmpeg runs here, because the mp4 these takes name
+    does not exist and every path below stops at "there is no demo.mp4".
+    """
+
+    class Boxes(FakePage):
+        """A page whose element boxes are the ones a test wrote down.
+
+        Keyed by selector, so a recorder reaching for `#__term_host` where it
+        means `#__term_win` reads `None` here rather than the other element's
+        box, and says it could not measure instead of measuring the wrong
+        thing.
+        """
+
+        def __init__(self, boxes: dict) -> None:
+            super().__init__()
+            self.boxes = boxes
+
+        def locator(self, selector: str):
+            box = self.boxes.get(selector)
+            return types.SimpleNamespace(bounding_box=lambda: box)
+
+    def test_the_strip_starts_from_the_windows_unrounded_right_edge(self):
+        # `int(x) + int(w)` and `int(x + w)` are a column apart on a
+        # fractional box: 100.6 + 57.6 is 158.2, so the edge is 158 and the
+        # strip starts at 166 — two truncations give 157 and start it at 165.
+        # One column out of 58 is a fraction of a luma level and would never
+        # change the verdict; what it can do is drift the recorder's number
+        # away from tests/smoke's independent reading of the same strip, which
+        # is graded with a 1.0 bar. The two derive the edge the same way.
+        rec = recorder(
+            self,
+            cls=TermRec,
+            page=self.Boxes(
+                {"#__term_win": {"x": 100.6, "y": 70.0, "width": 57.6, "height": 400.0}}
+            ),
+        )
+        rec._read_win_edge()
+        rect = rec._opening_card_rect()
+        self.assertIsNotNone(rect, "the window's box was read and gave no strip")
+        self.assertEqual(rect[0], 166)
+
+    def test_a_take_that_lost_its_app_rect_still_reports_its_opening_frame(self):
+        """The catalogue's clean-path-only assertion, on this field's guard.
+
+        `_content_rect` raising nulls the whole `content.opening` block — so a
+        terminal take that could read `#__term_win` and not `#__term_host`
+        used to say nothing whatsoever about the frame it opened on, with
+        nothing anywhere saying why. The opening card is not measured over the
+        app rect, so it has no reason to be lost with it.
+        """
+        rec = recorder(self, cls=TermRec, page=self.Boxes({}))
+        rec._converted = True
+
+        def no_host_box():
+            raise RuntimeError("#__term_host has no box")
+
+        rec._content_rect = no_host_box
+        rec._measure_content()
+        opening = (rec._content or {}).get("opening")
+        self.assertIsInstance(
+            opening, dict, "the whole opening block went null with the app rect"
+        )
+        self.assertIsInstance(opening["card"], dict)
+        self.assertIn("app rect could not be worked out", opening["note"] or "")
+        # And the absence inside it says why, rather than being a bare null:
+        # this take never read its window either, which is a different reason
+        # from the one above and has to be legible as one.
+        self.assertIsNone(opening["card"]["luma"])
+        self.assertIn(
+            "does not know where its window sits", opening["card"]["note"] or ""
         )
 
 
@@ -10984,6 +11160,94 @@ INJECTIONS = [
         [
             "OpeningWarning.test_the_warning_bar_is_graded_at_its_boundary",
             "OpeningWarning.test_a_healthy_take_whose_hold_landed_is_silent",
+        ],
+    ),
+    (
+        # Issue #235's classifier, at the bar rather than comfortably inside
+        # it. `<` for `<=` moves the card bar by nothing a take would notice
+        # and is exactly the edit no test inside the band can see.
+        "the card bar excludes the value it is written as including",
+        "content.py",
+        "    if luma <= OPENING_CARD_MAX_LUMA:",
+        "    if luma < OPENING_CARD_MAX_LUMA:",
+        ["OpeningCard.test_both_bars_are_graded_at_their_boundary"],
+    ),
+    (
+        # The band closed up. Every reading is then one of two states, and the
+        # 128 a loaded CI runner produced (#128) is reported as a bare
+        # terminal — a confident answer about a frame nobody could classify.
+        "the empty band between the two bars is closed",
+        "content.py",
+        "OPENING_BARE_MIN_LUMA = 150.0",
+        "OPENING_BARE_MIN_LUMA = 61.0",
+        [
+            "OpeningCard.test_a_card_part_way_up_is_called_neither",
+            "OpeningCard.test_the_band_between_the_bars_stays_wide_and_empty",
+        ],
+    ),
+    (
+        # A recorder that could not place its window reports on the frame
+        # anyway, off whatever `rect` it was handed. The note this replaces is
+        # the difference between "not measured" and a number.
+        "a take with no window box measures something regardless",
+        "content.py",
+        '        if rect is None:\n            report["note"] = (\n',
+        '        if False:\n            report["note"] = (\n',
+        ["OpeningCard.test_a_recorder_that_cannot_place_its_window_says_so"],
+    ),
+    (
+        # Without this flag "bare" is unreadable: it is #110's flash on a
+        # segment that asked for a card and the ordinary state of one that did
+        # not, and the luma is identical either way.
+        "the report claims every take asked for an opening card",
+        "content.py",
+        '        "raised": raised,',
+        '        "raised": True,',
+        ["OpeningCard.test_whether_a_card_was_asked_for_is_in_the_record"],
+    ),
+    (
+        # The key gone from the envelope rather than null. A consumer then
+        # cannot tell a medium that has nothing to say from a recorder that
+        # predates the field.
+        "the opening block stops carrying the card key at all",
+        "content.py",
+        '    return {"gap": gap, "held": held, "limit": limit, "note": note, "card": None}',
+        '    return {"gap": gap, "held": held, "limit": limit, "note": note}',
+        ["OpeningCard.test_the_opening_block_carries_the_key_on_every_take"],
+    ),
+    (
+        # The exception path as it shipped in the first draft of #235: the app
+        # rect could not be worked out, so the whole `opening` block went null
+        # and the frame the segment opened on went with it — a measurement
+        # that needs only `#__term_win`, lost because `#__term_host` was
+        # unreadable, with nothing saying so.
+        "a take that lost its app rect reports nothing about its opening",
+        "core.py",
+        '            self._content["opening"] = opening_report(\n'
+        "                None,\n"
+        '                "the app rect could not be worked out, so the opening gap was "\n'
+        '                "not measured; `card` below is read off this medium\'s own "\n'
+        '                "window and is unaffected",\n'
+        "                self._opening_held,\n"
+        "            )\n"
+        '            self._content["opening"]["card"] = self._opening_card()\n',
+        "            pass\n",
+        [
+            "OpeningCardOnATake."
+            "test_a_take_that_lost_its_app_rect_still_reports_its_opening_frame"
+        ],
+    ),
+    (
+        # Two truncations instead of one. Invisible on an integral box, a
+        # column adrift on a fractional one — and the column is on the side
+        # tests/smoke's agreement check reads.
+        "the strip is measured from a twice-rounded window edge",
+        "terminal.py",
+        '            self._win_right = int(box["x"] + box["width"])',
+        '            self._win_right = int(box["x"]) + int(box["width"])',
+        [
+            "OpeningCardOnATake."
+            "test_the_strip_starts_from_the_windows_unrounded_right_edge"
         ],
     ),
     (

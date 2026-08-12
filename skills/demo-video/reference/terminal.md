@@ -45,6 +45,15 @@ either way. `Recorder` (web) has no such argument and does not need one: its
 page is blank until `goto()`, so there is no "before" to flash — and a card
 painted before that first `goto()` would be destroyed by it.
 
+**Check it in the timeline rather than by watching.** Every terminal take reads
+its own first frame after the encode and writes the answer into
+`content.opening.card`: `state` is `"card"`, `"bare"` or `"between"`, beside
+the luma it came from and whether this take asked for a card. `demo.mp4` is not
+a file anybody commits, so this is the only account of that frame a demo
+directory carries — and the same flash has been reported three times by people
+watching. Nothing enforces it; read it. See *`opening.card`* in
+[timeline.md](timeline.md).
+
 ### Driving the four patterns
 
 - **Non-interactive CLI:** `run(cmd)` → `wait_for_prompt()`.

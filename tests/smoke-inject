@@ -681,6 +681,78 @@ INJECTIONS = [
         sites=("check_issues",),
         must_contain=("failed is indistinguishable from one that worked",),
     ),
+    # -- what a terminal segment says it opened on (issue #235), 26 s an entry
+    #
+    # The same 290 ms of bare terminal was reported three times by three people
+    # watching (#110, #114's re-report, #206), and nothing machine-readable
+    # ever saw it: a demo directory commits `timeline.json` and never
+    # `demo.mp4`, so the frame in question is in no shipped artifact.
+    # `check_opening_card` sweeps the corner of a take *this suite* records,
+    # which is a claim about the recorder. These four are aimed at the number
+    # the recorder now writes into `content.opening.card` — the account of that
+    # frame a reviewer of somebody else's demo can actually read.
+    #
+    # The third is the acceptance criterion's own injection, and it is one of
+    # the nine `tests/README.md` records being performed by hand when the
+    # corner sweep was written. It is executed here instead.
+    Injection(
+        name="a terminal take says nothing about the frame it opened on",
+        module="terminal.py",
+        old=(
+            "        return opening_card_report(\n"
+            "            self._media_path(),\n"
+            "            self._opening_card_rect(),\n"
+            "            raised=self._opening is not None,\n"
+            "        )\n"
+        ),
+        new="        return None\n",
+        arm="--polish-only",
+        sites=("check_reported_opening_card",),
+        must_contain=("timeline says nothing about the frame the segment opened on",),
+    ),
+    Injection(
+        # A plausible constant, which is the shape this class of defect really
+        # takes: 40.0 is inside the card band, so the take still reports
+        # `state: "card"` and every other statement about this field passes.
+        # Only reading the frame again says the number is not a measurement.
+        name="the opening frame's luma is a constant rather than a reading",
+        module="content.py",
+        old='        report["luma"] = round(sum(frames[0]) / len(frames[0]), 1)',
+        new='        report["luma"] = 40.0',
+        arm="--polish-only",
+        sites=("check_reported_opening_card",),
+        must_contain=("The number in the timeline is not a ",),
+    ),
+    Injection(
+        # The defect itself, exactly as #110 measured it: the card raised from
+        # a timer instead of at document start, so capture begins on the bare
+        # terminal and the card arrives afterwards. `check_opening_card` fires
+        # too — it is the same frame — and the entry is aimed at the *report*,
+        # which is the only account of that frame anybody ships.
+        name="the opening card is raised 400 ms into the document",
+        module="terminal.py",
+        old=(
+            "  if (document.body) build();\n"
+            "  else addEventListener('DOMContentLoaded', build);\n"
+        ),
+        new="  setTimeout(build, 400);\n",
+        arm="--polish-only",
+        sites=("check_reported_opening_card",),
+        must_contain=("and this time the take's own report says so",),
+    ),
+    Injection(
+        # Without `raised`, "bare" is ambiguous: it is the defect on a segment
+        # opened with `interlude=` and the arrangement on one that never asked
+        # for a card. A flag that is always false makes every reading of this
+        # field unreadable, and no luma can notice.
+        name="the report forgets that the take asked for an opening card",
+        module="terminal.py",
+        old="            raised=self._opening is not None,\n",
+        new="            raised=False,\n",
+        arm="--polish-only",
+        sites=("check_reported_opening_card",),
+        must_contain=("cannot be told from a segment that never asked for a card",),
+    ),
     # -- the clock demo.mp4 is on (issues #18/#215), 29 s an entry ------------
     #
     # Chromium stamps every screencast frame with the host's *wall* clock and
