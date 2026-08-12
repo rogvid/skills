@@ -679,6 +679,8 @@ class Render(unittest.TestCase):
             failure_artifact_url=None,
             run_url="https://github.com/o/r/actions/runs/1",
             sha="abcdef1234567890",
+            repo_url="https://github.com/o/r",
+            demo_root="",
         )
         opts.update(kw)
         return comment.render([("demos/x", timeline or TIMELINE)], **opts)
@@ -800,12 +802,66 @@ COVERAGE = {
 TAGGED = dict(TIMELINE, coverage=COVERAGE)
 
 # Every clause claimed. Same criteria, so the two documents differ in exactly
-# the thing the headline is a statement about.
+# the thing the headline is a statement about. No claim carries a still, so
+# every clause is also one a reviewer has nothing to open for (#274).
 ALL_CLAIMED = dict(
     TIMELINE,
     coverage=dict(
         COVERAGE,
         claimed={key: [claim(i)] for i, key in enumerate(COVERAGE["criteria"])},
+        unclaimed=[],
+    ),
+)
+
+# The take #274 describes: AC-1 claimed by a `shot()`, AC-2 by a `caption()`
+# alone. The two are indistinguishable in the manifest's `claimed` — same shape,
+# same beat fields — and differ only in whether a `still` was written, which is
+# the whole reason the finding is a fact about files rather than a judgement.
+STILL, MISSING = "images/01-search-box.png", "images/09-never-written.png"
+CAPTION_ONLY = dict(
+    TIMELINE,
+    coverage=dict(
+        COVERAGE,
+        claimed={
+            "AC-1": [claim(3, STILL)],
+            "AC-2": [claim(5)],
+            "AC-3": [claim(6), claim(9, "images/03-requester.png")],
+            "AC-4": [],
+        },
+        unclaimed=["AC-4"],
+    ),
+)
+
+# A claim naming a still nothing published — a `shot()` on a take that died
+# before it, or a still the freshness filter held back as a previous
+# recording's. The manifest looks exactly like CAPTION_ONLY's AC-1 row.
+ABSENT_STILL = dict(
+    TIMELINE,
+    coverage=dict(
+        COVERAGE,
+        claimed={
+            "AC-1": [claim(3, STILL)],
+            "AC-2": [claim(5, MISSING)],
+            "AC-3": [claim(9, "images/03-requester.png")],
+            "AC-4": [claim(11)],
+        },
+        unclaimed=[],
+    ),
+)
+
+# The clean path: every clause claimed, every claim carrying a still that this
+# take published. Neither gap headline has anything to say about it, which is
+# the branch a coverage claim is most tempting to print into.
+ALL_ILLUSTRATED = dict(
+    TIMELINE,
+    coverage=dict(
+        COVERAGE,
+        claimed={
+            "AC-1": [claim(3, STILL)],
+            "AC-2": [claim(5, "images/03-requester.png")],
+            "AC-3": [claim(9, STILL)],
+            "AC-4": [claim(11, "images/03-requester.png")],
+        },
         unclaimed=[],
     ),
 )
@@ -958,23 +1014,71 @@ class Coverage(unittest.TestCase):
     the comment cannot be read as having made it.
     """
 
-    def body(self, timeline):
-        return comment.render(
-            [("demos/x", timeline)],
+    #: The commit the stills are linked at. Full, never the seven-character
+    #: form the footnote prints: a short sha is ambiguous, and a link that
+    #: resolves today to a different object later is the artifact lying slowly.
+    SHA = "abcdef1234567890abcdef1234567890abcdef12"
+    REPO_URL = "https://github.com/o/r"
+
+    def setUp(self):
+        """A staging directory holding the stills the fixtures name.
+
+        The renderer decides between a link and "nothing published this" by
+        looking on disk, so these tests need files rather than a mock: the
+        thing being graded *is* the answer to whether the take wrote one.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        images = self.root / "demos/x/images"
+        images.mkdir(parents=True)
+        for name in ("01-search-box.png", "03-requester.png"):
+            (images / name).write_bytes(b"\x89PNG")
+        # Outside the demo, and deliberately real: the guard that refuses to
+        # link it has to be the reason, not the file's absence.
+        (self.root / "leaked.png").write_bytes(b"\x89PNG")
+
+    def body(self, timeline, **kw):
+        opts = dict(
             artifact_url=None,
             artifact_bytes=None,
             retention_days=30,
             evidence_retention_days=None,
             failure_artifact_url=None,
             run_url=None,
-            sha="abcdef1234567890",
+            sha=self.SHA,
+            repo_url=self.REPO_URL,
+            demo_root=str(self.root),
         )
+        opts.update(kw)
+        return comment.render([("demos/x", timeline)], **opts)
 
     def headline(self, body: str) -> str:
         """The one sentence naming the clauses nothing claimed."""
         found = [ln for ln in body.splitlines() if "no beat claiming" in ln]
         self.assertEqual(len(found), 1, f"no single gap headline in:\n{body}")
         return found[0]
+
+    def no_still_headline(self, body: str) -> str:
+        """The one sentence naming the clauses with no picture to open (#274)."""
+        found = [ln for ln in body.splitlines() if "no still was published" in ln]
+        self.assertEqual(len(found), 1, f"no single no-still headline in:\n{body}")
+        return found[0]
+
+    def row(self, body: str, key: str) -> list[str]:
+        """One clause's row, split into its cells.
+
+        Escaped pipes out first, the way a markdown renderer reads them: an
+        unescaped one in the clause text would otherwise split this row into
+        more cells than the table has columns, which is the failure the
+        escaping exists to prevent and is asserted below.
+        """
+        rows = [ln for ln in body.splitlines() if ln.startswith(f"| **{key}** ")]
+        self.assertEqual(len(rows), 1, f"no single row for {key}: {rows}")
+        cells = re.sub(r"\\\|", "", rows[0]).split("|")
+        # "", clause, claimed at, look at, ""
+        self.assertEqual(len(cells), 5, rows[0])
+        return [c.strip() for c in cells]
 
     def cell(self, body: str, key: str) -> str:
         """The `claimed at` cell of one clause's row, and only that.
@@ -983,15 +1087,16 @@ class Coverage(unittest.TestCase):
         itself, so a whole-row search would agree with a renderer that had lost
         the beat indices entirely.
         """
-        rows = [ln for ln in body.splitlines() if ln.startswith(f"| **{key}** ")]
-        self.assertEqual(len(rows), 1, f"no single row for {key}: {rows}")
-        # Escaped pipes out first, the way a markdown renderer reads them: an
-        # unescaped one in the clause text would otherwise split this row into
-        # more cells than the table has columns, which is the failure the
-        # escaping exists to prevent and is asserted below.
-        cells = re.sub(r"\\\|", "", rows[0]).split("|")
-        self.assertEqual(len(cells), 4, rows[0])  # "", clause, claimed at, ""
-        return cells[2].strip()
+        return self.row(body, key)[2]
+
+    def look_at(self, body: str, key: str) -> str:
+        """The `look at` cell of one clause's row, and only that.
+
+        Same narrowness, for the same reason: every still link in the comment
+        shares a prefix, so a whole-body search for one would be satisfied by
+        the row above it.
+        """
+        return self.row(body, key)[3]
 
     def swept(self, body: str, timeline: dict) -> str:
         """`body` with the spans the renderer quotes subtracted out of it.
@@ -1112,7 +1217,7 @@ class Coverage(unittest.TestCase):
         # before this section existed.
         body = self.body(TIMELINE)
         self.assertIn("| # | at | Caption |", body)  # control: still a comment
-        for absent in ("clause", "claimed at", "nothing claims this", "AC-"):
+        for absent in ("clause", "claimed at", "look at", "nothing claims this", "AC-"):
             self.assertNotIn(absent, body)
 
     def test_the_comment_no_longer_reports_the_binding_as_unwritten(self):
@@ -1137,6 +1242,135 @@ class Coverage(unittest.TestCase):
         )
         cells = self.cell(self.body(piped), "AC-1")
         self.assertEqual(cells, "beat 3")
+
+    # -- one picture per clause, and the clauses with none (#274) -----------
+
+    def test_a_claimed_still_is_linked_at_the_recorded_commit(self):
+        # The whole cell, not a substring of it: the reviewer clicks this, and
+        # a link to the right file at the wrong commit is an artifact that
+        # lies more convincingly than a missing one. Four things are pinned by
+        # this equality — the repository, the full sha, the demo directory the
+        # still belongs to, and the path the manifest recorded.
+        self.assertEqual(
+            self.look_at(self.body(TAGGED), "AC-1"),
+            f"[01-search-box.png]({self.REPO_URL}/raw/{self.SHA}"
+            f"/demos/x/images/01-search-box.png)",
+        )
+
+    def test_a_clause_links_its_own_still_and_not_another_clauses(self):
+        # The count of links is free to satisfy; which one lands in which row
+        # is the claim. AC-3's still is the second row of its own claim list,
+        # so a renderer reading `claimed` flat would put AC-1's here.
+        body = self.body(TAGGED)
+        self.assertIn("/demos/x/images/01-search-box.png)", self.look_at(body, "AC-1"))
+        self.assertIn("/demos/x/images/03-requester.png)", self.look_at(body, "AC-3"))
+
+    def test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture(self):
+        # #274's acceptance criterion: AC-1 claimed by a `shot()`, AC-2 by a
+        # `caption()` alone. Before this the two rendered identically.
+        body = self.body(CAPTION_ONLY)
+        line = self.no_still_headline(body)
+        self.assertIn("AC-2", line)
+        for illustrated in ("AC-1", "AC-3"):
+            self.assertNotIn(illustrated, line)
+        # And AC-4, which nothing claims at all: it is a different finding and
+        # it is already named by the sentence above this one.
+        self.assertNotIn("AC-4", line)
+        self.assertEqual(self.look_at(body, "AC-2"), "*no still*")
+        self.assertEqual(self.look_at(body, "AC-4"), "—")
+
+    def test_the_clauses_with_no_picture_are_named_before_the_claimed_table(self):
+        # Gap first, the same ordering claim as the unclaimed headline: a
+        # reader who meets the table of pictures first has already formed the
+        # impression this sentence exists to correct.
+        body = self.body(CAPTION_ONLY)
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+        where = body.index(self.no_still_headline(body))
+        self.assertLess(where, body.index("| clause | claimed at | look at |"))
+        self.assertLess(where, body.index("**AC-1**"))
+        self.assertLess(where, body.index("| # | at | Caption |"))
+
+    def test_a_still_the_manifest_names_and_nothing_published_is_not_linked(self):
+        # The artifact-lies case: a `shot()` that raised, or a still the
+        # freshness filter held back as a previous recording's. Naming it as
+        # absent is the honest answer; linking it hands the reviewer last
+        # week's picture, and skipping it silently is a claim with no evidence
+        # that reads like a clause nobody illustrated.
+        body = self.body(ABSENT_STILL)
+        cell = self.look_at(body, "AC-2")
+        self.assertIn("09-never-written.png", cell)
+        self.assertNotIn("](http", cell)
+        # And it counts as a clause with nothing to open, so the two agree.
+        self.assertIn("AC-2", self.no_still_headline(body))
+        # The control: a still that *was* published, in the same table.
+        self.assertIn("](http", self.look_at(body, "AC-1"))
+
+    def test_a_still_outside_the_demo_directory_is_named_and_not_linked(self):
+        # `timeline.json` is committed, and a pull request may edit it. A still
+        # of `../../leaked.png` resolves on disk, so existence alone would let
+        # it through and the comment would link a picture belonging to another
+        # part of the repository as this demo's evidence.
+        escaping = dict(
+            TIMELINE,
+            coverage={
+                "criteria": {"AC-1": "A search box above the queue narrows it."},
+                "claimed": {"AC-1": [claim(3, "../../leaked.png")]},
+            },
+        )
+        self.assertTrue((self.root / "leaked.png").exists())  # control
+        cell = self.look_at(self.body(escaping), "AC-1")
+        self.assertIn("leaked.png", cell)
+        self.assertNotIn("](http", cell)
+
+    def test_a_still_is_looked_for_in_the_directory_this_take_published(self):
+        # The staging copy, not the working tree: `images/` is committed, so on
+        # any path where the take did not rewrite them the working tree still
+        # holds the previous recording's pictures. Rendering a demo whose
+        # staged directory holds nothing must not link the committed ones.
+        body = self.body(TAGGED, demo_root=str(self.root / "empty"))
+        self.assertNotIn("](http", self.look_at(body, "AC-1"))
+        self.assertIn("01-search-box.png", self.look_at(body, "AC-1"))
+
+    def test_a_space_in_a_still_path_is_encoded_so_the_link_survives(self):
+        # A markdown link ends at the first space. Unencoded, this renders as
+        # text with a stray `.png)` after it — a picture the reviewer cannot
+        # open, in the column that exists so they can.
+        (self.root / "demos/x/images/a b.png").write_bytes(b"\x89PNG")
+        spaced = dict(
+            TIMELINE,
+            coverage={
+                "criteria": {"AC-1": "A search box above the queue narrows it."},
+                "claimed": {"AC-1": [claim(3, "images/a b.png")]},
+            },
+        )
+        self.assertEqual(
+            self.look_at(self.body(spaced), "AC-1"),
+            f"[a b.png]({self.REPO_URL}/raw/{self.SHA}/demos/x/images/a%20b.png)",
+        )
+
+    def test_with_no_repository_url_a_published_still_is_named_not_linked(self):
+        # Run outside Actions there is nothing to build a URL from. Naming the
+        # file is the honest degradation; a relative link would resolve against
+        # the pull request's own page and 404.
+        body = self.body(TAGGED, repo_url=None)
+        self.assertEqual(self.look_at(body, "AC-1"), "`images/01-search-box.png`")
+        # It is still a still this take published, so it is not a gap.
+        self.assertNotIn("no still was published", body)
+
+    def test_a_take_whose_clauses_all_have_a_picture_prints_neither_gap(self):
+        body = self.body(ALL_ILLUSTRATED)
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+        self.assertNotIn("no beat claiming", body)
+        self.assertNotIn("no still was published", body)
+        self.assertNotIn("*no still*", body)
+        self.assert_no_verdict(body, ALL_ILLUSTRATED)
+
+    def test_the_same_words_are_refused_where_a_clause_has_no_picture(self):
+        # A still beside a clause is exactly where a sentence that sounds like
+        # proof is tempting, and its absence is where a sentence that sounds
+        # like a failed check is. Both branches are swept.
+        for fixture in (CAPTION_ONLY, ABSENT_STILL):
+            self.assert_no_verdict(self.body(fixture), fixture)
 
     def test_a_claim_from_a_named_segment_says_which_segment(self):
         # A stitched demo renumbers beats, so "beat 6" alone points at the
@@ -1245,6 +1479,102 @@ class CommentCli(unittest.TestCase):
             body = out.read_text()
             self.assertIn("the take failed", body)
             self.assertIn("published no timeline.json", body)
+
+    def test_a_staged_still_is_linked_from_the_command_line_end_to_end(self):
+        # `render` is graded above with its arguments handed to it. This is the
+        # other half: that `main` finds the still beside the timeline it read
+        # and hands the reader a URL, which is where a `--demo-root` the
+        # existence check never saw would surface.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "stage"
+            (root / "demos/x/images").mkdir(parents=True)
+            (root / "demos/x/images/01-search-box.png").write_bytes(b"\x89PNG")
+            (root / "demos/x/timeline.json").write_text(
+                json.dumps(
+                    dict(
+                        TIMELINE,
+                        coverage={
+                            "criteria": {"AC-1": "A search box narrows the queue."},
+                            "claimed": {"AC-1": [claim(3, "images/01-search-box.png")]},
+                        },
+                    )
+                )
+            )
+            out = Path(tmp) / "body.md"
+            done = self._run(
+                "--demo",
+                "demos/x",
+                "--demo-root",
+                str(root),
+                "--repo-url",
+                "https://github.com/o/r",
+                "--sha",
+                "abcdef1234567890abcdef1234567890abcdef12",
+                "--retention-days",
+                "30",
+                "--out",
+                str(out),
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            body = out.read_text()
+            self.assertIn(
+                "[01-search-box.png](https://github.com/o/r/raw/"
+                "abcdef1234567890abcdef1234567890abcdef12"
+                "/demos/x/images/01-search-box.png)",
+                body,
+            )
+            self.assertNotIn(str(root), body)  # no runner path leaks to the reader
+
+    def test_the_repository_url_defaults_to_what_every_actions_step_is_given(self):
+        # So the workflow needs no new argument for the links to work. Both
+        # variables are set in every step; read rather than hardcoded, or a
+        # GitHub Enterprise host would have its blobs linked at github.com.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "stage"
+            (root / "demos/x/images").mkdir(parents=True)
+            (root / "demos/x/images/01-search-box.png").write_bytes(b"\x89PNG")
+            (root / "demos/x/timeline.json").write_text(
+                json.dumps(
+                    dict(
+                        TIMELINE,
+                        coverage={
+                            "criteria": {"AC-1": "A search box narrows the queue."},
+                            "claimed": {"AC-1": [claim(3, "images/01-search-box.png")]},
+                        },
+                    )
+                )
+            )
+            out = Path(tmp) / "body.md"
+            done = subprocess.run(
+                [
+                    sys.executable,
+                    str(_DIR / "demo-comment"),
+                    "--demo",
+                    "demos/x",
+                    "--demo-root",
+                    str(root),
+                    "--sha",
+                    "abcdef1234567890abcdef1234567890abcdef12",
+                    "--retention-days",
+                    "30",
+                    "--out",
+                    str(out),
+                ],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "GITHUB_SERVER_URL": "https://ghe.example.com",
+                    "GITHUB_REPOSITORY": "o/r",
+                },
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn(
+                "[01-search-box.png](https://ghe.example.com/o/r/raw/"
+                "abcdef1234567890abcdef1234567890abcdef12"
+                "/demos/x/images/01-search-box.png)",
+                out.read_text(),
+            )
 
     def test_without_demo_root_the_demo_path_is_read_directly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1420,7 +1750,10 @@ INJECTIONS = [
         "demo-comment",
         "    return gap + table + note",
         "    return table + gap + note",
-        ["Coverage.test_the_gap_is_stated_before_anything_that_was_claimed"],
+        [
+            "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
+            "Coverage.test_the_clauses_with_no_picture_are_named_before_the_claimed_table",
+        ],
     ),
     (
         # The failure mode every coverage tool has: print the covered half and
@@ -1498,7 +1831,9 @@ INJECTIONS = [
         # be perfect and never be called.
         "render_demo stops rendering the coverage section",
         "demo-comment",
-        '    lines += render_coverage(timeline.get("coverage"))',
+        '    lines += render_coverage(\n        timeline.get("coverage"),\n'
+        "        demo=name,\n        directory=demo_dir(demo_root, name),\n"
+        "        repo_url=repo_url,\n        sha=sha,\n    )",
         "    lines += []",
         [
             "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
@@ -1548,10 +1883,11 @@ INJECTIONS = [
     (
         "--demo-root is ignored, so the comment reads the working tree",
         "demo-comment",
-        "        directory = Path(args.demo_root) / name if args.demo_root else Path(name)",
-        "        directory = Path(name)",
+        "    return Path(demo_root) / name if demo_root else Path(name)",
+        "    return Path(name)",
         [
             "CommentCli.test_the_timeline_is_read_from_demo_root_and_named_by_demo",
+            "CommentCli.test_a_staged_still_is_linked_from_the_command_line_end_to_end",
         ],
     ),
     (
@@ -1670,6 +2006,156 @@ INJECTIONS = [
         [
             "Coverage.test_a_clause_whose_own_wording_is_a_verdict_does_not_trip_the_sweep"
         ],
+    ),
+    # -- one picture per clause (#274) --------------------------------------
+    (
+        # The link a reviewer clicks, pointed at a commit that is not the one
+        # this take was recorded from. Seven characters resolve today and are
+        # ambiguous later, which is the artifact lying slowly rather than
+        # loudly — and every count of links in the comment stays right.
+        "a still is linked at the abbreviated sha instead of the recorded one",
+        "demo-comment",
+        '    return f"{base}/raw/{quote(sha)}/{quote(path)}"',
+        '    return f"{base}/raw/{quote(sha[:7])}/{quote(path)}"',
+        [
+            "Coverage.test_a_claimed_still_is_linked_at_the_recorded_commit",
+            "CommentCli.test_a_staged_still_is_linked_from_the_command_line_end_to_end",
+        ],
+    ),
+    (
+        # A URL that 404s: the still is under the demo's directory, not the
+        # repository root. The cell still holds a link and still names the
+        # right file, so anything short of reading the whole href agrees.
+        "the still link drops the demo directory the picture lives in",
+        "demo-comment",
+        '        href = _still_href(repo_url, sha, f"{demo}/{rel}")',
+        "        href = _still_href(repo_url, sha, rel)",
+        [
+            "Coverage.test_a_claimed_still_is_linked_at_the_recorded_commit",
+            "CommentCli.test_a_staged_still_is_linked_from_the_command_line_end_to_end",
+        ],
+    ),
+    (
+        # The lookup rather than the link: the stills are searched for beside
+        # the *root* instead of inside this demo, so a repository with one demo
+        # in it would still be green if `images/` sat at the top level.
+        "a still is looked for outside the demo directory it belongs to",
+        "demo-comment",
+        "        directory=demo_dir(demo_root, name),",
+        "        directory=Path(demo_root),",
+        [
+            "Coverage.test_a_claimed_still_is_linked_at_the_recorded_commit",
+            "CommentCli.test_a_staged_still_is_linked_from_the_command_line_end_to_end",
+        ],
+    ),
+    (
+        # The count that stands in for the content, in the new column: every
+        # clause gets a picture, every picture resolves, and every row after
+        # the first points at the wrong one.
+        "every clause is pointed at the first still in the report",
+        "demo-comment",
+        "            claimed.get(key) or [],",
+        "            next((rows for rows in claimed.values() if rows), []),",
+        ["Coverage.test_a_clause_links_its_own_still_and_not_another_clauses"],
+    ),
+    (
+        # A still the manifest names and this take did not publish, handed to
+        # the reviewer as a link anyway — last week's picture under this
+        # week's clause, or a 404. The one the freshness filter exists for.
+        "a still nothing published is linked instead of reported absent",
+        "demo-comment",
+        "        if not (directory / rel).exists():\n            continue",
+        "        if False:\n            continue",
+        [
+            "Coverage.test_a_still_the_manifest_names_and_nothing_published_is_not_linked",
+            "Coverage.test_a_still_is_looked_for_in_the_directory_this_take_published",
+        ],
+    ),
+    (
+        # `timeline.json` is committed and a pull request may edit it, so the
+        # path in it is untrusted input pasted into a URL. Existence alone lets
+        # `../../leaked.png` through, because it does exist.
+        "a still pointing outside the demo is linked because it exists",
+        "demo-comment",
+        '    if not parts or ".." in parts:',
+        "    if not parts:",
+        ["Coverage.test_a_still_outside_the_demo_directory_is_named_and_not_linked"],
+    ),
+    (
+        # Without the encoding the markdown link ends at the first space and
+        # the reviewer gets text with a stray `.png)` after it.
+        "a still path is pasted into the link unencoded",
+        "demo-comment",
+        '    return f"{base}/raw/{quote(sha)}/{quote(path)}"\n',
+        '    return f"{base}/raw/{quote(sha)}/{path}"\n',
+        ["Coverage.test_a_space_in_a_still_path_is_encoded_so_the_link_survives"],
+    ),
+    (
+        # No repository to link under, and a root-relative href instead of the
+        # file's name: in a pull-request comment that resolves against the pull
+        # request's own page and 404s, while looking exactly like a link.
+        "a still is linked relatively when there is no repository to link under",
+        "demo-comment",
+        "    if not base or not sha:",
+        "    if not sha:",
+        ["Coverage.test_with_no_repository_url_a_published_still_is_named_not_linked"],
+    ),
+    (
+        # The finding itself, gone. The comment then reads exactly as it did
+        # before #274 on the take #274 is about: a clause claimed only by a
+        # caption is indistinguishable from a well-illustrated one.
+        "a clause with no picture is no longer named as one",
+        "demo-comment",
+        "    if unillustrated:",
+        "    if False:",
+        [
+            "Coverage.test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture",
+            "Coverage.test_the_clauses_with_no_picture_are_named_before_the_claimed_table",
+            "Coverage.test_a_still_the_manifest_names_and_nothing_published_is_not_linked",
+        ],
+    ),
+    (
+        # And the finding over-reporting, which is the failure that would get
+        # it switched off: every claimed clause named, including the ones with
+        # a picture right there in the row.
+        "the no-picture finding names every claimed clause",
+        "demo-comment",
+        "        key for key in criteria if key not in unclaimed "
+        + "and not pictures[key].found",
+        "        key for key in criteria if key not in unclaimed",
+        [
+            "Coverage.test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture",
+            "Coverage.test_a_take_whose_clauses_all_have_a_picture_prints_neither_gap",
+        ],
+    ),
+    (
+        # A clause nobody claimed described as one whose still is missing:
+        # same words, wrong cause, and the sentence above the table already
+        # said the true one.
+        "a clause nothing claims is reported as a claim with no still",
+        "demo-comment",
+        '        return _Picture("—", False)',
+        '        return _Picture("*no still*", False)',
+        [
+            "Coverage.test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture"
+        ],
+    ),
+    (
+        # The verdict sweep over the two sentences #274 adds. The disclaimer
+        # injections below cannot see these: `TAGGED` has a picture for every
+        # clause it claims, so neither sentence is rendered on that fixture.
+        "the no-picture sentence promotes the rest of the clauses",
+        "demo-comment",
+        '            f"here to open.**",',
+        '            f"here to open. The rest passed.**",',
+        ["Coverage.test_the_same_words_are_refused_where_a_clause_has_no_picture"],
+    ),
+    (
+        "the absent-still cell reads as a verdict on the clause",
+        "demo-comment",
+        '            f"no such file*",',
+        '            f"no such file, so nothing here is proved*",',
+        ["Coverage.test_the_same_words_are_refused_where_a_clause_has_no_picture"],
     ),
     (
         # What the eight per-word injections below are worth: a sentence that

@@ -1410,13 +1410,51 @@ would find the clause on a take whose card never reached the browser.
 about `timeline.json` and `timeline.md`; the pull-request comment is the one
 artifact a human is guaranteed to open, and until #273 it rendered none of
 this and said so by pointing at an issue that had been closed for months. Its
-`Coverage` class grades four things and nothing more: that the clauses nothing
+`Coverage` class grades five things and nothing more: that the clauses nothing
 claimed are named **before** the table of what was claimed, that every declared
 clause reaches the comment with its own text, that a clause's row names *its
-own* beats rather than another clause's, and that no sentence in the comment
-promotes a claim to a verdict. The last one is a word sweep with a control
-beside it, because a sweep for absent words passes just as happily on a comment
-that renders no coverage at all.
+own* beats rather than another clause's, that a claimed clause's row points at
+*its own* published still, and that no sentence in the comment promotes a claim
+to a verdict. The last one is a word sweep with a control beside it, because a
+sweep for absent words passes just as happily on a comment that renders no
+coverage at all.
+
+**The picture, and the clauses that have none**
+([#274](https://github.com/rogvid/skills/issues/274)). A clause whose only
+claim is a caption hands the reviewer nothing to look at, and before #274 it
+rendered exactly like a well-illustrated one. The `look at` column carries a
+link to the still the beat wrote, and the clauses with no still are named with
+the other gaps, above the table. Four properties of that link are graded,
+because a link that resolves to the wrong bytes is worse than no link:
+
+- the **whole href**, by equality — repository, full sha, the demo directory
+  the still belongs to, and the recorded path. A short sha resolves today and
+  is ambiguous later, and a still linked at the repository root 404s; both
+  leave the comment's shape, its row per clause and its link count intact,
+  which is what the equality is for;
+- **which row it lands in.** *Every clause is pointed at the first still in the
+  report* gives every clause a picture and every picture resolves — the
+  catalogue's *count that stands in for the content*, in a new column;
+- **that the file exists**, checked in the directory the timeline was read from
+  — in CI the staging copy, so a still the freshness filter held back as a
+  previous recording's is named as absent rather than linked as this take's.
+  Absent is *reported*: skipping it silently would make a clause with a broken
+  claim read like one nobody illustrated;
+- **that the path is inside the demo.** `timeline.json` is committed and a pull
+  request may edit it, so its `still` is untrusted text pasted into a URL. The
+  injection for this one stages a real `../../leaked.png`, because existence
+  alone lets it through.
+
+The two sentences #274 adds are swept for verdict words on fixtures that
+render them, which `TAGGED` does not: it has a picture for every clause it
+claims. The gap sentence is also reached by `ALL_CLAIMED`; the absent-still
+cell is reached by `ABSENT_STILL` and nothing else, and its injection reddens
+that one test alone — the measurement that says the fixture is carrying it
+rather than decorating it.
+
+What none of this says is that the picture shows the clause. It says a file
+exists, resolves, and belongs to the beat that claimed it — the same boundary
+as everything else here.
 
 **The sweep grades the sentences the renderer writes, not the ones it quotes**
 ([#283](https://github.com/rogvid/skills/issues/283)). Clause text belongs to
@@ -1443,8 +1481,11 @@ writes are swept. Clause **ids** are not exempted either — they are too short
 to subtract safely, so a ticket with a clause called `verified` would redden
 this suite.
 
-Nineteen injections cover it — nine from #273 and the ten #283 added above —
-and two of the first nine are worth naming: *the acceptance section
+The injections that cover the acceptance section are enumerated in `ci-unit`'s
+`INJECTIONS`, and the number they add up to is deliberately not written here:
+it went stale the first time somebody added one, which is
+[#295](https://github.com/rogvid/skills/issues/295) item 4 and the same
+conclusion #264 and #269 reached. Two are worth naming: *the acceptance section
 leads with what was claimed instead of the gap* — which is the whole ordering
 claim, and nothing else in the suite can see it — and *every clause is pointed
 at the first claim in the report*, which leaves the table its shape, its row
@@ -2238,9 +2279,19 @@ knows is missing is worse than one that is openly absent.
   [#272](https://github.com/rogvid/skills/issues/272), question 2.
 
   So what a green `tests/ci-unit` says about a demo's acceptance criteria is
-  exactly: the comment named every clause the storyboard declared, and named
-  first the ones no beat claimed. It says nothing about whether the beats that
-  did claim one showed it.
+  exactly: the comment named every clause the storyboard declared, named first
+  the ones no beat claimed and the ones with no still to open, and pointed
+  each of the rest at a picture that is on disk beside the timeline that named
+  it. It says nothing about whether the beats that did claim one showed it.
+
+- **Nothing here opens the link the comment prints.** The href is graded by
+  equality against the one the arguments imply, and the file it names is
+  graded as existing in the directory the timeline was read from. Neither is
+  an HTTP request: a still this take wrote and nobody committed at the head
+  sha will be linked here and 404 for the reader, and only a run of the
+  workflow on a real pull request can see that. What makes it worth doing
+  anyway is that the alternative — no link — is what
+  [#274](https://github.com/rogvid/skills/issues/274) was filed about.
 
 - **Nothing calls the ElevenLabs API.** The narration take grades everything a
   cache hit reaches — the key, the pacing, the mix — and by construction never
