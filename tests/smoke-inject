@@ -317,8 +317,12 @@ INJECTIONS = [
     Injection(
         name="a claim points one beat past the beat that made it",
         module="coverage.py",
-        old='                        "index": beat.get("index"),',
-        new='                        "index": (beat.get("index") or 0) + 1,',
+        # #309 extracted `_claim_row` out of the comprehension that used to
+        # build this dict, so the line lost sixteen columns of indentation and
+        # this entry went STALE. `--self-test` caught it; CI's own
+        # `tests/smoke-inject --self-test` step did not run before the merge.
+        old='        "index": beat.get("index"),',
+        new='        "index": (beat.get("index") or 0) + 1,',
         arm="--coverage-only",
         sites=("check_coverage", "check_coverage_merge"),
         must_contain=(
@@ -332,8 +336,11 @@ INJECTIONS = [
         # asserted.
         name="a claimed beat forgets which segment it came from",
         module="coverage.py",
-        old='                        "segment": beat.get("segment"),',
-        new='                        "segment": None,',
+        # Stale for the same reason as the entry above — #309's `_claim_row`
+        # extraction. This one was hidden behind it: `--self-test` reports the
+        # first STALE entry it meets, so fixing one uncovers the next.
+        old='        "segment": beat.get("segment"),',
+        new='        "segment": None,',
         arm="--coverage-only",
         sites=("check_coverage_merge",),
         must_contain=("a reviewer handed a bare 'beat 5'",),
@@ -1931,12 +1938,26 @@ def self_test() -> int:
             print(f"WRONG    {what}: contended() said {contended(lines)}")
 
     # The real manifest, against the real tree.
-    try:
-        verify_manifest(INJECTIONS)
-        print(f"OK       all {len(INJECTIONS)} registered entries still match")
-    except Refused as exc:
+    #
+    # Entry at a time, so every stale entry is named in one run. `verify_manifest`
+    # raises on the first, which is right for the run path — a manifest with one
+    # rotten entry should not start recording — but wrong for a report. #309 left
+    # two entries stale by the same re-indentation and the second only became
+    # visible after the first was fixed, which is one round per rotten entry on
+    # exactly the check that exists to stop silent rot.
+    stale = []
+    for entry in INJECTIONS:
+        try:
+            verify_manifest([entry])
+        except Refused as exc:
+            stale.append(str(exc))
+    if stale:
         bad += 1
-        print(f"STALE    {exc}")
+        print(f"STALE    {len(stale)} registered entr(ies) no longer match the tree:")
+        for problem in stale:
+            print(f"         - {problem}")
+    else:
+        print(f"OK       all {len(INJECTIONS)} registered entries still match")
 
     # And what tests/README.md says this manifest covers, against what it
     # covers (#184). Read as text: the README is the claim, `INJECTIONS` and
