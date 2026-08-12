@@ -1516,13 +1516,56 @@ says so explicitly. The injection *the failure lead counts every clause, not
 the ones no beat returned on* is what holds that line; without it the sentence
 would read as a finding against every clause on any crashed take.
 
-**What this leaves alone, stated rather than implied.** `render_timeline_md`'s
-`## Stills` gallery still embeds `![02](images/02.png)` for a `shot` beat that
-raised — a broken image in the same file whose acceptance table now withholds
-that path ([#305](https://github.com/rogvid/skills/issues/305)). It is a
-different renderer, reading `beats` rather than `coverage`, and #278's scope is
-the coverage row and the acceptance section; the wiring test asserts the path
-is absent from the acceptance section and says which issue owns the rest.
+**The same lie one section down: the `## Stills` gallery**
+([#305](https://github.com/rogvid/skills/issues/305)). #278 stopped the
+acceptance table naming `images/02.png` for a `shot` beat that raised, and
+twenty lines lower in the same file `render_timeline_md` embedded it as a
+picture — a third renderer, selecting off `beats` rather than `coverage` with
+`[b for b in beats if b.get("still")]`. A beat whose verb raised now
+contributes no gallery entry at all: not the embed, not the `### 02-empty —
+5.40s` heading, not the caption quoted under it. The beat table is where that
+beat still appears, marked **raised**.
+
+**`StillsGallery` grades the file-present case, and that is the whole design of
+it.** A missing file renders a broken-image placeholder — visibly broken,
+self-announcing, and an injection built on it would grade the easy half. But
+`images/` is committed, so on a re-record after a crash the *previous* take's
+picture of that name is already sitting on disk, and the embed puts a real
+photograph under this take's heading, this take's timestamp and this take's
+caption. So `setUp` stages that file, the document is written into the
+directory holding it with `write_timeline` — the path is relative, and means
+nothing without a directory to resolve against — and the assertions are on
+**which files on disk a markdown viewer could open out of the rendered
+document**, parsed here rather than borrowed from the renderer.
+
+| claim | what would otherwise pass |
+|---|---|
+| the openable pictures are exactly the ones this take wrote | stated as an equality, because "the stale picture is gone" is also true of a gallery that lost the section |
+| the heading and timestamp go with the picture | an entry stripped of only its `![…]()` line is still this take's heading and second over last week's photograph — and the injection *a beat that raised keeps its gallery heading and loses only the image* reddens this and leaves the row above green |
+| a take whose every picture raised prints no `## Stills` at all | a heading decided before the filter rather than after it is a promise of evidence with nothing behind it |
+| a take that finished embeds every picture it took | the #24 direction: a filter off by one `not` empties a healthy demo's gallery and satisfies all three rows above |
+
+Verified against the five committed `examples/ticket-queue/demos/*/timeline.json`:
+rendered on `ccd381c` and on this change, all five come out byte for byte the
+same. None of them carries a beat that raised, which is the point.
+
+**Two graded-coverage gaps in #278's own tests, closed here.** Both were found
+reviewing the merged change rather than by anything in the suite:
+
+- `_coverage_failure_md`'s `beat is None` branch — the take that came out of the
+  `with` block with no verb running — was ungraded in `tests/unit` while the
+  comment's mirror of it was graded. Replacing *"between beats — no verb was
+  running, so no beat is blamed"* with *"beat None (`None`)"* left the suite at
+  `Ran 420 tests … OK`. `CoverageMd.test_a_take_that_died_between_beats_blames_no_beat`
+  and an injection now hold it.
+- `Coverage.test_a_clean_take_carries_none_of_this` and
+  `Coverage.test_the_same_words_are_refused_on_a_take_that_did_not_finish` in
+  `tests/ci-unit` were in no `INJECTIONS` entry. Neither was hollow, but an edit
+  that hollowed them would have been silent. They now have one each: the lead
+  printed on a take that *finished* (the #24 direction, which `tests/unit` had
+  and this side did not), and a verdict word appended to the lead — appended
+  rather than substituted, for the reason the per-word injections append to the
+  disclaimer.
 
 **The sweep grades the sentences the renderer writes, not the ones it quotes**
 ([#283](https://github.com/rogvid/skills/issues/283)). Clause text belongs to

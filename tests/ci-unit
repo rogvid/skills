@@ -2167,6 +2167,39 @@ INJECTIONS = [
         ],
     ),
     (
+        # The same condition inverted, which is the direction #24 is about and
+        # the one the injection above cannot reach: the lead printed on every
+        # take that *finished*. `tests/unit` has this pair; this side had only
+        # the deletion, so nothing here watched an ordinary comment stay
+        # ordinary and `test_a_clean_take_carries_none_of_this` was in no
+        # manifest entry at all.
+        "the failure lead is printed on a take that did not fail",
+        "demo-comment",
+        "    if isinstance(failure, dict):\n"
+        "        gap += _failure_lead(failure, criteria, claimed)",
+        "    if not isinstance(failure, dict):\n"
+        "        gap += _failure_lead(failure or {}, criteria, claimed)",
+        [
+            "Coverage.test_a_clean_take_carries_none_of_this",
+            "Coverage.test_a_failed_take_says_so_before_anything_it_claimed",
+        ],
+    ),
+    (
+        # The verdict sweep, on the two sentences only a crashed take reaches.
+        # Appended rather than substituted, the same way the per-word
+        # injections treat the disclaimer: the lead's opening words are what
+        # three assertions above locate it by, and replacing them would redden
+        # those instead — the green-to-red transition that makes a sweep look
+        # alive while it stays silent.
+        "the failure lead promotes what the take got through to a verdict",
+        "demo-comment",
+        '        f"`with` block at {where}.",',
+        '        f"`with` block at {where}. Everything before it was demonstrated.",',
+        [
+            "Coverage.test_the_same_words_are_refused_on_a_take_that_did_not_finish",
+        ],
+    ),
+    (
         # The count that would be inventing a finding. #278 says it explicitly:
         # a clause claimed by a beat that *returned* on a take that later died
         # elsewhere is as good as any other claim that take made.

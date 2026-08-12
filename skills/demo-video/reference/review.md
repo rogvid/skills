@@ -317,6 +317,15 @@ A clause claimed by a beat that **returned** is untouched, even when the take
 died later somewhere else: that claim is as good as any other claim that take
 made.
 
+**The `## Stills` gallery at the foot of the same file drops that beat too**
+([#305](https://github.com/rogvid/skills/issues/305)). Withholding the path in
+the table above and embedding it as a picture twenty lines lower is the same
+lie twice, and the picture is the worse half: `images/` is committed, so on a
+re-record after a crash the *previous* take's file of that name is already on
+disk, and the embed puts a real photograph under this take's heading, this
+take's timestamp and this take's caption. The beat table is where that beat
+still appears, marked **raised**.
+
 ### Put the clause on screen: `criterion()`
 
 Everything above lives in files a viewer never opens. The video — the artifact
