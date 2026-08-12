@@ -432,6 +432,82 @@ INJECTIONS = [
         sites=("check_coverage",),
         must_contain=("states a finding about unclaimed criteria",),
     ),
+    # -- the window is visible around the card (issue #291) -------------------
+    #
+    # Three entries against the one assertion in this file that reads *pixels*
+    # out of the encoded frame. `tests/unit` grades the dispatch — which
+    # stylesheet each medium hands the page, and how far its field sits from
+    # the window body — at 0.2 s an injection; what it cannot see is what the
+    # composite did with either, which is the half a viewer meets.
+    #
+    # The first is the defect as it shipped, and it is the one that separates
+    # the two claims: a terminal card on a web take is a *wrong colour* (claim
+    # 1) and it is *invisible against the frame* (claim 2), and both fire. The
+    # second is a card dispatched perfectly and never painted. The third is the
+    # entry claim 2 exists for on its own — a card that is exactly the colour it
+    # should be, inside a window repainted to match it.
+    Injection(
+        # #291 restored. Injected at the import so the module still loads: a
+        # `NameError` here would fail the arm before it recorded anything, and
+        # the entry would be graded by an exception rather than by the pixels.
+        name="a web take is painted the terminal's card",
+        module="web.py",
+        old="from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, "
+        "_beat_verb, _DemoBase, _env",
+        new="from .core import (  # noqa: I001\n"
+        "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
+        "    WEB_WINDOW_BODY,\n"
+        "    _beat_verb,\n"
+        "    _DemoBase,\n"
+        "    _env,\n"
+        ")",
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=("the window's own frame is not visible around the card",),
+    ),
+    Injection(
+        # The card raised at zero opacity: the element is in the tree with the
+        # right text and the right stylesheet, so the aria snapshot, the beat
+        # log and the coverage table are all exactly as they should be, and the
+        # app is what a viewer sees. Every other assertion in this arm passes.
+        name="the card is built with the right colour and never shown",
+        module="core.py",
+        # The card's own two lines and not the caption bar's: `__demoCaption`
+        # ends in the same pair, so a shorter search string matches twice and
+        # the harness refuses the entry.
+        old="    el.style.cssText = '__CSS__';\n"
+        "    document.body.appendChild(el);\n"
+        "  }\n"
+        "  el.textContent = text;\n"
+        "  el.style.opacity = text ? '1' : '0';",
+        new="    el.style.cssText = '__CSS__';\n"
+        "    document.body.appendChild(el);\n"
+        "  }\n"
+        "  el.textContent = text;\n"
+        "  el.style.opacity = '0';",
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=(" levels off the web card's ",),
+    ),
+    Injection(
+        # **The window repainted to the card's own colour.** The card is black
+        # with light text exactly as it ships, the dispatch is untouched, the
+        # gutter is still drawn in the window's colour and therefore still
+        # matches it — and the frame around the card stops being something a
+        # viewer can see. This is #291 as a property rather than as a palette,
+        # and claim 1 passes throughout: it is the entry that says the frame
+        # reading is not decoration on top of the colour reading.
+        #
+        # `tests/unit` catches the constant moving, off two hand-written pins.
+        # It cannot say what the encoded frame looks like, which is this.
+        name="the window frame is repainted to match the card inside it",
+        module="core.py",
+        old='WEB_WINDOW_BODY = "#181825"',
+        new='WEB_WINDOW_BODY = "#050505"',
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=("the window's own frame is not visible around the card",),
+    ),
     # -- what strict=True refuses (issue #3), 21 s an entry -------------------
     #
     # These two are why `--strict-only` exists. The assertions were reachable

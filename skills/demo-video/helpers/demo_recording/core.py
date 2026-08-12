@@ -115,12 +115,79 @@ window.__demoCaption = (text) => {
 # an element `__demoInterlude` will then recognise and fade out, which means
 # one id and one stylesheet, in one place.
 INTERLUDE_ID = "__demo_interlude"
-INTERLUDE_CSS = (
+
+# Everything about the card except its two colours. Split out so the palettes
+# below cannot drift apart in the properties other things depend on: the card
+# is **opaque**, it covers the viewport, and it sits one level above the
+# caption bar (2147483646) so no caption is drawn while it is up. All three are
+# load-bearing outside this file — reference/limits.md reasons from them about
+# what the picture check can and cannot see.
+_INTERLUDE_LAYOUT = (
     "position: fixed; inset: 0; display: flex; align-items: center;"
-    " justify-content: center; background: #1c1a17; color: #f7f4ee;"
+    " justify-content: center;"
     " font: 500 30px/1.5 system-ui, sans-serif; text-align: center;"
     " padding: 0 12%; z-index: 2147483647; opacity: 0;"
     " transition: opacity .45s ease; pointer-events: none;"
+)
+
+# The body of the window web.py composites a page into — its `#win` fill, and
+# the colour of the pad that shows around the app video on every side. It is
+# defined here rather than there because the web card below is drawn *against*
+# it and the two must not drift: a card whose gutter is not the window's own
+# colour reads as a second frame inside the first. `web._FRAME_HTML` paints the
+# window with this same constant.
+WEB_WINDOW_BODY = "#181825"
+
+# The palette, per medium — and the split is issue #291.
+#
+# One palette used to serve both, and it was the terminal's: `#f7f4ee` text on
+# a `#1c1a17` field, the same near-black as the on-screen terminal card web.py
+# draws for `Recorder.terminal()`. On a terminal take that match is the feature.
+# `eca42c5` made this card the thing a terminal segment *opens on* (#110), so
+# it has to blend with what is behind it and with what replaces it; tuned to
+# blend with a terminal, it blends with a terminal.
+#
+# On a **web** take that is the wrong thing to blend with. The web recorder
+# composites the page into a dark window frame with a title bar and traffic
+# lights, so a full-bleed near-black field with a line of centred text inside
+# that frame reads as *a terminal window*, not as a card over an app — which is
+# what a human watching `examples/ticket-queue/demos/2026-08-11-criterion-card`
+# read it as. Nothing in an artifact could say so: the element, the beat, the
+# aria snapshot and the frames were all exactly right.
+#
+# **What went wrong was contrast, not geometry.** Both cards have always been
+# `inset: 0`, so both have always stopped at the app rect with the recorder's
+# own 14 px pad and title bar drawn around them. `#1c1a17` is 1.3 luma levels
+# from `WEB_WINDOW_BODY`, so that pad was there and invisible, and the card and
+# the window read as one dark surface. So the web card is drawn against the
+# window rather than merely differing from the terminal's:
+#
+#   * a **black** field, 25 luma levels from the window body, so the pad is a
+#     boundary a viewer sees rather than one that only exists in the geometry;
+#   * an 18 px **border in the window's own colour**, which widens that pad to
+#     ~28 px in the encoded frame without introducing a second frame — the card
+#     stops short of the window's inside edge, and looks it.
+#
+# The border is inside `inset: 0`: for a fixed element with all four insets set
+# and `width: auto` the used width is over-constrained, so the border box still
+# covers the app rect exactly. The card therefore stays **opaque and
+# full-bleed**, which is not decoration — `reference/limits.md` reasons from
+# it, and both halves (field and border) are flat opaque colours so nothing of
+# the app shows through and no caption is drawn while the card is up.
+#
+# Not warm paper, which is what this shipped as first and what a human
+# reviewing the video rejected: a light card inside a dark window frame is
+# unmistakably a card, and it is also a flashbang in the middle of a dark
+# recording. Not `#181825` itself either — "align it with the window" taken
+# literally puts the field *at* the boundary colour, 0 levels apart, which is
+# #291 again in a different hue.
+INTERLUDE_CSS_TERMINAL = (
+    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"
+)
+INTERLUDE_CSS_WEB = (
+    _INTERLUDE_LAYOUT
+    + " background: #000000; color: #f2f0ec;"
+    + f" border: 18px solid {WEB_WINDOW_BODY};"
 )
 _INTERLUDE_JS = """
 window.__demoInterlude = (text) => {
@@ -994,6 +1061,13 @@ class _DemoBase:
         # non-composited media (terminal) raise this so the caption lands at
         # the same height, keeping caption placement uniform across media.
         self._caption_bottom_px = 44
+        # The interlude card's stylesheet, which is per-medium (issue #291) for
+        # the same reason the two numbers above are: the card is composited
+        # into the medium's own chrome, and what reads as a card there is a
+        # property of that chrome. The terminal palette is the default because
+        # it is the one a medium can *open* on (#110); the web recorder swaps
+        # it in its own `__init__`.
+        self._interlude_css = INTERLUDE_CSS_TERMINAL
         self._lines: list[tuple[float, Path]] = []  # (video offset s, clip)
         # Both are readings of time.monotonic(). Nothing in this package
         # measures elapsed time any other way — not the beat log, not narration
@@ -1113,6 +1187,19 @@ class _DemoBase:
                 file=sys.stderr,
             )
 
+    def _interlude_script(self) -> str:
+        """`__demoInterlude`, carrying **this medium's** card (issue #291).
+
+        A method rather than an expression inside `__enter__` because that is
+        where the dispatch would otherwise be, and `__enter__` needs a browser:
+        this is the whole of the per-medium choice, and it is the largest part
+        of it a browser-free test can reach. `tests/unit` reads what it returns
+        for a recorder of each medium.
+        """
+        return _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID).replace(
+            "__CSS__", self._interlude_css
+        )
+
     # -- subclass hooks -----------------------------------------------------
 
     def _init_context(self, context) -> None:
@@ -1182,10 +1269,7 @@ class _DemoBase:
                 _CAPTION_JS.replace("__CAPFONT__", str(self._caption_font_px))
                 .replace("__CAPBOTTOM__", str(self._caption_bottom_px))
             )
-            self._context.add_init_script(
-                _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID)
-                .replace("__CSS__", INTERLUDE_CSS)
-            )
+            self._context.add_init_script(self._interlude_script())
             self._context.add_init_script(_BRIDGE_JS.replace("__ID__", BRIDGE_ID))
             # Medium-specific init scripts (cursor, spotlight, ...).
             self._init_context(self._context)

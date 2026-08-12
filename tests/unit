@@ -159,6 +159,7 @@ import demo_recording.frames as frames_module  # noqa: E402
 from demo_recording.core import (  # noqa: E402
     CRITERION_HOLD_MAX_S,
     CRITERION_HOLD_MIN_S,
+    INTERLUDE_ID,
     _beat_verb,
     _CaptureClock,
     _DemoBase,
@@ -4298,6 +4299,244 @@ class CriterionHold(unittest.TestCase):
         # spoken line" is satisfied by a hold that is *always* whatever
         # `_line_end` says, including a negative one.
         self.assertEqual(self.held_for("It works.", spoken=-30.0), CRITERION_HOLD_MIN_S)
+
+
+# --------------------------------------------------------------------------
+# core.py — which card each medium raises (issue #291)
+# --------------------------------------------------------------------------
+#
+# One stylesheet used to serve both media and it was the terminal's, so on a
+# **web** take the full-screen card was a near-black field inside the recorder's
+# own dark window frame and read as a terminal window rather than as a card over
+# the app. Found by a human watching a demo; no artifact could have said so,
+# because every artifact was right.
+#
+# **What went wrong was contrast, not geometry, and that is what is graded.**
+# The card has always been `inset: 0`, so it has always stopped at the app rect
+# with the recorder's pad and title bar drawn around it. `#1c1a17` sits 1.3 luma
+# levels from that frame's own `#181825`, so the boundary was there and nobody
+# could see it. The property below is therefore a *distance from the window*,
+# not a distance from the terminal card: a web card that matched the frame would
+# be #291 again whatever colour the terminal's had drifted to.
+#
+# What is graded here is the dispatch and the two palettes — which card a
+# recorder of each medium hands the page, that the terminal's is the value the
+# #110 blend was tuned to, and that the web one is far from the frame it is
+# composited into. **Whether a card reads as a card is not graded anywhere and
+# cannot be**: the same element, text and snapshot are produced either way, and
+# the only difference is a colour a person recognises. The pixel half of it —
+# that the frame around the card is visibly not the card, measured off
+# `demo.mp4` — is `tests/smoke`'s `check_criterion_card`; the legibility half is
+# a person watching, and tests/README.md says so under Known gaps.
+
+# The two palettes and the window body, hand-written. A bound read off the code
+# being graded agrees with that code whatever it says, and these are the numbers
+# other things were chosen against: `tests/smoke`'s opening-card sweep calls
+# anything under 60 luma "the card" (the terminal one measures 26), and the same
+# file's `WEB_CARD_RGB` and `WINDOW_BODY_RGB` are these two in decimal.
+TERMINAL_CARD_PALETTE = "background: #1c1a17; color: #f7f4ee;"
+WEB_CARD_PALETTE = "background: #000000; color: #f2f0ec;"
+WINDOW_BODY = "#181825"
+
+# How far the web card's field must sit from the window body it is composited
+# into before the frame around it is a boundary a viewer sees. Perceptual, and
+# **not** an inequality: #291 is a card 1.3 levels from the frame with every
+# dispatch in place. Measured off `demo.mp4` rather than guessed — the two
+# candidates a human was shown for this read 23.5 (what shipped) and 1.1 ("align
+# it with the window" taken literally, which is the defect in a different hue),
+# against 0.4 for #291 itself. The bar sits ~30x over the defect and the shipped
+# card clears it by 2x; `tests/smoke` uses the same 12 on the encoded frame.
+WINDOW_CONTRAST_MIN_LUMA = 12.0
+
+
+class _RecordingContext:
+    """A Playwright context that only remembers what was registered on it.
+
+    `_init_context` is the one half of the medium seam that takes a context and
+    no browser, so this is how a browser-free suite reads the scripts a take
+    would really have installed.
+    """
+
+    def __init__(self) -> None:
+        self.scripts: list[str] = []
+
+    def add_init_script(self, script: str) -> None:
+        self.scripts.append(script)
+
+
+def card_css(script: str) -> str:
+    """The stylesheet the card element is given, out of the script that builds
+    it — read the way the browser would, from the assignment it executes."""
+    match = re.search(r"style\.cssText = '([^']*)'", script)
+    return match.group(1) if match else ""
+
+
+def card_declaration(css: str, want: str) -> str:
+    """One declaration out of a card's inline stylesheet, or `""`.
+
+    Hand-parsed rather than imported from the recorder: a helper shared with
+    the code under test agrees with that code's bugs by construction.
+    """
+    for declaration in css.split(";"):
+        name, _, value = declaration.partition(":")
+        if name.strip() == want:
+            return value.strip()
+    return ""
+
+
+def card_background(css: str) -> str:
+    """The `background:` declaration out of a card's inline stylesheet."""
+    return card_declaration(css, "background")
+
+
+def luma(hex_colour: str) -> float:
+    """Rec. 601 luma of `#rrggbb`, the number a grayscale frame carries."""
+    r, g, b = (int(hex_colour[i : i + 2], 16) for i in (1, 3, 5))
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+class InterludePalette(unittest.TestCase):
+    def css_for(self, cls, **settings) -> str:
+        """The stylesheet a take of this medium gives its card.
+
+        Off `_interlude_script()`, which is the string `__enter__` registers on
+        the context, so every assertion below reads what the page would run.
+        """
+        return card_css(recorder(self, cls=cls, **settings)._interlude_script())
+
+    def test_a_web_take_raises_the_palette_smoke_grades_in_pixels(self):
+        # The pin, in both directions. `tests/smoke`'s `check_criterion_card`
+        # compares an encoded frame against this colour in decimal, and a
+        # palette changed here and not there turns that check into a reading of
+        # nothing at all.
+        self.assertIn(WEB_CARD_PALETTE, self.css_for(WebRec))
+
+    def test_a_web_take_does_not_raise_the_terminals_card(self):
+        # The defect, exactly: the string the *page* was handed on a web take
+        # carried the terminal palette, so the card was painted the colour of
+        # the recorder's own terminal widgets.
+        self.assertNotIn(TERMINAL_CARD_PALETTE, self.css_for(WebRec))
+
+    def test_a_terminal_take_still_raises_the_card_110_was_tuned_to(self):
+        # The blend `eca42c5` added is load-bearing on this medium: the card is
+        # what a terminal segment *opens* on, covering the recorder's own setup,
+        # and it has to be dark for the same reason the terminal is. This is the
+        # regression half of #291 — the fix is only correct if it left this one
+        # exactly where it was.
+        self.assertIn(TERMINAL_CARD_PALETTE, self.css_for(TermRec))
+        self.assertNotIn(WEB_CARD_PALETTE, self.css_for(TermRec))
+
+    def test_the_card_a_terminal_segment_opens_on_is_that_same_card(self):
+        # Two things build this element, and only one of them is the verb.
+        # `TerminalRecorder(interlude=…)` paints it from an init script before
+        # the page has painted at all (#110) — so a palette that arrived in
+        # `interlude()` alone would leave a segment opening on the other one,
+        # which is a card that changes colour mid-fade.
+        rec = recorder(self, cls=TermRec, interlude="…a few minutes later.")
+        context = _RecordingContext()
+        rec._init_context(context)
+        opening = [s for s in context.scripts if INTERLUDE_ID in s]
+        self.assertEqual(
+            len(opening), 1, "the opening card is not registered on the context"
+        )
+        self.assertEqual(card_css(opening[0]), card_css(rec._interlude_script()))
+
+    def test_the_web_card_is_not_the_colour_of_the_window_it_sits_in(self):
+        # **The property #291 is actually about.** Not "the two cards differ" —
+        # `!=` is satisfied by `#1c1a18`, and so is a bar drawn against the
+        # terminal card, which is a colour the web take never composites next
+        # to. What a viewer sees the web card against is the recorder's own
+        # window body, and the defect was that the card was 1.3 luma levels
+        # from it: the pad and title bar were drawn around the card exactly as
+        # they are now, and read as part of it.
+        web = card_background(self.css_for(WebRec))
+        # A card that is not a flat colour has no luma to compare; say so here
+        # rather than letting `luma()` raise, so this reads as a finding.
+        self.assertRegex(web, r"^#[0-9a-f]{6}$", "the web card")
+        self.assertGreaterEqual(
+            abs(luma(web) - luma(WINDOW_BODY)),
+            WINDOW_CONTRAST_MIN_LUMA,
+            f"the web card ({web}, luma {luma(web):.0f}) is within "
+            f"{WINDOW_CONTRAST_MIN_LUMA:.0f} luma levels of the window body it "
+            f"is composited into ({WINDOW_BODY}, luma {luma(WINDOW_BODY):.0f}) "
+            f"— issue #291 is a card the frame around it cannot be seen against",
+        )
+
+    def test_the_window_body_this_is_measured_against_is_the_one_drawn(self):
+        # The control for the assertion above, and the only thing that stops it
+        # grading two constants against each other: `WINDOW_BODY` is written out
+        # by hand here, and the frame a take actually paints has to still use
+        # it. Repaint the window darker and the card stops standing out from it
+        # — with this pin, that is a failure rather than a silent regression to
+        # #291 approached from the other side.
+        import inspect
+
+        import demo_recording.web as web_module
+        from demo_recording.core import WEB_WINDOW_BODY
+        from demo_recording.web import _FRAME_HTML
+
+        self.assertEqual(WEB_WINDOW_BODY, WINDOW_BODY)
+        self.assertIn("background: __WINBG__", _FRAME_HTML)
+        # ...and that the placeholder is filled from the shared constant. A
+        # frame painted from a literal would satisfy both lines above while
+        # drifting away from the card on the next edit, which is the drift the
+        # constant was introduced to close.
+        self.assertIn(
+            '.replace("__WINBG__", WEB_WINDOW_BODY)',
+            inspect.getsource(web_module),
+        )
+
+    def test_the_web_cards_gutter_is_the_windows_own_colour(self):
+        # The card's border is what widens the recorder's 14 px pad into a
+        # ~28 px gutter, so the field stops visibly short of the window's inside
+        # edge. It has to be the *window's* colour: any other value draws a
+        # second frame inside the first, which is a worse picture than the one
+        # #291 complained about.
+        css = self.css_for(WebRec)
+        self.assertIn(f"border: 18px solid {WINDOW_BODY};", css)
+        self.assertNotIn("border", self.css_for(TermRec))
+
+    def test_the_web_card_is_not_painted_like_the_skills_terminal_widgets(self):
+        # #291's own sentence, and the colour the card collided with is not only
+        # the other card's: `Recorder.terminal()` draws an on-screen terminal
+        # prop *inside a web demo*, and a card matching it reads as that widget
+        # having taken the whole screen over.
+        from demo_recording.web import _TERMINAL_JS
+
+        web = card_background(self.css_for(WebRec))
+        self.assertNotIn(
+            web,
+            _TERMINAL_JS,
+            f"the web interlude card is painted {web}, which is a colour the "
+            f"web recorder's own terminal prop draws with",
+        )
+
+    def test_both_cards_are_opaque_and_cover_the_frame_above_the_caption(self):
+        # Not decoration, and not a restatement of the CSS: reference/limits.md
+        # reasons from all three of these — a card that is translucent, inset,
+        # or under the caption bar changes what the picture check can see and
+        # what a caption swap does to it. The two other candidate fixes for #291
+        # (a scrim over the still-visible app; a card inset from the viewport
+        # edge) are ruled out here rather than in a commit message.
+        for medium, cls in (("web", WebRec), ("terminal", TermRec)):
+            with self.subTest(medium=medium):
+                css = self.css_for(cls)
+                self.assertIn("inset: 0", css)
+                self.assertIn("z-index: 2147483647", css)
+                # A flat `#rrggbb` and nothing else: `rgba(...)`, a gradient
+                # with a transparent stop, or a `background` left to the page
+                # are all ways for the app to show through.
+                self.assertRegex(card_background(css), r"^#[0-9a-f]{6}$")
+                # And the same of the border, which is the other half of an
+                # `inset: 0` element's paint. `inset: 0` with `width: auto` is
+                # over-constrained, so a border does not shrink the card off
+                # the app rect — but a translucent one, or a `border-radius`
+                # that rounds the *outer* corners away, puts the app back on
+                # screen at the edges while the card is up.
+                border = card_declaration(css, "border")
+                if border:
+                    self.assertRegex(border, r"^\d+px solid #[0-9a-f]{6}$")
+                self.assertEqual(card_declaration(css, "border-radius"), "")
 
 
 # --------------------------------------------------------------------------
@@ -11603,6 +11842,167 @@ INJECTIONS = [
         "        return max(reading, self._line_end - time.monotonic())",
         "        return reading",
         ["CriterionHold.test_the_clause_stays_up_for_the_whole_spoken_line"],
+    ),
+    (
+        # **Issue #291, restored.** The web recorder takes the card the terminal
+        # recorder needs, and every artifact of the take stays correct: the
+        # element, the beat, the aria snapshot and the coverage row are all
+        # right, and the video shows what a viewer read as a terminal window.
+        # Injected at the import rather than at the assignment, so the module
+        # still imports: a `NameError` would fail every test that builds a web
+        # recorder, and the entry would be graded by an exception instead of by
+        # the assertions it names.
+        "a web take is given the terminal's card",
+        "web.py",
+        "from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, _beat_verb, _DemoBase, _env",
+        "from .core import (  # noqa: I001\n"
+        "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
+        "    WEB_WINDOW_BODY,\n"
+        "    _beat_verb,\n"
+        "    _DemoBase,\n"
+        "    _env,\n"
+        ")",
+        [
+            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
+            "InterludePalette.test_a_web_take_does_not_raise_the_terminals_card",
+            "InterludePalette.test_the_web_card_is_not_the_colour_of_the_window_it_sits_in",
+            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+            "InterludePalette."
+            "test_the_web_card_is_not_painted_like_the_skills_terminal_widgets",
+        ],
+    ),
+    (
+        # The dispatch removed while both palettes stay in the file: the fix
+        # looks present at every site a reader would check, and no take reaches
+        # the web one. This is what makes the medium tests above readings about
+        # a recorder rather than about a constant.
+        "the card is chosen once for every medium instead of per take",
+        "core.py",
+        '            "__CSS__", self._interlude_css',
+        '            "__CSS__", INTERLUDE_CSS_TERMINAL',
+        [
+            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
+            "InterludePalette.test_a_web_take_does_not_raise_the_terminals_card",
+            "InterludePalette.test_the_web_card_is_not_the_colour_of_the_window_it_sits_in",
+            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+        ],
+    ),
+    (
+        # The web palette moved onto the terminal, which is #110's fix undone:
+        # a terminal segment then opens on a light field and fades it into a
+        # dark terminal, which is the flash that card exists to cover, brighter.
+        "the terminal's card is repainted in the web palette",
+        "core.py",
+        'INTERLUDE_CSS_TERMINAL = (\n    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"\n)',
+        'INTERLUDE_CSS_TERMINAL = (\n    _INTERLUDE_LAYOUT + " background: #efe7d8; color: #1c1a17;"\n)',
+        # Not `test_the_card_a_terminal_segment_opens_on_is_that_same_card`:
+        # that one grades the two builders of this element against **each
+        # other**, and both move together under a palette change. It is graded
+        # by the injection below, which is the fault it exists for.
+        [
+            "InterludePalette.test_a_terminal_take_still_raises_the_card_110_was_tuned_to",
+        ],
+    ),
+    (
+        # The palette fixed in `interlude()` and not in the init script that
+        # raises the opening card — the half of this element a storyboard never
+        # touches. The segment would open on one colour and fade out another.
+        "the card a terminal segment opens on keeps its own palette",
+        "terminal.py",
+        '                .replace("__CSS__", self._interlude_css)',
+        '                .replace("__CSS__", "background: #efe7d8; color: #1c1a17;")',
+        [
+            "InterludePalette.test_the_card_a_terminal_segment_opens_on_is_that_same_card",
+        ],
+    ),
+    (
+        # **"Align it with the window", taken literally.** The reviewer who
+        # rejected the light card asked for one that matches the window it sits
+        # in, and the colour that matches it exactly is the one #291 is: a card
+        # the frame around it cannot be seen against. Every dispatch is in
+        # place, the card is dark with light text as asked, the gutter is still
+        # drawn — and it is the window's own colour on both sides of its edge.
+        "the web card is painted the window body's own colour",
+        "core.py",
+        '    + " background: #000000; color: #f2f0ec;"',
+        '    + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"',
+        [
+            "InterludePalette.test_the_web_card_is_not_the_colour_of_the_window_it_sits_in",
+            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
+        ],
+    ),
+    (
+        # The window repainted to match the card, which is the same defect
+        # approached from the other end. **The distance test does not catch
+        # this and is not meant to**: it measures the card against a
+        # `WINDOW_BODY` written out by hand in this file, so a frame repainted
+        # in the package moves nothing it reads. That is what the pin is for,
+        # and this entry is the fault the pin exists for — without it the
+        # hand-written bound would be two constants graded against each other
+        # with nothing tying either to what a take paints.
+        "the window is repainted to the colour of the card inside it",
+        "core.py",
+        'WEB_WINDOW_BODY = "#181825"',
+        'WEB_WINDOW_BODY = "#050505"',
+        [
+            "InterludePalette.test_the_window_body_this_is_measured_against_is_the_one_drawn",
+            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+        ],
+    ),
+    (
+        # The window painted from a literal again, with the shared constant
+        # left in the file and still correct. Every value a reader would check
+        # agrees; the two are simply no longer the same value, which is how
+        # they drifted apart in the first place.
+        "the window frame is painted from a literal, not the shared constant",
+        "web.py",
+        '            .replace("__WINBG__", WEB_WINDOW_BODY)',
+        '            .replace("__WINBG__", "#181825")',
+        [
+            "InterludePalette.test_the_window_body_this_is_measured_against_is_the_one_drawn",
+        ],
+    ),
+    (
+        # The gutter drawn in something that is not the window's colour: the
+        # card stops short of the window's inside edge and a second frame
+        # appears between the two, which is a worse picture than #291's.
+        "the card's gutter draws a second frame inside the window's",
+        "core.py",
+        '    + f" border: 18px solid {WEB_WINDOW_BODY};"',
+        '    + " border: 18px solid #b45309;"',
+        [
+            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+        ],
+    ),
+    (
+        # A card that lets the app show through. The colour is right, the
+        # dispatch is right, and reference/limits.md's account of what the
+        # picture check can see — which rests on this card being opaque — stops
+        # being true of a web take.
+        "the web card is a scrim over the app rather than a card",
+        "core.py",
+        '    + " background: #000000; color: #f2f0ec;"',
+        '    + " background: rgba(0,0,0,.72); color: #f2f0ec;"',
+        [
+            "InterludePalette."
+            "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",
+            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
+        ],
+    ),
+    (
+        # The gutter rounded away at the outer corners. `border-radius` on an
+        # `inset: 0` element rounds the *border box*, so the four corners of the
+        # app rect stop being painted and the app shows through them while the
+        # card is up — full-bleed lost to a styling flourish, with the colour
+        # and the dispatch both correct.
+        "the card's outer corners are rounded off the app rect",
+        "core.py",
+        '    + f" border: 18px solid {WEB_WINDOW_BODY};"',
+        '    + f" border: 18px solid {WEB_WINDOW_BODY}; border-radius: 14px;"',
+        [
+            "InterludePalette."
+            "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",
+        ],
     ),
 ]
 

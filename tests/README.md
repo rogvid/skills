@@ -182,8 +182,8 @@ grades, the manifest that proves it can still fail:
 ```sh
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
-tests/smoke-inject --arm coverage # one arm's entries (~165 s)
-tests/smoke-inject                # all 56 entries, ~44 min
+tests/smoke-inject --arm coverage # one arm's entries (~210 s)
+tests/smoke-inject                # all 59 entries, ~44 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1390,6 +1390,9 @@ Injections caught:
 | the card claims nothing | the card arm's `ac`, and the claimed-rows assertion |
 | the criterion beat does not record which clause it showed | the card arm's `selector` |
 | the fixture stops raising a card at all | the card arm's control |
+| a web take is painted the terminal's card (#291) | the frame reading, at 0.4 luma levels apart |
+| the card is built in the right colour and never made visible | the colour reading, at 242 levels off |
+| the window is repainted to the colour of the card inside it | the frame reading, at 4.0 luma levels apart |
 
 **The card arm reads two sources on purpose** (issue #280). Four of its
 assertions read `timeline.json`, which the recorder writes out of the same
@@ -1425,13 +1428,38 @@ per clause and its beat numbers, and points every row at the wrong one.
 - Whether a tagged beat *shows* what it claims. That is the reviewer's
   judgement, and the artifact is written to say so rather than to assert it.
 - **Whether the criterion card is legible.** "The clause reached the page" is
-  not "a human can read it": a card rendered off-frame, at zero opacity, under
-  an app overlay, or clipped by an over-long clause puts exactly the same text
-  in exactly the same snapshot. Nothing here reads a pixel of the card, and
-  nothing here can. That question is answered the way this skill answers every
+  not "a human can read it": a card rendered off-frame, under an app overlay,
+  or clipped by an over-long clause puts exactly the same text in exactly the
+  same snapshot. That question is answered the way this skill answers every
   question about how a recording looks — somebody watches the video (SKILL.md
   Process step 6) — and the demo recorded for #280 is that answer for this
   verb.
+
+  **Two pixel readings are now taken, and only two** (issue #291).
+  `check_criterion_card` samples a strip of the app rect across the card's own
+  beat and requires (1) that it is the card's colour and (2) that it is at
+  least 12 luma levels from the recorder's own window body, sampled in the pad
+  below the app rect. The second is the graded property, and it is the one the
+  defect fails: the card had always been `inset: 0`, so the window frame was
+  drawn around it the whole time — it was 0.4 levels from that frame, so the
+  boundary existed and nobody could see it, and the video read as a terminal
+  window with a correct element, a correct beat, a correct snapshot and correct
+  frames.
+
+  What that pair deliberately does not read:
+
+  - **Whether the card is legible.** The strip is chosen to sit *above* the
+    text, so a card whose clause is clipped, mis-hyphenated or rendered in an
+    unreadable face passes exactly as a good one does.
+  - **How wide the visible frame is.** A card flush to the app rect and a card
+    inside an 18 px gutter of the window's own colour are the same reading
+    here. The gutter is a judgement about how obviously the thing reads as a
+    card, and that judgement is a person's.
+  - **Whether the result reads as a card at all**, which is the whole of #291
+    and is not gradable from any artifact — the same element, text and snapshot
+    are produced either way.
+
+  A human still has to watch.
 
 ### Whether the recorder notices that the recording shows nothing (issue #97)
 
@@ -1756,7 +1784,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-56 entries, 12 arms, ~43.6 min of takes
+59 entries, 12 arms, ~44.4 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -1785,7 +1813,7 @@ paragraph whose job is to say what this manifest does not cover.
 |---|---|---|
 | `--lock-only` | 3 | a run the machine lock refuses goes back to building an output directory it will never write to and printing `recordings left in` under `smoke: FAILED`, naming it ([#105](https://github.com/rogvid/skills/issues/105)) — or the fix overshoots and no failing run is told where its recordings are, which the third entry is the control for |
 | `--narration-only` | 6 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for. Two more are about *where* the voice went ([#226](https://github.com/rogvid/skills/issues/226)), which no window bar can see: the mix landing 250 ms from the second the take's own record names, and the record naming a second the mix did not use — caught only because the arm now watches the host's wall clock itself and compares |
-| `--coverage-only` | 10 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade |
+| `--coverage-only` | 13 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade. Three more grade the *picture* of that card ([#291](https://github.com/rogvid/skills/issues/291)) — pixels read off `demo.mp4`, not values read out of a document: a web take given the terminal's near-black card, which is the defect and which every artifact of the take describes correctly; a card dispatched in the right colour and never made visible; and — the one the frame reading exists for on its own — the recorder's window repainted to the card's own colour, where the card is exactly what it should be and the frame around it stops being something a viewer can see |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
@@ -1798,7 +1826,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 42 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 43 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
