@@ -1463,10 +1463,12 @@ per clause and its beat numbers, and points every row at the wrong one.
   going red is correct. The fix is to re-measure `core.WEB_CARD_BODY` against
   the window, never to widen `CARD_WINDOW_TOLERANCE`. **Where the constant was
   measured, precisely:** one Linux developer box, sweeping 100 declared colours
-  through real takes. It has not been swept on `ubuntu-latest` — what is known
-  there is that the two hosts read an *earlier* card colour identically off
-  `demo.mp4`, which makes agreement plausible and not proven. CI running this
-  arm is the confirmation, and a red bar there is a finding, not a flake.
+  through real takes. Two platforms then read the *shipped* value identically
+  off `demo.mp4` — that box and `ubuntu-latest` under `smoke (web, content and
+  terminal takes)`, both `(24, 21, 36)` for the card and `(23, 22, 37)` for the
+  window, not merely both under the bar. That is two hosts agreeing exactly,
+  which is evidence and not a guarantee: no Windows or macOS runner has ever
+  recorded a take here, and only this box was swept.
 
   **What is still not graded: whether a viewer reads the result as a card.**
   Sameness is measurable and now measured; recognition is not. Nor is:
