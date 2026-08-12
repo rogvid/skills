@@ -169,9 +169,12 @@ MIN_CONTENT_STDDEV = {
 #   web         25.6          0.00
 #   terminal     2.7          0.00
 #
-# The terminal margin is the thinnest number in this file — 2.7x over its
-# floor, against 4x or better for everything else. tests/README.md calls that
-# out under "Known gaps".
+# The terminal margin is 2.7x over its floor. It was the thinnest number in
+# this file when it was written (871eac3, against 4x or better everywhere
+# else) and it is now tied: `CARD_RGB_TOLERANCE` clears the terminal card by
+# 2.7x too, since #291 put two dark palettes next to each other. Both are
+# stated where they are set, and tests/README.md calls this one out under
+# "Known gaps".
 MIN_CAPTION_BAND_DIFF = {"web": 8.0, "terminal": 1.0, "segments": 8.0}
 
 # Consecutive stills must differ by at least this mean absolute luma, on the
