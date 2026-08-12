@@ -1472,6 +1472,58 @@ second and third rows each have an injection that reddens
 which is the measurement that says their fixtures are carrying those sentences
 rather than decorating an existing test.
 
+**A claim a failed take made must not read as a clean one**
+([#278](https://github.com/rogvid/skills/issues/278)). `coverage_report` copied
+`index`, `segment`, `segment_index`, `t_start` and `still` off the claiming
+beat and never its `error`, and every renderer downstream reads the row rather
+than the beat. So a `shot("07-x", ac="AC-3")` whose screenshot raised produced
+`**AC-3** — … | beat 17 | 31.8 | images/07-x.png` — a still the take never
+wrote, above a beat table that correctly said **raised**.
+
+Three things are graded, because they are three pieces of code: the report the
+row comes out of, the `timeline.md` rendering of it, and the pull-request
+comment's.
+
+| claim | where | what would otherwise pass |
+|---|---|---|
+| the row carries the beat's `error` | `Coverage`, in `tests/unit` | the row a renderer reads is the pre-#278 one, whatever either renderer does with it |
+| and only when it raised | `Coverage`, in `tests/unit` | a key on every row makes the assertion above pass on a report that copied a constant, and makes an old timeline read as one whose beats all raised |
+| the acceptance table marks the row | `CoverageMd`, in `tests/unit` | the beat table 40 lines lower still says **raised**, so a reader who scrolled far enough would find out |
+| and prints no still | `CoverageMd`, in `tests/unit` | the path names a file nothing wrote |
+| the section leads with the failure | `CoverageMd`, in `tests/unit` | a take that crashed opens its acceptance section exactly as a clean one does |
+| `render_timeline_md` hands it the failure | `TimelineMd`, in `tests/unit` | every assertion above holds on a perfect function nobody calls with the second argument |
+| the comment mirrors all of it | `Coverage`, in `tests/ci-unit` | the pull-request comment is the artifact a reviewer is guaranteed to read |
+
+**The comment's fixture stages the still on disk on purpose.** `RAISED` claims
+`images/01-search-box.png` from a beat that raised, and `setUp` writes that
+file — because `images/` is committed, so on a take that died the *previous*
+recording's picture of that name is sitting in the directory, and a renderer
+deciding by existence alone links last week's picture as this beat's evidence.
+`AC-1` claims the same file from a beat that returned and is linked in the same
+table, which is the control: a renderer that stopped linking anything satisfies
+neither.
+
+**One assertion was written and deleted** rather than kept: *the raised row is
+still four cells wide*. Every break that widens that row is caught one
+assertion earlier by the equality on the row's fourth cell, which indexes it
+and would read the wrong one or raise — the catalogue's dominated assertion,
+and it would have been a second row in the table above measuring nothing new.
+
+**What the count deliberately does not include.** A clause claimed by a beat
+that *returned*, on a take that died later somewhere else, is not marked and is
+not counted — that claim is as good as any other claim the take made, and #278
+says so explicitly. The injection *the failure lead counts every clause, not
+the ones no beat returned on* is what holds that line; without it the sentence
+would read as a finding against every clause on any crashed take.
+
+**What this leaves alone, stated rather than implied.** `render_timeline_md`'s
+`## Stills` gallery still embeds `![02](images/02.png)` for a `shot` beat that
+raised — a broken image in the same file whose acceptance table now withholds
+that path ([#305](https://github.com/rogvid/skills/issues/305)). It is a
+different renderer, reading `beats` rather than `coverage`, and #278's scope is
+the coverage row and the acceptance section; the wiring test asserts the path
+is absent from the acceptance section and says which issue owns the rest.
+
 **The sweep grades the sentences the renderer writes, not the ones it quotes**
 ([#283](https://github.com/rogvid/skills/issues/283)). Clause text belongs to
 whoever wrote the ticket and captions to whoever wrote the storyboard, and both

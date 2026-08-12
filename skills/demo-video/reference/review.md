@@ -299,6 +299,24 @@ with Recorder(OUT, criteria={
 **1 of 3 criteria have no beat claiming them: `AC-3`.**
 ```
 
+### What a take that died renders instead
+
+A verb that raises is recorded on its beat (`error`), and the claim that beat
+made carries it too. So on a crashed take the acceptance section **leads with
+the failure**, before the table — the same ordering `timeline.md` already uses
+for "## This take did not finish" — and the row reads:
+
+```
+| **AC-3** — The CLI prints the same… | beat 17 **raised TimeoutError** | 31.80 | *not written* |
+```
+
+The still is withheld rather than printed. `shot()` stamps the path on the beat
+before it takes the picture, so on a take that died there the path names a file
+nothing wrote, and printing it sends a reviewer looking for last week's picture.
+A clause claimed by a beat that **returned** is untouched, even when the take
+died later somewhere else: that claim is as good as any other claim that take
+made.
+
 ### Put the clause on screen: `criterion()`
 
 Everything above lives in files a viewer never opens. The video — the artifact

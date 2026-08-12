@@ -769,15 +769,29 @@ class Render(unittest.TestCase):
         self.assertEqual(unescaped.count("|"), 4, rows[0])  # 4 delimiters, 3 cells
 
 
-def claim(index: int, still: str | None = None, segment: str | None = None) -> dict:
-    """One row of `coverage.claimed[id]`, shaped as `coverage_report` writes it."""
-    return {
+def claim(
+    index: int,
+    still: str | None = None,
+    segment: str | None = None,
+    raised: str | None = None,
+) -> dict:
+    """One row of `coverage.claimed[id]`, shaped as `coverage_report` writes it.
+
+    `raised` adds the `error` key the recorder copies off a beat whose verb
+    threw (#278). Absent otherwise, exactly as the manifest has it — a fixture
+    that always carried the key would let a renderer reading it pass on a take
+    where nothing went wrong.
+    """
+    row = {
         "index": index,
         "segment": segment,
         "segment_index": index,
         "t_start": float(index),
         "still": still,
     }
+    if raised is not None:
+        row["error"] = {"type": raised, "message": "no such locator"}
+    return row
 
 
 # Four clauses, and the two nothing claims are **not** the last two: an
@@ -875,6 +889,51 @@ ALL_ILLUSTRATED = dict(
             "AC-2": [claim(5, "images/03-requester.png")],
             "AC-3": [claim(9, STILL)],
             "AC-4": [claim(11, "images/03-requester.png")],
+        },
+        unclaimed=[],
+    ),
+)
+
+# The take #278 is about: a `shot()` tagged AC-2 whose screenshot raised, on a
+# take that died right there.
+#
+# **AC-2's still is `STILL`, which `setUp` puts on disk.** That is the whole
+# point of the fixture and not an oversight: `images/` is committed, so a
+# previous recording's picture of that name is sitting in the directory, and a
+# renderer that decides by existence alone links last week's picture as this
+# beat's evidence. AC-1 claims the same file and *did* return, so the two rows
+# differ in exactly one field and the fixture cannot be satisfied by a renderer
+# that stopped linking anything.
+RAISED = dict(
+    TIMELINE,
+    failure={
+        "type": "TimeoutError",
+        "beat": 5,
+        "verb": "shot",
+        "message": "no such locator",
+    },
+    coverage=dict(
+        COVERAGE,
+        claimed={
+            "AC-1": [claim(3, STILL)],
+            "AC-2": [claim(5, STILL, raised="TimeoutError")],
+            "AC-3": [claim(9, "images/03-requester.png")],
+            "AC-4": [],
+        },
+        unclaimed=["AC-4"],
+    ),
+)
+
+# The other branch of the lead: the take died at a beat that tagged nothing, so
+# every clause still has a claim from a beat that returned. Without it the
+# count sentence would be the only thing the lead is ever seen writing.
+RAISED_NOWHERE = dict(
+    TIMELINE,
+    failure={"type": "RuntimeError", "beat": None, "verb": None, "message": "boom"},
+    coverage=dict(
+        COVERAGE,
+        claimed={
+            key: [claim(i + 1, STILL)] for i, key in enumerate(COVERAGE["criteria"])
         },
         unclaimed=[],
     ),
@@ -1276,10 +1335,11 @@ class Coverage(unittest.TestCase):
     def test_every_take_with_a_ticket_says_what_it_is_not_evidence_of(self):
         """The one sentence about the comment's own reach, on every branch.
 
-        Enumerated rather than counted, and the fixtures are the four shapes
-        the gap block takes: a clause nothing claims, a clause with no picture,
-        every clause claimed and illustrated, and nothing claimed at all. The
-        third is the one that matters most and is the easiest to lose — a
+        Enumerated rather than counted, and the fixtures are the shapes the
+        gap block takes: a clause nothing claims, a clause with no picture,
+        every clause claimed and illustrated, nothing claimed at all, and a
+        take that did not finish (#278, whose lead sits above this sentence).
+        The third is the one that matters most and is the easiest to lose — a
         rendering that printed this only where it already had a gap to report
         would say nothing on the take a reviewer is likeliest to trust.
 
@@ -1298,7 +1358,7 @@ class Coverage(unittest.TestCase):
                 unclaimed=list(COVERAGE["criteria"]),
             ),
         )
-        for fixture in (TAGGED, CAPTION_ONLY, ALL_ILLUSTRATED, none_claimed):
+        for fixture in (TAGGED, CAPTION_ONLY, ALL_ILLUSTRATED, none_claimed, RAISED):
             body = self.body(fixture)
             # The haystack: without this, a renderer that stopped printing the
             # acceptance section entirely would fail here for a reason this
@@ -1466,6 +1526,84 @@ class Coverage(unittest.TestCase):
         # two sentences" of a renderer that writes three — a boundary reported
         # as guarded across text one branch of which nothing read.
         for fixture in (CAPTION_ONLY, ABSENT_STILL, OUTSIDE_STILL):
+            self.assert_no_verdict(self.body(fixture), fixture)
+
+    # -- a claim a failed take made must not read as a clean one (#278) -----
+
+    def lead(self, body: str) -> str:
+        """The one sentence saying the take crashed, in the acceptance section.
+
+        Matched from the start of the line, not by "did not finish" anywhere:
+        `render_demo`'s own heading carries those words too, and a search that
+        found it would place the lead by the heading's position — above every
+        assertion below, whatever `render_coverage` did.
+        """
+        found = [ln for ln in body.splitlines() if ln.startswith("**This take did not")]
+        self.assertEqual(len(found), 1, f"no single failure lead in:\n{body}")
+        return found[0]
+
+    def test_a_failed_take_says_so_before_anything_it_claimed(self):
+        body = self.body(RAISED)
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+        where = body.index(self.lead(body))
+        self.assertLess(where, body.index("| clause | claimed at | look at |"))
+        self.assertLess(where, body.index("**AC-1**"))
+        # And before the two gap headlines, which are themselves above the
+        # table: on a take that died, the failure is the reason for both.
+        self.assertLess(where, body.index(self.headline(body)))
+        self.assertIn("beat 5 (`shot`)", self.lead(body))
+
+    def test_the_lead_counts_the_clauses_no_returning_beat_claimed(self):
+        # AC-2's only claim raised and nothing claims AC-4, so two of the four
+        # have no claim from a beat that returned. AC-1 and AC-3 do, and
+        # counting them would be inventing a finding on claims as good as any
+        # other this take made.
+        body = self.body(RAISED)
+        line = [ln for ln in body.splitlines() if "no claim from a beat" in ln]
+        self.assertEqual(len(line), 1, body)
+        self.assertIn("2 of the 4 clauses", line[0])
+        self.assertIn("AC-2", line[0])
+        self.assertIn("AC-4", line[0])
+        self.assertNotIn("AC-1", line[0])
+        self.assertNotIn("AC-3", line[0])
+
+    def test_a_take_that_died_claiming_everything_prints_no_count(self):
+        body = self.body(RAISED_NOWHERE)
+        self.assertIn("between beats", self.lead(body))
+        self.assertNotIn("no claim from a beat", body)
+
+    def test_a_clause_claimed_by_a_beat_that_raised_says_so_in_its_row(self):
+        # The `claimed at` cell, read narrowly: unmarked it says "beat 5" and
+        # is indistinguishable from AC-1's, which is a claim the take kept.
+        body = self.body(RAISED)
+        self.assertEqual(self.cell(body, "AC-2"), "beat 5 (raised TimeoutError)")
+        self.assertEqual(self.cell(body, "AC-1"), "beat 3")
+
+    def test_a_still_a_beat_that_raised_would_have_written_is_not_linked(self):
+        # The artifact-lies case this slice exists for. The file is on disk —
+        # `images/` is committed, so a previous recording's picture of that
+        # name is right there — and AC-1 links it from the same table, so the
+        # renderer is demonstrably able to find it.
+        self.assertTrue((self.root / "demos/x/images/01-search-box.png").exists())
+        body = self.body(RAISED)
+        self.assertIn("](http", self.look_at(body, "AC-1"))  # control
+        cell = self.look_at(body, "AC-2")
+        self.assertNotIn("](http", cell)
+        self.assertNotIn("01-search-box.png", cell)
+        self.assertIn("raised TimeoutError", cell)
+
+    def test_a_clean_take_carries_none_of_this(self):
+        # The #24 rule at the comment's edge: a document with no failure and no
+        # raised claim must read exactly as it did before this slice.
+        body = self.body(ALL_ILLUSTRATED)
+        for added in ("did not finish", "raised", "no claim from a beat"):
+            self.assertNotIn(added, body)
+        self.assertIn("](http", self.look_at(body, "AC-1"))  # control
+
+    def test_the_same_words_are_refused_on_a_take_that_did_not_finish(self):
+        # The lead and the raised cell are two more sentences the renderer
+        # writes, in a branch every fixture above reaches by not having.
+        for fixture in (RAISED, RAISED_NOWHERE):
             self.assert_no_verdict(self.body(fixture), fixture)
 
     def test_a_claim_from_a_named_segment_says_which_segment(self):
@@ -1960,11 +2098,92 @@ INJECTIONS = [
         '    lines += render_coverage(\n        timeline.get("coverage"),\n'
         "        demo=repo_path(path_prefix, name),\n"
         "        directory=demo_dir(demo_root, name),\n"
-        "        repo_url=repo_url,\n        sha=sha,\n    )",
+        "        repo_url=repo_url,\n        sha=sha,\n"
+        "        # Without this the section renders a crashed take's claims "
+        "exactly like\n"
+        "        # a clean take's, five lines above a block that says the take "
+        "failed\n"
+        "        # (issue #278).\n"
+        "        failure=failure,\n    )",
         "    lines += []",
         [
             "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
             "Coverage.test_every_declared_clause_reaches_the_comment_with_its_own_text",
+        ],
+    ),
+    (
+        # The wiring #278 adds, and the one the injection above cannot see: the
+        # call still happens, the section still renders, and it is never told
+        # the take died — so a crashed take's clauses come out exactly like a
+        # clean take's, five lines above a block saying the take failed.
+        "the coverage section is not told the take failed",
+        "demo-comment",
+        "        failure=failure,\n    )",
+        "    )",
+        [
+            "Coverage.test_a_failed_take_says_so_before_anything_it_claimed",
+            "Coverage.test_the_lead_counts_the_clauses_no_returning_beat_claimed",
+            "Coverage.test_a_take_that_died_claiming_everything_prints_no_count",
+        ],
+    ),
+    (
+        # **The defect #278 is about**, in the artifact a reviewer actually
+        # reads: the row's `error` ignored, so a claim a beat threw out of
+        # names the same beat in the same words as one that returned.
+        "a claim whose beat raised is labelled like one that returned",
+        "demo-comment",
+        "            part += f\" (raised {_cell(str(error.get('type') or 'an exception'))})\"",
+        "            pass",
+        ["Coverage.test_a_clause_claimed_by_a_beat_that_raised_says_so_in_its_row"],
+    ),
+    (
+        # And the picture. `images/` is committed, so on a take that died the
+        # previous recording's still of that name is sitting in the directory
+        # and existence alone links it — last week's picture, beside a clause
+        # whose beat threw.
+        "a still is linked for a beat that raised, because the file exists",
+        "demo-comment",
+        '        error = row.get("error")\n        if isinstance(error, dict):\n'
+        '            raised.append(str(error.get("type") or "an exception"))\n'
+        "            continue",
+        '        error = row.get("error")\n        if False:\n'
+        '            raised.append(str(error.get("type") or "an exception"))\n'
+        "            continue",
+        [
+            "Coverage.test_a_still_a_beat_that_raised_would_have_written_is_not_linked",
+        ],
+    ),
+    (
+        # The lead deleted. The gap headline then opens the section on a
+        # crashed take exactly as it does on one that finished.
+        "the acceptance section stops leading with the failure",
+        "demo-comment",
+        "    if isinstance(failure, dict):\n        gap += _failure_lead(failure, criteria, claimed)",
+        "    if False:\n        gap += _failure_lead(failure, criteria, claimed)",
+        [
+            "Coverage.test_a_failed_take_says_so_before_anything_it_claimed",
+            "Coverage.test_the_lead_counts_the_clauses_no_returning_beat_claimed",
+            "Coverage.test_a_take_that_died_claiming_everything_prints_no_count",
+        ],
+    ),
+    (
+        # The count that would be inventing a finding. #278 says it explicitly:
+        # a clause claimed by a beat that *returned* on a take that later died
+        # elsewhere is as good as any other claim that take made.
+        "the failure lead counts every clause, not the ones no beat returned on",
+        "demo-comment",
+        "    unreached = [\n"
+        "        key\n"
+        "        for key in criteria\n"
+        "        if not any(\n"
+        '            not isinstance(row.get("error"), dict) '
+        "for row in (claimed.get(key) or [])\n"
+        "        )\n"
+        "    ]",
+        "    unreached = list(criteria)",
+        [
+            "Coverage.test_the_lead_counts_the_clauses_no_returning_beat_claimed",
+            "Coverage.test_a_take_that_died_claiming_everything_prints_no_count",
         ],
     ),
     (
