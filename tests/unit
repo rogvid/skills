@@ -987,6 +987,27 @@ class ContentSummaryStreams(unittest.TestCase):
     def test_no_content_at_all_prints_nothing_on_either_stream(self):
         self.assertEqual(self.summary(None), ("", ""))
 
+    def test_a_take_that_held_nothing_announces_no_hold(self):
+        # `opened` is gated on `held > 0`, and reference/timeline.md says so
+        # since #290. Without this the prose is the only thing that knows: a
+        # zero clause reads as "the first 0.00s is a hold", which tells a
+        # reader the recorder covered something on a take where it covered
+        # nothing — the confidently-wrong artifact, in one clause.
+        out, err = self.summary(
+            seg("a", opening={"gap": 0.0, "held": 0.0, "limit": 1.5})["content"]
+        )
+        self.assertIn("shows a picture", out)
+        self.assertNotIn("hold", out)
+        self.assertEqual(err, "")
+
+    def test_a_take_that_held_the_opening_says_so_on_stdout(self):
+        # The control for the test above, which is satisfied by a summary that
+        # never mentions a hold at all — including one with the clause deleted.
+        out, _ = self.summary(
+            seg("a", opening={"gap": 0.0, "held": 0.4, "limit": 1.5})["content"]
+        )
+        self.assertIn("the first 0.40s is a hold", out)
+
 
 # --------------------------------------------------------------------------
 # narration.py — the cache key (issue #157)
@@ -1184,6 +1205,83 @@ class SkillDocs(unittest.TestCase):
         linked = set(re.findall(r"\]\(reference/([^)#]+)", self.skill))
         self.assertGreaterEqual(len(on_disk), REFERENCE_FLOOR)
         self.assertEqual(on_disk - linked, set(), "reference files nothing links")
+
+
+# --------------------------------------------------------------------------
+# The shipped verb table, against the sets it was copied out of (issue #289)
+# --------------------------------------------------------------------------
+#
+# `reference/timeline.md` tells a storyboard author which verbs a held stretch
+# tolerates in silence and which ones make it warn. That is `content.py`'s two
+# frozensets, retyped — and until #289 nothing compared the two, so deleting
+# `criterion` from the passive row turned nothing red. It is the shape #165
+# came from, one document over: `"bridge"` sat in the passive set and was
+# copied into this table, and no timeline has ever carried that verb.
+#
+# Graded **name for name, both rows**. "The row has nine verbs" is the
+# catalogue's count standing in for the content, and nine wrong names satisfy
+# it. The acting row is graded too although #289 only names the passive one:
+# it was the same copy, and it was already six verbs short of the set.
+#
+# Order inside a row is not graded, duplication is: both sides are sorted
+# lists, so a verb written twice fails instead of being absorbed by a set. No
+# floor of its own — a row that lost every verb fails the comparison, and the
+# union is floored one class up by `VerbClassification`, which the same two
+# sets feed.
+
+VERB_TABLE_HEADER = "| beats inside the held stretch | verdict |"
+
+
+def verb_table_rows() -> list[tuple[list[str], str]]:
+    """(verbs named, verdict) for each row of the shipped held-stretch table.
+
+    Read out of the document a storyboard author actually opens, and by
+    position rather than by matching verb names: a parser that went looking for
+    the names it expects would find them however few of them were there.
+    """
+    lines = (
+        (SKILL_DIR / "reference" / "timeline.md")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    at = [i for i, line in enumerate(lines) if line.strip() == VERB_TABLE_HEADER]
+    if len(at) != 1:
+        return []
+    rows = []
+    for line in lines[at[0] + 2 :]:  # +2: past the `|---|---|` rule
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not line.startswith("|") or len(cells) != 2:
+            break
+        rows.append((re.findall(r"`([a-z_]+)`", cells[0]), cells[1]))
+    return rows
+
+
+class VerbTable(unittest.TestCase):
+    def test_the_shipped_table_names_exactly_the_verbs_the_code_classifies(self):
+        rows = verb_table_rows()
+        self.assertEqual(
+            len(rows),
+            2,
+            f"the table under {VERB_TABLE_HEADER!r} in reference/timeline.md "
+            f"parsed as {len(rows)} row(s), not the passive one and the acting "
+            f"one — nothing below is graded until it parses",
+        )
+        (passive, passive_verdict), (acting, acting_verdict) = rows
+        self.assertIn("silent", passive_verdict)
+        self.assertIn("warns", acting_verdict)
+        self.assertEqual(
+            sorted(passive),
+            sorted(CONTENT_PASSIVE_VERBS),
+            "the silent row of reference/timeline.md and CONTENT_PASSIVE_VERBS "
+            "name different verbs. A storyboard author reads that row to decide "
+            "what may sit inside a held stretch; the recorder reads the set",
+        )
+        self.assertEqual(
+            sorted(acting),
+            sorted(CONTENT_ACTING_VERBS),
+            "the warning row of reference/timeline.md and CONTENT_ACTING_VERBS "
+            "name different verbs",
+        )
 
 
 # --------------------------------------------------------------------------
@@ -2873,7 +2971,8 @@ class OneClassifier(unittest.TestCase):
 #
 # Its scope, stated: `helpers/demo_recording/*.py`, `SKILL.md`, the shipped
 # `scripts/`, and the storyboards under `examples/`. The last two were added by
-# #281 — both ship, neither was read, and `# The URL is redacted in the log.`
+# #281 — both are prose a reader trusts, neither was read, and the line
+# `# The URL is redacted in the log.`
 # added to `scripts/demo-target-guard` left the suite green when that was
 # reproduced. Not `reference/` or the skill README, and not whether the
 # surviving prose is right about anything other than masking — see
@@ -4232,6 +4331,26 @@ class CriterionCard(unittest.TestCase):
         self.assertEqual(rec._beats, [])
 
 
+class _HoldClock:
+    """A monotonic clock that only a held frame advances.
+
+    Stood in for `core.time` so a 7.5 s spoken line costs this suite
+    microseconds while the beat log still comes out with the timestamps a real
+    take would write. `_idle` is where a take spends a hold, and it is left
+    running exactly as it ships — its own `time.sleep` is what moves this
+    clock, so a hold the recorder skipped moves nothing.
+    """
+
+    def __init__(self) -> None:
+        self.mono = 0.0
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def sleep(self, seconds: float) -> None:
+        self.mono += seconds
+
+
 class CriterionHold(unittest.TestCase):
     """How long the clause stays up, and what pins the two constants.
 
@@ -4287,16 +4406,70 @@ class CriterionHold(unittest.TestCase):
     def test_a_storyboard_that_says_how_long_gets_exactly_that(self):
         self.assertEqual(self.held_for(CLAUSE, hold=0.25), 0.25)
 
-    def test_the_clause_stays_up_for_the_whole_spoken_line(self):
-        # With narration on, a card that leaves mid-sentence is the one thing
-        # this verb must not do: the voice is still reading the clause and the
-        # screen has moved on.
-        self.assertAlmostEqual(self.held_for("It works.", spoken=7.5), 7.5, delta=0.2)
+    def beats_over_line(self, text: str, spoken: float) -> list[dict]:
+        """The beat log of a take that raised a card while a line was still
+        being spoken, and then took it down with the documented clear.
+
+        Run over `_HoldClock` and with the production `_idle` — the loop, the
+        pump and the slicing against a deadline, all of it — because what is
+        being read here is `t_start`/`t_end`, and a recorder that holds nothing
+        writes a beat log where every beat is instantaneous.
+        """
+        clock = _HoldClock()
+        rec = recorder(self, cls=Recorder, page=DrawingPage(), criteria={"AC-1": text})
+        rec._t0 = 0.0
+        # What `_start_line` does for a real narration clip, without one: the
+        # line is now known to end `spoken` seconds from here. Once — the
+        # `interlude("")` that clears the card speaks nothing.
+        pending = [spoken]
+        rec._start_line = lambda clip: (  # type: ignore[method-assign]
+            setattr(rec, "_line_end", clock.monotonic() + pending.pop())
+            if pending
+            else None
+        )
+        real = core_module.time
+        core_module.time = clock  # type: ignore[assignment]
+        try:
+            rec.criterion("AC-1")
+            rec.interlude("")
+        finally:
+            core_module.time = real  # type: ignore[assignment]
+        return rec._beats
+
+    def test_the_criterion_beat_covers_the_whole_spoken_line(self):
+        # **What the `line_remaining` term actually buys, measured** (#287).
+        # Not that the card stays up: the only take-down is `interlude("")`,
+        # whose `_prepare_line("")` idles the line out before it clears, so the
+        # clause is on screen for the whole line either way. What the term
+        # decides is which beat the wait is *attributed* to — and a beat's
+        # `t_end` is what `frames.py` cuts its review frame at the midpoint of,
+        # so the wrong attribution moves the one frame a reviewer sees for this
+        # card onto a clause the voice has not reached yet.
+        criterion, cleared = self.beats_over_line("It works.", spoken=7.5)
+        self.assertEqual(criterion["verb"], "criterion")
+        self.assertAlmostEqual(criterion["t_end"], 7.5, delta=0.01)
+        self.assertEqual(
+            cleared["t_start"],
+            criterion["t_end"],
+            "the seconds the voice spent finishing the clause belong to no "
+            "beat: the criterion beat ended before the line did, and the "
+            "clear had to wait the rest of it out before its own beat opened",
+        )
+
+    def test_a_take_with_no_line_to_finish_pays_nothing_for_the_term(self):
+        # The control. Both assertions above are satisfied by a card that is
+        # *always* held to `spoken`, and by one whose beats are all glued end
+        # to end whatever the hold was — this take scripts a line that is
+        # already over, and the card falls back to reading speed.
+        criterion, cleared = self.beats_over_line("It works.", spoken=-30.0)
+        self.assertAlmostEqual(criterion["t_end"], CRITERION_HOLD_MIN_S, delta=0.01)
+        self.assertEqual(cleared["t_start"], criterion["t_end"])
 
     def test_a_line_that_already_finished_does_not_shorten_the_card(self):
-        # The control for the test above: without it, "the card rides the
-        # spoken line" is satisfied by a hold that is *always* whatever
-        # `_line_end` says, including a negative one.
+        # The same control one level down, on the hold itself rather than on
+        # the beat it lands in: without it, "the card rides the spoken line"
+        # is satisfied by a hold that is *always* whatever `_line_end` says,
+        # including a negative one.
         self.assertEqual(self.held_for("It works.", spoken=-30.0), CRITERION_HOLD_MIN_S)
 
 
@@ -10279,7 +10452,24 @@ INJECTIONS = [
         '        "caption",\n        "criterion",',
         '        "bridge",\n        "caption",\n        "criterion",',
         [
-            "VerbClassification.test_every_classified_verb_is_one_a_recorder_actually_logs"
+            "VerbClassification.test_every_classified_verb_is_one_a_recorder_actually_logs",
+            # The code half of #289's drift, in the same break: a set that grew
+            # a name the shipped table does not carry. The entry below breaks
+            # the table instead, so both directions are watched.
+            "VerbTable.test_the_shipped_table_names_exactly_the_verbs_the_code_classifies",
+        ],
+    ),
+    (
+        # #289 exactly: `criterion` deleted from the row a storyboard author
+        # reads to decide what may sit inside a held stretch. Before the check
+        # below existed this turned nothing red — the table was a copy of
+        # `CONTENT_PASSIVE_VERBS` that nothing compared to it.
+        "a verb is dropped from the shipped table of what a held stretch tolerates",
+        "reference/timeline.md",
+        "| `caption`, `criterion`, `hold`,",
+        "| `caption`, `hold`,",
+        [
+            "VerbTable.test_the_shipped_table_names_exactly_the_verbs_the_code_classifies"
         ],
     ),
     (
@@ -10347,6 +10537,28 @@ INJECTIONS = [
         [
             "ContentSummaryStreams.test_no_content_at_all_prints_nothing_on_either_stream"
         ],
+    ),
+    (
+        # A hold of zero announced as a hold. The clause exists so that a
+        # reader is told the opening frames are not frames the recording
+        # captured; on a take that covered nothing it says the opposite of
+        # what happened, in the one line the recorder prints unasked (#290).
+        "a take that covered nothing still announces an opening hold",
+        "content.py",
+        "        if isinstance(held_open, (int, float)) and held_open > 0:",
+        "        if isinstance(held_open, (int, float)):",
+        ["ContentSummaryStreams.test_a_take_that_held_nothing_announces_no_hold"],
+    ),
+    (
+        # The other direction, and the reason the test above has a control:
+        # "no hold is announced" is satisfied by a recorder that never
+        # announces one, and then `held` is in `timeline.json` and nowhere a
+        # reader of the take's own output will meet it.
+        "the opening hold stops being announced at all",
+        "content.py",
+        "        if isinstance(held_open, (int, float)) and held_open > 0:",
+        "        if isinstance(held_open, (int, float)) and held_open > 1e9:",
+        ["ContentSummaryStreams.test_a_take_that_held_the_opening_says_so_on_stdout"],
     ),
     (
         # #46 in the marker's own body: the stale branch is the case the file
@@ -11595,14 +11807,20 @@ INJECTIONS = [
         ],
     ),
     (
-        # The card leaves while the narrator is still reading the clause off
-        # it. Silent on a take recorded without speech, which is every take in
-        # CI — so the assertion that catches it has to script the line.
-        "the card comes down mid-sentence when the clause is being spoken",
+        # The seconds the voice spends finishing the clause stop belonging to
+        # the criterion beat. The card is on screen for the whole line either
+        # way — `interlude("")` idles the line out before it clears — so what
+        # this breaks is the beat log, not the picture: the criterion beat ends
+        # early, the wait falls into the gap before the clear's own beat, and
+        # the review frame `frames.py` cuts at the beat's midpoint moves onto a
+        # clause the narrator has not reached. Silent on a take recorded
+        # without speech, which is every take in CI, so the assertion that
+        # catches it has to script the line (#287).
+        "the wait for the spoken line falls outside the criterion beat",
         "core.py",
         "        return max(reading, self._line_end - time.monotonic())",
         "        return reading",
-        ["CriterionHold.test_the_clause_stays_up_for_the_whole_spoken_line"],
+        ["CriterionHold.test_the_criterion_beat_covers_the_whole_spoken_line"],
     ),
 ]
 

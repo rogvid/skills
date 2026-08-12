@@ -258,6 +258,11 @@ CONTENT_STATIC_WARN_S = 15.0
 # set until #165: both interlude styles log the verb `interlude` with the style
 # in `selector`, so no timeline has ever carried it, and the documentation
 # copied it out of here into a shipped table of beat verbs.
+#
+# That table — the two rows under *did a verb that acts on the app run inside
+# the stretch?* in `reference/timeline.md` — is compared to these two sets name
+# by name, also in tests/unit, since #289. It was a copy nothing graded, which
+# is how a dead member reached a shipped document in the first place.
 CONTENT_ACTING_VERBS = frozenset(
     {
         "clear",
@@ -866,10 +871,12 @@ def print_content_summary(content: dict | None, media: str) -> None:
     or one warning per entry in `content.warnings` — goes to `stderr` with the
     recorder's other diagnostics. The healthy `… shows a picture (…)` line goes
     to `stdout`, where `wrote <path>` and the take's other statements about its
-    own output already are. Every path out of here takes one of those two
-    branches and never both, so a caller redirecting one stream loses no part
-    of the summary — only the branch this take did not take. The section header
-    above says the same, and `tests/unit` pins each line to its stream.
+    own output already are. A path out of here takes **at most one** of those
+    two branches and never both — a take that encoded no mp4 has no `content`
+    to report and prints on neither stream — so a caller redirecting one stream
+    loses no part of the summary, only the branch this take did not take. The
+    section header above says the same, and `tests/unit` pins each line to its
+    stream.
     """
     if not isinstance(content, dict):
         return

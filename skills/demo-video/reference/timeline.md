@@ -60,7 +60,8 @@ key is fine, renaming one is not:
   starting and returning. A verb built out of other verbs (`click` glides
   first, `type_into` clicks first) is one beat, not one per internal step.
 - `caption` is the line on screen during the beat: the new text for a
-  `caption` beat, the line shown for an `interlude`, `""` when none is up.
+  `caption` beat, the line shown for an `interlude`, the declared clause a
+  `criterion` card carries, `""` when none is up.
 - `selector` is what the verb acted on, as a string — a CSS selector for the
   web verbs, the command / keys / pattern for the terminal ones, the name for
   `shot`. `null` for verbs with no target (`pause`, `hold`, a cleared
@@ -164,7 +165,10 @@ to.
   measured one. Spoken, it is a clause of the healthy `shows a picture` line —
   **stdout**, and the only place the recorder ever says it. A take that warned
   does not print that line, so on a take with warnings `held` is in this file
-  and nowhere else. Nothing else in the video is touched — the duration,
+  and nowhere else — and a take whose `held` is `0.0` gets no clause either,
+  because the clause says what was covered and nothing was, so a healthy line
+  carrying no hold is a take that opened on a painted app rather than a take
+  that hid one. Nothing else in the video is touched — the duration,
   the audio and every beat timestamp are exactly what they were, because the
   hold is an overlay switched off rather than a trim.
 - The video is therefore not a measurement of your app's load time, and was
@@ -224,8 +228,14 @@ inside the stretch?**
 
 | beats inside the held stretch | verdict |
 |---|---|
-| `caption`, `criterion`, `interlude`, `hold`, `pause`, `shot`, `wait_for*` | narrated hold — silent |
-| `run`, `send`, `key`, `click`, `type_into`, `goto`, `scroll_to`, `spotlight`, `move_to` | worth looking at — warns |
+| `caption`, `criterion`, `hold`, `interlude`, `pause`, `shot`, `wait_for`, `wait_for_prompt`, `wait_for_text` | narrated hold — silent |
+| `clear`, `click`, `click_fast`, `goto`, `key`, `move_to`, `press`, `run`, `scroll_to`, `send`, `spotlight`, `terminal`, `terminal_close`, `terminal_output`, `type_into` | worth looking at — warns |
+
+Both rows are the whole of `content.py`'s `CONTENT_PASSIVE_VERBS` and
+`CONTENT_ACTING_VERBS`, written out name by name rather than summarised. This
+skill's own repository holds a `tests/unit` that compares the two rows to those
+two sets, so a verb that drifts out of either one fails there rather than
+shipping as a table nobody grades (#289).
 
 Both interlude styles log as the verb `interlude`, with `selector` carrying the
 style (`"card"` or `"light"`) — there is no separate verb for the light one.
@@ -254,13 +264,13 @@ working one.
 
 - **A held stretch containing only narration is never reported.** This is the
   verb correlation doing its job, and it is also the one blind spot that can
-  hide a real fault: a demo that raises an interlude card and then only
-  captions, holds and takes stills behind it is silent, however long the card
-  stays up. Measured: a card over 31.5s of a 34s take, no warning. There is no
-  third answer available from the frames — with the caption band excluded, an
-  honest tour of a still screen and a card left up are byte-identical. If your
-  storyboard raises a card, take it down explicitly; do not rely on this check
-  to notice.
+  hide a real fault: a demo that raises a card (`interlude()`, `criterion()`)
+  and then only captions, holds and takes stills behind it is silent, however
+  long the card stays up. Measured: a card over 31.5s of a 34s take, no
+  warning. There is no third answer available from the frames — with the
+  caption band excluded, an honest tour of a still screen and a card left up
+  are byte-identical. If your storyboard raises a card, take it down
+  explicitly; do not rely on this check to notice.
 
 - **A caption change is invisible to the held-picture arm, by design.** The
   caption bar is the recorder's own drawing and it renders over an interlude
