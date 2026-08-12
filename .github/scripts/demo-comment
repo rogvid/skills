@@ -23,8 +23,9 @@ Tier 1 is what survives artifact retention. Tier 2 is what a reviewer clicks
 today. Neither substitutes for the other.
 
 A take recorded against a ticket carries a third thing above the beat table:
-the ticket's clauses, the ones no beat claimed named first (issue #273). It is
-a rendering of `timeline.json`'s `coverage` and it grades nothing — see
+the ticket's clauses, the ones no beat claimed named first (issue #273), each
+claimed clause pointed at the committed still a reviewer can open (issue #274).
+It is a rendering of `timeline.json`'s `coverage` and it grades nothing — see
 `render_coverage`.
 
 The body opens with an HTML marker so the workflow can find and rewrite this
@@ -37,6 +38,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import quote
 
 MARKER = "<!-- demo-video-ci: one comment per pull request, rewritten on every push -->"
 
@@ -96,7 +99,108 @@ def _claim_label(rows: list[dict]) -> str:
     return _plural(len(parts), "beat ", "beats ") + ", ".join(parts)
 
 
-def render_coverage(coverage: object) -> list[str]:
+class _Picture(NamedTuple):
+    """What the `look at` column says for one clause, and whether it is one."""
+
+    cell: str
+    found: bool  # a still this take published, which the cell points at
+
+
+def _inside_demo(still: str) -> str | None:
+    """`still` as a path inside the demo directory, or None if it is not one.
+
+    `timeline.json` is a committed, pull-request-editable file, and its `still`
+    is pasted into a URL below. A value of `../../elsewhere.png` can exist on
+    disk and would resolve to a picture that has nothing to do with this demo,
+    so it is named in the table rather than linked.
+    """
+    if still.startswith("/") or "\\" in still:
+        return None
+    parts = [p for p in still.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def _still_href(repo_url: str | None, sha: str | None, path: str) -> str | None:
+    """A URL for a committed still, at the commit the take was recorded from.
+
+    None when the caller gave no repository or no commit: a link built without
+    both would point at the wrong bytes, and naming the file is better than
+    handing a reviewer a picture from some other revision.
+    """
+    base = (repo_url or "").rstrip("/")
+    if not base or not sha:
+        return None
+    return f"{base}/raw/{quote(sha)}/{quote(path)}"
+
+
+def _picture(
+    rows: list[dict],
+    *,
+    demo: str,
+    directory: Path,
+    repo_url: str | None,
+    sha: str | None,
+) -> _Picture:
+    """The one still a reviewer can open for this clause, or why there is none.
+
+    `images/*.png` are committed, so a blob at the head SHA is the only piece
+    of a take that has a URL at all: `demo.mp4` and `frames/` are both inside
+    Actions artifact zips and `frames/` is gitignored, which is why this is a
+    still and not a seek into the video (issue #272).
+
+    Existence is checked in the directory this take's `timeline.json` was read
+    from — in CI the staging copy, which the freshness filter has already
+    applied — so a still left behind by a *previous* recording is named as
+    missing rather than linked as this take's. A still the manifest names and
+    nothing published is the artifact-lies case: it is reported, never skipped
+    and never linked.
+    """
+    if not rows:
+        return _Picture("—", False)
+    named: list[str] = []
+    outside: list[str] = []
+    for row in rows:
+        still = row.get("still")
+        if not isinstance(still, str) or not still.strip():
+            continue
+        raw = still.strip()
+        named.append(raw)
+        rel = _inside_demo(raw)
+        if rel is None:
+            outside.append(raw)
+            continue
+        if not (directory / rel).exists():
+            continue
+        href = _still_href(repo_url, sha, f"{demo}/{rel}")
+        # The file name alone in the cell: the row already says which clause
+        # and which demo, and the full path crowds a three-column table.
+        label = _cell(rel.rsplit("/", 1)[-1])
+        return _Picture(f"[{label}]({href})" if href else f"`{_cell(rel)}`", True)
+    if outside:
+        return _Picture(
+            f"*`{_cell(outside[0])}` is not a path inside this demo, "
+            f"so it is not linked*",
+            False,
+        )
+    if named:
+        return _Picture(
+            f"*`{_cell(named[0])}` is named here, but this take published "
+            f"no such file*",
+            False,
+        )
+    return _Picture("*no still*", False)
+
+
+def render_coverage(
+    coverage: object,
+    *,
+    demo: str,
+    directory: Path,
+    repo_url: str | None,
+    sha: str | None,
+) -> list[str]:
     """The ticket's clauses and what claimed them, **gap first** (issue #273).
 
     Nothing here is a verdict, and the wording is load-bearing rather than a
@@ -116,7 +220,14 @@ def render_coverage(coverage: object) -> list[str]:
 
     Which clauses nothing claimed is derived from `claimed`, not read out of
     the manifest's own `unclaimed`, so the headline and the table below it
-    cannot disagree about the same take.
+    cannot disagree about the same take. The clauses with no picture are
+    derived the same way, and from the same pass that fills the `look at`
+    column, for the same reason.
+
+    A clause claimed only by a caption gives a reviewer nothing to open, and
+    until issue #274 it looked exactly like a well-illustrated one. It is named
+    with the other gaps, above the table: it is the second finding here that
+    takes no judgement, being a fact about which files exist.
     """
     doc = coverage if isinstance(coverage, dict) else {}
     criteria = doc.get("criteria")
@@ -128,6 +239,19 @@ def render_coverage(coverage: object) -> list[str]:
     claimed = doc.get("claimed") or {}
     unclaimed = [key for key in criteria if not (claimed.get(key) or [])]
     total, covered = len(criteria), len(criteria) - len(unclaimed)
+    pictures = {
+        key: _picture(
+            claimed.get(key) or [],
+            demo=demo,
+            directory=directory,
+            repo_url=repo_url,
+            sha=sha,
+        )
+        for key in criteria
+    }
+    unillustrated = [
+        key for key in criteria if key not in unclaimed and not pictures[key].found
+    ]
 
     gap: list[str] = []
     if unclaimed:
@@ -135,6 +259,15 @@ def render_coverage(coverage: object) -> list[str]:
         gap += [
             f"**{ids} {_plural(len(unclaimed), 'has', 'have')} no beat "
             f"claiming {_plural(len(unclaimed), 'it', 'them')}.**",
+            "",
+        ]
+    if unillustrated:
+        ids = _and_list([f"`{_cell(key)}`" for key in unillustrated])
+        gap += [
+            f"**{ids} {_plural(len(unillustrated), 'is', 'are')} claimed, but "
+            f"no still was published for "
+            f"{_plural(len(unillustrated), 'it', 'them')}, so there is nothing "
+            f"here to open.**",
             "",
         ]
     if covered:
@@ -153,11 +286,14 @@ def render_coverage(coverage: object) -> list[str]:
         )
     gap.append("")
 
-    table = ["| clause | claimed at |", "|---|---|"]
+    table = ["| clause | claimed at | look at |", "|---|---|---|"]
     for key, text in criteria.items():
         rows = claimed.get(key) or []
         where = _claim_label(rows) if rows else "*nothing claims this*"
-        table.append(f"| **{_cell(key)}** — {_cell(str(text))} | {where} |")
+        table.append(
+            f"| **{_cell(key)}** — {_cell(str(text))} | {where} "
+            f"| {pictures[key].cell} |"
+        )
     table.append("")
 
     note = [
@@ -165,7 +301,10 @@ def render_coverage(coverage: object) -> list[str]:
         "coverage timestamps are on the recorder's monotonic clock and the "
         "video is on the host's wall clock, so a seek printed from them would "
         "be [#229](https://github.com/rogvid/skills/issues/229) in a new "
-        "artifact ([#277](https://github.com/rogvid/skills/issues/277)).</sub>",
+        "artifact ([#277](https://github.com/rogvid/skills/issues/277)). A "
+        "picture is the still that beat wrote, linked in this repository at "
+        "the commit this take was recorded from; what it is a picture of is "
+        "the reviewer's call.</sub>",
         "",
     ]
     # The gap first, and the order is the whole point rather than a layout
@@ -188,7 +327,40 @@ def _duration(timeline: dict) -> str:
     return f"{float(d):.0f}s"
 
 
-def render_demo(name: str, timeline: dict) -> str:
+def demo_dir(demo_root: str, name: str) -> Path:
+    """Where this demo's published files are, `--demo-root` or not.
+
+    One implementation, because `main` reads `timeline.json` out of it and
+    `render_coverage` checks the stills that timeline names against it: two
+    copies of this rule would let the comment link a picture from a directory
+    other than the one it described.
+    """
+    return Path(demo_root) / name if demo_root else Path(name)
+
+
+def repo_path(prefix: str, name: str) -> str:
+    """`name` as the *repository* sees it, not as the workflow ran it.
+
+    A `--demo` path is relative to the caller's `working-directory`, which the
+    workflow re-roots storyboards to: this repository's own reference call sets
+    it to `examples/ticket-queue`, so the demo the comment calls
+    `demos/2026-07-28-queue-search` is four directories down in git. A still
+    linked without that prefix is a 404 that looks exactly like a working link,
+    which is why the prefix is passed in rather than inferred.
+    """
+    parts = [p for p in f"{prefix}/{name}".split("/") if p not in ("", ".")]
+    return "/".join(parts)
+
+
+def render_demo(
+    name: str,
+    timeline: dict,
+    *,
+    demo_root: str,
+    path_prefix: str,
+    repo_url: str | None,
+    sha: str | None,
+) -> str:
     """One demo's section: the heading, the beat table, and what went wrong."""
     beats = timeline.get("beats") or []
     rows = story_beats(beats)
@@ -207,7 +379,13 @@ def render_demo(name: str, timeline: dict) -> str:
     # the reason somebody opened the comment — and a reviewer who scrolls past
     # twenty captions first has already formed the impression the coverage
     # report exists to test (issue #273, the same ordering `timeline.md` uses).
-    lines += render_coverage(timeline.get("coverage"))
+    lines += render_coverage(
+        timeline.get("coverage"),
+        demo=repo_path(path_prefix, name),
+        directory=demo_dir(demo_root, name),
+        repo_url=repo_url,
+        sha=sha,
+    )
 
     if rows:
         lines.append("| # | at | Caption |")
@@ -266,6 +444,9 @@ def render(
     failure_artifact_url: str | None,
     run_url: str | None,
     sha: str | None,
+    repo_url: str | None,
+    demo_root: str,
+    path_prefix: str,
 ) -> str:
     failed = any(t.get("failure") for _, t in demos)
     lines = [MARKER, ""]
@@ -276,7 +457,16 @@ def render(
         return "\n".join(lines) + "\n"
 
     for name, timeline in demos:
-        lines.append(render_demo(name, timeline))
+        lines.append(
+            render_demo(
+                name,
+                timeline,
+                demo_root=demo_root,
+                path_prefix=path_prefix,
+                repo_url=repo_url,
+                sha=sha,
+            )
+        )
 
     if artifact_url:
         size = _human_size(artifact_bytes)
@@ -317,6 +507,18 @@ def render(
     return "\n".join(lines) + "\n"
 
 
+def _default_repo_url() -> str:
+    """`$GITHUB_SERVER_URL/$GITHUB_REPOSITORY`, or "" outside Actions.
+
+    Both are set in every Actions step, so the workflow needs no new argument
+    for the still links to work; the server URL is read rather than hardcoded
+    so a GitHub Enterprise host links its own blobs and not github.com's.
+    """
+    server = (os.environ.get("GITHUB_SERVER_URL") or "https://github.com").rstrip("/")
+    repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip("/")
+    return f"{server}/{repo}" if repo else ""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -341,14 +543,34 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--failure-artifact-url")
     ap.add_argument("--run-url")
     ap.add_argument("--sha")
+    ap.add_argument(
+        "--repo-url",
+        default=_default_repo_url(),
+        help=(
+            "the repository's web URL, e.g. https://github.com/o/r. Each "
+            "claimed still is linked under it at --sha, because `images/` is "
+            "committed and the video is not. Defaults to "
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY, which every Actions step "
+            "has; with neither given, a still is named rather than linked."
+        ),
+    )
+    ap.add_argument(
+        "--path-prefix",
+        default="",
+        help=(
+            "where the --demo paths sit in the repository, when they are not "
+            "at its root — the workflow's working-directory. Prefixed to the "
+            "still links only; without it a demo recorded under "
+            "examples/ticket-queue is linked at the repository root and 404s."
+        ),
+    )
     ap.add_argument("--out", required=True, help="where to write the comment body")
     args = ap.parse_args(argv)
 
     demos: list[tuple[str, dict]] = []
     for raw in args.demo:
         name = raw.rstrip("/")
-        directory = Path(args.demo_root) / name if args.demo_root else Path(name)
-        timeline_path = directory / "timeline.json"
+        timeline_path = demo_dir(args.demo_root, name) / "timeline.json"
         if not timeline_path.exists():
             # A take that refused before writing anything, or one whose
             # timeline was held back as not this take's. Say so rather than
@@ -385,6 +607,9 @@ def main(argv: list[str] | None = None) -> int:
         failure_artifact_url=args.failure_artifact_url,
         run_url=args.run_url,
         sha=args.sha,
+        repo_url=args.repo_url or None,
+        demo_root=args.demo_root,
+        path_prefix=args.path_prefix,
     )
     Path(args.out).write_text(body, encoding="utf-8")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

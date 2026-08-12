@@ -53,10 +53,29 @@ jobs:
 On a take recorded against a ticket — `Recorder(criteria={"AC-1": "…"})`, beats
 tagged `ac="AC-1"` — a third thing sits **above** the beat table: the ticket's
 clauses, with the ones **no beat claimed named first**, then a table of what
-claimed the rest and at which beat. That order is deliberate. A rendering that
-opened with the covered half would be a coverage claim whatever the sentence
-under it said, and the one finding here that needs no judgement is the clause
-nobody even asserted.
+claimed the rest, at which beat, and which picture to open. That order is
+deliberate. A rendering that opened with the covered half would be a coverage
+claim whatever the sentence under it said, and the findings here that need no
+judgement are the clause nobody even asserted and the clause nobody left a
+picture of.
+
+**The picture is a committed still, and clauses with none are named as a gap.**
+`shot("01-search-box", ac="AC-1")` writes `images/01-search-box.png`, which is
+a committed file and therefore the only piece of a take that has a URL: the
+video and `frames/` are both inside artifact zips, so there is no timestamp to
+deep-link and none is printed. The comment links each clause's still in your
+repository at the head commit — under `working-directory`, which is where git
+holds them — and a still the manifest names that this take did not publish is
+reported as absent rather than linked: last week's picture under this week's
+clause is worse than no picture at all.
+
+A clause claimed only by `caption(text, ac=…)` has no still, so it hands a
+reviewer nothing to open, and it is named above the table with the unclaimed
+ones. The rule that follows: **tag a `shot()` for every clause, not only a
+caption.** A caption tag says where to look; a still tag is the thing that can
+be looked at. Neither is evidence that the clause was demonstrated — a picture
+next to a clause is a frame the storyboard chose, and what it is a picture of
+is still the reviewer's call.
 
 **It says "claimed", never "demonstrated", and it says out loud that it graded
 nothing.** An `ac=` tag is a string the storyboard author typed; whether the

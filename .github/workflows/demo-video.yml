@@ -518,6 +518,10 @@ jobs:
           EVIDENCE_RETENTION: ${{ inputs.evidence-retention-days }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Where the --demo paths sit in the repository. They are relative to
+          # working-directory, so a still linked without this is a 404 that
+          # looks exactly like a working link.
+          WORKDIR: ${{ inputs.working-directory }}
         run: |
           set -euo pipefail
           args=()
@@ -539,6 +543,7 @@ jobs:
             --retention-days "$RETENTION" \
             --evidence-retention-days "$EVIDENCE_RETENTION" \
             --run-url "$RUN_URL" --sha "$HEAD_SHA" \
+            --path-prefix "$WORKDIR" \
             --out "$COMMENT_BODY"
 
       # One comment, found by its marker and rewritten. A branch with ten
