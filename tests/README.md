@@ -1414,7 +1414,33 @@ promotes a claim to a verdict. The last one is a word sweep with a control
 beside it, because a sweep for absent words passes just as happily on a comment
 that renders no coverage at all.
 
-Nine injections cover it, and two are worth naming: *the acceptance section
+**The sweep grades the sentences the renderer writes, not the ones it quotes**
+([#283](https://github.com/rogvid/skills/issues/283)). Clause text belongs to
+whoever wrote the ticket and captions to whoever wrote the storyboard, and both
+are subtracted from the body before the sweep runs — span by span, each one
+required to be long enough to be unambiguous, because a bare `replace()` of
+something short would take the `[x]` the sweep is looking for with it. That
+boundary is what lets the list carry ordinary English: `met`, `passed`,
+`shown`, `proved`, `verify`, `verification`, `✓` and `☑` joined it in #283,
+after the sweep was found green on "Each was shown on video", "All clauses
+passed" and "All acceptance criteria are met". Alphabetic entries match whole
+words (`met` must not fire on `metadata`, `proved` not on `improved`); an entry
+ending in `*` is a stem; `✓` and `[x]` are literal. Each added word has its own
+injection, and each appends a sentence to the disclaimer rather than replacing
+it: replacing it reddens the assertion about the disclaimer's *presence*, and
+that green-to-red transition is what let the hole look guarded. Two more
+injections break the two exemptions, because the fixture that grades them is
+the only one whose ticket and captions read as verdicts.
+
+What that boundary leaves out, stated rather than implied: a ticket clause, a
+caption, a failure message or an issue message may print any of these words in
+the comment, and nothing here objects. Only the words `demo-comment` itself
+writes are swept. Clause **ids** are not exempted either — they are too short
+to subtract safely, so a ticket with a clause called `verified` would redden
+this suite.
+
+Nineteen injections cover it — nine from #273 and the ten #283 added above —
+and two of the first nine are worth naming: *the acceptance section
 leads with what was claimed instead of the gap* — which is the whole ordering
 claim, and nothing else in the suite can see it — and *every clause is pointed
 at the first claim in the report*, which leaves the table its shape, its row

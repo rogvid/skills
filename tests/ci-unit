@@ -815,8 +815,20 @@ ALL_CLAIMED = dict(
 # author typed — so the most-read artifact must not be the one place that says
 # a clause was shown. `[x]` is here because a ticked box reads as a verdict
 # even with no verb attached to it.
+#
+# The alphabet was narrower than the boundary it guards until
+# [#283](https://github.com/rogvid/skills/issues/283): "Each was shown on
+# video", "All clauses passed", "✓ Each clause met" and "We verify each clause"
+# all swept clean, and `✓` U+2713 was missing while `✔` U+2714 and `✅` were
+# present. The eight entries below the blank line are what #283 added, each one
+# watched reddening `test_no_sentence_promotes_a_claim_to_a_verdict` by its own
+# injection.
+#
+# It is a word list and stays one. Detecting a verdict in general is a
+# judgement over prose; this trades that for a check that can say exactly which
+# word it refused and why.
 VERDICT_WORDS = (
-    "demonstrat",
+    "demonstrat*",
     "verified",
     "verifies",
     "validated",
@@ -827,6 +839,113 @@ VERDICT_WORDS = (
     "[x]",
     "✅",
     "✔",
+    "shown",
+    "proved",
+    "verify",
+    "verification",
+    "passed",
+    "met",
+    "✓",
+    "☑",
+)
+
+
+# One sentence per word #283 added, each the sort of thing an author would
+# reasonably write. `fault_inject` appends one at a time to the disclaimer
+# `render_coverage` already prints, which is how each added word is *seen*
+# reddening the sweep rather than merely listed above.
+VERDICT_SENTENCES = {
+    "shown": "Each was shown on video.",
+    "proved": "Each has been proved on video.",
+    "verify": "We verify each clause.",
+    "verification": "This section is a verification.",
+    "passed": "All clauses passed.",
+    "met": "All acceptance criteria are met.",
+    "✓": "✓ Each clause.",
+    "☑": "☑ Each clause.",
+}
+
+
+def _verdict_hits(text: str) -> list[str]:
+    """Which verdict words `text` contains, matched the way the list means them.
+
+    Three spellings, because one match rule cannot carry all of them:
+
+    - an entry ending in `*` is a **stem** — `demonstrat*` is demonstrated,
+      demonstrates, demonstration;
+    - an alphabetic entry is a **whole word**, because the words #283 added are
+      ordinary English. `met` matched as a substring fires on `metadata` and
+      `parameter`, `proved` on `improved`, `passed` on `bypassed`; a list that
+      cried wolf on those would be narrowed again by the next author, which is
+      how the hole got there the first time;
+    - anything else is **literal**. A word boundary means nothing next to `✓`
+      or `[x]`.
+
+    Returns the words rather than a bool so a failure names what it refused.
+    """
+    low = text.lower()
+    hits = []
+    for word in VERDICT_WORDS:
+        if word.endswith("*"):
+            found = re.search(rf"\b{re.escape(word[:-1])}", low) is not None
+        elif word.isalpha():
+            found = re.search(rf"\b{re.escape(word)}\b", low) is not None
+        else:
+            found = word in low
+        if found:
+            hits.append(word)
+    return hits
+
+
+def _as_rendered(text: str) -> str:
+    """What `_cell` does to authored text, hand-written rather than imported.
+
+    A check that shares the code's normalization is blind wherever the code is.
+    If the two ever disagree, the span is not found in the comment and `swept`
+    says so instead of quietly exempting nothing.
+    """
+    out = str(text).replace("\\", "\\\\").replace("|", "\\|")
+    return " ".join(out.split())
+
+
+def _quoted(timeline: dict) -> list[str]:
+    """The spans `demo-comment` copies out of its input rather than writing.
+
+    The verdict sweep grades the sentences this renderer *writes*. Clause text
+    belongs to whoever wrote the ticket and captions to whoever wrote the
+    storyboard; a clause that reads "the filtered count is shown in the
+    heading" is that ticket's wording reaching the reader intact, not the
+    comment promoting a claim to a verdict. Reddening CI on it would make the
+    sweep a check on prose nobody in this repo controls.
+
+    Read straight off the timeline, not through `comment.story_beats`, so a
+    renderer that lost half the captions cannot also shrink what is exempted.
+    """
+    coverage = timeline.get("coverage") or {}
+    criteria = (coverage.get("criteria") or {}).values()
+    spans = [str(text) for text in criteria]  # the ticket author's sentences
+    spans += [str(b.get("caption") or "") for b in timeline.get("beats") or []]
+    return [s for s in dict.fromkeys(spans) if s]
+
+
+# A ticket whose own clause reads as a verdict, and a storyboard whose captions
+# do too. This is the false positive the widened list would otherwise produce,
+# and it is a fixture rather than a hypothetical because both halves are real
+# English a ticket writer would use. Each half carries verdict words the other
+# does not need, so the two exemptions are graded separately.
+QUOTED_VERDICT = dict(
+    TIMELINE,
+    beats=beats(
+        (1.0, "The heading shows every criterion the release has met."),
+        (4.0, "✓ Escalated matches nothing, which the ticket calls proved."),
+    ),
+    coverage=dict(
+        COVERAGE,
+        criteria=dict(
+            COVERAGE["criteria"],
+            **{"AC-4": "All four are met, shown on video and verified. ☑"},
+        ),
+    ),
 )
 
 
@@ -874,6 +993,35 @@ class Coverage(unittest.TestCase):
         self.assertEqual(len(cells), 4, rows[0])  # "", clause, claimed at, ""
         return cells[2].strip()
 
+    def swept(self, body: str, timeline: dict) -> str:
+        """`body` with the spans the renderer quotes subtracted out of it.
+
+        Span by span, and never by a bare `body.replace(...)` on anything
+        short: subtracting a demo called `x` would take the `[x]` the sweep is
+        looking for with it, and the sweep would then pass for a reason nobody
+        wrote down. A span too short to be unambiguous is refused rather than
+        exempted — the strict direction, so the failure is loud.
+        """
+        out = body
+        for span in _quoted(timeline):
+            flat = _as_rendered(span)
+            self.assertGreaterEqual(len(flat), 16, f"too short to subtract: {flat!r}")
+            self.assertIn(flat, out, f"quoted span never reached the reader: {flat!r}")
+            out = out.replace(flat, " ")
+        return out
+
+    def assert_no_verdict(self, body: str, timeline: dict) -> None:
+        """No sentence `demo-comment` writes reads as a machine's verdict."""
+        swept = self.swept(body, timeline)
+        # The control on the sweep, read off the swept text rather than the
+        # body: without it every assertion here holds over a comment that
+        # rendered no coverage at all, and a subtraction that ate the section
+        # would pass just as quietly.
+        self.assertIn("AC-1", swept)
+        self.assertIn("claimed at", swept)
+        hits = _verdict_hits(swept)
+        self.assertEqual(hits, [], f"{hits} read as a verdict in:\n{swept}")
+
     def test_the_gap_is_stated_before_anything_that_was_claimed(self):
         body = self.body(TAGGED)
         self.assertIn("| clause | claimed at |", body)  # control: a section ran
@@ -913,21 +1061,26 @@ class Coverage(unittest.TestCase):
             self.assertEqual(self.cell(body, key), "*nothing claims this*")
 
     def test_no_sentence_promotes_a_claim_to_a_verdict(self):
-        body = self.body(TAGGED)
-        # The control on the sweep: without it every assertion below holds over
-        # a comment that renders no coverage at all.
-        self.assertIn("AC-1", body)
-        self.assertIn("claimed at", body)
-        for word in VERDICT_WORDS:
-            self.assertNotIn(word, body.lower(), f"{word!r} reads as a verdict")
+        self.assert_no_verdict(self.body(TAGGED), TAGGED)
 
     def test_the_same_words_are_refused_on_a_take_that_claimed_everything(self):
         # The clean path is where a coverage claim is most tempting to print,
         # and it is a different branch of the renderer from the one above.
-        body = self.body(ALL_CLAIMED)
-        self.assertIn("claimed at", body)
-        for word in VERDICT_WORDS:
-            self.assertNotIn(word, body.lower(), f"{word!r} reads as a verdict")
+        self.assert_no_verdict(self.body(ALL_CLAIMED), ALL_CLAIMED)
+
+    def test_a_clause_whose_own_wording_is_a_verdict_does_not_trip_the_sweep(self):
+        # The boundary that lets the list afford `met` and `passed`: the sweep
+        # grades the sentences the renderer writes, not the ones it quotes. The
+        # alternative is a suite that reddens on somebody else's ticket, and
+        # the pressure then is to drop the common words rather than to fix the
+        # scope — which is how #283's hole was arrived at honestly.
+        body = self.body(QUOTED_VERDICT)
+        # Controls: both quoted spans reached the reader intact, verdict words
+        # and all. A renderer that dropped them would sweep clean for the wrong
+        # reason, and this test would be the one certifying it.
+        self.assertIn("All four are met, shown on video and verified. ☑", body)
+        self.assertIn("The heading shows every criterion the release has met.", body)
+        self.assert_no_verdict(body, QUOTED_VERDICT)
 
     def test_a_take_whose_clauses_are_all_claimed_prints_no_headline(self):
         body = self.body(ALL_CLAIMED)
@@ -952,8 +1105,7 @@ class Coverage(unittest.TestCase):
             self.assertIn(key, line)
             self.assertEqual(self.cell(body, key), "*nothing claims this*")
         self.assertIn("no beat claims any of them", body)
-        for word in VERDICT_WORDS:
-            self.assertNotIn(word, body.lower(), f"{word!r} reads as a verdict")
+        self.assert_no_verdict(body, none_claimed)
 
     def test_a_take_recorded_without_criteria_prints_no_acceptance_section(self):
         # The ordinary case, and the one that must read exactly as it did
@@ -997,6 +1149,37 @@ class Coverage(unittest.TestCase):
             },
         )
         self.assertEqual(self.cell(self.body(stitched), "AC-1"), "beat 6 (`part2`)")
+
+
+class VerdictAlphabet(unittest.TestCase):
+    """What the per-word injections below are worth (#283).
+
+    An injection is only evidence for the word it is filed under if that word
+    is the reason the sweep refused it. A sentence carrying two verdict words
+    would go red off the older entry and certify the new one for free — the
+    per-word table would then be eight rows of the same measurement.
+    """
+
+    def test_each_injected_sentence_is_refused_for_exactly_its_own_word(self):
+        for word, sentence in VERDICT_SENTENCES.items():
+            self.assertEqual(_verdict_hits(sentence), [word], sentence)
+
+    def test_every_word_the_ticket_named_is_on_the_list(self):
+        # The acceptance criterion of #283, spelled out so a later edit that
+        # narrows the list back has to delete this line to do it.
+        for word in ("shown", "proved", "verify", "verification", "passed", "met"):
+            self.assertIn(word, VERDICT_WORDS)
+        for tick in ("✓", "☑", "✔", "✅"):
+            self.assertIn(tick, VERDICT_WORDS)
+
+    def test_an_ordinary_word_that_merely_contains_one_is_not_a_verdict(self):
+        # Why the alphabetic entries are whole words. Each of these is a word
+        # the comment or a ticket could plausibly carry, and each contains a
+        # verdict word as a substring.
+        for innocent in ("metadata", "parameter", "improved", "bypassed", "kilometre"):
+            self.assertEqual(_verdict_hits(innocent), [], innocent)
+        # The control: the stem entry still fires on the suffixes it exists for.
+        self.assertEqual(_verdict_hits("demonstration"), ["demonstrat*"])
 
 
 class CommentCli(unittest.TestCase):
@@ -1456,6 +1639,71 @@ INJECTIONS = [
         '    "EXTRA_ENV": "",',
         ["WorkflowGates.test_no_unpassed_fact_is_unexplained"],
     ),
+    (
+        # The exemption that lets the sweep afford `met` and `passed`, broken
+        # on the ticket's half: with the clause text no longer subtracted, a
+        # ticket that says "all four are met" reddens CI for prose this repo
+        # does not write. Nothing else in the suite can see this — every other
+        # fixture's clause text is verdict-free, which is precisely why the
+        # false positive would have shipped.
+        "the sweep stops exempting the ticket's own clause text",
+        "tests/ci-unit",
+        # Joined with `+` so this entry is not itself a second match of the
+        # line it is looking for — the file being injected into is this one,
+        # and the harness aborts on two matches. Not adjacent literals:
+        # `ruff format` folds those back into one and the abort returns.
+        "    spans = [str(text) for text in criteria]"
+        + "  # the ticket author's sentences",
+        "    spans: list[str] = []",
+        [
+            "Coverage.test_a_clause_whose_own_wording_is_a_verdict_does_not_trip_the_sweep"
+        ],
+    ),
+    (
+        # And on the storyboard's half, which is a separate exemption reaching
+        # a separate table.
+        "the sweep stops exempting the storyboard's captions",
+        "tests/ci-unit",
+        '    spans += [str(b.get("caption") or "") for b in timeline'
+        + '.get("beats") or []]',
+        "    spans += []",
+        [
+            "Coverage.test_a_clause_whose_own_wording_is_a_verdict_does_not_trip_the_sweep"
+        ],
+    ),
+    (
+        # What the eight per-word injections below are worth: a sentence that
+        # carries two verdict words is refused by the older one and says
+        # nothing about the word it is filed under.
+        "an injected sentence carries a second verdict word",
+        "tests/ci-unit",
+        '    "passed": "All clauses' + ' passed.",',
+        '    "passed": "All clauses passed and were demonstrated.",',
+        [
+            "VerdictAlphabet.test_each_injected_sentence_is_refused_for_exactly_its_own_word"
+        ],
+    ),
+]
+
+# The disclaimer `render_coverage` writes in the branch every sweep fixture
+# reaches. The per-word injections **append** to it rather than replacing it:
+# replacing it reddens `test_a_take_whose_clauses_are_all_claimed_prints_no_headline`,
+# an assertion about the disclaimer's *presence*, and that green-to-red
+# transition is what made #283's sweep look alive while it stayed silent — the
+# catalogue's dominated assertion. With the sentence left in place the only
+# test that can notice is the sweep itself, which is what each row below
+# requires to fail.
+_DISCLAIMER = '            f"call. Nothing in this comment graded a claim."'
+
+INJECTIONS += [
+    (
+        f"the comment promotes a claim to a verdict, in the word {word!r}",
+        "demo-comment",
+        _DISCLAIMER,
+        _DISCLAIMER[:-1] + f' {sentence}"',
+        ["Coverage.test_no_sentence_promotes_a_claim_to_a_verdict"],
+    )
+    for word, sentence in VERDICT_SENTENCES.items()
 ]
 
 
