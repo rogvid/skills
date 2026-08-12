@@ -4311,42 +4311,42 @@ class CriterionHold(unittest.TestCase):
 # the app. Found by a human watching a demo; no artifact could have said so,
 # because every artifact was right.
 #
-# **What went wrong was contrast, not geometry, and that is what is graded.**
-# The card has always been `inset: 0`, so it has always stopped at the app rect
-# with the recorder's pad and title bar drawn around it. `#1c1a17` sits 1.3 luma
-# levels from that frame's own `#181825`, so the boundary was there and nobody
-# could see it. The property below is therefore a *distance from the window*,
-# not a distance from the terminal card: a web card that matched the frame would
-# be #291 again whatever colour the terminal's had drifted to.
+# **The web card is the window's own body colour, and that is what is graded
+# here: consistency, not distinguishability.** Three rounds of candidates were
+# put in front of the person who found #291, and what they asked for was *"the
+# interlude to match the window, without a need for a border of another colour,
+# or an additional edge of a third colour."* So the card's field, the frame's
+# `#win` fill and the pad around the app video are one constant painted in two
+# places, and the assertions below say exactly that: the card's declared colour
+# **equals** `WEB_WINDOW_BODY`, and the frame is painted from that same
+# constant. Neither is a claim that a viewer can tell the two apart — the
+# requested distance between them is zero.
 #
-# What is graded here is the dispatch and the two palettes — which card a
-# recorder of each medium hands the page, that the terminal's is the value the
-# #110 blend was tuned to, and that the web one is far from the frame it is
-# composited into. **Whether a card reads as a card is not graded anywhere and
-# cannot be**: the same element, text and snapshot are produced either way, and
-# the only difference is a colour a person recognises. The pixel half of it —
-# that the frame around the card is visibly not the card, measured off
-# `demo.mp4` — is `tests/smoke`'s `check_criterion_card`; the legibility half is
-# a person watching, and tests/README.md says so under Known gaps.
+# **What the previous round graded and this one cannot.** #297 pinned the card's
+# field at least 12 luma levels off the window body, here and in `tests/smoke`,
+# and that is the check that would have caught #291. It is deleted rather than
+# relaxed: relaxing a bar until the current value clears it grades nothing, and
+# the value the reviewer chose is *at* the bound. Nothing in this repo now
+# grades whether a web card is distinguishable from its window. A person
+# watching the video is the only thing covering it, and tests/README.md says so
+# under Known gaps rather than implying otherwise with a green check.
+#
+# What is still graded here is the dispatch and the two palettes — which card a
+# recorder of each medium hands the page, and that the terminal's is the value
+# the #110 blend was tuned to. **Whether a card reads as a card is not graded
+# anywhere and cannot be**: the same element, text and snapshot are produced
+# either way, and the only difference is a colour a person recognises. The pixel
+# half — that the colour dispatched here reached an encoded frame at all — is
+# `tests/smoke`'s `check_criterion_card`.
 
 # The two palettes and the window body, hand-written. A bound read off the code
 # being graded agrees with that code whatever it says, and these are the numbers
 # other things were chosen against: `tests/smoke`'s opening-card sweep calls
 # anything under 60 luma "the card" (the terminal one measures 26), and the same
-# file's `WEB_CARD_RGB` and `WINDOW_BODY_RGB` are these two in decimal.
+# file's `WEB_CARD_RGB` is the web one in decimal.
 TERMINAL_CARD_PALETTE = "background: #1c1a17; color: #f7f4ee;"
-WEB_CARD_PALETTE = "background: #000000; color: #f2f0ec;"
+WEB_CARD_PALETTE = "background: #181825; color: #f2f0ec;"
 WINDOW_BODY = "#181825"
-
-# How far the web card's field must sit from the window body it is composited
-# into before the frame around it is a boundary a viewer sees. Perceptual, and
-# **not** an inequality: #291 is a card 1.3 levels from the frame with every
-# dispatch in place. Measured off `demo.mp4` rather than guessed — the two
-# candidates a human was shown for this read 23.5 (what shipped) and 1.1 ("align
-# it with the window" taken literally, which is the defect in a different hue),
-# against 0.4 for #291 itself. The bar sits ~30x over the defect and the shipped
-# card clears it by 2x; `tests/smoke` uses the same 12 on the encoded frame.
-WINDOW_CONTRAST_MIN_LUMA = 12.0
 
 
 class _RecordingContext:
@@ -4387,12 +4387,6 @@ def card_declaration(css: str, want: str) -> str:
 def card_background(css: str) -> str:
     """The `background:` declaration out of a card's inline stylesheet."""
     return card_declaration(css, "background")
-
-
-def luma(hex_colour: str) -> float:
-    """Rec. 601 luma of `#rrggbb`, the number a grayscale frame carries."""
-    r, g, b = (int(hex_colour[i : i + 2], 16) for i in (1, 3, 5))
-    return 0.299 * r + 0.587 * g + 0.114 * b
 
 
 class InterludePalette(unittest.TestCase):
@@ -4441,34 +4435,34 @@ class InterludePalette(unittest.TestCase):
         )
         self.assertEqual(card_css(opening[0]), card_css(rec._interlude_script()))
 
-    def test_the_web_card_is_not_the_colour_of_the_window_it_sits_in(self):
-        # **The property #291 is actually about.** Not "the two cards differ" —
-        # `!=` is satisfied by `#1c1a18`, and so is a bar drawn against the
-        # terminal card, which is a colour the web take never composites next
-        # to. What a viewer sees the web card against is the recorder's own
-        # window body, and the defect was that the card was 1.3 luma levels
-        # from it: the pad and title bar were drawn around the card exactly as
-        # they are now, and read as part of it.
+    def test_the_web_card_is_the_colour_of_the_window_it_sits_in(self):
+        # **The pin that is true, and it grades consistency rather than
+        # distinguishability.** The reviewer asked for the card to *match* the
+        # window, so there is no distance here to assert — what there is to
+        # assert is that the two are the same value, and the test below is what
+        # stops that from being two constants agreeing with each other.
+        #
+        # Say plainly what this cannot see: a card that matches the window is
+        # indistinguishable from it by construction, so #291 — a card that reads
+        # as one surface with its frame — is no longer detectable from any
+        # artifact. That is the reviewer's informed choice, not an oversight.
         web = card_background(self.css_for(WebRec))
-        # A card that is not a flat colour has no luma to compare; say so here
-        # rather than letting `luma()` raise, so this reads as a finding.
-        self.assertRegex(web, r"^#[0-9a-f]{6}$", "the web card")
-        self.assertGreaterEqual(
-            abs(luma(web) - luma(WINDOW_BODY)),
-            WINDOW_CONTRAST_MIN_LUMA,
-            f"the web card ({web}, luma {luma(web):.0f}) is within "
-            f"{WINDOW_CONTRAST_MIN_LUMA:.0f} luma levels of the window body it "
-            f"is composited into ({WINDOW_BODY}, luma {luma(WINDOW_BODY):.0f}) "
-            f"— issue #291 is a card the frame around it cannot be seen against",
+        self.assertEqual(
+            web,
+            WINDOW_BODY,
+            f"the web card is painted {web!r} and the window body it sits in is "
+            f"{WINDOW_BODY!r} — #291's fix is that they are one colour, so a "
+            f"card that is merely close to the window is a third colour nobody "
+            f"asked for",
         )
 
     def test_the_window_body_this_is_measured_against_is_the_one_drawn(self):
         # The control for the assertion above, and the only thing that stops it
         # grading two constants against each other: `WINDOW_BODY` is written out
         # by hand here, and the frame a take actually paints has to still use
-        # it. Repaint the window darker and the card stops standing out from it
-        # — with this pin, that is a failure rather than a silent regression to
-        # #291 approached from the other side.
+        # it. Repaint the window and the card no longer matches it — with this
+        # pin, that is a failure rather than a silent return to a card and a
+        # frame that are two different colours.
         import inspect
 
         import demo_recording.web as web_module
@@ -4486,15 +4480,16 @@ class InterludePalette(unittest.TestCase):
             inspect.getsource(web_module),
         )
 
-    def test_the_web_cards_gutter_is_the_windows_own_colour(self):
-        # The card's border is what widens the recorder's 14 px pad into a
-        # ~28 px gutter, so the field stops visibly short of the window's inside
-        # edge. It has to be the *window's* colour: any other value draws a
-        # second frame inside the first, which is a worse picture than the one
-        # #291 complained about.
-        css = self.css_for(WebRec)
-        self.assertIn(f"border: 18px solid {WINDOW_BODY};", css)
-        self.assertNotIn("border", self.css_for(TermRec))
+    def test_the_web_card_is_one_colour_and_draws_no_edge_of_its_own(self):
+        # The reviewer's sentence has three clauses and this is the last two:
+        # *"without a need for a border of another colour, or an additional edge
+        # of a third colour."* #297 shipped an 18 px border in the window's
+        # colour and it was rejected — measured in the encoded frame, that
+        # border and the recorder's own pad are two different colours (#301),
+        # so what reads as one gutter in the stylesheet is two bands on screen.
+        # Neither card declares a border now.
+        self.assertEqual(card_declaration(self.css_for(WebRec), "border"), "")
+        self.assertEqual(card_declaration(self.css_for(TermRec), "border"), "")
 
     def test_the_web_card_is_not_painted_like_the_skills_terminal_widgets(self):
         # #291's own sentence, and the colour the card collided with is not only
@@ -4527,15 +4522,11 @@ class InterludePalette(unittest.TestCase):
                 # with a transparent stop, or a `background` left to the page
                 # are all ways for the app to show through.
                 self.assertRegex(card_background(css), r"^#[0-9a-f]{6}$")
-                # And the same of the border, which is the other half of an
-                # `inset: 0` element's paint. `inset: 0` with `width: auto` is
-                # over-constrained, so a border does not shrink the card off
-                # the app rect — but a translucent one, or a `border-radius`
-                # that rounds the *outer* corners away, puts the app back on
-                # screen at the edges while the card is up.
-                border = card_declaration(css, "border")
-                if border:
-                    self.assertRegex(border, r"^\d+px solid #[0-9a-f]{6}$")
+                # And no rounded corners. Neither card declares a border any
+                # more (the test above), but `border-radius` needs one of its
+                # own: it clips the *background* too, so a radius here puts the
+                # app back on screen at the four corners of the app rect while
+                # the card is up.
                 self.assertEqual(card_declaration(css, "border-radius"), "")
 
 
@@ -11865,8 +11856,7 @@ INJECTIONS = [
         [
             "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
             "InterludePalette.test_a_web_take_does_not_raise_the_terminals_card",
-            "InterludePalette.test_the_web_card_is_not_the_colour_of_the_window_it_sits_in",
-            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+            "InterludePalette.test_the_web_card_is_the_colour_of_the_window_it_sits_in",
             "InterludePalette."
             "test_the_web_card_is_not_painted_like_the_skills_terminal_widgets",
         ],
@@ -11883,8 +11873,7 @@ INJECTIONS = [
         [
             "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
             "InterludePalette.test_a_web_take_does_not_raise_the_terminals_card",
-            "InterludePalette.test_the_web_card_is_not_the_colour_of_the_window_it_sits_in",
-            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+            "InterludePalette.test_the_web_card_is_the_colour_of_the_window_it_sits_in",
         ],
     ),
     (
@@ -11916,37 +11905,36 @@ INJECTIONS = [
         ],
     ),
     (
-        # **"Align it with the window", taken literally.** The reviewer who
-        # rejected the light card asked for one that matches the window it sits
-        # in, and the colour that matches it exactly is the one #291 is: a card
-        # the frame around it cannot be seen against. Every dispatch is in
-        # place, the card is dark with light text as asked, the gutter is still
-        # drawn — and it is the window's own colour on both sides of its edge.
-        "the web card is painted the window body's own colour",
+        # **A card that is nearly the window rather than the window.** One digit
+        # of blue: it clears any proximity bar anyone would write, it is
+        # invisible in a diff, and it is exactly what the reviewer's third
+        # clause refuses — a second colour where they asked for one. This is the
+        # entry that says the replacement pin is an *equality* and not a bar
+        # with a tolerance quietly picked to let the current value through.
+        "the web card is nearly the window's colour instead of being it",
         "core.py",
-        '    + " background: #000000; color: #f2f0ec;"',
-        '    + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + " background: #181826; color: #f2f0ec;"',
         [
-            "InterludePalette.test_the_web_card_is_not_the_colour_of_the_window_it_sits_in",
+            "InterludePalette.test_the_web_card_is_the_colour_of_the_window_it_sits_in",
             "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
         ],
     ),
     (
-        # The window repainted to match the card, which is the same defect
-        # approached from the other end. **The distance test does not catch
-        # this and is not meant to**: it measures the card against a
-        # `WINDOW_BODY` written out by hand in this file, so a frame repainted
-        # in the package moves nothing it reads. That is what the pin is for,
-        # and this entry is the fault the pin exists for — without it the
-        # hand-written bound would be two constants graded against each other
-        # with nothing tying either to what a take paints.
-        "the window is repainted to the colour of the card inside it",
+        # The shared constant moved. Both the window and the card follow it, so
+        # they still match each other and the equality above cannot see it —
+        # what catches it is that the value is pinned to `WINDOW_BODY`, written
+        # out by hand in this file. Without that pin the equality would be two
+        # constants agreeing with each other with nothing tying either to a
+        # colour anybody chose.
+        "the window and the card are both repainted, together",
         "core.py",
         'WEB_WINDOW_BODY = "#181825"',
         'WEB_WINDOW_BODY = "#050505"',
         [
             "InterludePalette.test_the_window_body_this_is_measured_against_is_the_one_drawn",
-            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+            "InterludePalette.test_the_web_card_is_the_colour_of_the_window_it_sits_in",
+            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
         ],
     ),
     (
@@ -11963,15 +11951,17 @@ INJECTIONS = [
         ],
     ),
     (
-        # The gutter drawn in something that is not the window's colour: the
-        # card stops short of the window's inside edge and a second frame
-        # appears between the two, which is a worse picture than #291's.
-        "the card's gutter draws a second frame inside the window's",
+        # A border put back on the card. This is #297's second rejected
+        # candidate: the field matches the window, the dispatch is right, and
+        # the card draws an edge of its own between itself and the recorder's
+        # pad — the "additional edge of a third colour" the reviewer refused.
+        "the card draws an edge of its own around the field",
         "core.py",
-        '    + f" border: 18px solid {WEB_WINDOW_BODY};"',
+        '    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"\n'
         '    + " border: 18px solid #b45309;"',
         [
-            "InterludePalette.test_the_web_cards_gutter_is_the_windows_own_colour",
+            "InterludePalette.test_the_web_card_is_one_colour_and_draws_no_edge_of_its_own",
         ],
     ),
     (
@@ -11981,8 +11971,8 @@ INJECTIONS = [
         # being true of a web take.
         "the web card is a scrim over the app rather than a card",
         "core.py",
-        '    + " background: #000000; color: #f2f0ec;"',
-        '    + " background: rgba(0,0,0,.72); color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + " background: rgba(24,24,37,.72); color: #f2f0ec;"',
         [
             "InterludePalette."
             "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",
@@ -11990,15 +11980,16 @@ INJECTIONS = [
         ],
     ),
     (
-        # The gutter rounded away at the outer corners. `border-radius` on an
-        # `inset: 0` element rounds the *border box*, so the four corners of the
-        # app rect stop being painted and the app shows through them while the
-        # card is up — full-bleed lost to a styling flourish, with the colour
-        # and the dispatch both correct.
+        # The card's corners rounded off the app rect. `border-radius` clips the
+        # background of an `inset: 0` element, so the four corners of the app
+        # rect stop being painted and the app shows through them while the card
+        # is up — full-bleed lost to a styling flourish, with the colour and the
+        # dispatch both correct.
         "the card's outer corners are rounded off the app rect",
         "core.py",
-        '    + f" border: 18px solid {WEB_WINDOW_BODY};"',
-        '    + f" border: 18px solid {WEB_WINDOW_BODY}; border-radius: 14px;"',
+        '    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"\n'
+        '    + " border-radius: 14px;"',
         [
             "InterludePalette."
             "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",

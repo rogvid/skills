@@ -1,6 +1,6 @@
 # Demo timeline
 
-`demo.mp4` · Recorder · 29.8s · 21 beats
+`demo.mp4` · Recorder · 29.7s · 21 beats
 
 Written by the demo-video recorder on every clean exit — do not edit it by hand, re-record instead.
 
@@ -11,9 +11,9 @@ This take was recorded against a ticket. **The table below is what the storyboar
 | criterion | claimed by | at | still |
 |---|---|---:|---|
 | **AC-1** — A search box above the queue narrows the list as you type, case-insensitively, with no button to press. | beat 4 | 5.21 | `images/01-queue.png` |
-|  | beat 6 | 5.59 |  |
-|  | beat 7 | 12.32 | `images/02-criterion-card.png` |
-|  | beat 13 | 19.41 | `images/03-invoice.png` |
+|  | beat 6 | 5.58 |  |
+|  | beat 7 | 12.31 | `images/02-criterion-card.png` |
+|  | beat 13 | 19.38 | `images/03-invoice.png` |
 
 Every one of the 1 criteria has at least one beat claiming it. Whether those beats show what they claim is the reviewer's call.
 
@@ -23,27 +23,27 @@ Every one of the 1 criteria has at least one beat claiming it. Whether those bea
 
 | # | start | end | verb | target | caption |
 |---:|---:|---:|---|---|---|
-| 0 | 0.43 | 1.00 | `goto` | `/` |  |
-| 1 | 1.00 | 1.03 | `wait_for` | `.ticket` |  |
-| 2 | 1.03 | 3.68 | `caption` |  | Seven tickets, in a browser window. |
-| 3 | 3.68 | 5.21 | `hold` |  | Seven tickets, in a browser window. |
-| 4 | 5.21 | 5.28 | `shot` | `01-queue` | Seven tickets, in a browser window. |
-| 5 | 5.28 | 5.59 | `caption` |  |  |
-| 6 | 5.59 | 12.32 | `criterion` | `AC-1` | A search box above the queue narrows the list as you type, case-insensitively, with no button to press. |
-| 7 | 12.32 | 12.36 | `shot` | `02-criterion-card` |  |
+| 0 | 0.44 | 1.01 | `goto` | `/` |  |
+| 1 | 1.01 | 1.04 | `wait_for` | `.ticket` |  |
+| 2 | 1.04 | 3.70 | `caption` |  | Seven tickets, in a browser window. |
+| 3 | 3.70 | 5.21 | `hold` |  | Seven tickets, in a browser window. |
+| 4 | 5.21 | 5.27 | `shot` | `01-queue` | Seven tickets, in a browser window. |
+| 5 | 5.27 | 5.58 | `caption` |  |  |
+| 6 | 5.58 | 12.31 | `criterion` | `AC-1` | A search box above the queue narrows the list as you type, case-insensitively, with no button to press. |
+| 7 | 12.31 | 12.36 | `shot` | `02-criterion-card` |  |
 | 8 | 12.36 | 12.97 | `interlude` | `card` |  |
 | 9 | 12.97 | 16.64 | `caption` |  | The card is gone, and the queue is back. |
-| 10 | 16.64 | 17.89 | `type_into` | `#queue-search` | The card is gone, and the queue is back. |
-| 11 | 17.89 | 17.90 | `wait_for` | `.ticket` | The card is gone, and the queue is back. |
-| 12 | 17.90 | 19.41 | `hold` |  | The card is gone, and the queue is back. |
-| 13 | 19.41 | 19.46 | `shot` | `03-invoice` | The card is gone, and the queue is back. |
-| 14 | 19.46 | 19.77 | `caption` |  |  |
-| 15 | 19.77 | 22.59 | `interlude` | `card` | Same card, no clause — this is what bridges a time skip. |
-| 16 | 22.59 | 22.62 | `shot` | `04-interlude-card` |  |
-| 17 | 22.62 | 23.23 | `interlude` | `card` |  |
-| 18 | 23.23 | 27.59 | `caption` |  | Queue, card, queue again — the card sits over the app. |
-| 19 | 27.59 | 29.11 | `hold` |  | Queue, card, queue again — the card sits over the app. |
-| 20 | 29.11 | 29.43 | `caption` |  |  |
+| 10 | 16.64 | 17.86 | `type_into` | `#queue-search` | The card is gone, and the queue is back. |
+| 11 | 17.86 | 17.87 | `wait_for` | `.ticket` | The card is gone, and the queue is back. |
+| 12 | 17.87 | 19.38 | `hold` |  | The card is gone, and the queue is back. |
+| 13 | 19.38 | 19.43 | `shot` | `03-invoice` | The card is gone, and the queue is back. |
+| 14 | 19.43 | 19.74 | `caption` |  |  |
+| 15 | 19.74 | 22.55 | `interlude` | `card` | Same card, no clause — this is what bridges a time skip. |
+| 16 | 22.55 | 22.59 | `shot` | `04-interlude-card` |  |
+| 17 | 22.59 | 23.20 | `interlude` | `card` |  |
+| 18 | 23.20 | 27.55 | `caption` |  | Queue, card, queue again — the card sits over the app. |
+| 19 | 27.55 | 29.06 | `hold` |  | Queue, card, queue again — the card sits over the app. |
+| 20 | 29.06 | 29.37 | `caption` |  |  |
 
 ## Stills
 
@@ -53,16 +53,16 @@ Every one of the 1 criteria has at least one beat claiming it. Whether those bea
 
 ![01-queue](images/01-queue.png)
 
-### 02-criterion-card — 12.32s
+### 02-criterion-card — 12.31s
 
 ![02-criterion-card](images/02-criterion-card.png)
 
-### 03-invoice — 19.41s
+### 03-invoice — 19.38s
 
 > The card is gone, and the queue is back.
 
 ![03-invoice](images/03-invoice.png)
 
-### 04-interlude-card — 22.59s
+### 04-interlude-card — 22.55s
 
 ![04-interlude-card](images/04-interlude-card.png)

@@ -4685,102 +4685,90 @@ COVERAGE_APP_MARKER = "Northwind Ops"
 # **What the defect was not: geometry.** The card has always been `inset: 0`,
 # so the recorder's 14 px pad and its title bar have always been drawn around
 # it — the window frame was there the whole time. `#1c1a17` is 0.4 luma levels
-# from that frame *as encoded*, so the boundary existed and nobody could see
-# it, and the card and the window read as one dark surface. The first fix here
-# was a light card, which a reviewer rejected: what they asked for is a dark
-# card whose frame is still visible around it.
+# from that frame *as encoded*, so the boundary existed and nobody could see it.
 #
-# So the property graded below is **contrast against the frame**, not a colour
-# and not a distance from the terminal card. A web card that matched the window
-# would be #291 again whatever the terminal card had drifted to, and a bar
-# drawn against the terminal card grades a colour a web take never composites
-# next to. The two halves of the claim, in the two places that can hold them:
+# Two fixes were rejected by the person who found it — warm paper (205 levels
+# off the window) and black in a gutter of the window's colour (23.5) — and what
+# they asked for in the end was the opposite of a distance: *"I want the
+# interlude to match the window, without a need for a border of another colour,
+# or an additional edge of a third colour."* The web card is now
+# `WEB_WINDOW_BODY`, the same constant `_FRAME_HTML` paints the window with.
+#
+# **So the check that was here is gone, and nothing replaces it.** #297 graded
+# the card's field at least 12 luma levels off the window body, in this file and
+# in `tests/unit`; the decision above asks for zero. Relaxing that bar until the
+# new value cleared it would have been a measurement of nothing, so it is
+# deleted. What is left, in the two places that can hold something true:
 #
 #   tests/unit   which stylesheet a recorder of each medium hands the page, that
 #                the terminal's is still the value #110's blend was tuned to,
-#                and that the web card's field is far in luma from the window
-#                body — against a `WINDOW_BODY` written out by hand there and
-#                pinned to the one `_FRAME_HTML` paints. Browser-free, and where
-#                the *dispatch* lives.
-#   here         what came out the other end, off the encoded mp4 — the one file
-#                a reviewer watches. A palette can be dispatched perfectly and
-#                never reach a frame, and no reading of a stylesheet knows what
-#                the composite did with it.
+#                and that the web card's colour **equals** a `WINDOW_BODY`
+#                written out by hand there and pinned to the one `_FRAME_HTML`
+#                paints. That grades *consistency*, not distinguishability.
+#   here         that the colour so dispatched reached the encoded mp4 at all —
+#                a palette can be dispatched perfectly and never painted, and no
+#                reading of a stylesheet knows what the composite did with it.
 #
-# Neither of them grades whether the card *reads* as a card, and neither grades
-# how *wide* the visible frame is — a card flush to the app rect and a card
-# inside an 18 px gutter are the same reading here. That is a person watching,
-# and tests/README.md says so under Known gaps rather than implying otherwise
-# with a green check.
+# Neither of them grades whether a web card can be **told apart from its
+# window**, which was #291's whole complaint and is now, by the reviewer's
+# informed choice, a person watching the video. tests/README.md says so under
+# Known gaps rather than implying otherwise with a green check.
 
 # The two cards in decimal, hand-written. `tests/unit` pins the package's
 # stylesheets to the same two colours, so a palette changed in one place and
 # not the other is a failure rather than a check that grades nothing.
 #
-# The **window body is deliberately not here**. It is measured off the frame
-# instead, and the difference matters: pin it and the entry that repaints the
-# window to match the card trips a premise saying the frame is the wrong
-# colour, which dominates the claim it was written to prove and leaves the
-# frame reading with no injection of its own. Measured, that entry reports the
-# sentence it should — the frame and the card 4.0 levels apart.
-WEB_CARD_RGB = (0x00, 0x00, 0x00)
+# The **window body is deliberately not a bar here.** It is the same value as
+# `WEB_CARD_RGB` by construction now, so an assertion drawn between them would
+# be an assertion about one constant. It is still *read*, and printed beside the
+# card, so the delta a person cares about is in the log of every run — labelled
+# as ungraded, because it is.
+WEB_CARD_RGB = (0x18, 0x18, 0x25)
 TERMINAL_CARD_RGB = (0x1C, 0x1A, 0x17)
 
 # How far a channel may sit from the card's own value before the strip is not
 # that card.
 #
-# Measured on this arm rather than chosen: a flat card in this codec (libx264,
-# yuv420p) reads **2** levels off its own colour, and the two states it has to
-# be told apart from read **241** (the fixture app's own header strip, which is
-# what a card that never painted leaves there — injected, and caught) and
-# **25** (the terminal card — issue #291 itself, injected, and caught).
+# Measured on this arm rather than chosen, and the number moved with the
+# palette, which is the part worth reading. A flat `#efe7d8` or `#000000` card
+# reads **2** levels off its own colour in this pipeline; `#181825` reads **5**,
+# and that is not noise. The window frame is a Playwright *screenshot* and the
+# card is inside Playwright's *video*, so the same declared colour arrives by
+# two routes, and Chromium's VP8 screencast encoder quantises this one's chroma
+# where it did not quantise those (issue #301 has the measurement).
 #
-# Note the asymmetry, because it is the honest part: this bar used to sit two
-# orders of magnitude under the terminal card, and with both cards now dark it
-# sits 4x under it. The colour reading is no longer what separates a web card
-# from a terminal one; `frame_visible` below is. What this one still does well
-# is separate a card from **no card**, which is 40x away.
-CARD_RGB_TOLERANCE = 6
-
-# How far the card's field must sit, in luma, from the window body drawn around
-# it before a viewer can see the boundary between them. This is the reviewer's
-# property and the one #291 fails.
+# The two states the reading has to be told apart from, both injected and both
+# caught: **213** — the fixture app's own header strip, `(236, 237, 242)`, which
+# is what a card that never painted leaves there — and **15**, the terminal card
+# on a web take, `(25, 25, 22)`, which is #291 itself.
 #
-# Measured off `demo.mp4` on candidates rendered for a human to choose between,
-# not guessed:
-#
-#   | the card                                    | levels |
-#   |---------------------------------------------|-------:|
-#   | #291 — the terminal card on a web take      |    0.4 |
-#   | the window's own colour ("align it exactly")|    1.1 |
-#   | black inside a gutter — what ships          |   23.5 |
-#   | the warm paper a reviewer rejected          |  205.3 |
-#
-# So the bar sits ~30x over the defect and the shipped card clears it by 2x.
-# `tests/unit` applies the same 12 to the stylesheet, before any frame exists.
-FRAME_CONTRAST_MIN_LUMA = 12.0
+# Note the margin, because it is the honest part. Against a card that never
+# painted the bar is 21x clear. Against the *terminal* card it is 1.5x, down
+# from 4x in #297 and from two orders of magnitude before that: the palette the
+# reviewer chose is a dark blue and the terminal card is a dark brown, and the
+# only channel that separates them is blue, 15 levels. This reading is not a
+# comfortable separator of the two cards, and after #291 nothing else is either.
+CARD_RGB_TOLERANCE = 10
 
 # Where in the app rect the strip is read: a band across the top, inset from
 # every edge. Above the centred text on purpose — glyphs move the mean by ~5
 # levels and by however many words the clause has, which is a reading of the
 # sentence and not of the card. Inset from the left and right because the
 # composite's edges blend the app into the window frame, and from the top for
-# the same reason **and** to clear the card's own 18 px gutter, which is ~14 px
-# once the app video is scaled into the window — the strip starts at 6% of the
-# app's height, 34 px, so it reads the field and not the border.
+# the same reason: the outermost rows of the app video are a chroma blend into
+# the window's pad, ~2 px wide once the page is scaled into the window.
 CARD_STRIP = (0.10, 0.06, 0.80, 0.12)  # x, y, w, h as fractions of the app rect
 
-# And where the frame around it is read: a band of the window's body below the
-# app rect, inset from the left and right so the window's rounded corners and
-# its drop shadow stay out of the mean. Below rather than above because the
-# title bar up there is a different colour again and carries text and three
-# coloured dots; this band is flat `WINDOW_BODY_RGB` and nothing else.
+# And where the window's body is read, for the line that reports it: a band
+# below the app rect, inset from the left and right so the window's rounded
+# corners and its drop shadow stay out of the mean. Below rather than above
+# because the title bar up there is a different colour again and carries text
+# and three coloured dots; this band is flat window body and nothing else.
 #
 # **Nothing the card does can paint here** — the pad is part of the frame still
-# ffmpeg composites the app video *onto*, a different layer entirely. That is
-# the point rather than a weakness: the question #291 asks is not whether the
-# frame is drawn, it is whether the card can be told apart from it, and the
-# answer has to be read off the same encoded frame for both.
+# ffmpeg composites the app video *onto*, a different layer entirely. Which is
+# exactly why no assertion is drawn against it any more: it would report the gap
+# between two encodings of one constant (#301), not anything about the card.
 FRAME_BAND = (0.15, 0.70)  # x offset and width, as fractions of the app rect
 
 # Where in the card's beat the frames are read, as fractions of its span. Three
@@ -4938,8 +4926,10 @@ def frame_band(app: Rect, win: Rect) -> Rect | None:
 
     Between the bottom of the app rect and the bottom of the window — the pad
     the recorder leaves so the window's rounded corners stay visible around the
-    video. `None` when there is no pad to read, which is a frame with nothing
-    of itself left showing and a finding rather than a skip.
+    video. `None` when there is no pad to read.
+
+    Nothing is graded off this. It feeds one clause of the line printed on a
+    healthy run, so the two colours #291 made one are both in the log.
     """
     ax, ay, aw, ah = app
     _, wy, _, wh = win
@@ -4957,37 +4947,37 @@ def off_card(rgb: tuple[float, float, float], card: tuple[int, int, int]) -> flo
     return max(abs(value - want) for value, want in zip(rgb, card, strict=True))
 
 
-def rgb_luma(rgb: tuple[float, float, float]) -> float:
-    """Rec. 601 luma, the number a viewer's eye is closest to reading."""
-    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-
-
 def check_criterion_card(out_dir: Path, app: Rect, win: Rect) -> list[str]:
-    """A web take's card, and the window frame still visible around it (#291).
+    """A web take's card is the colour the package dispatched (#291).
 
     Read off `demo.mp4` and not off a still: `shot()` screenshots the page,
-    which is the layer *before* the composite, and the whole of #291 is what
-    the card looks like once it is inside the recorder's window frame.
+    which is the layer *before* the composite, and what a viewer meets is the
+    card once it is inside the recorder's window frame.
 
-    Two claims, in this order because the second needs the first:
+    **One claim, and it is weaker than the one that was here.** #297 also
+    required the card's field and the window body to be at least 12 luma levels
+    apart, which is the property #291 fails. The reviewer who found #291 chose a
+    card that *matches* the window, so that distance is zero by design and the
+    check is deleted rather than relaxed. What is left:
 
-      1. **the card painted.** The strip reads the card's own colour. This is
-         the one that separates a card from the app underneath it, and it is
-         40x from the state it has to rule out.
-      2. **the frame is visible around it.** The band of the window's body
-         below the app rect and the card's field are at least
-         `FRAME_CONTRAST_MIN_LUMA` apart. This is the reviewer's property and
-         the one #291 fails, at 0.4 levels — a card and a frame that read as one
-         surface. Note what it is not: a claim that the frame is *drawn*, which
-         no card could stop, but a claim that the card can be told apart from
-         it.
+      1. **the card painted, in the colour the package dispatched.** The strip
+         reads `WEB_CARD_RGB`. That separates a card from the app underneath it
+         — 20x from the state it has to rule out — and it separates the two
+         palettes at 14 levels against a bar of 10, which is thin and is stated
+         as such where `CARD_RGB_TOLERANCE` is set.
 
-    Two premises have to hold before either says anything:
+    Nothing here, and nothing in `tests/unit`, grades whether the card can be
+    **told apart** from the window it sits in. tests/README.md says so under
+    Known gaps. The window body is still read, and printed beside the card on a
+    healthy run, so a person has both numbers; no assertion is drawn between
+    them, because after #291 they are one constant painted twice (#301).
+
+    Two premises have to hold before the claim says anything:
 
       * every strip decodes, at every instant sampled;
       * the card's strip is **not** the card's colour at an instant when no card
-        is up. Without that, a fixture app that happened to be black would
-        satisfy claim 1 with no card in the recording at all.
+        is up. Without that, a fixture app that happened to be this dark blue
+        would satisfy the claim with no card in the recording at all.
 
     That second one is read **after** the card, halfway between the end of its
     beat and the end of the take, and not just before it. The beat log's clock
@@ -5011,12 +5001,6 @@ def check_criterion_card(out_dir: Path, app: Rect, win: Rect) -> list[str]:
     start, end = float(cards[0]["t_start"]), float(cards[0]["t_end"])
     strip = card_strip(app)
     band = frame_band(app, win)
-    if band is None:
-        return [
-            f"coverage: the app rect {app} reaches the bottom of the window "
-            f"{win}, so the recorder leaves no pad of its own frame showing and "
-            f"there is nothing to tell the card apart from"
-        ]
 
     duration = float(doc.get("duration") or 0.0)
     if duration - end < 1.0:
@@ -5044,15 +5028,12 @@ def check_criterion_card(out_dir: Path, app: Rect, win: Rect) -> list[str]:
 
     failures: list[str] = []
     read: list[tuple[tuple[float, float, float], float]] = []
-    seen_frame: list[tuple[tuple[float, float, float], float]] = []
     for fraction in CARD_SAMPLE_FRACTIONS:
         at = start + (end - start) * fraction
         got = strip_rgb(mp4, at, strip)
-        chrome = strip_rgb(mp4, at, band)
-        if got is None or chrome is None:
+        if got is None:
             failures.append(
-                f"coverage: {mp4.name} decodes no frame at {at:.2f}s over "
-                f"{strip if got is None else band}"
+                f"coverage: {mp4.name} decodes no frame at {at:.2f}s over {strip}"
             )
             continue
         drift = off_card(got, WEB_CARD_RGB)
@@ -5068,37 +5049,29 @@ def check_criterion_card(out_dir: Path, app: Rect, win: Rect) -> list[str]:
                 f"issue #291, where the card reads as a terminal window inside "
                 f"the recorder's own window frame."
             )
-        # Claim 2, and the reason it is read here rather than derived from the
-        # constants: the window body is a *measurement* of the frame in this
-        # frame of this file, so a frame that stopped being drawn, or one
-        # repainted to match the card, moves it.
-        contrast = abs(rgb_luma(chrome) - rgb_luma(got))
-        seen_frame.append((chrome, contrast))
-        if contrast < FRAME_CONTRAST_MIN_LUMA:
-            failures.append(
-                f"coverage: {(fraction * 100):.0f}% through the criterion beat "
-                f"the window's own frame is not visible around the card — its "
-                f"body reads {tuple(round(v) for v in chrome)} over {band} "
-                f"(luma {rgb_luma(chrome):.0f}) against the card's "
-                f"{tuple(round(v) for v in got)} (luma {rgb_luma(got):.0f}), "
-                f"{contrast:.1f} levels apart against a bar of "
-                f"{FRAME_CONTRAST_MIN_LUMA:.0f}. That is issue #291: the pad and "
-                f"title bar are drawn exactly as always and the card cannot be "
-                f"told from them, so the window reads as one dark surface."
-            )
     if not failures:
         worst = max(drift for _, drift in read)
-        closest = min(contrast for _, contrast in seen_frame)
+        # Ungraded, and labelled so in the line itself: after #291 the card and
+        # the window body are one constant, so the only thing a bar between them
+        # could measure is how far two encodings of it drifted (#301).
+        at = start + (end - start) * CARD_SAMPLE_FRACTIONS[0]
+        chrome = strip_rgb(mp4, at, band) if band is not None else None
+        window = (
+            f"the window body {band} reads {tuple(round(v) for v in chrome)}, "
+            f"{max(abs(a - b) for a, b in zip(chrome, read[0][0], strict=True)):.0f} "
+            f"off the card as encoded — reported, not graded: the two are one "
+            f"declared colour painted in two layers (#291, #301), and nothing in "
+            f"this suite grades whether a viewer can tell them apart"
+            if chrome is not None
+            else "the window leaves no pad of its own showing, so its body is not read"
+        )
         print(
             f"smoke: coverage card is the web palette {WEB_CARD_RGB} — strip "
             f"{strip} reads {tuple(round(v) for v in read[0][0])} under it "
             f"({worst:.0f} off over {len(read)} samples, bar "
             f"{CARD_RGB_TOLERANCE}) and "
             f"{tuple(round(v) for v in before)} once it is down "
-            f"({off_card(before, WEB_CARD_RGB):.0f} off); the window frame "
-            f"{band} reads {tuple(round(v) for v in seen_frame[0][0])}, "
-            f"{closest:.0f} luma levels clear of the card "
-            f"(bar {FRAME_CONTRAST_MIN_LUMA:.0f})"
+            f"({off_card(before, WEB_CARD_RGB):.0f} off); {window}"
         )
     return failures
 

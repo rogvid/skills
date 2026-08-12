@@ -359,9 +359,13 @@ beat, the coverage row, the snapshot and the frames were all correct
 throughout, and the person who found it was watching. Note what the defect
 was *not*: the card had always stopped at the app rect, with the frame drawn
 around it. It was 1.3 luma levels from that frame, so the boundary existed and
-nobody could see it. A web card is now black inside a gutter of the window's
-own colour, and what `tests/` grades is that the frame is a different colour
-from the card — not that the result reads as a card.
+nobody could see it. A web card is now the window's own body colour, painted
+from the one constant the window frame is painted with — which is what that
+same person asked for after seeing three rounds of alternatives. What `tests/`
+grades is that the card is that colour, in the stylesheet and in the encoded
+frame. **Nothing grades whether a viewer can tell the card from the window**,
+because the answer the reviewer chose is that they cannot; watching is the
+only thing covering it.
 
 ### What this does and does not tell you
 

@@ -432,20 +432,27 @@ INJECTIONS = [
         sites=("check_coverage",),
         must_contain=("states a finding about unclaimed criteria",),
     ),
-    # -- the window is visible around the card (issue #291) -------------------
+    # -- the card is the colour the package dispatched (issue #291) -----------
     #
     # Three entries against the one assertion in this file that reads *pixels*
     # out of the encoded frame. `tests/unit` grades the dispatch — which
-    # stylesheet each medium hands the page, and how far its field sits from
-    # the window body — at 0.2 s an injection; what it cannot see is what the
-    # composite did with either, which is the half a viewer meets.
+    # stylesheet each medium hands the page, and that the web one equals the
+    # window body — at 0.2 s an injection; what it cannot see is what the
+    # composite did with it, which is the half a viewer meets.
     #
-    # The first is the defect as it shipped, and it is the one that separates
-    # the two claims: a terminal card on a web take is a *wrong colour* (claim
-    # 1) and it is *invisible against the frame* (claim 2), and both fire. The
-    # second is a card dispatched perfectly and never painted. The third is the
-    # entry claim 2 exists for on its own — a card that is exactly the colour it
-    # should be, inside a window repainted to match it.
+    # **What used to be here and is not:** #297 also graded the window frame as
+    # visibly *not* the card, and the entry that proved that reading stood on
+    # its own repainted the window to match the card. The person who found #291
+    # then asked for a card that matches the window, so both the check and that
+    # entry are gone — deleted rather than relaxed, and the gap they leave is
+    # written down in tests/README.md instead of being papered over here.
+    #
+    # The first entry below is the defect as it shipped: a terminal card on a
+    # web take, now caught as a wrong *colour* and at a much thinner margin (14
+    # levels against a bar of 10, where #297 caught it at 0.4 against 12 on the
+    # reading that no longer exists). The second is a card dispatched perfectly
+    # and never painted. The third moves the shared constant and proves the card
+    # in the encoded frame really is painted from it.
     Injection(
         # #291 restored. Injected at the import so the module still loads: a
         # `NameError` here would fail the arm before it recorded anything, and
@@ -463,7 +470,7 @@ INJECTIONS = [
         ")",
         arm="--coverage-only",
         sites=("check_criterion_card",),
-        must_contain=("the window's own frame is not visible around the card",),
+        must_contain=("off the *terminal* card's",),
     ),
     Injection(
         # The card raised at zero opacity: the element is in the tree with the
@@ -490,23 +497,20 @@ INJECTIONS = [
         must_contain=(" levels off the web card's ",),
     ),
     Injection(
-        # **The window repainted to the card's own colour.** The card is black
-        # with light text exactly as it ships, the dispatch is untouched, the
-        # gutter is still drawn in the window's colour and therefore still
-        # matches it — and the frame around the card stops being something a
-        # viewer can see. This is #291 as a property rather than as a palette,
-        # and claim 1 passes throughout: it is the entry that says the frame
-        # reading is not decoration on top of the colour reading.
-        #
-        # `tests/unit` catches the constant moving, off two hand-written pins.
-        # It cannot say what the encoded frame looks like, which is this.
-        name="the window frame is repainted to match the card inside it",
+        # **The shared constant moved.** `WEB_WINDOW_BODY` is now the card's own
+        # colour as well as the window's, so this repaints both — and the point
+        # of the entry is the *card* half. `tests/unit` catches the constant
+        # moving off two hand-written pins, and that is a reading of source
+        # text; this says the colour that constant holds is the colour a frame
+        # of `demo.mp4` actually carries, which is the only thing that makes the
+        # equality in `tests/unit` about a recording rather than about a file.
+        name="the shared window-and-card colour is repainted",
         module="core.py",
         old='WEB_WINDOW_BODY = "#181825"',
         new='WEB_WINDOW_BODY = "#050505"',
         arm="--coverage-only",
         sites=("check_criterion_card",),
-        must_contain=("the window's own frame is not visible around the card",),
+        must_contain=("levels off the web card's",),
     ),
     # -- what strict=True refuses (issue #3), 21 s an entry -------------------
     #

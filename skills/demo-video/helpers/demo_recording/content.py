@@ -73,8 +73,8 @@ def media_duration(path: Path) -> float:
 #               change, in seconds. Catches a recording that is *covered* or
 #               frozen, which the score cannot: the #91 card is a flat dark
 #               field with one line of text on it — near-black on a terminal
-#               take, black inside a gutter of the window's own colour on a web
-#               take since #291 — and it scores ~12, comfortably "content".
+#               take, the window's own body colour on a web take since #291 —
+#               and it scores ~12, comfortably "content".
 #
 # **Three things about the rect, and each one was a defect somewhere.**
 #

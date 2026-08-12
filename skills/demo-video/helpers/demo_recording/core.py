@@ -132,10 +132,9 @@ _INTERLUDE_LAYOUT = (
 
 # The body of the window web.py composites a page into — its `#win` fill, and
 # the colour of the pad that shows around the app video on every side. It is
-# defined here rather than there because the web card below is drawn *against*
-# it and the two must not drift: a card whose gutter is not the window's own
-# colour reads as a second frame inside the first. `web._FRAME_HTML` paints the
-# window with this same constant.
+# defined here rather than there because the web card below **is** this colour:
+# one constant, painted by two different things, so they cannot drift apart.
+# `web._FRAME_HTML` paints the window with it.
 WEB_WINDOW_BODY = "#181825"
 
 # The palette, per medium — and the split is issue #291.
@@ -155,39 +154,61 @@ WEB_WINDOW_BODY = "#181825"
 # read it as. Nothing in an artifact could say so: the element, the beat, the
 # aria snapshot and the frames were all exactly right.
 #
-# **What went wrong was contrast, not geometry.** Both cards have always been
-# `inset: 0`, so both have always stopped at the app rect with the recorder's
-# own 14 px pad and title bar drawn around them. `#1c1a17` is 1.3 luma levels
-# from `WEB_WINDOW_BODY`, so that pad was there and invisible, and the card and
-# the window read as one dark surface. So the web card is drawn against the
-# window rather than merely differing from the terminal's:
+# **So the web card is the window's own body colour, and nothing else.** Not a
+# palette chosen to stand out from the window: a human watched three rounds of
+# candidates and asked for exactly this — *"I want the interlude to match the
+# window, without a need for a border of another colour, or an additional edge
+# of a third colour."* The content area simply becomes the window's colour with
+# the sentence on it. One constant, `WEB_WINDOW_BODY`, painted by the frame and
+# by the card, so the two cannot drift; whitish text, because that is what is
+# legible on it.
 #
-#   * a **black** field, 25 luma levels from the window body, so the pad is a
-#     boundary a viewer sees rather than one that only exists in the geometry;
-#   * an 18 px **border in the window's own colour**, which widens that pad to
-#     ~28 px in the encoded frame without introducing a second frame — the card
-#     stops short of the window's inside edge, and looks it.
+# Two earlier answers to #291 are recorded here because both were rejected by
+# the person watching, and a later reader will otherwise re-propose them:
 #
-# The border is inside `inset: 0`: for a fixed element with all four insets set
-# and `width: auto` the used width is over-constrained, so the border box still
-# covers the app rect exactly. The card therefore stays **opaque and
-# full-bleed**, which is not decoration — `reference/limits.md` reasons from
-# it, and both halves (field and border) are flat opaque colours so nothing of
-# the app shows through and no caption is drawn while the card is up.
+#   * **warm paper** (`#efe7d8`), 205 luma levels off the window. Unmistakably
+#     a card, and a flashbang in the middle of a dark recording.
+#   * **black inside an 18 px border in the window's colour**, 23.5 levels off.
+#     Read as a card in a frame in a window — three colours where the reviewer
+#     wanted one, and the border and the recorder's own pad measured as two
+#     different colours in the encoded frame (see below).
 #
-# Not warm paper, which is what this shipped as first and what a human
-# reviewing the video rejected: a light card inside a dark window frame is
-# unmistakably a card, and it is also a flashbang in the middle of a dark
-# recording. Not `#181825` itself either — "align it with the window" taken
-# literally puts the field *at* the boundary colour, 0 levels apart, which is
-# #291 again in a different hue.
+# **What that costs, stated plainly: nothing now grades whether a web card can
+# be told apart from its window.** The previous round pinned the two at least
+# 12 luma levels apart, in `tests/unit` and in `tests/smoke`; the decision above
+# asks for a distance of zero, so that check is deleted rather than relaxed.
+# What is graded in its place is *consistency* — the card's declared colour
+# equals `WEB_WINDOW_BODY`, and the frame is painted from that same constant —
+# which is a weaker claim, and is the one that is true. The guard that would
+# have caught #291 is gone by a deliberate human decision; a person watching the
+# video is the only thing covering it. `tests/README.md` says so under Known
+# gaps.
+#
+# The card stays **opaque and full-bleed** — `inset: 0`, one flat `#rrggbb`,
+# above the caption bar. That is not decoration: `reference/limits.md` reasons
+# from all three, and with no border there is no second box whose corners or
+# alpha could put the app back on screen at the edges.
+#
+# **One measured thing about this colour, because it looks like a bug and is
+# not.** The window body and the card declare the same `#181825` and arrive in
+# `demo.mp4` as two values: the pad reads `#171625` and the card reads
+# `#181620`, ~5 levels apart in blue. The two layers reach the file by different
+# routes — the window is a Playwright *screenshot* (lossless PNG, one x264
+# encode) and the card is inside Playwright's *video* (Chromium's VP8 screencast
+# encoder). Measured on a page of nothing but `#181825`, the screenshot is
+# exactly (24, 24, 37) and the webm is already (24, 22, 32) before ffmpeg is run
+# at all: the webm stores Y=37, Cb=132, Cr=128 where the colour wants Cb=133.7,
+# and 1.7 levels of chroma error becomes 5 levels of blue on decode. Nothing in
+# the recorder's own ffmpeg does this — the same colour pushed through
+# webm→x264→scale→overlay→x264 synthetically comes back at (23, 22, 37). So an
+# assertion that reads this card off an encoded frame must allow for it, and one
+# that asserts the card and the window are byte-equal there would be wrong
+# (issue #301).
 INTERLUDE_CSS_TERMINAL = (
     _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"
 )
 INTERLUDE_CSS_WEB = (
-    _INTERLUDE_LAYOUT
-    + " background: #000000; color: #f2f0ec;"
-    + f" border: 18px solid {WEB_WINDOW_BODY};"
+    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"
 )
 _INTERLUDE_JS = """
 window.__demoInterlude = (text) => {

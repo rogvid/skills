@@ -21,17 +21,25 @@ so.
 
 What went wrong was contrast, not geometry: the card had always stopped at the
 app rect, with the recorder's pad and title bar drawn around it. It was 1.3 luma
-levels from that frame, so the boundary was there and nobody could see it. The
-card is now black, its text near-white, and it carries an 18 px gutter in the
-window's own colour so it visibly stops short of the window's inside edge.
+levels from that frame, so the boundary was there and nobody could see it.
+
+Three rounds of candidates were put in front of the person who found it — warm
+paper, then black inside a gutter of the window's colour — and what they asked
+for in the end was neither: *"I want the interlude to match the window, without
+a need for a border of another colour, or an additional edge of a third
+colour."* So the card is now painted `WEB_WINDOW_BODY`, the same constant the
+window frame is painted with, with whitish text. The content area simply becomes
+the window's colour with the sentence on it.
 
 Which makes this demoable by the repo's own test: the acceptance criterion is
 that **a viewer can tell a card from a terminal**, and it is verified by
-watching. What a reviewer should look at, in order:
+watching — the only thing that can, now that the card and the window are one
+colour and no assertion can separate them. What a reviewer should look at, in
+order:
 
 1. the queue, so the app is on screen and recognisable;
-2. the criterion card — black, over the app, with that same dark window frame
-   still visible as a band all the way around it;
+2. the criterion card — the window's own colour, no border, no second edge,
+   with the title bar and traffic lights the only chrome left;
 3. the app again, with the search doing the thing the clause asked for;
 4. a plain `interlude()` card, which is the same element and the same palette.
 

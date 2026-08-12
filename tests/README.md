@@ -1435,29 +1435,36 @@ per clause and its beat numbers, and points every row at the wrong one.
   Process step 6) — and the demo recorded for #280 is that answer for this
   verb.
 
-  **Two pixel readings are now taken, and only two** (issue #291).
-  `check_criterion_card` samples a strip of the app rect across the card's own
-  beat and requires (1) that it is the card's colour and (2) that it is at
-  least 12 luma levels from the recorder's own window body, sampled in the pad
-  below the app rect. The second is the graded property, and it is the one the
-  defect fails: the card had always been `inset: 0`, so the window frame was
-  drawn around it the whole time — it was 0.4 levels from that frame, so the
-  boundary existed and nobody could see it, and the video read as a terminal
-  window with a correct element, a correct beat, a correct snapshot and correct
-  frames.
+  **One pixel reading is taken** (issue #291). `check_criterion_card` samples a
+  strip of the app rect across the card's own beat and requires that it is the
+  colour the package dispatched — `#181825`, the window body's own value.
 
-  What that pair deliberately does not read:
+  **Nothing grades whether a web card is distinguishable from its window, and
+  that is the gap this section exists to state.** An earlier round of #291's fix
+  required the card's field and the window body to be at least 12 luma levels
+  apart, here and in `tests/unit`; that check would have caught #291, which
+  measures 0.4. The person who found #291 was shown three rounds of candidates
+  and chose a card that **matches** the window — *"I want the interlude to match
+  the window, without a need for a border of another colour, or an additional
+  edge of a third colour"* — so the required distance is zero and the check was
+  deleted rather than relaxed to fit. The guard is gone by a deliberate human
+  decision, and **the video review is the only thing covering it**. An honest
+  gap beats a green check.
+
+  What the one remaining reading also does not read:
 
   - **Whether the card is legible.** The strip is chosen to sit *above* the
     text, so a card whose clause is clipped, mis-hyphenated or rendered in an
     unreadable face passes exactly as a good one does.
-  - **How wide the visible frame is.** A card flush to the app rect and a card
-    inside an 18 px gutter of the window's own colour are the same reading
-    here. The gutter is a judgement about how obviously the thing reads as a
-    card, and that judgement is a person's.
   - **Whether the result reads as a card at all**, which is the whole of #291
     and is not gradable from any artifact — the same element, text and snapshot
     are produced either way.
+
+  The window body is still *read*, and printed beside the card's reading on a
+  healthy run so both numbers are in the log. No assertion is drawn between
+  them: they are one declared colour painted in two layers, and the two layers
+  reach `demo.mp4` by different encoders, so they differ by ~5 levels of blue
+  with nothing wrong ([#301](https://github.com/rogvid/skills/issues/301)).
 
   A human still has to watch.
 

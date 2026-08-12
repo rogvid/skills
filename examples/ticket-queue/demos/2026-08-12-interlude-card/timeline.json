@@ -4,7 +4,7 @@
   "recorder": "Recorder",
   "segment": null,
   "media": "demo.mp4",
-  "duration": 29.8,
+  "duration": 29.72,
   "determinism": {
     "deterministic": false,
     "clock": null,
@@ -21,8 +21,8 @@
       460
     ],
     "sample_fps": 2,
-    "frames": 60,
-    "score": 21.62,
+    "frames": 59,
+    "score": 21.58,
     "floor": 1.0,
     "static_for": 6.5,
     "static_from": 5.5,
@@ -36,7 +36,7 @@
     "static_limit": 15.0,
     "opening": {
       "gap": 0.0,
-      "held": 0.35,
+      "held": 0.4,
       "limit": 1.5,
       "note": null
     },
@@ -47,14 +47,14 @@
     "note": null,
     "steps": [
       {
-        "t": 12.539,
-        "delta": -0.5762
+        "t": 19.021,
+        "delta": -0.578
       }
     ],
-    "total": -0.5762,
+    "total": -0.578,
     "sample_interval": 0.02,
     "min_step": 0.005,
-    "max_gap": 0.0219,
+    "max_gap": 0.0209,
     "max_gap_limit": 0.25
   },
   "narration": null,
@@ -68,28 +68,28 @@
           "index": 4,
           "segment": null,
           "segment_index": 4,
-          "t_start": 5.213,
+          "t_start": 5.207,
           "still": "images/01-queue.png"
         },
         {
           "index": 6,
           "segment": null,
           "segment_index": 6,
-          "t_start": 5.589,
+          "t_start": 5.583,
           "still": null
         },
         {
           "index": 7,
           "segment": null,
           "segment_index": 7,
-          "t_start": 12.322,
+          "t_start": 12.315,
           "still": "images/02-criterion-card.png"
         },
         {
           "index": 13,
           "segment": null,
           "segment_index": 13,
-          "t_start": 19.41,
+          "t_start": 19.38,
           "still": "images/03-invoice.png"
         }
       ]
@@ -101,8 +101,8 @@
   "beats": [
     {
       "index": 0,
-      "t_start": 0.428,
-      "t_end": 0.999,
+      "t_start": 0.439,
+      "t_end": 1.007,
       "caption": "",
       "verb": "goto",
       "selector": "/",
@@ -113,8 +113,8 @@
     },
     {
       "index": 1,
-      "t_start": 0.999,
-      "t_end": 1.028,
+      "t_start": 1.007,
+      "t_end": 1.044,
       "caption": "",
       "verb": "wait_for",
       "selector": ".ticket",
@@ -125,8 +125,8 @@
     },
     {
       "index": 2,
-      "t_start": 1.028,
-      "t_end": 3.683,
+      "t_start": 1.044,
+      "t_end": 3.697,
       "caption": "Seven tickets, in a browser window.",
       "verb": "caption",
       "selector": null,
@@ -137,8 +137,8 @@
     },
     {
       "index": 3,
-      "t_start": 3.683,
-      "t_end": 5.213,
+      "t_start": 3.697,
+      "t_end": 5.207,
       "caption": "Seven tickets, in a browser window.",
       "verb": "hold",
       "selector": null,
@@ -149,8 +149,8 @@
     },
     {
       "index": 4,
-      "t_start": 5.213,
-      "t_end": 5.275,
+      "t_start": 5.207,
+      "t_end": 5.271,
       "caption": "Seven tickets, in a browser window.",
       "verb": "shot",
       "selector": "01-queue",
@@ -164,8 +164,8 @@
     },
     {
       "index": 5,
-      "t_start": 5.275,
-      "t_end": 5.589,
+      "t_start": 5.271,
+      "t_end": 5.583,
       "caption": "",
       "verb": "caption",
       "selector": null,
@@ -176,8 +176,8 @@
     },
     {
       "index": 6,
-      "t_start": 5.589,
-      "t_end": 12.322,
+      "t_start": 5.583,
+      "t_end": 12.315,
       "caption": "A search box above the queue narrows the list as you type, case-insensitively, with no button to press.",
       "verb": "criterion",
       "selector": "AC-1",
@@ -191,8 +191,8 @@
     },
     {
       "index": 7,
-      "t_start": 12.322,
-      "t_end": 12.36,
+      "t_start": 12.315,
+      "t_end": 12.355,
       "caption": "",
       "verb": "shot",
       "selector": "02-criterion-card",
@@ -206,8 +206,8 @@
     },
     {
       "index": 8,
-      "t_start": 12.36,
-      "t_end": 12.971,
+      "t_start": 12.355,
+      "t_end": 12.97,
       "caption": "",
       "verb": "interlude",
       "selector": "card",
@@ -218,8 +218,8 @@
     },
     {
       "index": 9,
-      "t_start": 12.971,
-      "t_end": 16.644,
+      "t_start": 12.97,
+      "t_end": 16.641,
       "caption": "The card is gone, and the queue is back.",
       "verb": "caption",
       "selector": null,
@@ -230,8 +230,8 @@
     },
     {
       "index": 10,
-      "t_start": 16.644,
-      "t_end": 17.888,
+      "t_start": 16.641,
+      "t_end": 17.861,
       "caption": "The card is gone, and the queue is back.",
       "verb": "type_into",
       "selector": "#queue-search",
@@ -242,8 +242,8 @@
     },
     {
       "index": 11,
-      "t_start": 17.888,
-      "t_end": 17.9,
+      "t_start": 17.861,
+      "t_end": 17.872,
       "caption": "The card is gone, and the queue is back.",
       "verb": "wait_for",
       "selector": ".ticket",
@@ -254,8 +254,8 @@
     },
     {
       "index": 12,
-      "t_start": 17.9,
-      "t_end": 19.41,
+      "t_start": 17.872,
+      "t_end": 19.38,
       "caption": "The card is gone, and the queue is back.",
       "verb": "hold",
       "selector": null,
@@ -266,8 +266,8 @@
     },
     {
       "index": 13,
-      "t_start": 19.41,
-      "t_end": 19.461,
+      "t_start": 19.38,
+      "t_end": 19.427,
       "caption": "The card is gone, and the queue is back.",
       "verb": "shot",
       "selector": "03-invoice",
@@ -281,8 +281,8 @@
     },
     {
       "index": 14,
-      "t_start": 19.461,
-      "t_end": 19.772,
+      "t_start": 19.427,
+      "t_end": 19.737,
       "caption": "",
       "verb": "caption",
       "selector": null,
@@ -293,8 +293,8 @@
     },
     {
       "index": 15,
-      "t_start": 19.772,
-      "t_end": 22.585,
+      "t_start": 19.737,
+      "t_end": 22.547,
       "caption": "Same card, no clause — this is what bridges a time skip.",
       "verb": "interlude",
       "selector": "card",
@@ -305,8 +305,8 @@
     },
     {
       "index": 16,
-      "t_start": 22.585,
-      "t_end": 22.622,
+      "t_start": 22.547,
+      "t_end": 22.585,
       "caption": "",
       "verb": "shot",
       "selector": "04-interlude-card",
@@ -317,8 +317,8 @@
     },
     {
       "index": 17,
-      "t_start": 22.622,
-      "t_end": 23.234,
+      "t_start": 22.585,
+      "t_end": 23.195,
       "caption": "",
       "verb": "interlude",
       "selector": "card",
@@ -329,8 +329,8 @@
     },
     {
       "index": 18,
-      "t_start": 23.234,
-      "t_end": 27.591,
+      "t_start": 23.195,
+      "t_end": 27.547,
       "caption": "Queue, card, queue again — the card sits over the app.",
       "verb": "caption",
       "selector": null,
@@ -341,8 +341,8 @@
     },
     {
       "index": 19,
-      "t_start": 27.591,
-      "t_end": 29.113,
+      "t_start": 27.547,
+      "t_end": 29.056,
       "caption": "Queue, card, queue again — the card sits over the app.",
       "verb": "hold",
       "selector": null,
@@ -353,8 +353,8 @@
     },
     {
       "index": 20,
-      "t_start": 29.113,
-      "t_end": 29.425,
+      "t_start": 29.056,
+      "t_end": 29.368,
       "caption": "",
       "verb": "caption",
       "selector": null,
