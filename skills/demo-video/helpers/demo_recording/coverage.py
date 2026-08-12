@@ -41,6 +41,11 @@ import re
 #
 # `unclaimed` is the one machine-checkable finding here, and it is safe to
 # automate precisely because it needs no judgement: nobody even asserted it.
+#
+# A claim's `error` is the second, and it needs no judgement either: it is the
+# beat's own record of the verb raising. A claim made by a beat that threw is
+# not a claim the take kept, and rendering it like one is the artifact lying
+# (issue #278).
 
 # How a criterion id may be written. Deliberately narrow — these become table
 # rows, filenames in a reviewer's prompt and keys in a JSON object, and an id
@@ -89,6 +94,39 @@ def _ac_field(claims: list[str]) -> dict:
     return {"ac": claims} if claims else {}
 
 
+def _claim_row(beat: dict) -> dict:
+    """One row of `claimed[id]`: where the claim was made, and whether it held.
+
+    `error` is present **only** when the beat's verb raised, and absent
+    otherwise — the #24 rule, so a take recorded before this key existed reads
+    exactly like one whose beats all returned.
+
+    It is copied here rather than left for a consumer to look up in `beats`
+    because every renderer of this report reads the row and never the beat.
+    Without it a claim made by a beat that threw is indistinguishable from one
+    that worked, and a `shot("07-x", ac="AC-3")` whose screenshot raised
+    produces a row naming a still the take never wrote — an artifact reporting
+    success on failure, inside the feature whose whole purpose is honesty about
+    claims (issue #278).
+    """
+    row = {
+        "index": beat.get("index"),
+        "segment": beat.get("segment"),
+        "segment_index": beat.get("segment_index"),
+        "t_start": beat.get("t_start"),
+        "still": beat.get("still"),
+    }
+    error = beat.get("error")
+    if isinstance(error, dict):
+        # `type` and `message`, not the beat's dict by reference: a renderer
+        # that mutated this row would otherwise reach into `beats`.
+        row["error"] = {
+            "type": error.get("type"),
+            "message": error.get("message"),
+        }
+    return row
+
+
 def coverage_report(criteria: dict[str, str], beats: list[dict]) -> dict | None:
     """Which criteria the storyboard **claimed**, and which nothing claimed.
 
@@ -111,15 +149,7 @@ def coverage_report(criteria: dict[str, str], beats: list[dict]) -> dict | None:
         tagged += 1
         for key in ids:
             if key in claimed:
-                claimed[key].append(
-                    {
-                        "index": beat.get("index"),
-                        "segment": beat.get("segment"),
-                        "segment_index": beat.get("segment_index"),
-                        "t_start": beat.get("t_start"),
-                        "still": beat.get("still"),
-                    }
-                )
+                claimed[key].append(_claim_row(beat))
     return {
         "criteria": dict(criteria),
         # Every declared id is a key here, including the ones with an empty

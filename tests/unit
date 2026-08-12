@@ -310,6 +310,48 @@ class Coverage(unittest.TestCase):
             ],
         )
 
+    def test_a_claim_from_a_beat_that_raised_carries_that_beats_error(self):
+        # Issue #278. Without this the row is `index`/`segment`/`t_start`/
+        # `still` and nothing else, so a `shot()` whose screenshot threw is
+        # indistinguishable in the report from one that wrote its file.
+        report = coverage_report(
+            self.CRITERIA,
+            [
+                beat(
+                    17,
+                    "shot",
+                    31.8,
+                    ac=["AC-3"],
+                    still="images/07-x.png",
+                    error={"type": "TimeoutError", "message": "locator not found"},
+                )
+            ],
+        )
+        self.assertEqual(
+            report["claimed"]["AC-3"][0]["error"],
+            {"type": "TimeoutError", "message": "locator not found"},
+        )
+
+    def test_a_claim_from_a_beat_that_returned_carries_no_error_key(self):
+        # The control, and the #24 rule: absent, not null. A key present on
+        # every row would satisfy the assertion above on a report that copied
+        # a constant, and a timeline recorded before this key existed has to
+        # read exactly like one whose beats all returned.
+        report = coverage_report(
+            self.CRITERIA, [beat(4, "shot", 9.0, ac=["AC-1"], still="images/01.png")]
+        )
+        self.assertNotIn("error", report["claimed"]["AC-1"][0])
+
+    def test_a_takes_error_is_copied_and_not_shared_with_the_beat(self):
+        # The row is handed to renderers; the beat is the recorder's record of
+        # what happened. A renderer that edited the row must not be able to
+        # rewrite the beat log underneath it.
+        raised = {"type": "TimeoutError", "message": "locator not found"}
+        beats = [beat(2, "shot", 1.0, ac=["AC-1"], error=raised)]
+        report = coverage_report(self.CRITERIA, beats)
+        report["claimed"]["AC-1"][0]["error"]["type"] = "Rewritten"
+        self.assertEqual(beats[0]["error"]["type"], "TimeoutError")
+
     def test_a_take_recorded_outside_a_ticket_has_no_report(self):
         # None, not {}. An empty report would read as a take that covered
         # nothing, which is a different and false statement.
@@ -449,10 +491,141 @@ class CoverageMd(unittest.TestCase):
         "untagged_beats": 4,
     }
 
+    # The take issue #278 is about. Identical to REPORT in every field but the
+    # `error` on AC-2's claim — that is the whole difference the rendering has
+    # to make visible, and holding everything else equal is what stops these
+    # assertions passing off some other change to the fixture.
+    RAISED = {
+        "criteria": dict(REPORT["criteria"]),
+        "claimed": {
+            "AC-1": [{"index": 1, "t_start": 3.2, "still": None, "segment": None}],
+            "AC-2": [
+                {
+                    "index": 2,
+                    "t_start": 5.4,
+                    "still": "images/02.png",
+                    "segment": None,
+                    "error": {"type": "TimeoutError", "message": "no such locator"},
+                }
+            ],
+            "AC-3": [],
+        },
+        "unclaimed": ["AC-3"],
+        "tagged_beats": 2,
+        "untagged_beats": 4,
+    }
+    FAILURE = {
+        "type": "TimeoutError",
+        "beat": 2,
+        "verb": "shot",
+        "message": "no such locator",
+    }
+
     def test_the_unclaimed_sentence_names_every_unclaimed_id(self):
         text = "\n".join(_coverage_md(self.REPORT))
         self.assertIn("`AC-3`", text)
         self.assertIn("1 of 3 criteria have no beat claiming them", text)
+
+    # -- a claim a failed take made must not read as a clean one (#278) -----
+
+    def test_a_row_whose_beat_raised_says_so_in_the_table(self):
+        # In the acceptance table itself, not only in the beat table further
+        # down the file. A reviewer reading top-down meets this row first.
+        text = "\n".join(_coverage_md(self.RAISED))
+        row = [ln for ln in text.splitlines() if ln.startswith("| **AC-2**")]
+        self.assertEqual(len(row), 1, text)
+        self.assertIn("**raised TimeoutError**", row[0])
+
+    def test_a_row_whose_beat_raised_names_no_still(self):
+        # The still is the lie: `shot()` stamps the path on the beat before it
+        # takes the picture, so a take that died there names a file it never
+        # wrote. Searched over the whole section, not the row, because a path
+        # printed anywhere in it is a path a reviewer will go looking for.
+        text = "\n".join(_coverage_md(self.RAISED))
+        self.assertNotIn("images/02.png", text)
+        # The control: the same still, on the same claim, without the error.
+        # Without it this assertion passes on a renderer that lost the column.
+        self.assertIn("images/02.png", "\n".join(_coverage_md(self.REPORT)))
+
+    def test_a_row_whose_beat_raised_does_not_read_as_a_row_with_no_still(self):
+        # A blank cell is what a `caption(ac=)` claim renders as, and "nobody
+        # took a picture" is a different statement from "the picture this beat
+        # was taking was never written".
+        row = [ln for ln in _coverage_md(self.RAISED) if ln.startswith("| **AC-2**")][0]
+        self.assertEqual(split_row(row)[3], "*not written*")
+        # AC-1's claim carries no still at all, and stays blank.
+        blank = [ln for ln in _coverage_md(self.RAISED) if ln.startswith("| **AC-1**")]
+        self.assertEqual(split_row(blank[0])[3], "")
+
+    def test_a_failed_take_says_so_before_anything_it_claimed(self):
+        # "Leads with", read strictly: the first line of the section after its
+        # heading. "Somewhere above the table" would be satisfied by a sentence
+        # under the paragraph about what a tag means, which is where a reader
+        # scrolling to the table would never meet it.
+        lines = _coverage_md(self.RAISED, self.FAILURE)
+        self.assertEqual(lines[:2], ["## Acceptance criteria", ""])
+        self.assertTrue(lines[2].startswith("**This take did not finish**"), lines[2])
+        self.assertIn("beat 2 (`shot`)", lines[2])
+        text = "\n".join(lines)
+        self.assertIn("| criterion | claimed by |", text)  # control: a table ran
+        self.assertLess(text.index("did not finish"), text.index("| criterion |"))
+        self.assertLess(text.index("did not finish"), text.index("**AC-1**"))
+
+    def test_the_lead_counts_the_clauses_no_returning_beat_claimed(self):
+        # AC-2's only claim raised and nothing claims AC-3, so two of the three
+        # have no claim from a beat that returned. AC-1 does, and counting it
+        # here would be inventing a finding on a claim as good as any other.
+        text = "\n".join(_coverage_md(self.RAISED, self.FAILURE))
+        self.assertIn(
+            "2 of the 3 criteria have no claim from a beat that returned", text
+        )
+        self.assertIn("`AC-2`", text)
+        self.assertIn("`AC-3`", text)
+        line = [ln for ln in text.splitlines() if "no claim from a beat" in ln][0]
+        self.assertNotIn("AC-1", line)
+
+    def test_a_take_that_died_claiming_everything_says_that_instead(self):
+        # The other branch, and the one a reader meets when the take crashed at
+        # a beat that tagged nothing. Without it the count sentence would be
+        # the only thing this section ever says about a failure.
+        report = dict(
+            self.REPORT,
+            claimed={
+                key: [{"index": i, "t_start": 1.0, "still": None, "segment": None}]
+                for i, key in enumerate(self.REPORT["criteria"])
+            },
+            unclaimed=[],
+        )
+        text = "\n".join(_coverage_md(report, self.FAILURE))
+        self.assertIn("did not finish", text)
+        self.assertIn("still has a claim from a beat that returned", text)
+        self.assertNotIn("no claim from a beat that returned", text)
+
+    def test_a_take_that_finished_renders_exactly_what_it_did_before(self):
+        # The #24 rule, as a whole-section equality: a document with no failure
+        # and no raised claim must come out byte-for-byte as it always has.
+        # Nothing below this line is allowed to leak into an ordinary take.
+        text = "\n".join(_coverage_md(self.REPORT, None))
+        for added in ("did not finish", "raised", "not written", "died before"):
+            self.assertNotIn(added, text)
+        self.assertEqual(text, "\n".join(_coverage_md(self.REPORT)))
+
+    def test_the_unclaimed_sentence_offers_the_third_reason_only_on_a_failure(self):
+        # Same words, wrong cause: "either the demo does not show them, or the
+        # storyboard did not say where" is a complete list on a take that
+        # finished and is missing the reason that matters on one that did not.
+        crashed = "\n".join(_coverage_md(self.RAISED, self.FAILURE))
+        self.assertIn("died before reaching them", crashed)
+        clean = "\n".join(_coverage_md(self.RAISED))
+        self.assertNotIn("died before reaching them", clean)
+        self.assertIn("Both are worth fixing before review", clean)
+
+    # A "the raised row is still four cells wide" test stood here and was
+    # deleted rather than kept: every break that widens that row is caught one
+    # assertion earlier by `split_row(row)[3] == "*not written*"` above, which
+    # indexes the cell and would read the wrong one or raise. The catalogue
+    # calls that the dominated assertion, and a check that cannot fire for the
+    # reason it claims is worse than no check.
 
     def test_the_section_says_claimed_and_never_says_demonstrated(self):
         # The whole honesty of issue #12. If this file said "demonstrated",
@@ -479,6 +652,45 @@ class CoverageMd(unittest.TestCase):
 
 
 class TimelineMd(unittest.TestCase):
+    def test_the_acceptance_section_is_told_the_take_failed(self):
+        """The wiring, which no assertion on `_coverage_md` can reach.
+
+        `_coverage_md` can be perfect about a failure it is never handed:
+        `render_timeline_md` reads `failure` for the section above the beat
+        table and could pass the coverage report on its own, leaving a crashed
+        take's clauses rendered exactly like a clean take's a few lines below
+        a heading that says the take died (issue #278).
+        """
+        doc = envelope(
+            duration=None,
+            beats=[
+                beat(
+                    2,
+                    "shot",
+                    5.4,
+                    ac=["AC-2"],
+                    still="images/02.png",
+                    error={"type": "TimeoutError", "message": "no such locator"},
+                )
+            ],
+            coverage=CoverageMd.RAISED,
+            failure=CoverageMd.FAILURE,
+        )
+        text = render_timeline_md(doc)
+        start = text.index("## Acceptance criteria")
+        section = text[start : text.index("\n## ", start + 1)]
+        self.assertIn("**AC-2**", section)  # control: the section rendered
+        # The lead line, not "did not finish" anywhere in the section. The
+        # first version of this assertion searched for the phrase, and the
+        # unclaimed sentence three paragraphs lower carries it too — so with
+        # the lead deleted it stayed green, and it was grading a sentence it
+        # was not written about. Fault injection found that; reading did not.
+        self.assertIn("\n**This take did not finish**", section)
+        # And the still the beat never wrote is nowhere in the section. The
+        # `## Stills` gallery further down still embeds it — that is a
+        # different renderer and issue #305, not this one.
+        self.assertNotIn("images/02.png", section)
+
     def test_a_null_duration_is_not_rendered_as_a_number(self):
         # issue #20: a take that encoded no mp4 reports duration null, even
         # when a previous run's demo.mp4 is sitting right there. Rendering
@@ -10040,9 +10252,168 @@ INJECTIONS = [
     (
         "a claim records only the beat index, losing the frame it points at",
         "coverage.py",
-        '                        "still": beat.get("still"),',
-        '                        "still": None,',
+        '        "still": beat.get("still"),',
+        '        "still": None,',
         ["Coverage.test_a_claim_carries_the_beat_that_made_it"],
+    ),
+    (
+        # **The defect issue #278 is about**, restored exactly: the row copies
+        # index, segment, t_start and still off the claiming beat and never its
+        # `error`. Every renderer downstream reads the row, so a claim made by
+        # a beat that threw then reads as an ordinary one — and a `shot()` that
+        # raised names a still the take never wrote.
+        "a claim does not record that the beat making it raised",
+        "coverage.py",
+        '    error = beat.get("error")\n    if isinstance(error, dict):',
+        '    error = beat.get("error")\n    if False:',
+        [
+            "Coverage.test_a_claim_from_a_beat_that_raised_carries_that_beats_error",
+            "Coverage.test_a_takes_error_is_copied_and_not_shared_with_the_beat",
+        ],
+    ),
+    (
+        # The other direction, and the #24 rule: a key present on every row
+        # makes the assertion above pass on a report that copied a constant,
+        # and makes a take recorded before this key existed read as one whose
+        # beats all raised.
+        "every claim carries an error key, present or not",
+        "coverage.py",
+        '        row["error"] = {\n'
+        '            "type": error.get("type"),\n'
+        '            "message": error.get("message"),\n'
+        "        }",
+        "        pass\n"
+        '    row["error"] = {\n'
+        '        "type": (error or {}).get("type"),\n'
+        '        "message": (error or {}).get("message"),\n'
+        "    }",
+        [
+            "Coverage.test_a_claim_from_a_beat_that_returned_carries_no_error_key",
+            "Coverage.test_a_claim_carries_the_beat_that_made_it",
+        ],
+    ),
+    (
+        # The beat's own dict handed through by reference. Nothing downstream
+        # mutates a row today, which is exactly why the assertion needs its own
+        # injection: without this it would only ever be seen failing alongside
+        # the one above, and it would be decorating that measurement.
+        "the claim shares the beat's error dict instead of copying it",
+        "coverage.py",
+        '        row["error"] = {\n'
+        '            "type": error.get("type"),\n'
+        '            "message": error.get("message"),\n'
+        "        }",
+        '        row["error"] = error',
+        ["Coverage.test_a_takes_error_is_copied_and_not_shared_with_the_beat"],
+    ),
+    (
+        # The mark, gone from the acceptance table while the beat table 40
+        # lines lower still carries it. A reviewer reading top-down meets the
+        # clean row first, and that ordering is the whole of #278.
+        "the acceptance table stops marking a claim whose beat raised",
+        "timeline.py",
+        "                beat += f\" **raised {_md_cell(error.get('type'))}**\"",
+        "                pass",
+        ["CoverageMd.test_a_row_whose_beat_raised_says_so_in_the_table"],
+    ),
+    (
+        # The still printed anyway. `shot()` stamps the path on the beat before
+        # it takes the picture, so on a take that died there the path names a
+        # file nothing wrote — the artifact-lies case, in the one feature whose
+        # purpose is honesty about claims.
+        "a claim whose beat raised prints the still it never wrote",
+        "timeline.py",
+        '                cell = "*not written*" if still else ""',
+        '                cell = f"`{_md_cell(still)}`" if still else ""',
+        [
+            "CoverageMd.test_a_row_whose_beat_raised_names_no_still",
+            "CoverageMd.test_a_row_whose_beat_raised_does_not_read_as_a_row_with_no_still",
+            "TimelineMd.test_the_acceptance_section_is_told_the_take_failed",
+        ],
+    ),
+    (
+        # The lead, deleted. The table then opens the section on a crashed take
+        # exactly as it does on a clean one.
+        "the acceptance section stops leading with the failure",
+        "timeline.py",
+        "    if isinstance(failure, dict):\n"
+        "        out += _coverage_failure_md(failure, criteria, claimed)",
+        "    if False:\n"
+        "        out += _coverage_failure_md(failure, criteria, claimed)",
+        [
+            "CoverageMd.test_a_failed_take_says_so_before_anything_it_claimed",
+            "CoverageMd.test_the_lead_counts_the_clauses_no_returning_beat_claimed",
+            "CoverageMd.test_a_take_that_died_claiming_everything_says_that_instead",
+            "TimelineMd.test_the_acceptance_section_is_told_the_take_failed",
+        ],
+    ),
+    (
+        # The same condition inverted, which is the direction #24 is about: the
+        # lead printed on every take that *finished*. The injection above can
+        # only be seen by a document carrying a failure; this one is the only
+        # thing in the suite that watches an ordinary take stay ordinary.
+        "the failure lead is printed on a take that did not fail",
+        "timeline.py",
+        "    if isinstance(failure, dict):\n"
+        "        out += _coverage_failure_md(failure, criteria, claimed)",
+        "    if not isinstance(failure, dict):\n"
+        "        out += _coverage_failure_md(failure or {}, criteria, claimed)",
+        [
+            "CoverageMd.test_a_take_that_finished_renders_exactly_what_it_did_before",
+            "CoverageMd.test_a_failed_take_says_so_before_anything_it_claimed",
+        ],
+    ),
+    (
+        # And the third-reason sentence printed on every take, which is the
+        # same #24 direction one paragraph lower. Same search string as the
+        # injection below it and the opposite break, because the boundary has
+        # two sides and only one of them has ever been watched.
+        "the unclaimed sentence blames the crash on a take that finished",
+        "timeline.py",
+        "            if isinstance(failure, dict)\n"
+        '            else "Either the demo does not show them, or the storyboard did "',
+        "            if True\n"
+        '            else "Either the demo does not show them, or the storyboard did "',
+        [
+            "CoverageMd."
+            "test_the_unclaimed_sentence_offers_the_third_reason_only_on_a_failure",
+            "CoverageMd.test_a_take_that_finished_renders_exactly_what_it_did_before",
+        ],
+    ),
+    (
+        # The count that would be inventing a finding: a clause claimed by a
+        # beat that *returned* on a take that later died elsewhere is as good
+        # as any other claim on that take, and #278 says so explicitly.
+        "the failure lead counts every clause, not the ones no beat returned on",
+        "timeline.py",
+        "    unreached = _kept_claims(criteria, claimed)",
+        "    unreached = list(criteria)",
+        [
+            "CoverageMd.test_the_lead_counts_the_clauses_no_returning_beat_claimed",
+            "CoverageMd.test_a_take_that_died_claiming_everything_says_that_instead",
+        ],
+    ),
+    (
+        # The wiring, which no injection above touches: `_coverage_md` can be
+        # perfect about a failure `render_timeline_md` never hands it.
+        "the timeline renderer stops telling the acceptance section it failed",
+        "timeline.py",
+        '    out += _coverage_md(doc.get("coverage"), failure)',
+        '    out += _coverage_md(doc.get("coverage"))',
+        ["TimelineMd.test_the_acceptance_section_is_told_the_take_failed"],
+    ),
+    (
+        # Same words, wrong cause. The two reasons this sentence has always
+        # given are a complete list on a take that finished and are both wrong
+        # on one that did not.
+        "the unclaimed sentence blames the storyboard on a take that crashed",
+        "timeline.py",
+        '            if isinstance(failure, dict)\n            else "Either the demo does not show them, or the storyboard did "',
+        '            if False\n            else "Either the demo does not show them, or the storyboard did "',
+        [
+            "CoverageMd."
+            "test_the_unclaimed_sentence_offers_the_third_reason_only_on_a_failure"
+        ],
     ),
     (
         "segments disagreeing about a criterion's wording are silently resolved",

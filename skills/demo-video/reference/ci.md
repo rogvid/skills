@@ -77,6 +77,23 @@ be looked at. Neither is evidence that the clause was demonstrated — a picture
 next to a clause is a frame the storyboard chose, and what it is a picture of
 is still the reviewer's call.
 
+**On a take that did not finish, that is the first thing the section says.**
+Above both gap headlines, which are themselves above the table: a reader who
+meets a table of claims first reads it as an ordinary take's. It names the beat
+the take came out of the `with` block at, and counts the clauses no beat that
+*returned* claimed — a clause claimed only by a beat that raised, and a clause
+nothing claimed at all, which on a crashed take mean the same thing and cannot
+be told apart, because the beats that would say never ran.
+
+A claim from a beat that raised says so in its own row and is **never given a
+picture**. `shot()` stamps the still's path on the beat before it takes the
+picture, so a take that died there names a file it did not write — and
+`images/` is committed, so the previous recording's still of that name is
+sitting in the directory waiting to be linked as this beat's evidence. A clause
+claimed by a beat that returned is left alone, on a crashed take as on any
+other: that claim is as good as any other claim the take made, and marking it
+would be inventing a finding.
+
 **It says "claimed", never "demonstrated", and it says out loud that it graded
 nothing.** An `ac=` tag is a string the storyboard author typed; whether the
 frames show the clause is the reviewer's call, and the comment is written so it

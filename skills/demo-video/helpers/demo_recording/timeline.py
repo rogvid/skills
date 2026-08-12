@@ -218,6 +218,12 @@ from .markdown import _fmt_t, _md_cell
 #                          machine-checkable finding here), `tagged_beats`,
 #                          `untagged_beats`, and `conflicts` on a merged demo
 #                          whose segments used different text for one id.
+#                          A claimed row carries `error` — the raising beat's
+#                          `type` and `message` — **only** when that beat's
+#                          verb raised, absent otherwise (issue #24), because
+#                          a claim a beat threw out of is not a claim the take
+#                          kept and a `shot` that raised names a still nothing
+#                          wrote (issue #278).
 #                          On a stitched demo it is recomputed over the merged
 #                          beats, so its indices match this file. See
 #                          "acceptance criteria and coverage".
@@ -1022,7 +1028,64 @@ def _narration_md(narration: object) -> list[str]:
     ]
 
 
-def _coverage_md(coverage: object) -> list[str]:
+def _kept_claims(criteria: dict, claimed: dict) -> list[str]:
+    """The criteria no beat that *returned* claimed (issue #278).
+
+    A clause is here when every claim it has came from a beat that raised, and
+    when it has no claim at all. Both mean the same thing on a take that died:
+    nothing this take got through asserted it. The two are not told apart,
+    because they cannot be — the beats that would have said never ran.
+    """
+    return [
+        key
+        for key in criteria
+        if not any(
+            not isinstance(row.get("error"), dict) for row in (claimed.get(key) or [])
+        )
+    ]
+
+
+def _coverage_failure_md(failure: dict, criteria: dict, claimed: dict) -> list[str]:
+    """The first thing in the acceptance section on a take that crashed.
+
+    Above the table, for the same reason "## This take did not finish" is above
+    the beat table: a reader who opens this file after a crash is reading it
+    *because* something went wrong, and a coverage table met first is read as
+    an ordinary take's (issue #278).
+    """
+    where = (
+        f"beat {failure['beat']} (`{_md_cell(failure.get('verb'))}`)"
+        if failure.get("beat") is not None
+        else "between beats — no verb was running, so no beat is blamed"
+    )
+    out = [
+        f"**This take did not finish**, so the table below is the part of the "
+        f"ticket it got through and not the whole of it. It came out of the "
+        f"`with` block on a **{_md_cell(failure.get('type'))}**, at {where}.",
+        "",
+    ]
+    unreached = _kept_claims(criteria, claimed)
+    if unreached:
+        ids = ", ".join(f"`{_md_cell(k)}`" for k in unreached)
+        out += [
+            f"**{len(unreached)} of the {len(criteria)} criteria have no claim "
+            f"from a beat that returned: {ids}.** Each was either never tagged "
+            f"by this storyboard or sits after the beat the take died on, and "
+            f"this file cannot tell those apart — the beats that would say "
+            f"never ran.",
+            "",
+        ]
+    else:
+        out += [
+            f"Each of the {len(criteria)} criteria still has a claim from a "
+            f"beat that returned: the take died at a beat that tagged none of "
+            f"them.",
+            "",
+        ]
+    return out
+
+
+def _coverage_md(coverage: object, failure: object = None) -> list[str]:
     """The acceptance-criteria section of timeline.md, or nothing (issue #12).
 
     Every word here is chosen so a reader cannot come away thinking this file
@@ -1030,6 +1093,10 @@ def _coverage_md(coverage: object) -> list[str]:
     author's claim, and the only assertive sentence in the section is about
     the criteria nothing claimed — which needs no judgement, because nobody
     asserted them.
+
+    `failure` is the document's, and it changes what this section leads with
+    rather than what it concludes: a demo that failed must never render a clean
+    "AC-2 — shown at 0:12" (issue #278).
     """
     if not isinstance(coverage, dict):
         return []
@@ -1038,9 +1105,10 @@ def _coverage_md(coverage: object) -> list[str]:
         return []
     claimed = coverage.get("claimed") or {}
     unclaimed = coverage.get("unclaimed") or []
-    out = [
-        "## Acceptance criteria",
-        "",
+    out = ["## Acceptance criteria", ""]
+    if isinstance(failure, dict):
+        out += _coverage_failure_md(failure, criteria, claimed)
+    out += [
         "This take was recorded against a ticket. **The table below is what "
         "the storyboard *claimed*, not what it proved** — an `ac=` tag is a "
         "string its author typed, and whether the frames actually show the "
@@ -1065,18 +1133,35 @@ def _coverage_md(coverage: object) -> list[str]:
             if row.get("segment"):
                 beat += f" (`{_md_cell(row['segment'])}`)"
             still = row.get("still")
-            out.append(
-                f"| {label} | {beat} | {_fmt_t(row.get('t_start'))} | "
-                + (f"`{_md_cell(still)}`" if still else "")
-                + " |"
-            )
+            # Marked here and not only in the beat table below, and the still
+            # is withheld rather than printed: the verb that would have written
+            # it raised, so the path names a file this take never produced and
+            # the row would otherwise read exactly like one that worked
+            # (issue #278).
+            error = row.get("error")
+            if isinstance(error, dict):
+                beat += f" **raised {_md_cell(error.get('type'))}**"
+                cell = "*not written*" if still else ""
+            else:
+                cell = f"`{_md_cell(still)}`" if still else ""
+            out.append(f"| {label} | {beat} | {_fmt_t(row.get('t_start'))} | {cell} |")
     out.append("")
     if unclaimed:
+        # On a take that crashed the two reasons this sentence has always
+        # given are both wrong, and the third one is the reason: the take
+        # never got there. Same words, wrong cause (issue #278).
+        why = (
+            "Either the demo does not show them, the storyboard did not say "
+            "where, or — on this take, which did not finish — it died before "
+            "reaching them."
+            if isinstance(failure, dict)
+            else "Either the demo does not show them, or the storyboard did "
+            "not say where. Both are worth fixing before review."
+        )
         out += [
             f"**{len(unclaimed)} of {len(criteria)} criteria have no beat "
             f"claiming them: {', '.join(f'`{_md_cell(k)}`' for k in unclaimed)}.** "
-            f"Either the demo does not show them, or the storyboard did not say "
-            f"where. Both are worth fixing before review.",
+            f"{why}",
             "",
         ]
     else:
@@ -1193,7 +1278,10 @@ def render_timeline_md(doc: dict) -> str:
     # when the take was recorded against a ticket — and because a reviewer who
     # scrolls past 28 beats first has already formed the impression the
     # coverage report exists to test (issue #12).
-    out += _coverage_md(doc.get("coverage"))
+    # The failure goes in with it, not only into the section above: without it
+    # the acceptance table renders a crashed take's claims exactly like a clean
+    # take's, which is the artifact reporting success on failure (issue #278).
+    out += _coverage_md(doc.get("coverage"), failure)
     # Directly above the beat table, because it is a statement about the
     # numbers in it: a reader who has scrolled past the table has already read
     # the timestamps as the video's, which is the misreading this says out

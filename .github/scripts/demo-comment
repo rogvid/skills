@@ -24,8 +24,9 @@ today. Neither substitutes for the other.
 
 A take recorded against a ticket carries a third thing above the beat table:
 the ticket's clauses, the ones no beat claimed named first (issue #273), each
-claimed clause pointed at the committed still a reviewer can open (issue #274).
-It is a rendering of `timeline.json`'s `coverage` and it grades nothing — see
+claimed clause pointed at the committed still a reviewer can open (issue #274),
+and on a take that died, that fact ahead of all of them (issue #278). It is a
+rendering of `timeline.json`'s `coverage` and it grades nothing — see
 `render_coverage`. It also states, in `DIFF_LIMIT`, the one question watching
 the take answers and the many it does not (issue #303).
 
@@ -118,6 +119,12 @@ def _claim_label(rows: list[dict]) -> str:
         part = "an unnumbered beat" if index is None else str(index)
         if row.get("segment"):
             part += f" (`{_cell(str(row['segment']))}`)"
+        # A verb that threw did not do what its beat says it did, so a claim
+        # made by it is not a claim the take kept. Unmarked, this cell reads
+        # exactly like a claim from a beat that returned (issue #278).
+        error = row.get("error")
+        if isinstance(error, dict):
+            part += f" (raised {_cell(str(error.get('type') or 'an exception'))})"
         parts.append(part)
     return _plural(len(parts), "beat ", "beats ") + ", ".join(parts)
 
@@ -184,7 +191,16 @@ def _picture(
         return _Picture("—", False)
     named: list[str] = []
     outside: list[str] = []
+    raised: list[str] = []
     for row in rows:
+        # Before the existence check, and that order is the point: on a take
+        # that died, a still of this name left behind by a *previous* recording
+        # is sitting right there, and linking it would hand the reviewer last
+        # week's picture as evidence for a beat that threw (issue #278).
+        error = row.get("error")
+        if isinstance(error, dict):
+            raised.append(str(error.get("type") or "an exception"))
+            continue
         still = row.get("still")
         if not isinstance(still, str) or not still.strip():
             continue
@@ -201,6 +217,14 @@ def _picture(
         # and which demo, and the full path crowds a three-column table.
         label = _cell(rel.rsplit("/", 1)[-1])
         return _Picture(f"[{label}]({href})" if href else f"`{_cell(rel)}`", True)
+    if raised:
+        # First among the reasons there is nothing here, because it is a fact
+        # about the take rather than about a path: the beat threw, so whatever
+        # it was going to write was never written.
+        return _Picture(
+            f"*the beat claiming this raised {_cell(raised[0])}, so it wrote no still*",
+            False,
+        )
     if outside:
         return _Picture(
             f"*`{_cell(outside[0])}` is not a path inside this demo, "
@@ -216,6 +240,49 @@ def _picture(
     return _Picture("*no still*", False)
 
 
+def _failure_lead(failure: dict, criteria: dict, claimed: dict) -> list[str]:
+    """What the acceptance section leads with when the take crashed (#278).
+
+    Above the gap headlines, which are above the table, for the reason
+    `render_timeline_md` puts "## This take did not finish" above the beat
+    table: a reader who meets a table of claims first reads it as an ordinary
+    take's, and the heading alone is one line of a section they scroll past.
+
+    A clause is counted here when every claim it has came from a beat that
+    raised, and when it has no claim at all. Both mean nothing this take got
+    through asserted it; the two are not told apart, because the beats that
+    would say never ran.
+    """
+    beat = failure.get("beat")
+    where = f"beat {beat} (`{_cell(str(failure.get('verb') or '?'))}`)"
+    if beat is None:
+        where = "between beats"
+    unreached = [
+        key
+        for key in criteria
+        if not any(
+            not isinstance(row.get("error"), dict) for row in (claimed.get(key) or [])
+        )
+    ]
+    out = [
+        f"**This take did not finish**, so what is below is the part of the "
+        f"ticket it got through and not the whole of it. It came out of the "
+        f"`with` block at {where}.",
+        "",
+    ]
+    if unreached:
+        ids = _and_list([f"`{_cell(key)}`" for key in unreached])
+        out += [
+            f"**{len(unreached)} of the {len(criteria)} clauses "
+            f"{_plural(len(unreached), 'has', 'have')} no claim from a beat "
+            f"that returned: {ids}.** Each was either never tagged by this "
+            f"storyboard or sits after the beat the take died on, and this "
+            f"comment cannot tell those apart.",
+            "",
+        ]
+    return out
+
+
 def render_coverage(
     coverage: object,
     *,
@@ -223,6 +290,7 @@ def render_coverage(
     directory: Path,
     repo_url: str | None,
     sha: str | None,
+    failure: object = None,
 ) -> list[str]:
     """The ticket's clauses and what claimed them, **gap first** (issue #273).
 
@@ -251,6 +319,12 @@ def render_coverage(
     until issue #274 it looked exactly like a well-illustrated one. It is named
     with the other gaps, above the table: it is the second finding here that
     takes no judgement, being a fact about which files exist.
+
+    On a take that carries `failure` the section leads with that, before every
+    other gap (issue #278). A claim from a beat that raised says so in its own
+    row and is never given a picture — the verb that would have written one
+    threw, so a file of that name is a previous recording's. **A demo that
+    failed must never render a clean "AC-2 — shown at 0:12."**
     """
     doc = coverage if isinstance(coverage, dict) else {}
     criteria = doc.get("criteria")
@@ -277,6 +351,8 @@ def render_coverage(
     ]
 
     gap: list[str] = []
+    if isinstance(failure, dict):
+        gap += _failure_lead(failure, criteria, claimed)
     if unclaimed:
         ids = _and_list([f"`{_cell(key)}`" for key in unclaimed])
         gap += [
@@ -414,6 +490,10 @@ def render_demo(
         directory=demo_dir(demo_root, name),
         repo_url=repo_url,
         sha=sha,
+        # Without this the section renders a crashed take's claims exactly like
+        # a clean take's, five lines above a block that says the take failed
+        # (issue #278).
+        failure=failure,
     )
 
     if rows:
