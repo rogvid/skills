@@ -851,6 +851,18 @@ ABSENT_STILL = dict(
     ),
 )
 
+# A still that resolves on disk and belongs to another part of the repository.
+# `timeline.json` is committed and a pull request may edit it, so this is the
+# untrusted-input branch — and its cell is a third sentence the renderer writes,
+# reached by no other fixture here.
+OUTSIDE_STILL = dict(
+    TIMELINE,
+    coverage={
+        "criteria": {"AC-1": "A search box above the queue narrows it."},
+        "claimed": {"AC-1": [claim(3, "../../leaked.png")]},
+    },
+)
+
 # The clean path: every clause claimed, every claim carrying a still that this
 # take published. Neither gap headline has anything to say about it, which is
 # the branch a coverage claim is most tempting to print into.
@@ -1334,15 +1346,8 @@ class Coverage(unittest.TestCase):
         # of `../../leaked.png` resolves on disk, so existence alone would let
         # it through and the comment would link a picture belonging to another
         # part of the repository as this demo's evidence.
-        escaping = dict(
-            TIMELINE,
-            coverage={
-                "criteria": {"AC-1": "A search box above the queue narrows it."},
-                "claimed": {"AC-1": [claim(3, "../../leaked.png")]},
-            },
-        )
         self.assertTrue((self.root / "leaked.png").exists())  # control
-        cell = self.look_at(self.body(escaping), "AC-1")
+        cell = self.look_at(self.body(OUTSIDE_STILL), "AC-1")
         self.assertIn("leaked.png", cell)
         self.assertNotIn("](http", cell)
 
@@ -1392,8 +1397,12 @@ class Coverage(unittest.TestCase):
     def test_the_same_words_are_refused_where_a_clause_has_no_picture(self):
         # A still beside a clause is exactly where a sentence that sounds like
         # proof is tempting, and its absence is where a sentence that sounds
-        # like a failed check is. Both branches are swept.
-        for fixture in (CAPTION_ONLY, ABSENT_STILL):
+        # like a failed check is. Every branch that writes one is swept, and
+        # the fixtures are listed rather than counted: `OUTSIDE_STILL` was left
+        # out of the first version of this loop, and the README then said "the
+        # two sentences" of a renderer that writes three — a boundary reported
+        # as guarded across text one branch of which nothing read.
+        for fixture in (CAPTION_ONLY, ABSENT_STILL, OUTSIDE_STILL):
             self.assert_no_verdict(self.body(fixture), fixture)
 
     def test_a_claim_from_a_named_segment_says_which_segment(self):
@@ -2241,6 +2250,16 @@ INJECTIONS = [
         "demo-comment",
         '            f"here to open.**",',
         '            f"here to open. The rest passed.**",',
+        ["Coverage.test_the_same_words_are_refused_where_a_clause_has_no_picture"],
+    ),
+    (
+        # The third sentence, and the one the first version of the sweep loop
+        # could not see: with only `CAPTION_ONLY` and `ABSENT_STILL` in it,
+        # this exact break left the whole suite green.
+        "the outside-the-demo cell reads as a verdict on the clause",
+        "demo-comment",
+        '            f"so it is not linked*",',
+        '            f"so nothing here is proved or verified*",',
         ["Coverage.test_the_same_words_are_refused_where_a_clause_has_no_picture"],
     ),
     (

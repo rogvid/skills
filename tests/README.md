@@ -1453,12 +1453,24 @@ no reading of `demo-comment` alone can see. Two injections cover it, the same
 pair `WorkflowGates` uses: the argument dropped, and the variable exported and
 then not passed.
 
-The two sentences #274 adds are swept for verdict words on fixtures that
-render them, which `TAGGED` does not: it has a picture for every clause it
-claims. The gap sentence is also reached by `ALL_CLAIMED`; the absent-still
-cell is reached by `ABSENT_STILL` and nothing else, and its injection reddens
-that one test alone — the measurement that says the fixture is carrying it
-rather than decorating it.
+Each sentence #274 adds is swept for verdict words on a fixture that renders
+it, and they are enumerated rather than counted, because the count is what went
+wrong here first: the loop had two fixtures in it, this paragraph said "the two
+sentences", and the renderer wrote three. Replacing the third with *"so nothing
+here is proved or verified"* left the whole suite green.
+
+| sentence the renderer writes | fixture that reaches it |
+|---|---|
+| the clauses with no picture, above the table | `CAPTION_ONLY`, and `ALL_CLAIMED` |
+| *`…` is named here, but this take published no such file* | `ABSENT_STILL` |
+| *`…` is not a path inside this demo, so it is not linked* | `OUTSIDE_STILL` |
+
+`TAGGED` reaches none of them — it has a picture for every clause it claims —
+so a sweep run only there would grade these three by never seeing them. The
+second and third rows each have an injection that reddens
+`test_the_same_words_are_refused_where_a_clause_has_no_picture` **alone**,
+which is the measurement that says their fixtures are carrying those sentences
+rather than decorating an existing test.
 
 What none of this says is that the picture shows the clause. It says a file
 exists, resolves, and belongs to the beat that claimed it — the same boundary
