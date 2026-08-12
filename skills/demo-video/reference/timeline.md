@@ -14,7 +14,11 @@ next to the media, whether or not the storyboard finished. No storyboard
 changes are needed; it is a byproduct of recording.
 
 `timeline.md` is the readable version: a table of every beat, then each still
-embedded under the caption it was taken during. Directly above that table it
+**the take actually wrote** embedded under the caption it was taken during — a
+`shot()` whose screenshot raised stamped its path on the beat before it took
+the picture, so that beat contributes no gallery entry at all
+([#305](https://github.com/rogvid/skills/issues/305)); the beat table above
+still carries its row, marked **raised**. Directly above that table it
 says when the host's wall clock **stepped** during the take, and by how much —
 the times in the table are `time.monotonic()` and `demo.mp4` is on the wall
 clock, so a step parts the two (`timeline.json`'s `capture_clock` carries every

@@ -1371,7 +1371,22 @@ def render_timeline_md(doc: dict) -> str:
         if total > len(issues):
             out.append(f"- …and {total - len(issues)} more, not recorded.")
         out.append("")
-    stills = [b for b in beats if b.get("still")]
+    # A beat whose verb raised contributes nothing here. `shot()` stamps the
+    # path on the beat *before* it takes the picture, so on a take that died
+    # there the path names a file this take never wrote — and the interesting
+    # case is not the missing file. `images/` is committed, so on a re-record
+    # after a crash the *previous* take's picture of that name is already
+    # sitting on disk, and the embed puts a real photograph under this take's
+    # heading, this take's timestamp and this take's caption, as evidence of a
+    # moment this take never reached. The acceptance table one section up
+    # withholds the same path for the same reason (issues #278, #305).
+    #
+    # Dropped rather than marked: this is a gallery of pictures, and a heading
+    # with no picture under it is not one. The beat table above already carries
+    # the row, marked **raised**.
+    stills = [
+        b for b in beats if b.get("still") and not isinstance(b.get("error"), dict)
+    ]
     if stills:
         out += ["", "## Stills", ""]
         for beat in stills:

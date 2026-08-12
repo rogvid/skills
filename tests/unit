@@ -116,6 +116,7 @@ from demo_recording.timeline import (  # noqa: E402
     _coverage_md,
     render_timeline_md,
     timeline_paths,
+    write_timeline,
 )
 
 # --------------------------------------------------------------------------
@@ -584,6 +585,24 @@ class CoverageMd(unittest.TestCase):
         line = [ln for ln in text.splitlines() if "no claim from a beat" in ln][0]
         self.assertNotIn("AC-1", line)
 
+    def test_a_take_that_died_between_beats_blames_no_beat(self):
+        # `failure["beat"]` is null when the take came out of the `with` block
+        # with no verb running, and this branch was ungraded here: replacing
+        # its sentence with `beat None (`None`)` left the whole suite green.
+        # The comment's mirror of it *is* graded, so this was one-sided — and
+        # "beat None" is a confident wrong answer where the branch exists to
+        # say nobody may honestly be blamed.
+        lines = _coverage_md(
+            self.RAISED, {"type": "KeyboardInterrupt", "beat": None, "verb": None}
+        )
+        self.assertTrue(lines[2].startswith("**This take did not finish**"), lines[2])
+        self.assertIn("between beats", lines[2])
+        self.assertNotIn("beat None", lines[2])
+        # The control, on the same renderer: a failure that *does* name a beat
+        # still names it. Without it this passes on a lead that never blames
+        # anything.
+        self.assertIn("beat 2 (`shot`)", _coverage_md(self.RAISED, self.FAILURE)[2])
+
     def test_a_take_that_died_claiming_everything_says_that_instead(self):
         # The other branch, and the one a reader meets when the take crashed at
         # a beat that tagged nothing. Without it the count sentence would be
@@ -678,7 +697,13 @@ class TimelineMd(unittest.TestCase):
         )
         text = render_timeline_md(doc)
         start = text.index("## Acceptance criteria")
-        section = text[start : text.index("\n## ", start + 1)]
+        # To the next `## ` heading, **or to the end of the file**. This used
+        # to index unconditionally, and the heading it landed on was `##
+        # Stills` — which this document no longer has, because its one still
+        # belongs to the beat that raised (issue #305). The span is the same
+        # bytes either way: the gallery was the last thing in the file.
+        end = text.find("\n## ", start + 1)
+        section = text[start : len(text) if end < 0 else end]
         self.assertIn("**AC-2**", section)  # control: the section rendered
         # The lead line, not "did not finish" anywhere in the section. The
         # first version of this assertion searched for the phrase, and the
@@ -687,8 +712,8 @@ class TimelineMd(unittest.TestCase):
         # was not written about. Fault injection found that; reading did not.
         self.assertIn("\n**This take did not finish**", section)
         # And the still the beat never wrote is nowhere in the section. The
-        # `## Stills` gallery further down still embeds it — that is a
-        # different renderer and issue #305, not this one.
+        # `## Stills` gallery further down is a different renderer, reading
+        # `beats` rather than `coverage`; `StillsGallery` below grades it.
         self.assertNotIn("images/02.png", section)
 
     def test_a_null_duration_is_not_rendered_as_a_number(self):
@@ -799,6 +824,133 @@ class TimelineMd(unittest.TestCase):
             )
         )
         self.assertIn("204 more", text)
+
+
+class StillsGallery(unittest.TestCase):
+    """`## Stills` must embed only pictures this take actually wrote (#305).
+
+    The gallery selects off the beat log, and `shot()` stamps `still` on the
+    beat *before* it takes the picture — so a beat whose screenshot raised
+    carried the path and no file, and the gallery embedded it one section below
+    an acceptance table that withheld the same path for the stated reason that
+    it was never written (#278).
+
+    **The interesting case is the file being there, not missing.** A missing
+    file renders a broken-image placeholder: visibly broken, self-announcing.
+    But `images/` is committed, so on a re-record after a crash the *previous*
+    take's picture of that name is already sitting on disk, and the embed puts
+    a real photograph under this take's heading, this take's timestamp and this
+    take's caption — evidence of a moment this take never reached.
+
+    So these assertions are written from the reader's side rather than the
+    renderer's: the document is written to a directory where the stale picture
+    is staged, and what is graded is which files on disk a markdown viewer
+    could open out of it.
+    """
+
+    STALE = b"\x89PNG\r\n\x1a\nthe previous recording's 02-empty"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        (self.dir / "images").mkdir()
+        (self.dir / "images" / "01-filtered.png").write_bytes(b"\x89PNG\r\n\x1a\nthis")
+        (self.dir / "images" / "02-empty.png").write_bytes(self.STALE)
+
+    KEPT = beat(
+        1,
+        "shot",
+        3.2,
+        caption="Filtering to one status.",
+        still="images/01-filtered.png",
+    )
+    RAISED = beat(
+        2,
+        "shot",
+        5.4,
+        caption="Nothing matches, and the queue says why.",
+        still="images/02-empty.png",
+        error={"type": "TimeoutError", "message": "no such locator"},
+    )
+    FAILURE = {
+        "type": "TimeoutError",
+        "beat": 2,
+        "verb": "shot",
+        "message": "no such locator",
+    }
+
+    def render(self, *beats: dict, failure: object = None) -> str:
+        """`timeline.md` as it lands beside the pictures, and read back.
+
+        Through `write_timeline` rather than `render_timeline_md` because the
+        claim is about a *relative* path: `images/02-empty.png` means nothing
+        until the document has a directory to resolve against, and that
+        directory is the one holding the previous recording's stills.
+        """
+        doc = envelope(duration=None, beats=list(beats))
+        if failure is not None:
+            doc["failure"] = failure
+        write_timeline(self.dir, doc)
+        return (self.dir / "timeline.md").read_text(encoding="utf-8")
+
+    def openable(self, text: str) -> list[str]:
+        """The embedded pictures a reader could actually open, resolved on disk.
+
+        The markdown is parsed here rather than in the renderer's terms — no
+        helper is shared with `timeline.py` — because the claim is about what a
+        viewer recovers from the artifact, and a check that borrowed the
+        producer's idea of an embed would be blind wherever the producer is.
+        """
+        return [
+            rel
+            for rel in re.findall(r"!\[[^\]]*\]\(([^)]*)\)", text)
+            if (self.dir / rel).is_file()
+        ]
+
+    def test_a_picture_this_take_never_wrote_is_not_embedded(self):
+        # The staging first: this grades the file-*present* case on purpose.
+        # With the file absent the same embed is a broken image, which fails
+        # safe, and an injection built on that would grade the easy half.
+        self.assertTrue((self.dir / "images" / "02-empty.png").is_file())
+        text = self.render(self.KEPT, self.RAISED, failure=self.FAILURE)
+        # Exactly the one this take wrote. Stated as an equality rather than as
+        # two membership checks so that a gallery which embedded nothing at all
+        # cannot satisfy it: "the stale picture is gone" is also true of a
+        # renderer that lost the section.
+        self.assertEqual(self.openable(text), ["images/01-filtered.png"], text)
+
+    def test_the_heading_and_timestamp_over_it_go_with_the_picture(self):
+        # The embed is not the whole of the lie. `### 02-empty — 5.40s` and the
+        # caption quoted under it are this take's heading and this take's
+        # second over last week's photograph, and an entry stripped of only its
+        # `![…]()` line would still be all three.
+        text = self.render(self.KEPT, self.RAISED, failure=self.FAILURE)
+        section = text[text.index("## Stills") :]
+        self.assertIn("### 01-filtered — 3.20s", section)  # control
+        self.assertNotIn("02-empty", section)
+        self.assertNotIn("5.40", section)
+
+    def test_a_take_whose_every_picture_raised_prints_no_gallery_at_all(self):
+        # An empty `## Stills` heading is a promise of evidence with none under
+        # it. The control is the same document with the beat's `error` dropped,
+        # which must still print one.
+        text = self.render(self.RAISED, failure=self.FAILURE)
+        self.assertIn("| # | start |", text)  # control: the document rendered
+        self.assertNotIn("## Stills", text)
+        kept = {k: v for k, v in self.RAISED.items() if k != "error"}
+        self.assertIn("## Stills", self.render(kept))
+
+    def test_a_take_that_finished_embeds_every_picture_it_took(self):
+        # The #24 direction, and the only thing here that watches an ordinary
+        # take stay ordinary: absent `error`, nothing is withheld. A filter
+        # inverted by one `not` empties the gallery of a healthy demo, and
+        # every assertion above is satisfied by exactly that.
+        text = self.render(
+            self.KEPT, {k: v for k, v in self.RAISED.items() if k != "error"}
+        )
+        self.assertEqual(
+            self.openable(text), ["images/01-filtered.png", "images/02-empty.png"], text
+        )
 
 
 class TimelinePaths(unittest.TestCase):
@@ -10401,6 +10553,111 @@ INJECTIONS = [
         '    out += _coverage_md(doc.get("coverage"), failure)',
         '    out += _coverage_md(doc.get("coverage"))',
         ["TimelineMd.test_the_acceptance_section_is_told_the_take_failed"],
+    ),
+    (
+        # The branch a take that came out of the `with` block with no verb
+        # running lands in. It was ungraded on this side while the comment's
+        # mirror of it was graded, so the sentence could be replaced with the
+        # confident wrong answer below and the suite stayed green. Eight spaces
+        # of indent, which is what tells this occurrence from the identical
+        # sentence in `render_timeline_md` twelve spaces in.
+        "the failure lead names beat None instead of saying no beat is blamed",
+        "timeline.py",
+        '\n        else "between beats — no verb was running, so no beat is blamed"',
+        "\n        else f\"beat {failure['beat']} (`{_md_cell(failure.get('verb'))}`)\"",
+        ["CoverageMd.test_a_take_that_died_between_beats_blames_no_beat"],
+    ),
+    (
+        # **The defect issue #305 is about**, restored exactly: the gallery
+        # selects off `still` alone, so a beat whose screenshot raised is
+        # embedded. `images/` is committed, so the file is usually *there* —
+        # the previous recording's — and the reader is shown a real photograph
+        # under this take's heading, timestamp and caption.
+        "the stills gallery embeds a picture the take never wrote",
+        "timeline.py",
+        "    stills = [\n"
+        '        b for b in beats if b.get("still") '
+        'and not isinstance(b.get("error"), dict)\n'
+        "    ]",
+        '    stills = [b for b in beats if b.get("still")]',
+        [
+            "StillsGallery.test_a_picture_this_take_never_wrote_is_not_embedded",
+            "StillsGallery.test_the_heading_and_timestamp_over_it_go_with_the_picture",
+            "StillsGallery."
+            "test_a_take_whose_every_picture_raised_prints_no_gallery_at_all",
+        ],
+    ),
+    (
+        # The heading decided before the filter rather than after it: a `##
+        # Stills` on a take with nothing left to show under it, which is a
+        # promise of evidence with none behind it. This is the break that
+        # reddens the empty-gallery assertion **alone**, which is what says it
+        # is measuring something the assertion above does not.
+        "the stills heading is printed for pictures the gallery then drops",
+        "timeline.py",
+        '    if stills:\n        out += ["", "## Stills", ""]',
+        '    if any(b.get("still") for b in beats):\n'
+        '        out += ["", "## Stills", ""]',
+        [
+            "StillsGallery."
+            "test_a_take_whose_every_picture_raised_prints_no_gallery_at_all"
+        ],
+    ),
+    (
+        # The half-fix, and the reason the heading assertion is not decoration:
+        # the entry is still built for a beat that raised — its `### 02-empty —
+        # 5.40s` and the caption quoted under it — and only the `![…]()` line
+        # is skipped. Nothing about the *picture* is wrong under this break, so
+        # the assertion above stays green and this one is the only thing that
+        # can see it. Two edits in one span, because a heading kept without its
+        # image cannot be expressed at either site alone.
+        "a beat that raised keeps its gallery heading and loses only the image",
+        "timeline.py",
+        "    stills = [\n"
+        '        b for b in beats if b.get("still") '
+        'and not isinstance(b.get("error"), dict)\n'
+        "    ]\n"
+        "    if stills:\n"
+        '        out += ["", "## Stills", ""]\n'
+        "        for beat in stills:\n"
+        '            rel = str(beat["still"])\n'
+        '            name = rel.rsplit("/", 1)[-1].removesuffix(".png")\n'
+        '            out += [f"### {name} — {_fmt_t(beat.get(\'t_start\'))}s", ""]\n'
+        '            if beat.get("caption"):\n'
+        '                out += [f"> {beat[\'caption\']}", ""]\n'
+        '            out += [f"![{name}]({rel})", ""]',
+        '    stills = [b for b in beats if b.get("still")]\n'
+        "    if stills:\n"
+        '        out += ["", "## Stills", ""]\n'
+        "        for beat in stills:\n"
+        '            rel = str(beat["still"])\n'
+        '            name = rel.rsplit("/", 1)[-1].removesuffix(".png")\n'
+        '            out += [f"### {name} — {_fmt_t(beat.get(\'t_start\'))}s", ""]\n'
+        '            if beat.get("caption"):\n'
+        '                out += [f"> {beat[\'caption\']}", ""]\n'
+        '            if not isinstance(beat.get("error"), dict):\n'
+        '                out += [f"![{name}]({rel})", ""]',
+        [
+            "StillsGallery.test_the_heading_and_timestamp_over_it_go_with_the_picture",
+            "StillsGallery."
+            "test_a_take_whose_every_picture_raised_prints_no_gallery_at_all",
+        ],
+    ),
+    (
+        # The same filter inverted, which is the #24 direction: the gallery of
+        # a healthy demo emptied of every picture it took. Only the clean-take
+        # assertion can see this one, and without it a filter off by one `not`
+        # satisfies everything else #305 added.
+        "the stills gallery keeps only the pictures no beat wrote",
+        "timeline.py",
+        '        b for b in beats if b.get("still") '
+        'and not isinstance(b.get("error"), dict)',
+        '        b for b in beats if b.get("still") '
+        'and isinstance(b.get("error"), dict)',
+        [
+            "StillsGallery.test_a_take_that_finished_embeds_every_picture_it_took",
+            "StillsGallery.test_a_picture_this_take_never_wrote_is_not_embedded",
+        ],
     ),
     (
         # Same words, wrong cause. The two reasons this sentence has always
