@@ -280,6 +280,7 @@ CONTENT_ACTING_VERBS = frozenset(
 CONTENT_PASSIVE_VERBS = frozenset(
     {
         "caption",
+        "criterion",
         "hold",
         "interlude",
         "pause",

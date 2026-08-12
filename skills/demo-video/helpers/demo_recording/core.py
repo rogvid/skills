@@ -136,6 +136,25 @@ window.__demoInterlude = (text) => {
 };
 """
 
+# How long a `criterion()` card stays up when the storyboard does not say.
+#
+# Not `interlude()`'s flat 2.8 s, because the two cards carry different things.
+# An interlude is a phrase the storyboard author wrote to bridge a jump, and
+# they can shorten it. A criterion is a clause out of somebody else's ticket,
+# quoted verbatim precisely so that nobody can shorten it — and the whole point
+# of putting it on screen is that a viewer reads it. So the default is reading
+# speed over the words that are actually there (the same 0.6 + 0.34·words
+# `_caption_hold` uses), floored at the interlude default so a three-word
+# clause is not a flicker, and capped because a demo is 30-60 s and one card
+# must not eat a fifth of it.
+#
+# A clause too long to read inside the cap is a clause too long for a card:
+# pass `hold=` and accept the cost, or quote the sentence rather than the
+# paragraph. Both bounds are graded one word either side of where they take
+# over, in tests/unit.
+CRITERION_HOLD_MIN_S = 2.8
+CRITERION_HOLD_MAX_S = 9.0
+
 
 # Lightweight bridge: a centered label over a soft scrim, with the scene
 # still visible behind it. For short segment transitions where a full-screen
@@ -2449,6 +2468,64 @@ take with fewer beats than the last one would otherwise leave the
                 )
             self._start_line(clip)
             self.pause(hold if text else 0.6)
+
+    def criterion(self, ac: str, hold: float | None = None) -> None:
+        """Put a declared acceptance criterion's own sentence on screen.
+
+        `rec.criterion("AC-2")` raises the full-screen card carrying the text
+        of AC-2 **out of the `criteria=` map this take was constructed with** —
+        never a string the storyboard retyped. That is the whole of the verb: a
+        storyboard author cannot show a viewer a different sentence from the one
+        the coverage table and the ticket quote carry, because there is one
+        string and this reads it.
+
+        The beat claims AC-2, so the card appears in `coverage` like any other
+        claim. It claims **only itself**: the beats that follow are untouched,
+        because a claim nobody typed is indistinguishable in the report from one
+        somebody did.
+
+        Refused when the id was never declared, and when the take declared no
+        `criteria=` at all — the same two refusals, at the line that made them,
+        for the same reasons as `caption(ac=...)`. One id and not a list: a card
+        shows one sentence, and handed two it would have to drop one silently.
+
+        The card is the element `interlude()` raises, so `interlude("")` takes
+        it down and the "card left up" warning applies unchanged. **Take it
+        down explicitly** — nothing else will notice (reference/limits.md).
+
+        `hold` defaults to how long the clause takes to read, and to the whole
+        spoken line when narration is on: see CRITERION_HOLD_MIN_S.
+        """
+        if not isinstance(ac, str):
+            raise TypeError(
+                f"criterion() was given ac={ac!r}: one criterion id, as a "
+                f"string. A card shows one sentence — to claim several ids on "
+                f"one screen, tag a caption or a shot with ac=[...]."
+            )
+        key = self._checked_ac(ac, "criterion()")[0]
+        text = self._criteria[key]
+        # Synthesized before the beat opens, exactly as `caption()` does it:
+        # the beat's t_start has to be when the clause reached the screen, or a
+        # reviewer extracting a frame at that timestamp gets the beat before.
+        clip = self._prepare_line(text)
+        with self._beat("criterion", selector=key, caption=text, **_ac_field([key])):
+            self.page.evaluate("t => window.__demoInterlude(t)", text)
+            self._start_line(clip)
+            self.pause(self._criterion_hold(text) if hold is None else hold)
+
+    def _criterion_hold(self, text: str) -> float:
+        """How long a clause stays up when the storyboard does not say.
+
+        Read speed over the clause, bounded by the two constants — and never
+        less than what is left of the line being spoken, because a card that
+        leaves mid-sentence while the voice is still reading the clause is the
+        one failure this verb exists to remove.
+        """
+        reading = min(
+            CRITERION_HOLD_MAX_S,
+            max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),
+        )
+        return max(reading, self._line_end - time.monotonic())
 
     @_beat_verb("hold")
     def hold(self, min_s: float = 1.5) -> None:

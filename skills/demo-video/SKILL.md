@@ -100,9 +100,10 @@ review. Each limit below is measured, and the measurements, with the issue
 behind every one, are in [reference/limits.md](reference/limits.md).
 
 - **It will not tell you a card was left up.** A held picture is reported only
-  when a verb that *acts on the app* ran while it was held, so a demo that
-  raises an `interlude()` and then only captions, holds and takes stills behind
-  it passes in silence for almost its whole length. Take cards down explicitly.
+  when a verb that *acts on the app* ran while it was held, so a demo raising a
+  card (`interlude()`, `criterion()`) and then only captioning, holding and
+  taking stills behind it passes in silence for almost its whole length. Take
+  cards down explicitly.
   A caption long enough to wrap can also silence the same warning on an app's
   own modal, so keep captions to one line.
 - **A frame is aimed at a beat, not stamped with one.** Chromium stamps frames
@@ -264,6 +265,7 @@ exception, or a non-zero exit. Both are
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
 | `caption(text)` | Narrator line at the bottom; `""` clears; dies on full page loads — the beat log clears with it and records a `caption_lost` issue naming the line — survives SPA routing; re-caption after a load |
 | `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See [reference/review.md](reference/review.md). |
+| `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped — so the viewer meets the clause and then watches it happen. The beat claims AC-3 and nothing else; the beats after it are untagged. Held to reading speed, and cleared by `interlude("")` like any card. |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
 | `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search). Types at the caret: it appends to what is already there, so `clear()` first to replace it |
@@ -309,8 +311,6 @@ below are encoded in the recorder; the point is to *not fight them*.
 - **One salient change at a time.** The eye can track one moving/appearing
   thing. Don't navigate, spotlight, and type in the same instant; sequence
   them, caption first (it tells the eye where to look), then the visual.
-- **Never dwell on a static frame with a stale caption** (see Common mistakes)
-  — during unavoidable waits, tour what's on screen or swap the caption.
 
 ## Terminal demos (CLI / TUI)
 

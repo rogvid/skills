@@ -273,7 +273,8 @@ from .markdown import _fmt_t, _md_cell
 #   t_end     float  — seconds from the start of `media` to the verb returning
 #   caption   str    — the caption text on screen during the beat (the new
 #                      text for a `caption` beat, the line shown for an
-#                      `interlude` beat); "" when no caption is up
+#                      `interlude`, the declared clause for a `criterion`);
+#                      "" when no caption is up
 #   verb      str    — the storyboard verb: "caption", "click", "run", ...
 #   selector  str?   — what the verb acted on, as a string: a CSS selector for
 #                      the web verbs, the command / keys / pattern for the
@@ -291,8 +292,9 @@ from .markdown import _fmt_t, _md_cell
 #   ac        list?  — **absent** on a beat that claims no acceptance
 #                      criterion, which is most of them. Present, as a list of
 #                      declared criterion ids, on a `caption` or `shot` given
-#                      `ac=`. A claim by the storyboard's author and nothing
-#                      more — see `coverage` above.
+#                      `ac=`, and on a `criterion` beat, which claims the one
+#                      clause it put on screen. A claim by the storyboard's
+#                      author and nothing more — see `coverage` above.
 #   evidence  str?   — path, relative to the timeline file, of this beat's
 #                      evidence file ("evidence/beat-04.json"); null when
 #                      evidence capture is off. See "per-beat evidence" below

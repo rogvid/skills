@@ -110,7 +110,7 @@ ARM_SECONDS = {
     # table's other rows are in.
     "--lock-only": 1,
     "--evidence-only": 7,
-    "--coverage-only": 8,
+    "--coverage-only": 15,
     "--issues-only": 26,
     "--narration-only": 8,
     "--strict-only": 13,
@@ -346,6 +346,79 @@ INJECTIONS = [
         arm="--coverage-only",
         sites=("check_coverage_refusals",),
         must_contain=("a tag naming an undeclared criterion", " was accepted"),
+    ),
+    # -- the ticket's own sentence, on screen (issue #280) --------------------
+    #
+    # Five entries, and the split matters: four break the *recorder* and are
+    # caught by assertions reading `timeline.json`, one breaks the drawing and
+    # is caught only by the assertion that reads the page. Without that last
+    # one every claim about this card would be the beat log agreeing with the
+    # values it was written from.
+    Injection(
+        # The failure the verb exists to make impossible, in the only form it
+        # can still take: a card that puts *something* on screen which is not
+        # the declared clause. Nothing else in the take notices — `timeline.md`
+        # renders the criteria map whatever went in front of the viewer.
+        name="the card shows the criterion's id instead of its declared sentence",
+        module="core.py",
+        old="        text = self._criteria[key]",
+        new="        text = key",
+        arm="--coverage-only",
+        sites=("check_coverage",),
+        must_contain=(
+            "The card reads the criteria map so that a second wording",
+            "the document the recorder was driving never had those",
+        ),
+    ),
+    Injection(
+        # The beat log perfect and the browser untouched. This is the entry
+        # that makes the page-snapshot assertion worth having: every other
+        # claim about the card still passes here, because every other claim is
+        # read out of values the recorder wrote down rather than drew.
+        name="the card is logged in full and never drawn on the page",
+        module="core.py",
+        old='            self.page.evaluate("t => window.__demoInterlude(t)", text)',
+        new="            pass",
+        arm="--coverage-only",
+        sites=("check_coverage",),
+        must_contain=("the document the recorder was driving never had those",),
+    ),
+    Injection(
+        name="the card claims nothing, so coverage never lists the clause it showed",
+        module="core.py",
+        old='        with self._beat("criterion", selector=key, caption=text, '
+        "**_ac_field([key])):",
+        new='        with self._beat("criterion", selector=key, caption=text):',
+        arm="--coverage-only",
+        sites=("check_coverage",),
+        must_contain=(
+            "a card claims the clause it shows, and only that one",
+            "the video and the coverage table disagree",
+        ),
+    ),
+    Injection(
+        # A beat that says a card was up and not which clause was on it. The
+        # video is right and the log is unreadable, which is the direction
+        # nobody checks by hand.
+        name="the criterion beat does not record which clause it showed",
+        module="core.py",
+        old='        with self._beat("criterion", selector=key, caption=text, ',
+        new='        with self._beat("criterion", selector=None, caption=text, ',
+        arm="--coverage-only",
+        sites=("check_coverage",),
+        must_contain=("the beat log does not say which clause was on screen",),
+    ),
+    Injection(
+        # The control for the four above: with no card in the take at all,
+        # every one of their assertions has nothing to grade, and a check that
+        # quietly skipped an absent card would report this arm green.
+        name="the coverage fixture stops raising a criterion card",
+        module="tests/smoke",
+        old="        rec.criterion(COVERAGE_CARD)",
+        new="        pass",
+        arm="--coverage-only",
+        sites=("check_coverage",),
+        must_contain=("nothing about the card",),
     ),
     Injection(
         # The arm that a weaker assertion slept through: "AC-3 in timeline.md"
