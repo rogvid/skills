@@ -65,6 +65,13 @@ cannot be mistaken for having made it. A claim points at a **beat index**
 rather than a timestamp, because the coverage timestamps are on the recorder's
 monotonic clock while the video is on the host's wall clock.
 
+This skill's own repository holds that line in `tests/ci-unit`, with a word
+sweep over the comment — not only
+"demonstrated" but "verified", "shown", "proved", "passed", "met", a ticked box
+and a checkmark. It sweeps the sentences the renderer *writes*: your clause
+text and your captions are quoted through untouched, so a ticket that says "the
+count is shown in the heading" prints as written and reddens nothing.
+
 `demo.mp4`, `timeline.md`/`.json` and `images/` upload as the `demo-video`
 artifact on an explicit `retention-days`; `evidence/` and `frames/` upload
 separately on a short one (1–7 days, long enough to check a disputed finding
