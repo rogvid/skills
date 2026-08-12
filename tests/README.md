@@ -1445,6 +1445,14 @@ because a link that resolves to the wrong bytes is worse than no link:
   injection for this one stages a real `../../leaked.png`, because existence
   alone lets it through.
 
+`CommentStep` grades the one fact only the workflow holds: a `--demo` path is
+relative to `working-directory`, and this repository's own reference call sets
+that to `examples/ticket-queue`. Without it every still is linked at the
+repository root — a 404 that renders exactly like a working link, and one that
+no reading of `demo-comment` alone can see. Two injections cover it, the same
+pair `WorkflowGates` uses: the argument dropped, and the variable exported and
+then not passed.
+
 The two sentences #274 adds are swept for verdict words on fixtures that
 render them, which `TAGGED` does not: it has a picture for every clause it
 claims. The gap sentence is also reached by `ALL_CLAIMED`; the absent-still

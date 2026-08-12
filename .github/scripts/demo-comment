@@ -338,11 +338,26 @@ def demo_dir(demo_root: str, name: str) -> Path:
     return Path(demo_root) / name if demo_root else Path(name)
 
 
+def repo_path(prefix: str, name: str) -> str:
+    """`name` as the *repository* sees it, not as the workflow ran it.
+
+    A `--demo` path is relative to the caller's `working-directory`, which the
+    workflow re-roots storyboards to: this repository's own reference call sets
+    it to `examples/ticket-queue`, so the demo the comment calls
+    `demos/2026-07-28-queue-search` is four directories down in git. A still
+    linked without that prefix is a 404 that looks exactly like a working link,
+    which is why the prefix is passed in rather than inferred.
+    """
+    parts = [p for p in f"{prefix}/{name}".split("/") if p not in ("", ".")]
+    return "/".join(parts)
+
+
 def render_demo(
     name: str,
     timeline: dict,
     *,
     demo_root: str,
+    path_prefix: str,
     repo_url: str | None,
     sha: str | None,
 ) -> str:
@@ -366,7 +381,7 @@ def render_demo(
     # report exists to test (issue #273, the same ordering `timeline.md` uses).
     lines += render_coverage(
         timeline.get("coverage"),
-        demo=name,
+        demo=repo_path(path_prefix, name),
         directory=demo_dir(demo_root, name),
         repo_url=repo_url,
         sha=sha,
@@ -431,6 +446,7 @@ def render(
     sha: str | None,
     repo_url: str | None,
     demo_root: str,
+    path_prefix: str,
 ) -> str:
     failed = any(t.get("failure") for _, t in demos)
     lines = [MARKER, ""]
@@ -446,6 +462,7 @@ def render(
                 name,
                 timeline,
                 demo_root=demo_root,
+                path_prefix=path_prefix,
                 repo_url=repo_url,
                 sha=sha,
             )
@@ -537,6 +554,16 @@ def main(argv: list[str] | None = None) -> int:
             "has; with neither given, a still is named rather than linked."
         ),
     )
+    ap.add_argument(
+        "--path-prefix",
+        default="",
+        help=(
+            "where the --demo paths sit in the repository, when they are not "
+            "at its root — the workflow's working-directory. Prefixed to the "
+            "still links only; without it a demo recorded under "
+            "examples/ticket-queue is linked at the repository root and 404s."
+        ),
+    )
     ap.add_argument("--out", required=True, help="where to write the comment body")
     args = ap.parse_args(argv)
 
@@ -582,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
         sha=args.sha,
         repo_url=args.repo_url or None,
         demo_root=args.demo_root,
+        path_prefix=args.path_prefix,
     )
     Path(args.out).write_text(body, encoding="utf-8")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

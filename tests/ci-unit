@@ -432,6 +432,7 @@ GUARD_FACT_NOT_PASSED = {
 
 GUARD_STEP = "Refuse a target that could be production"
 RECORD_STEP = "Record"
+COMMENT_STEP = "Render the comment"
 _INPUT_RE = re.compile(r"^\$\{\{\s*inputs\.([a-z0-9-]+)\s*\}\}$")
 
 
@@ -681,6 +682,7 @@ class Render(unittest.TestCase):
             sha="abcdef1234567890",
             repo_url="https://github.com/o/r",
             demo_root="",
+            path_prefix="",
         )
         opts.update(kw)
         return comment.render([("demos/x", timeline or TIMELINE)], **opts)
@@ -1049,6 +1051,7 @@ class Coverage(unittest.TestCase):
             sha=self.SHA,
             repo_url=self.REPO_URL,
             demo_root=str(self.root),
+            path_prefix="",
         )
         opts.update(kw)
         return comment.render([("demos/x", timeline)], **opts)
@@ -1265,6 +1268,27 @@ class Coverage(unittest.TestCase):
         self.assertIn("/demos/x/images/01-search-box.png)", self.look_at(body, "AC-1"))
         self.assertIn("/demos/x/images/03-requester.png)", self.look_at(body, "AC-3"))
 
+    def test_a_demo_below_the_repository_root_is_linked_where_git_holds_it(self):
+        # `--demo` paths are relative to the workflow's working-directory; this
+        # repository's own reference call sets it to `examples/ticket-queue`.
+        # Both halves are asserted, because prefixing the *lookup* too is the
+        # tempting way to write this and it stops the still being found at all.
+        body = self.body(TAGGED, path_prefix="examples/ticket-queue")
+        self.assertEqual(
+            self.look_at(body, "AC-1"),
+            f"[01-search-box.png]({self.REPO_URL}/raw/{self.SHA}"
+            f"/examples/ticket-queue/demos/x/images/01-search-box.png)",
+        )
+
+    def test_the_default_working_directory_adds_nothing_to_the_link(self):
+        # `working-directory` defaults to `.`, which the workflow passes
+        # through as written. `/./demos/x/` resolves for a browser and is wrong
+        # in a link a human reads and compares against a path.
+        self.assertEqual(
+            self.look_at(self.body(TAGGED, path_prefix="."), "AC-1"),
+            self.look_at(self.body(TAGGED), "AC-1"),
+        )
+
     def test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture(self):
         # #274's acceptance criterion: AC-1 claimed by a `shot()`, AC-2 by a
         # `caption()` alone. Before this the two rendered identically.
@@ -1383,6 +1407,36 @@ class Coverage(unittest.TestCase):
             },
         )
         self.assertEqual(self.cell(self.body(stitched), "AC-1"), "beat 6 (`part2`)")
+
+
+class CommentStep(unittest.TestCase):
+    """The one fact about the repository only the workflow knows (#274).
+
+    A `--demo` path is relative to `working-directory`, and this repository's
+    own reference call sets that to `examples/ticket-queue`. `demo-comment`
+    cannot infer it and every default is wrong in the same direction — a link
+    at the repository root, rendered exactly like one that works. So the
+    coupling is the same shape as `WorkflowGates`: a fact the step is
+    configured with has to reach the script that needs it.
+    """
+
+    def setUp(self):
+        text = _WORKFLOW.read_text(encoding="utf-8")
+        steps = workflow_steps(text)
+        # The haystack first: a renamed or reindented step would otherwise make
+        # every assertion below hold over an empty list.
+        self.assertIn(COMMENT_STEP, steps, f"no {COMMENT_STEP!r} step")
+        self.lines = steps[COMMENT_STEP]
+        self.env = step_env(self.lines)
+        self.assertGreaterEqual(len(self.env), 5, self.env)
+
+    def test_the_working_directory_reaches_the_comment_as_a_path_prefix(self):
+        name = "WORKDIR"
+        self.assertEqual(self.env.get(name), "${{ inputs.working-directory }}")
+        # And is actually passed. The variable being exported says nothing:
+        # that is how the regression `WorkflowGates` was written for happened.
+        run = "\n".join(self.lines)
+        self.assertIn(f'--path-prefix "${name}"', run)
 
 
 class VerdictAlphabet(unittest.TestCase):
@@ -1832,7 +1886,8 @@ INJECTIONS = [
         "render_demo stops rendering the coverage section",
         "demo-comment",
         '    lines += render_coverage(\n        timeline.get("coverage"),\n'
-        "        demo=name,\n        directory=demo_dir(demo_root, name),\n"
+        "        demo=repo_path(path_prefix, name),\n"
+        "        directory=demo_dir(demo_root, name),\n"
         "        repo_url=repo_url,\n        sha=sha,\n    )",
         "    lines += []",
         [
@@ -2047,6 +2102,44 @@ INJECTIONS = [
             "Coverage.test_a_claimed_still_is_linked_at_the_recorded_commit",
             "CommentCli.test_a_staged_still_is_linked_from_the_command_line_end_to_end",
         ],
+    ),
+    (
+        # The 404 that looks like a working link: the demo is linked at the
+        # repository root, which is where it sits only when the caller left
+        # `working-directory` alone. This repository's own reference call does
+        # not, and every other assertion about the href passes.
+        "the still link forgets the directory the storyboards are rooted at",
+        "demo-comment",
+        "        demo=repo_path(path_prefix, name),",
+        "        demo=name,",
+        ["Coverage.test_a_demo_below_the_repository_root_is_linked_where_git_holds_it"],
+    ),
+    (
+        # The workflow's default, `.`, pasted into the URL as a path component.
+        "the path prefix stops being normalised, so `.` reaches the link",
+        "demo-comment",
+        '    parts = [p for p in f"{prefix}/{name}".split("/") if p not in ("", ".")]',
+        '    parts = [p for p in f"{prefix}/{name}".split("/") if p != ""]',
+        ["Coverage.test_the_default_working_directory_adds_nothing_to_the_link"],
+    ),
+    (
+        # The other half of the coupling, and the half no reading of
+        # `demo-comment` can see: the argument is never passed, so every still
+        # in a repository like this one is linked at the root and 404s.
+        "the comment step stops passing the working directory to the script",
+        "demo-video.yml",
+        '            --path-prefix "$WORKDIR" \\\n',
+        "",
+        ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
+    ),
+    (
+        # And the variable exported but not used, which is the shape
+        # `WorkflowGates` exists for: it looks coupled.
+        "the comment step exports the working directory and drops it",
+        "demo-video.yml",
+        '            --path-prefix "$WORKDIR"',
+        '            --path-prefix ""',
+        ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
         # The count that stands in for the content, in the new column: every
@@ -2295,13 +2388,17 @@ def fault_inject() -> int:
 #   test of "updated in place", and it is done by hand on the reference pull
 #   request.
 #
-#   The **one** exception is `WorkflowGates` above, and it is deliberately
-#   narrow: that every fact the guard step classifies on is handed to the
-#   recorder that re-classifies it, from the same input. That is a property of
-#   the text, it is what broke, and no run of the workflow on an in-repo pull
-#   request would have caught it either — the regression only appears for a
-#   caller who sets `allow-private-network-target`, and this repository has
-#   none.
+#   The **two** exceptions are `WorkflowGates` and `CommentStep` above, and
+#   both are deliberately narrow: that every fact the guard step classifies on
+#   is handed to the recorder that re-classifies it, from the same input, and
+#   that the working directory the `--demo` paths are relative to reaches the
+#   script that pastes them into a URL. Both are properties of the text. The
+#   first is what broke, and no run of the workflow on an in-repo pull request
+#   would have caught it either — the regression only appears for a caller who
+#   sets `allow-private-network-target`, and this repository has none. The
+#   second is the reverse: it appears for *this* repository, whose reference
+#   call roots its storyboards at `examples/ticket-queue`, and the artifact it
+#   would produce is a link that 404s while looking like one that works.
 # - **The recorder.** `tests/smoke` owns that.
 # - **Egress.** The target guard is a static check on configuration and source
 #   text. A storyboard that computes a URL at run time is invisible to it, and

@@ -64,9 +64,10 @@ picture of.
 a committed file and therefore the only piece of a take that has a URL: the
 video and `frames/` are both inside artifact zips, so there is no timestamp to
 deep-link and none is printed. The comment links each clause's still in your
-repository at the head commit, and a still the manifest names that this take
-did not publish is reported as absent rather than linked — last week's picture
-under this week's clause is worse than no picture at all.
+repository at the head commit — under `working-directory`, which is where git
+holds them — and a still the manifest names that this take did not publish is
+reported as absent rather than linked: last week's picture under this week's
+clause is worse than no picture at all.
 
 A clause claimed only by `caption(text, ac=…)` has no still, so it hands a
 reviewer nothing to open, and it is named above the table with the unclaimed
