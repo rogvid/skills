@@ -24,18 +24,20 @@ app rect, with the recorder's pad and title bar drawn around it. It was 1.3 luma
 levels from that frame, so the boundary was there and nobody could see it.
 
 Three rounds of candidates were put in front of the person who found it — warm
-paper, then black inside a gutter of the window's colour — and what they asked
-for in the end was neither: *"I want the interlude to match the window, without
-a need for a border of another colour, or an additional edge of a third
-colour."* So the card is now painted `WEB_WINDOW_BODY`, the same constant the
-window frame is painted with, with whitish text. The content area simply becomes
-the window's colour with the sentence on it.
+paper, then black inside a gutter of the window's colour, then the window's own
+constant declared for both — and what they asked for in the end was *"I want the
+interlude to match the window, without a need for a border of another colour, or
+an additional edge of a third colour."* The third round declared one colour and
+still failed: the window frame reaches `demo.mp4` as a screenshot and the card
+reaches it through the page recording, so they arrived five levels of blue apart
+and the reviewer sampled a frame and saw it (#301). So the card is painted
+`WEB_CARD_BODY` — `WEB_WINDOW_BODY` compensated for that second encoder, by
+measurement — with whitish text, and the content area becomes the window's
+colour with the sentence on it *on screen*, which is the only place it counts.
 
 Which makes this demoable by the repo's own test: the acceptance criterion is
 that **a viewer can tell a card from a terminal**, and it is verified by
-watching — the only thing that can, now that the card and the window are one
-colour and no assertion can separate them. What a reviewer should look at, in
-order:
+watching. What a reviewer should look at, in order:
 
 1. the queue, so the app is on screen and recognisable;
 2. the criterion card — the window's own colour, no border, no second edge,
@@ -46,6 +48,11 @@ order:
 Beats 2 and 4 are the picture the issue is about. Compare them against
 `demos/2026-08-11-criterion-card/` recorded before the fix, where the same
 element filled the same frame in `#1c1a17` and the frame vanished into it.
+
+What `tests/smoke` grades off the recording is that the card's field and the
+window's pad land within 2 levels per channel in `demo.mp4` — the thing the
+reviewer measured by hand. What it cannot grade, and what these beats are for,
+is whether the result *reads* as a card.
 
 Deliberately **not** what this shows: whether the clause is legible, whether
 the wording is right, or anything about a terminal take. A terminal segment

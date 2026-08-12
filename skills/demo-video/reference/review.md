@@ -359,13 +359,16 @@ beat, the coverage row, the snapshot and the frames were all correct
 throughout, and the person who found it was watching. Note what the defect
 was *not*: the card had always stopped at the app rect, with the frame drawn
 around it. It was 1.3 luma levels from that frame, so the boundary existed and
-nobody could see it. A web card is now the window's own body colour, painted
-from the one constant the window frame is painted with — which is what that
-same person asked for after seeing three rounds of alternatives. What `tests/`
-grades is that the card is that colour, in the stylesheet and in the encoded
-frame. **Nothing grades whether a viewer can tell the card from the window**,
-because the answer the reviewer chose is that they cannot; watching is the
-only thing covering it.
+nobody could see it. A web card is now the window's own body colour, which is
+what that same person asked for after seeing three rounds of alternatives —
+and "the same colour" turned out to mean *in the encoded video*, not in the
+stylesheet. The window frame reaches `demo.mp4` as a screenshot and the card
+reaches it through the page recording, so one declared colour arrives as two
+([#301](https://github.com/rogvid/skills/issues/301)); the card is declared a
+couple of levels off the window so that the two land together, and what
+`tests/` grades is where they land. **Nothing grades whether a viewer reads
+the result as a card** rather than as one flat surface; watching is the only
+thing covering that.
 
 ### What this does and does not tell you
 

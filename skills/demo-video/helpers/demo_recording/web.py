@@ -41,9 +41,11 @@ _WEB_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
 # once per run; the app video is composited into its body by ffmpeg.
 #
 # `__WINBG__` is `core.WEB_WINDOW_BODY`, and it is a shared constant rather
-# than a literal because the interlude card **is** this exact colour (issue
-# #291) — see `core.INTERLUDE_CSS_WEB`. Paint this from a literal and the card
-# and the window drift apart on the next edit.
+# than a literal because the interlude card is painted to match this colour in
+# the encoded frame (issue #291) — see `core.WEB_CARD_BODY`, which is this value
+# compensated for the extra encoder the card goes through (#301). Paint this
+# from a literal and the two drift apart on the next edit, with nothing left
+# tying the card's compensation to the thing it compensates for.
 _FRAME_HTML = """<!doctype html><meta charset="utf-8">
 <style>
   html, body { margin: 0; height: 100%; }
@@ -518,8 +520,8 @@ class Recorder(_DemoBase):
         # And the same composite is why the interlude card is not the default
         # one: the terminal palette is the colour of a *terminal*, and inside
         # this window frame a full-bleed field of it reads as one — the whole
-        # of issue #291. The web card is the window's own body colour instead.
-        # See core.INTERLUDE_CSS_WEB.
+        # of issue #291. The web card is the window's own body colour instead,
+        # as it lands in demo.mp4. See core.INTERLUDE_CSS_WEB.
         self._interlude_css = INTERLUDE_CSS_WEB
         # What spotlight() is currently pointing at, which is what a beat's
         # evidence is scoped to. Held here rather than read back out of the

@@ -132,10 +132,42 @@ _INTERLUDE_LAYOUT = (
 
 # The body of the window web.py composites a page into — its `#win` fill, and
 # the colour of the pad that shows around the app video on every side. It is
-# defined here rather than there because the web card below **is** this colour:
-# one constant, painted by two different things, so they cannot drift apart.
+# defined here rather than there because the web card below is painted to match
+# it *as encoded*, so the two numbers have to be read together.
 # `web._FRAME_HTML` paints the window with it.
 WEB_WINDOW_BODY = "#181825"
+
+# **The card's own field, and it is deliberately not `WEB_WINDOW_BODY`. Do not
+# "fix" it to be.** The card has to match the window in `demo.mp4`, and the two
+# reach that file by different encoders, so matching there means declaring two
+# slightly different colours here (issue #301).
+#
+# The frame is a Playwright **screenshot** — a lossless PNG that ffmpeg encodes
+# once. The card is a DOM element in the page, so it goes through Chromium's
+# **VP8** screencast encoder first, and VP8 quantises subsampled chroma onto a
+# coarse grid. Declare one colour for both and the window arrives at
+# `(23, 22, 37)` while the card arrives at `(24, 22, 32)`: five levels of blue,
+# which a human reviewer of #291's fix spotted by eye in a shipped frame.
+#
+# `#181726` is not arithmetic on a colour-space model — it is the value that
+# **measured** closest. A hundred declared colours around `#181825` were swept
+# through real takes and read back out of the encoded mp4, and this one arrives
+# at `(24, 21, 36)` against the window's `(23, 22, 37)`: one level per channel,
+# down from five.
+#
+# **One level is the floor, not a stopping point somebody chose.** Those 100
+# declared colours produce only 20 distinct encoded ones — VP8 quantises the
+# chroma planes, so the card can only land on a coarse grid — and `(23, 22, 37)`
+# is not on it. Of the twenty, three land 1 level off the window and seventeen
+# land 2 or more. None lands 0.
+#
+# **A drift here is a real failure, not a flake.** The compensation is tuned to
+# one encoder path (this Chromium's VP8, this ffmpeg, `yuv420p`). Change any of
+# them and `tests/smoke`'s card-against-window reading goes red, which is the
+# correct outcome: the two layers really have stopped matching on screen, and
+# the answer is to re-measure this constant, never to widen that bar.
+# tests/README.md says so where the bar is described.
+WEB_CARD_BODY = "#181726"
 
 # The palette, per medium — and the split is issue #291.
 #
@@ -154,14 +186,15 @@ WEB_WINDOW_BODY = "#181825"
 # read it as. Nothing in an artifact could say so: the element, the beat, the
 # aria snapshot and the frames were all exactly right.
 #
-# **So the web card is the window's own body colour, and nothing else.** Not a
-# palette chosen to stand out from the window: a human watched three rounds of
+# **So the web card is the window's own body colour, on screen.** Not a palette
+# chosen to stand out from the window: a human watched three rounds of
 # candidates and asked for exactly this — *"I want the interlude to match the
 # window, without a need for a border of another colour, or an additional edge
 # of a third colour."* The content area simply becomes the window's colour with
-# the sentence on it. One constant, `WEB_WINDOW_BODY`, painted by the frame and
-# by the card, so the two cannot drift; whitish text, because that is what is
-# legible on it.
+# the sentence on it; whitish text, because that is what is legible on it. The
+# card declares `WEB_CARD_BODY` rather than `WEB_WINDOW_BODY` **so that it can
+# match** — see that constant for the encoder path the two levels of difference
+# pay for.
 #
 # Two earlier answers to #291 are recorded here because both were rejected by
 # the person watching, and a later reader will otherwise re-propose them:
@@ -171,44 +204,31 @@ WEB_WINDOW_BODY = "#181825"
 #   * **black inside an 18 px border in the window's colour**, 23.5 levels off.
 #     Read as a card in a frame in a window — three colours where the reviewer
 #     wanted one, and the border and the recorder's own pad measured as two
-#     different colours in the encoded frame (see below).
+#     different colours in the encoded frame (#301 again).
 #
-# **What that costs, stated plainly: nothing now grades whether a web card can
-# be told apart from its window.** The previous round pinned the two at least
-# 12 luma levels apart, in `tests/unit` and in `tests/smoke`; the decision above
-# asks for a distance of zero, so that check is deleted rather than relaxed.
-# What is graded in its place is *consistency* — the card's declared colour
-# equals `WEB_WINDOW_BODY`, and the frame is painted from that same constant —
-# which is a weaker claim, and is the one that is true. The guard that would
-# have caught #291 is gone by a deliberate human decision; a person watching the
-# video is the only thing covering it. `tests/README.md` says so under Known
-# gaps.
+# A third answer was rejected by the same person after it shipped: **one colour
+# declared for both**, which is what a reader expects "the card is the window's
+# colour" to mean. It reached `demo.mp4` as two colours five levels apart and
+# they saw it in a frame. That is why the two declarations differ, and why the
+# thing that grades this is a reading of the **encoded video**, not a reading of
+# these strings: `tests/smoke`'s `check_criterion_card` requires the card's
+# field and the window's pad to be within 2 levels per channel in `demo.mp4`.
+# An equality pinned between two declarations would be green on exactly the
+# build the reviewer rejected.
+#
+# What is still not graded anywhere: whether a viewer **reads the result as a
+# card**. Sameness is now measurable; recognition is not, and tests/README.md
+# says so under Known gaps rather than implying otherwise with a green check.
 #
 # The card stays **opaque and full-bleed** — `inset: 0`, one flat `#rrggbb`,
 # above the caption bar. That is not decoration: `reference/limits.md` reasons
 # from all three, and with no border there is no second box whose corners or
 # alpha could put the app back on screen at the edges.
-#
-# **One measured thing about this colour, because it looks like a bug and is
-# not.** The window body and the card declare the same `#181825` and arrive in
-# `demo.mp4` as two values: the pad reads `#171625` and the card reads
-# `#181620`, ~5 levels apart in blue. The two layers reach the file by different
-# routes — the window is a Playwright *screenshot* (lossless PNG, one x264
-# encode) and the card is inside Playwright's *video* (Chromium's VP8 screencast
-# encoder). Measured on a page of nothing but `#181825`, the screenshot is
-# exactly (24, 24, 37) and the webm is already (24, 22, 32) before ffmpeg is run
-# at all: the webm stores Y=37, Cb=132, Cr=128 where the colour wants Cb=133.7,
-# and 1.7 levels of chroma error becomes 5 levels of blue on decode. Nothing in
-# the recorder's own ffmpeg does this — the same colour pushed through
-# webm→x264→scale→overlay→x264 synthetically comes back at (23, 22, 37). So an
-# assertion that reads this card off an encoded frame must allow for it, and one
-# that asserts the card and the window are byte-equal there would be wrong
-# (issue #301).
 INTERLUDE_CSS_TERMINAL = (
     _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"
 )
 INTERLUDE_CSS_WEB = (
-    _INTERLUDE_LAYOUT + f" background: {WEB_WINDOW_BODY}; color: #f2f0ec;"
+    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"
 )
 _INTERLUDE_JS = """
 window.__demoInterlude = (text) => {

@@ -432,27 +432,25 @@ INJECTIONS = [
         sites=("check_coverage",),
         must_contain=("states a finding about unclaimed criteria",),
     ),
-    # -- the card is the colour the package dispatched (issue #291) -----------
+    # -- the card is the window's own colour, in demo.mp4 (issue #291) --------
     #
-    # Three entries against the one assertion in this file that reads *pixels*
-    # out of the encoded frame. `tests/unit` grades the dispatch — which
-    # stylesheet each medium hands the page, and that the web one equals the
-    # window body — at 0.2 s an injection; what it cannot see is what the
-    # composite did with it, which is the half a viewer meets.
+    # Four entries against the two claims in the one assertion here that reads
+    # *pixels* out of the encoded frame. `tests/unit` grades the dispatch —
+    # which stylesheet each medium hands the page — at 0.2 s an injection; what
+    # it cannot see is what the composite did with it, which is the half a
+    # viewer meets, and after #301 it is the *only* half that can say whether
+    # the card and the window are one colour on screen.
     #
-    # **What used to be here and is not:** #297 also graded the window frame as
-    # visibly *not* the card, and the entry that proved that reading stood on
-    # its own repainted the window to match the card. The person who found #291
-    # then asked for a card that matches the window, so both the check and that
-    # entry are gone — deleted rather than relaxed, and the gap they leave is
-    # written down in tests/README.md instead of being papered over here.
-    #
-    # The first entry below is the defect as it shipped: a terminal card on a
-    # web take, now caught as a wrong *colour* and at a much thinner margin (14
-    # levels against a bar of 10, where #297 caught it at 0.4 against 12 on the
-    # reading that no longer exists). The second is a card dispatched perfectly
-    # and never painted. The third moves the shared constant and proves the card
-    # in the encoded frame really is painted from it.
+    # The first entry is the defect as it shipped: a terminal card on a web
+    # take, caught as a wrong *colour* at 16 levels against a bar of 6. The
+    # second is a card dispatched perfectly and never painted, at 214. The last
+    # two carry the claim that the card and the window body agree in the
+    # encoded frame, one from each side — the frame repainted under a card that
+    # is exactly what it should be, and the card's encoder compensation
+    # removed. Note what the second of those means for the bar next door: the
+    # uncompensated card is 6 levels off its own declared colour, which
+    # `CARD_RGB_TOLERANCE` lets through at exactly the bound, so the entry is
+    # caught by the window reading and by nothing else.
     Injection(
         # #291 restored. Injected at the import so the module still loads: a
         # `NameError` here would fail the arm before it recorded anything, and
@@ -497,20 +495,41 @@ INJECTIONS = [
         must_contain=(" levels off the web card's ",),
     ),
     Injection(
-        # **The shared constant moved.** `WEB_WINDOW_BODY` is now the card's own
-        # colour as well as the window's, so this repaints both — and the point
-        # of the entry is the *card* half. `tests/unit` catches the constant
-        # moving off two hand-written pins, and that is a reading of source
-        # text; this says the colour that constant holds is the colour a frame
-        # of `demo.mp4` actually carries, which is the only thing that makes the
-        # equality in `tests/unit` about a recording rather than about a file.
-        name="the shared window-and-card colour is repainted",
+        # **The window is repainted under a card that is exactly right.** This
+        # is the entry #297 had and the round after it deleted with the check it
+        # existed for. It is back because there is a check again: the card's own
+        # colour claim passes here — the strip really is `WEB_CARD_RGB` — and
+        # the *only* thing that fires is the reading that says the card and the
+        # window body are one colour on screen, which is #291's own property.
+        name="the window frame is repainted out from under the card",
         module="core.py",
         old='WEB_WINDOW_BODY = "#181825"',
         new='WEB_WINDOW_BODY = "#050505"',
         arm="--coverage-only",
         sites=("check_criterion_card",),
-        must_contain=("levels off the web card's",),
+        must_contain=(
+            "levels apart (bar",
+            "that a viewer cannot tell a web take's card",
+        ),
+    ),
+    Injection(
+        # **The compensation is removed**, which is the third rejected fix
+        # restored: one declared colour for both, the thing a reader expects
+        # "the card is the window's colour" to mean. Every stylesheet is
+        # consistent, `tests/unit` is green, and the card lands 5 levels of blue
+        # off the window in `demo.mp4` because it went through Chromium's VP8
+        # and the window did not (#301). A human found this by sampling a
+        # shipped frame; this is the entry that says a machine can now find it.
+        name="the card drops its encoder compensation and declares the window's colour",
+        module="core.py",
+        old='WEB_CARD_BODY = "#181726"',
+        new='WEB_CARD_BODY = "#181825"',
+        arm="--coverage-only",
+        sites=("check_criterion_card",),
+        must_contain=(
+            "levels apart (bar",
+            "that a viewer cannot tell a web take's card",
+        ),
     ),
     # -- what strict=True refuses (issue #3), 21 s an entry -------------------
     #
