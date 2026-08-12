@@ -2875,7 +2875,7 @@ knows is missing is worse than one that is openly absent.
 
 - **Whether the reference names the right *stream* for a line the recorder
   prints.** `ContentSummaryStreams` pins each half of the content summary to
-  its stream in both directions, with four injections behind it, so the *code*
+  its stream in both directions, with seven injections behind it, so the *code*
   is graded. Nothing grades the sentence in `reference/timeline.md` that tells
   a reader which stream to watch, and for a long time that sentence was wrong:
   it said `held` arrives "on stderr as it finishes", where in fact
@@ -2884,12 +2884,22 @@ knows is missing is worse than one that is openly absent.
   goes to **stdout** — and `opening_warning` names `gap` and never mentions
   `held` at all, so on a take that warned the number is in `timeline.json` and
   nowhere else. Corrected under
-  [#281](https://github.com/rogvid/skills/issues/281); still ungraded. A
-  string-matching assertion over the document would be decoration — it would
-  pin today's wording rather than the claim, and pass just as happily on a
-  reworded sentence naming the wrong stream. This is written down instead,
-  because an honest gap beats a check that cannot fail for the reason it
-  claims.
+  [#281](https://github.com/rogvid/skills/issues/281), and twice more since —
+  [#286](https://github.com/rogvid/skills/issues/286) for the take that prints
+  on neither stream, [#290](https://github.com/rogvid/skills/issues/290) for
+  the healthy take whose `held` is `0.0` and which therefore announces no hold
+  either. Three corrections to one paragraph is what an ungraded sentence
+  costs. It is still ungraded: a string-matching assertion over the document
+  would be decoration — it would pin today's wording rather than the claim, and
+  pass just as happily on a reworded sentence naming the wrong stream. This is
+  written down instead, because an honest gap beats a check that cannot fail
+  for the reason it claims.
+
+  What **is** graded, and was not before #290, is the code side of that last
+  clause: `test_a_take_that_held_nothing_announces_no_hold`, with a control
+  beside it so "no hold is announced" cannot be satisfied by a summary that
+  never mentions one. Both directions are injected — a zero hold announced,
+  and the clause silenced for every take.
 
 - **Most of where the shipped documentation points.** `tests/lint`'s
   `check_pointers()` resolves every repo-shaped path named in `skills/**/*.md`
@@ -2946,11 +2956,16 @@ knows is missing is worse than one that is openly absent.
   "somebody is on this" is invisible to it. `--self-test` holds a floor under
   how many sentences in this tree that vocabulary still matches, so it cannot
   quietly stop matching anything, and the sweep floors **both** its axes —
-  references and files. Measured here: 1,428 references across 47 files, of
-  which the top five files carry **1,087** and all of `skills/` carries 349. A
-  sweep narrowed to `tests/` reads 1,047 references from 6 files — five times
-  the reference floor, and none of the shipped documents this check exists for.
-  Depth is not breadth, and only the file floor says so.
+  references and files. Why both, measured with `tests/lint --issues` when this
+  paragraph was last touched (#290): 1,510 references across 49 files, of which
+  the top five files carry **1,146** and all of `skills/` carries 353. A sweep
+  narrowed to `tests/` reads 1,112 references from 6 files — five times the
+  reference floor, and none of the shipped documents this check exists for.
+  Depth is not breadth, and only the file floor says so. **The totals are a
+  snapshot and nothing grades them**: every commit that names an issue moves
+  them, and the figure before this one was two pull requests stale. Re-run the
+  command rather than trusting the number; what has to keep holding is the
+  shape, which is what the two floors are set against.
 
 - **The issue check runs in one direction only.** It catches a *closed* issue
   presented as pending. It says nothing about an *open* issue presented as
