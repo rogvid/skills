@@ -48,7 +48,13 @@ from .content import (
     overlay_warning,
     print_content_summary,
 )
-from .coverage import _ac_field, _checked_criteria, coverage_report
+from .coverage import (
+    _ac_field,
+    _checked_criteria,
+    _checked_ticket,
+    _ticket_field,
+    coverage_report,
+)
 from .failure import (
     FAILURE_DIR,
     FAILURE_MARKER,
@@ -1005,6 +1011,7 @@ class _DemoBase:
         locale: str | None = None,
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
+        ticket: str | None = None,
         allow_private: bool | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
@@ -1043,6 +1050,10 @@ class _DemoBase:
         # the criteria **nothing** claimed — and that is underivable from the
         # tags alone. Absent here, `coverage` is null and `ac=` is refused.
         self._criteria = _checked_criteria(criteria)
+        # Which ticket those clauses were copied out of (issue #275), as the
+        # author wrote it. Stored and written down; never fetched, never
+        # resolved — see `coverage.py`.
+        self._ticket = _checked_ticket(ticket)
         self.images_dir = self.out_dir / "images"
         self._video_dir = self.out_dir / ".video"
         if accent_rgb is None:
@@ -2396,6 +2407,11 @@ take with fewer beats than the last one would otherwise leave the
             "generated_by": "demo-video",
             "recorder": type(self).__name__,
             "segment": self.segment,
+            # The ticket this take was recorded against, exactly as the
+            # storyboard wrote it (issue #275). Absent on a take recorded
+            # outside one, so a timeline written before this key existed reads
+            # as it always did. Nothing here fetched or resolved it.
+            **_ticket_field(self._ticket),
             "media": mp4.name,
             "duration": duration,
             # Which clock produced this take. Without it a still committed to a

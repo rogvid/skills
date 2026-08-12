@@ -11,7 +11,9 @@ Run the app first:
 
 The storyboard is written from ticket #129 and declares its four acceptance
 criteria on the recorder, so `timeline.md` carries a coverage table naming the
-beat and the still that claims each one.
+beat and the still that claims each one. It names the ticket to the recorder
+too — `ticket=TICKET` below — so the manifest says where those four sentences
+were copied from instead of leaving it here in prose nothing can read.
 
 The `wait_for()` calls are assertions, not decoration: `.ticket` after typing
 `invoice` fails the take if the search left nothing listed, and `.queue-empty`
@@ -38,6 +40,10 @@ from demo_recording import Recorder  # noqa: E402
 
 BASE_URL = os.environ.get("TICKET_QUEUE_URL", "http://127.0.0.1:8901")
 SEARCH = "#queue-search"
+# The ticket the four clauses below are quoted from. Written down, never
+# fetched: re-running this file has to produce the same manifest in six months,
+# whatever has happened to the issue since.
+TICKET = "rogvid/skills#129"
 
 CRITERIA = {
     "AC-1": (
@@ -66,7 +72,7 @@ def clear_search(rec):
     rec.page.keyboard.press("Backspace")
 
 
-with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA) as rec:
+with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA, ticket=TICKET) as rec:
     rec.goto("/")
     rec.wait_for(".ticket")
 

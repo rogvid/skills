@@ -1,4 +1,5 @@
-"""Acceptance criteria, and what a storyboard claimed against them.
+"""Acceptance criteria, what a storyboard claimed against them, and whose
+ticket they were copied out of.
 
 A pure function of the declared criteria and the beat list, so a stitched demo
 merges the same way a single take builds it, and a consumer can re-run the
@@ -81,6 +82,86 @@ def _checked_criteria(criteria: dict[str, str] | None) -> dict[str, str]:
             )
         checked[key] = text.strip()
     return checked
+
+
+# -- the ticket the clauses came out of (issue #275) --------------------------
+#
+# `criteria={...}` declares four sentences and, until this existed, nothing
+# anywhere recorded which ticket they were copied out of — in the reference
+# storyboard it lived in a Python docstring. A manifest that quotes four
+# clauses but cannot name their source cannot be checked against that source by
+# anything, and a reviewer cannot click through from the demo to the
+# requirement.
+#
+# **Never fetched and never resolved.** The recorder refuses a public target at
+# construction, before a browser opens; a call to a tracker inside a take is
+# exactly the coupling that machinery exists to avoid. It would also put a
+# network dependency and a credential inside a take, and make re-running a
+# committed storyboard produce a *different* manifest whenever somebody edited
+# the issue — the artifact would stop being a function of the file in git.
+# Whether the quoted clauses actually appear in the named ticket is a separate,
+# non-fatal step with a network and a token, and it is not this file's.
+
+
+def _checked_ticket(ticket: str | None) -> str | None:
+    """The ticket this take was recorded against, or None when there is none.
+
+    Checked for exactly one thing: that it is a non-empty string. A private
+    tracker's id is not this recorder's business to have opinions about, and a
+    shape rule here would refuse takes rather than catch mistakes — the
+    consumers that *can* use a shape (linking `owner/repo#N`) try it and print
+    the string verbatim when it does not fit.
+    """
+    if ticket is None:
+        return None
+    if not isinstance(ticket, str):
+        raise TypeError(
+            f"ticket must be a string — the ticket this take demonstrates, as "
+            f"you write it ('rogvid/skills#129', or a URL) — got "
+            f"{type(ticket).__name__}"
+        )
+    stripped = ticket.strip()
+    if not stripped:
+        raise ValueError(
+            "ticket is empty. Name the ticket this take was recorded against, "
+            "or leave the parameter off — a blank string is a take that "
+            "claims to have a source and cannot say what it is."
+        )
+    return stripped
+
+
+def _ticket_field(ticket: object) -> dict:
+    """`{"ticket": ...}` when there is one, `{}` when there is not.
+
+    Absent-rather-than-null for the reason `error` is absent on a beat that
+    returned (issue #24): a take recorded before this key existed then reads
+    exactly like a take recorded outside a ticket, which is what it is.
+    """
+    return {"ticket": ticket} if ticket else {}
+
+
+def _merged_ticket_fields(docs: list[dict]) -> dict:
+    """What a stitched demo says about the ticket(s) its segments named.
+
+    Every distinct ticket, in the order the segments named them. One of them —
+    including the case where only some segments named one, since silence is not
+    disagreement — is the merged demo's `ticket`.
+
+    Two or more is a **conflict**, and it is named rather than resolved, the
+    same treatment `coverage.conflicts` gives segments that disagree about a
+    clause's wording. `ticket` is then absent: a merged demo half of which
+    demonstrates another ticket has no single honest answer, and writing one of
+    them there would be the artifact stating something no segment said.
+    """
+    named: list[str] = []
+    for doc in docs:
+        ticket = doc.get("ticket")
+        if isinstance(ticket, str) and ticket.strip():
+            if ticket.strip() not in named:
+                named.append(ticket.strip())
+    if len(named) > 1:
+        return {"ticket_conflicts": named}
+    return _ticket_field(named[0] if named else None)
 
 
 def _ac_field(claims: list[str]) -> dict:

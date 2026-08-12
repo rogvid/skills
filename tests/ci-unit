@@ -817,6 +817,11 @@ COVERAGE = {
 }
 TAGGED = dict(TIMELINE, coverage=COVERAGE)
 
+# The same take, saying which ticket those four clauses were copied out of
+# (#275). A line that points at a requirement is exactly where a sentence
+# claiming the two were compared is tempting, so it is swept like every other.
+TICKETED = dict(TAGGED, ticket="rogvid/skills#129")
+
 # Every clause claimed. Same criteria, so the two documents differ in exactly
 # the thing the headline is a statement about. No claim carries a still, so
 # every clause is also one a reviewer has nothing to open for (#274).
@@ -1606,6 +1611,12 @@ class Coverage(unittest.TestCase):
         for fixture in (RAISED, RAISED_NOWHERE):
             self.assert_no_verdict(self.body(fixture), fixture)
 
+    def test_naming_the_ticket_promotes_no_claim_to_a_verdict(self):
+        # The branch #275 adds, swept where the helpers for it live. "verified
+        # against rogvid/skills#129" is the sentence this refuses, and nothing
+        # in the comment has read that ticket.
+        self.assert_no_verdict(self.body(TICKETED), TICKETED)
+
     def test_a_claim_from_a_named_segment_says_which_segment(self):
         # A stitched demo renumbers beats, so "beat 6" alone points at the
         # wrong picture when the reader goes back to a segment's own timeline.
@@ -1617,6 +1628,99 @@ class Coverage(unittest.TestCase):
             },
         )
         self.assertEqual(self.cell(self.body(stitched), "AC-1"), "beat 6 (`part2`)")
+
+
+class Ticket(unittest.TestCase):
+    """Which ticket the clauses were copied out of, in the comment (#275).
+
+    **What none of this grades:** whether the ticket exists, whether it is
+    readable, or whether the clauses above it appear in it. Nothing in this
+    script opens a network connection, and the comment says so rather than
+    letting the link imply otherwise.
+    """
+
+    SHA = "abcdef1234567890abcdef1234567890abcdef12"
+    REPO_URL = "https://github.com/o/r"
+
+    def body(self, timeline, **kw):
+        opts = dict(
+            artifact_url=None,
+            artifact_bytes=None,
+            retention_days=30,
+            evidence_retention_days=None,
+            failure_artifact_url=None,
+            run_url=None,
+            sha=self.SHA,
+            repo_url=self.REPO_URL,
+            demo_root="",
+            path_prefix="",
+        )
+        opts.update(kw)
+        return comment.render([("demos/x", timeline)], **opts)
+
+    def test_an_owner_repo_reference_is_linked_at_its_own_tracker(self):
+        # The whole rendering by equality, not "the number is in there": a link
+        # to the wrong issue resolves and reads exactly like the right one.
+        self.assertEqual(
+            comment.ticket_link("rogvid/skills#129"),
+            "[rogvid/skills#129](https://github.com/rogvid/skills/issues/129)",
+        )
+
+    def test_a_url_is_linked_as_itself(self):
+        url = "https://example.invalid/browse/QUEUE-4412"
+        self.assertEqual(comment.ticket_link(url), f"[{url}]({url})")
+
+    def test_anything_else_is_printed_verbatim_rather_than_guessed_at(self):
+        # A private tracker's id is not this script's business, and a guessed
+        # link is worse than a name: it resolves somewhere, and a reviewer who
+        # follows it reads the wrong requirement. `#129` alone is the tempting
+        # one — there is no host in it.
+        for named in ("QUEUE-4412", "#129", "the ticket in my head"):
+            rendered = comment.ticket_link(named)
+            self.assertNotIn("](", rendered, named)
+            self.assertIn(named, rendered)
+
+    def test_a_link_target_that_would_not_survive_markdown_is_not_linked(self):
+        # `timeline.json` is committed and a pull request may edit it, so the
+        # ticket is untrusted text pasted into a link target. A `)` ends that
+        # target early and the rest of the line becomes prose.
+        rendered = comment.ticket_link("https://example.invalid/a)(b")
+        self.assertNotIn("](", rendered)
+
+    def test_a_take_that_names_no_ticket_is_rendered_as_it_always_was(self):
+        # The control on everything below: a comment that always carried the
+        # word would satisfy the assertions above on every take.
+        self.assertIsNone(comment.ticket_link(None))
+        body = self.body(TIMELINE)
+        self.assertIn("recorded by `Recorder`", body)  # control: the line ran
+        self.assertNotIn("against", body)
+
+    def test_the_comment_says_which_ticket_the_clauses_came_out_of(self):
+        # The reviewer's route from the demo to the requirement, in the one
+        # artifact they are guaranteed to open.
+        body = self.body(TICKETED)
+        self.assertIn(
+            "· against [rogvid/skills#129](https://github.com/rogvid/skills/issues/129)",
+            body,
+        )
+
+    def test_naming_the_ticket_does_not_displace_the_gap(self):
+        # #273's ordering claim, retested on the branch this adds: the clauses
+        # nothing claimed are still stated before the table of what was.
+        body = self.body(TICKETED)
+        headline = [ln for ln in body.splitlines() if "no beat claiming" in ln]
+        self.assertEqual(len(headline), 1, body)
+        self.assertLess(body.index(headline[0]), body.index("| clause | claimed at |"))
+
+    def test_a_stitched_demo_whose_parts_disagree_names_every_ticket(self):
+        # `stitch()` names them rather than choosing, and so does this: which
+        # of two tickets a demo is about is the reviewer's call.
+        body = self.body(
+            dict(TAGGED, ticket_conflicts=["rogvid/skills#129", "acme/app#7"])
+        )
+        self.assertIn("its segments name different tickets", body)
+        self.assertIn("https://github.com/rogvid/skills/issues/129", body)
+        self.assertIn("https://github.com/acme/app/issues/7", body)
 
 
 class CommentStep(unittest.TestCase):
@@ -2666,6 +2770,58 @@ INJECTIONS += [
         ["Coverage.test_no_sentence_promotes_a_claim_to_a_verdict"],
     )
     for word, sentence in VERDICT_SENTENCES.items()
+]
+
+INJECTIONS += [
+    (
+        # A guessed link, which is the failure mode a verbatim fallback exists
+        # to prevent: it resolves, it renders exactly like a working one, and
+        # a reviewer who follows it reads somebody else's requirement. `#129`
+        # and `QUEUE-4412` name no host, and this invents one for them.
+        "a ticket this script cannot resolve is linked at a guessed host",
+        "demo-comment",
+        '    return f"`{_cell(text)}`"',
+        '    return f"[{_cell(text)}](https://github.com/{text})"',
+        [
+            "Ticket.test_anything_else_is_printed_verbatim_rather_than_guessed_at",
+            "Ticket.test_a_link_target_that_would_not_survive_markdown_is_not_linked",
+        ],
+    ),
+    (
+        # The comment stops saying which ticket a take was recorded against.
+        # The clause table is untouched, so the reviewer still gets four
+        # sentences with nothing to check them against — #275's problem, in
+        # the artifact a human is guaranteed to open.
+        "the comment stops naming the ticket a take was recorded against",
+        "demo-comment",
+        "    if len(refs) == 1:",
+        "    if len(refs) > 90:",
+        ["Ticket.test_the_comment_says_which_ticket_the_clauses_came_out_of"],
+    ),
+    (
+        # The sentence a ticket link invites, and the reason the ticketed
+        # fixture is swept rather than assumed to be covered by the others:
+        # nothing here has opened that ticket. Appended after the link rather
+        # than rewritten around it, so the assertion about the link's own text
+        # stays green and the sweep is the only thing that can notice — the
+        # measurement that says `TICKETED` carries this branch instead of
+        # decorating an existing test.
+        "the comment says the take was verified against the ticket it names",
+        "demo-comment",
+        '        meta += f" · against {refs[0]}"',
+        '        meta += f" · against {refs[0]}, verified"',
+        ["Coverage.test_naming_the_ticket_promotes_no_claim_to_a_verdict"],
+    ),
+    (
+        # A stitched demo whose parts disagree, rendered as though they had
+        # not. The other ticket disappears from the one artifact a reviewer
+        # reads, while `timeline.json` still names both.
+        "a demo whose segments name two tickets names neither in the comment",
+        "demo-comment",
+        "    elif refs:",
+        "    elif not refs:",
+        ["Ticket.test_a_stitched_demo_whose_parts_disagree_names_every_ticket"],
+    ),
 ]
 
 

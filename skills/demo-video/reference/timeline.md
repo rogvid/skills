@@ -352,6 +352,13 @@ at the top level carry the value every segment agrees on — `"mixed"`, and
 `null` per key, where they do not; the per-segment truth is in `segments`. A
 timeline a single take wrote has no `segments` key at all.
 
+`ticket` is the exception to that pattern, and deliberately: parts that agree
+carry it at the top level, and parts that **disagree** produce
+`ticket_conflicts` naming every one of them with no top-level `ticket` at all.
+A demo half of which demonstrates another ticket has no single honest answer,
+so this one is named rather than resolved — the treatment a disagreement about
+a clause's wording already gets ([review.md](review.md)).
+
 `stitch()` refuses before it encodes anything if the parts cannot honestly be
 joined: a missing or unreadable `.seg.mp4`, a beat log of the wrong schema or
 one written for a *different recording* of that segment, or parts that
