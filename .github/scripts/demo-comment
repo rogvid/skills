@@ -26,7 +26,8 @@ A take recorded against a ticket carries a third thing above the beat table:
 the ticket's clauses, the ones no beat claimed named first (issue #273), each
 claimed clause pointed at the committed still a reviewer can open (issue #274).
 It is a rendering of `timeline.json`'s `coverage` and it grades nothing — see
-`render_coverage`.
+`render_coverage`. It also states, in `DIFF_LIMIT`, the one question watching
+the take answers and the many it does not (issue #303).
 
 The body opens with an HTML marker so the workflow can find and rewrite this
 comment rather than appending a new one on every push.
@@ -42,6 +43,28 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 MARKER = "<!-- demo-video-ci: one comment per pull request, rewritten on every push -->"
+
+#: What this comment is evidence of, and what it leaves to the diff (issue
+#: #303). Everything else here defends against the artifact *lying* — a still
+#: that does not exist, a claim promoted to a verdict. This defends against it
+#: implying more coverage than it has, which is the likelier harm: a demo can
+#: show a ticket's clauses; it cannot show the change does only that. The same
+#: pull request can delete a rate limiter, widen a permission or add a
+#: dependency, and the recording is silent about all three.
+#:
+#: Fixed text rather than anything computed. A count of files changed against
+#: paths the take exercised would be a number standing in for content, and it
+#: would invite exactly the confidence this sentence exists to withhold.
+#:
+#: It carries no word from `tests/ci-unit`'s `VERDICT_WORDS`, and is not
+#: exempted from that sweep — it is a sentence this script writes, so the sweep
+#: reads it like every other.
+DIFF_LIMIT = (
+    "**Watching this replaces reading the diff for one question only: whether "
+    "the take shows the clauses below.** Anything else the change touches — a "
+    "widened permission, a deleted check, a new dependency — is invisible to a "
+    "demo, and is still the diff's to answer."
+)
 
 
 def _cell(text: str) -> str:
@@ -285,6 +308,11 @@ def render_coverage(
             f"comment graded a claim."
         )
     gap.append("")
+    # Unconditional, and assembled apart from `gap` so that where it goes is
+    # one line rather than a position inside a block that varies with the take:
+    # it is printed on the take where every clause is claimed and illustrated
+    # too, which is the one it is most needed on.
+    limit = [DIFF_LIMIT, ""]
 
     table = ["| clause | claimed at | look at |", "|---|---|---|"]
     for key, text in criteria.items():
@@ -309,8 +337,9 @@ def render_coverage(
     ]
     # The gap first, and the order is the whole point rather than a layout
     # choice: a rendering that opened with the claimed table would *be* a
-    # coverage claim, whatever the words under it said.
-    return gap + table + note
+    # coverage claim, whatever the words under it said. `limit` follows for the
+    # same reason: below it, a reader has already started judging the clauses.
+    return gap + limit + table + note
 
 
 def _human_size(n: int | None) -> str:

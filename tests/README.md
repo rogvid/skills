@@ -1497,6 +1497,44 @@ writes are swept. Clause **ids** are not exempted either — they are too short
 to subtract safely, so a ticket with a clause called `verified` would redden
 this suite.
 
+**What the comment says about its own reach**
+([#303](https://github.com/rogvid/skills/issues/303)). Everything above stops
+the artifact *claiming* more than it earned; this is the complement — one fixed
+sentence, above the clause table on every take that declared a ticket, saying
+that watching replaces reading the diff for whether the clauses were shown and
+for nothing else. Two assertions hold it: that it reaches every branch of the
+gap block — a clause nothing claims, a clause with no picture, every clause
+claimed and illustrated, nothing claimed at all — and that it is read *with*
+the clauses rather than under the twenty captions past them. The fixtures are
+enumerated for the same reason the sweep's are: the branch that matters is the
+clean take, and a sentence printed only where the comment already has a gap to
+report would be missing from exactly the take a reviewer trusts most. That is
+an injection, and it reddens the first assertion alone.
+
+**The sentence sits inside the verdict sweep rather than beside it.** `_quoted`
+subtracts the ticket's clauses and the storyboard's captions and nothing else,
+and this is neither — it is text `demo-comment` writes, so
+`test_no_sentence_promotes_a_claim_to_a_verdict` reads it like every other
+sentence in the section. Which is why it carries none of `VERDICT_WORDS`:
+`shown` and `demonstrat*` are both on the list, and the wording works around
+the sweep rather than the sweep being taught to skip the wording. There is no
+separate assertion that the sentence is verdict-free, because the sweep already
+guarantees it and a second one would be the catalogue's dominated assertion.
+What exists instead is the injection *the limit sentence promotes the clauses
+it disclaims*, which appends "The clauses below were demonstrated." to it and
+reddens the sweep — the measurement that says the sweep can see it at all. It
+appends rather than replaces, so the two assertions above stay green and the
+sweep is the only thing that notices.
+
+**Where #303 stopped, stated rather than implied:** a take recorded without
+`criteria=` renders no acceptance section, and so carries no sentence. The demo
+whose storyboard declared no ticket says nothing about its own reach. That
+boundary is graded only in the negative — by
+`test_a_take_recorded_without_criteria_prints_no_acceptance_section`, which
+refuses the word `clause` anywhere in that body, and which is therefore also
+what would redden if the sentence were later printed unconditionally without
+being reworded.
+
 The injections that cover the acceptance section are enumerated in `ci-unit`'s
 `INJECTIONS`, and the number they add up to is deliberately not written here:
 it went stale the first time somebody added one, which is

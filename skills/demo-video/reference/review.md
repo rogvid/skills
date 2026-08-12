@@ -388,6 +388,42 @@ automate precisely because it takes no judgement: nobody even asserted those.
 Everything else is the reviewer's call, and the artifact's job is to put them in
 front of the right frames.
 
+### What a take is evidence about, and what stays the diff's to answer
+
+Everything above defends against one failure: the artifact **claiming** more
+than it earned. This is the other one, and it is the likelier way this skill
+hurts somebody — the artifact **implying** more than it covers.
+
+A demo can show that a ticket's clauses were met. It cannot show that the
+change does *only* that. Every criterion can be declared, claimed, illustrated
+and watched, and the same pull request can delete a rate limiter, widen a
+permission, drop an authorisation check or add a dependency: the recording is
+silent about all four. Not because the recorder missed them — because they are
+not things a screen does. There is no frame in which a removed guard is
+visible, and no storyboard that could film one.
+
+So watching a take replaces reading the diff for exactly one question: *were
+the declared clauses shown?* It is a real substitution and a narrow one, and
+the danger is a reviewer who has generalised it — "the demo is green, so the
+ticket is done" is half of a review being skipped by somebody who was never
+told which half. The pull-request comment this repository's workflow renders
+therefore says so above the clause table, in a sentence, on every take recorded
+against a ticket.
+
+**There is deliberately no number beside it.** Files changed against paths the
+take exercised, criteria against lines of diff, a percentage of anything — each
+is a count standing in for content, and each would be read as a bound on what
+got past. A demo that touched 90 % of the changed files is not 90 % reviewed.
+Worse, the number is the part people remember: it would manufacture exactly the
+confidence the sentence exists to withhold, and it would do it with a figure
+nobody could argue with. The honest artifact here is a sentence, not a
+measurement.
+
+Stated the way the security absence at the top of [SKILL.md](../SKILL.md) is
+stated, and for the same reason: this is a scope limit, not a gap waiting to be
+filled. A demo that graded the whole change would have to be trusted. This one
+only has to be watched.
+
 ### Rules that follow
 
 - **Derive the storyboard from the ticket, the ADR or the RFC — not from the

@@ -1019,6 +1019,19 @@ QUOTED_VERDICT = dict(
 )
 
 
+#: The sentence #303 adds, hand-written here rather than imported from
+#: `comment`. Importing it would make this pair of tests agree with the script
+#: by construction: any rewording, including one that dropped the second half,
+#: would still be "present". Copied text goes stale loudly, which is the
+#: direction to be wrong in.
+DIFF_LIMIT = (
+    "**Watching this replaces reading the diff for one question only: whether "
+    "the take shows the clauses below.** Anything else the change touches — a "
+    "widened permission, a deleted check, a new dependency — is invisible to a "
+    "demo, and is still the diff's to answer."
+)
+
+
 class Coverage(unittest.TestCase):
     """The ticket's clauses in the pull-request comment, gap first (#273).
 
@@ -1257,6 +1270,56 @@ class Coverage(unittest.TestCase):
         )
         cells = self.cell(self.body(piped), "AC-1")
         self.assertEqual(cells, "beat 3")
+
+    # -- what watching answers, and what it leaves to the diff (#303) -------
+
+    def test_every_take_with_a_ticket_says_what_it_is_not_evidence_of(self):
+        """The one sentence about the comment's own reach, on every branch.
+
+        Enumerated rather than counted, and the fixtures are the four shapes
+        the gap block takes: a clause nothing claims, a clause with no picture,
+        every clause claimed and illustrated, and nothing claimed at all. The
+        third is the one that matters most and is the easiest to lose — a
+        rendering that printed this only where it already had a gap to report
+        would say nothing on the take a reviewer is likeliest to trust.
+
+        The boundary in the other direction — a take that declared no
+        `criteria=` prints no acceptance section and so no sentence — is
+        already graded by
+        `test_a_take_recorded_without_criteria_prints_no_acceptance_section`,
+        which refuses the word `clause` anywhere in that body. Asserting it
+        again here would be a check an earlier one already guarantees.
+        """
+        none_claimed = dict(
+            TIMELINE,
+            coverage=dict(
+                COVERAGE,
+                claimed={key: [] for key in COVERAGE["criteria"]},
+                unclaimed=list(COVERAGE["criteria"]),
+            ),
+        )
+        for fixture in (TAGGED, CAPTION_ONLY, ALL_ILLUSTRATED, none_claimed):
+            body = self.body(fixture)
+            # The haystack: without this, a renderer that stopped printing the
+            # acceptance section entirely would fail here for a reason this
+            # test would report as the sentence going missing.
+            self.assertIn("| clause | claimed at | look at |", body)
+            self.assertEqual(body.count(DIFF_LIMIT), 1, body)
+
+    def test_the_limit_is_read_with_the_clauses_and_not_after_the_captions(self):
+        # Placement is the claim: a sentence about what the comment covers is
+        # worth nothing below the twenty captions a reviewer scrolled past to
+        # reach it. It sits under the gaps and above the table — after the
+        # findings that need no judgement, before the reader starts working
+        # through the clauses and has decided what this comment is for.
+        body = self.body(TAGGED)
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+        self.assertIn(DIFF_LIMIT, body)  # so a missing sentence reads as one
+        where = body.index(DIFF_LIMIT)
+        self.assertGreater(where, body.index(self.headline(body)))
+        self.assertLess(where, body.index("| clause | claimed at | look at |"))
+        self.assertLess(where, body.index("**AC-1**"))
+        self.assertLess(where, body.index("| # | at | Caption |"))
 
     # -- one picture per clause, and the clauses with none (#274) -----------
 
@@ -1811,8 +1874,8 @@ INJECTIONS = [
         # *is* a coverage claim, whatever the sentence under it says.
         "the acceptance section leads with what was claimed instead of the gap",
         "demo-comment",
-        "    return gap + table + note",
-        "    return table + gap + note",
+        "    return gap + limit + table + note",
+        "    return table + gap + limit + note",
         [
             "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
             "Coverage.test_the_clauses_with_no_picture_are_named_before_the_claimed_table",
@@ -2280,6 +2343,55 @@ INJECTIONS = [
         [
             "VerdictAlphabet.test_each_injected_sentence_is_refused_for_exactly_its_own_word"
         ],
+    ),
+    # -- what the comment is evidence of (#303) -----------------------------
+    (
+        # The sentence gone. The comment then reads as it did before #303: a
+        # coverage table a reviewer can take for the whole of review, with
+        # nothing in it saying which half it is.
+        "the comment stops saying what the demo is not evidence of",
+        "demo-comment",
+        '    limit = [DIFF_LIMIT, ""]',
+        "    limit = []",
+        [
+            "Coverage.test_every_take_with_a_ticket_says_what_it_is_not_evidence_of",
+            "Coverage.test_the_limit_is_read_with_the_clauses_and_not_after_the_captions",
+        ],
+    ),
+    (
+        # Printed only where the comment already had a gap to report — so it is
+        # present on every fixture that names a missing clause, and absent from
+        # the clean take, which is the one a reviewer is likeliest to trust.
+        # The ordering assertion runs on `TAGGED` and stays green throughout.
+        "the limit is printed only on takes that already report a gap",
+        "demo-comment",
+        '    limit = [DIFF_LIMIT, ""]',
+        '    limit = [DIFF_LIMIT, ""] if unclaimed else []',
+        ["Coverage.test_every_take_with_a_ticket_says_what_it_is_not_evidence_of"],
+    ),
+    (
+        # Below the clauses instead of above them. Every count of it is still
+        # one and the acceptance section is otherwise untouched — a sentence
+        # about what the comment covers, printed after the reader worked
+        # through what it covers.
+        "the limit is printed under the clause table rather than over it",
+        "demo-comment",
+        "    return gap + limit + table + note",
+        "    return gap + table + limit + note",
+        ["Coverage.test_the_limit_is_read_with_the_clauses_and_not_after_the_captions"],
+    ),
+    (
+        # The one that says #303's sentence is *inside* the verdict sweep
+        # rather than exempted from it. It is text `demo-comment` writes, so
+        # `_quoted` never subtracts it; appending to it leaves the literal the
+        # two tests above look for intact, so the sweep is the only thing that
+        # can notice — which is the same shape the per-word injections use.
+        "the limit sentence promotes the clauses it disclaims",
+        "demo-comment",
+        '    "demo, and is still the diff\'s to answer."',
+        "    \"demo, and is still the diff's to answer. "
+        + 'The clauses below were demonstrated."',
+        ["Coverage.test_no_sentence_promotes_a_claim_to_a_verdict"],
     ),
 ]
 
