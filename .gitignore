@@ -1,8 +1,10 @@
 # Design docs — kept local while the repo's home is still being decided.
 # CLAUDE.md's Layout section says `docs/` is gitignored; until now it was not,
 # so a `git add -A` would have committed every local design doc.
+# Anchored: an unanchored `docs/` also ignores `skills/<name>/docs/`, and a
+# shipped doc that git cannot see is a doc `npx skills add` cannot install.
 .scratch/
-docs/
+/docs/
 
 # Node / TypeScript build artifacts (bundled skill CLIs)
 node_modules/
