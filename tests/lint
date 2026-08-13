@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import json
 import re
 import shutil
@@ -589,6 +590,39 @@ def resolve(rel: str, token: str) -> tuple[Path | None, Path]:
     return None, skill
 
 
+@functools.cache
+def tracked_dirs(skill: Path) -> frozenset[str]:
+    """Top-level directory names this repository actually contains.
+
+    Read off `git ls-files` rather than off the working tree, because the
+    working tree is not the same on two boxes and this decides a verdict. An
+    untracked `.claude/` — settings, worktrees, whatever a developer's tooling
+    left behind — used to make `.claude/skills` read `dead` locally and
+    `elsewhere` on a CI checkout, so the same document linted green on one box
+    and red on the other. A check that answers from the environment grades the
+    environment.
+
+    Tracked contents are the honest question anyway: `.claude/skills/` in a
+    shipped document names where *the reader's* installer puts a skill, not
+    anything in this repository, and git agrees because this repository does
+    not track it.
+
+    The other half of the same sensitivity is left standing and stated:
+    `resolve()` still asks the working tree whether a file exists, so a pointer
+    at a file that is present but uncommitted resolves here and dies on CI.
+    That direction fails closed — CI catches what the author forgot to commit —
+    which is the behaviour you want, so it is not worth removing.
+    """
+    tops = {p.split("/")[0] for p in tracked()}
+    within = {
+        p[len(prefix) :].split("/")[0]
+        for prefix in (f"{skill.relative_to(REPO).as_posix()}/",)
+        for p in tracked()
+        if p.startswith(prefix)
+    }
+    return frozenset(tops | within)
+
+
 def verdict(rel: str, token: str, sentence: str) -> tuple[str, str]:
     """(verdict, why) for one pointer. The whole rule, in one place.
 
@@ -615,7 +649,7 @@ def verdict(rel: str, token: str, sentence: str) -> tuple[str, str]:
             f"`npx skills add` has no such path"
         )
     head = token.split("/")[0]
-    if (REPO / head).is_dir() or (skill / head).is_dir():
+    if head in {".", ".."} or head in tracked_dirs(skill):
         return "dead", f"`{token}` does not exist, here or in the skill"
     return "elsewhere", ""
 
