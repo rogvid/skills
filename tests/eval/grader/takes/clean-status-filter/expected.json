@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "take": "clean-status-filter",
+  "what": "Nothing is planted. Both clauses are genuinely shown, so anything this take reports is a false alarm.",
+  "clauses": {
+    "AC-1": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "Two beats click a status button and the queue visibly loses the rows that do not have that status; the claim and the picture are the same beats."
+    },
+    "AC-2": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "All is clicked, every row comes back, and the heading is spotlit in the same beat that claims it."
+    }
+  }
+}

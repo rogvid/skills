@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "take": "caption-overclaims",
+  "what": "The negative control. AC-3's caption asserts requester matching; the take types 'webhook', a word from TQ-104's title that appears in no requester. The reader is expected to miss it, because the caption it would have to disbelieve is burned into the frames it reads.",
+  "clauses": {
+    "AC-1": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "Typing invoice narrows the queue to one row, in the beat that claims it."
+    },
+    "AC-3": {
+      "kind": "expected-miss",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "Everything on screen agrees with the caption except the one thing that would disprove it: the search box holds 'webhook', which is in the title and not the requester. The reader would have to read the box, know the requester list, and disbelieve the caption. demo-grade names this exact case as what it does not catch. If a run scores this as caught, report it — do not edit this expectation to match the result."
+    }
+  }
+}

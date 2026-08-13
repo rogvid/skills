@@ -1,0 +1,572 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Score the blind reader against a corpus of takes with known answers.
+
+    tests/eval-grader record [--force] [--take NAME]   # ~90 s/take, cached
+    tests/eval-grader brief  [--take NAME]             # one brief per take
+    tests/eval-grader score --readings DIR             # the table
+
+The grader had been measured once, on one take, by three readers who agreed.
+That is an anecdote. This is the measurement: four takes recorded against
+`examples/ticket-queue`, each clause carrying a written-down expectation, and a
+score that says what the reader caught, what it cried wolf on, and what it was
+expected to miss and did.
+
+**No model call happens in this file either**, which is the same seam
+`demo-grade` uses. `record` and `brief` produce the frames and the document a
+reader gets; the reader is dispatched by hand or by a harness; `score` reads
+the answers back off disk. So the scoring phase is arithmetic over documents,
+it runs in seconds, and no model's opinion is ever a committed file.
+
+## What the corpus has to contain, and why the fourth take is not a joke
+
+`AGENTS.md`, under "Where an eval replaces the injections": *a corpus with no
+expected misses is not a measurement.* A corpus of defects the reader catches
+measures its own fixtures. So `caption-overclaims` plants the defect
+`demo-grade`'s own docstring says it cannot catch — a caption asserting a
+misread requirement over a screen that agrees with it — and the table below
+prints that clause as an **expected** miss rather than as a failure. If a run
+ever scores it caught, that is a finding to report, not an expectation to edit.
+
+## The mechanic the corpus is built around
+
+The reader is blind to `coverage.claimed`, structurally: `demo-grade`'s two
+renderers are handed the clauses and the frame filenames and cannot reach for a
+claim. So mutating `claimed` moves the *comparison* and never the reader's
+answer, and a corpus built out of such mutations would measure `demo-grade`'s
+arithmetic — which `tests/unit` already covers — while reporting a number about
+the reader.
+
+Every defect here is therefore in the **pixels**: a clause the storyboard
+claims on a beat whose screen never does the thing (`never-demonstrated`), and
+a caption that asserts what the screen does not do (`caption-overclaims`).
+
+## What "caught" means here
+
+One rule, and it is the product's own: a clause reaches a human when its
+verdict class is anything other than `agreement`. `disagreement`, `cannot tell`
+and `no reading` all put it in front of somebody; `agreement` is the only class
+that closes the question without a person. So:
+
+* a **planted** clause is caught when it does not land in `agreement`;
+* a **clean** clause is a false alarm when it does not land in `agreement`;
+* an **expected-miss** clause is missed-as-expected when it *does*.
+
+The table also prints whether the reader's status and the verdict class matched
+the expectation exactly, because "caught for the wrong reason" and "caught" are
+worth telling apart and the rule above cannot.
+
+## What this does not measure
+
+Stated here rather than left for a reader to work out, because a score with an
+unstated boundary is read as covering everything:
+
+* **Four takes and seven clauses.** A false-alarm rate over five clean clauses
+  has an enormous confidence interval. This distinguishes "the reader flags
+  clean demos constantly" from "it does not"; it does not put a number on how
+  often.
+* **One reader per clause per run**, so nothing here measures the reader's
+  *variance*. Run it twice with different readers to see that, and #131 is the
+  standing warning that the unstable half of this question is the half that is
+  deliberately not asked.
+* **One app, one recorder, one storyboard author.** Every take is
+  `examples/ticket-queue` through `demo-video`. Nothing says how the reader
+  behaves on a terminal take, a stitched demo, or an app whose screens are not
+  a list of rows.
+* **Not the recorder.** A defect the recorder introduces — a frame cut in the
+  wrong place, a caption on the wrong beat — is invisible to this, because the
+  expectations are written against what the storyboard *should* produce and
+  scored against what the reader said, with nothing in between checking that
+  the frames are of what the storyboard asked for. `tests/smoke` owns that.
+* **Not `demo-grade`'s arithmetic**, on purpose. See above.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+CORPUS = REPO / "tests" / "eval" / "grader" / "takes"
+SKILL = REPO / "skills" / "demo-video"
+DEMO_GRADE = SKILL / "scripts" / "demo-grade"
+APP = REPO / "examples" / "ticket-queue"
+SERVE = APP / "serve"
+
+MARKER = ".eval-recording.json"
+MARKER_SCHEMA = 1
+EXPECTED_SCHEMA = 1
+
+# The three things a clause's expectation can be. `expected-miss` is the one
+# that makes the other two mean anything — see the module docstring.
+CLEAN = "clean"
+PLANTED = "planted"
+EXPECTED_MISS = "expected-miss"
+KINDS = (CLEAN, PLANTED, EXPECTED_MISS)
+
+# The one class that closes a clause without a human looking at it. Everything
+# else in `demo-grade`'s CLASS_ORDER puts the clause in front of somebody, so
+# everything else counts as surfaced.
+AGREEMENT = "agreement"
+
+
+class Refused(Exception):
+    """The runner cannot do its job on this input, and says why."""
+
+
+# --- the corpus --------------------------------------------------------------
+
+
+def takes(only: str | None = None) -> list[Path]:
+    """The corpus take directories, in a stable order."""
+    if not CORPUS.is_dir():
+        raise Refused(f"there is no corpus at {CORPUS}")
+    found = sorted(p for p in CORPUS.iterdir() if (p / "record.py").is_file())
+    if not found:
+        raise Refused(f"{CORPUS} holds no take with a record.py")
+    if only is None:
+        return found
+    chosen = [p for p in found if p.name == only]
+    if not chosen:
+        raise Refused(
+            f"no take named {only!r}; the corpus is {', '.join(p.name for p in found)}"
+        )
+    return chosen
+
+
+def expectation(take: Path) -> dict:
+    """One take's written-down answers, validated.
+
+    Strict for the reason `demo-grade` is strict about a reading: an
+    expectation this file cannot understand would otherwise be scored as
+    though it said something it does not, and a confidently wrong score is
+    worse than no score.
+    """
+    path = take / "expected.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Refused(f"{take.name} has no expected.json — {path}") from None
+    except ValueError as exc:
+        raise Refused(f"{path} is not readable JSON: {exc}") from None
+    if not isinstance(doc, dict) or doc.get("schema") != EXPECTED_SCHEMA:
+        raise Refused(
+            f"{path} declares schema {doc.get('schema')!r} and this runner "
+            f"reads schema {EXPECTED_SCHEMA}"
+        )
+    clauses = doc.get("clauses")
+    if not isinstance(clauses, dict) or not clauses:
+        raise Refused(f"{path} names no clauses, so there is nothing to score")
+    for key, row in clauses.items():
+        if not isinstance(row, dict):
+            raise Refused(f"{path}: clause {key} is not an object")
+        if row.get("kind") not in KINDS:
+            raise Refused(
+                f"{path}: clause {key} has kind {row.get('kind')!r}; it must be "
+                f"one of {', '.join(KINDS)}"
+            )
+        if not isinstance(row.get("why"), str) or not row["why"].strip():
+            raise Refused(
+                f"{path}: clause {key} says nothing under `why`. An expectation "
+                f"without its reasoning cannot be argued with, and the whole "
+                f"value of a written-down answer is that it can."
+            )
+    return doc
+
+
+def declared_criteria(take: Path) -> dict[str, str]:
+    """The clauses the recorded take actually declared, off its timeline."""
+    path = take / "timeline.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Refused(
+            f"{take.name} has no timeline.json — it has not been recorded. Run "
+            f"`tests/eval-grader record`."
+        ) from None
+    except ValueError as exc:
+        raise Refused(f"{path} is not readable JSON: {exc}") from None
+    coverage = doc.get("coverage")
+    criteria = coverage.get("criteria") if isinstance(coverage, dict) else None
+    if not isinstance(criteria, dict) or not criteria:
+        raise Refused(f"{path} declares no criteria")
+    return {str(k): str(v) for k, v in criteria.items()}
+
+
+# --- recording, and the cache that keeps it off the scoring path -------------
+
+
+def _digest(paths: list[Path]) -> str:
+    """A hash over file contents, by sorted repo-relative path.
+
+    The path is hashed alongside the bytes, so moving a file changes the
+    digest — a rename that leaves the same bytes elsewhere is still a
+    different corpus input.
+    """
+    sha = hashlib.sha256()
+    for path in sorted(paths, key=lambda p: str(p)):
+        sha.update(str(path.relative_to(REPO)).encode("utf-8"))
+        sha.update(b"\0")
+        sha.update(path.read_bytes())
+    return sha.hexdigest()
+
+
+def inputs_digest(take: Path) -> str:
+    """Everything whose bytes decide what the frames of this take look like.
+
+    The storyboard, the app it drives, and the recorder that drives it. All
+    three, because a frame is a function of all three and a cache key that
+    named only the storyboard would hand a scoring run pictures of an older
+    recorder while reporting a number about today's.
+    """
+    paths = [take / "record.py"]
+    paths += sorted(p for p in (APP / "web").rglob("*") if p.is_file())
+    paths += [APP / "data" / "tickets.json", SERVE]
+    paths += sorted((SKILL / "helpers" / "demo_recording").glob("*.py"))
+    return _digest(paths)
+
+
+def marker(take: Path) -> dict | None:
+    """What the last recording of this take was made from, if it said."""
+    try:
+        doc = json.loads((take / MARKER).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def recorded(take: Path) -> bool:
+    """Whether there is a recording here for `brief` and `score` to read."""
+    return (take / "timeline.json").is_file() and (
+        take / "frames" / "frames.json"
+    ).is_file()
+
+
+def stale(take: Path) -> bool:
+    """Whether the frames on disk are of a different storyboard, app or recorder.
+
+    Never fatal anywhere. A stale corpus still scores — it is simply scoring
+    older pictures, and the table says so in its footer rather than refusing
+    to print a number somebody is waiting for.
+    """
+    doc = marker(take)
+    return not doc or doc.get("inputs") != inputs_digest(take)
+
+
+def free_port() -> int:
+    """A port the OS has just confirmed is free.
+
+    Ephemeral rather than the app's default 8901: this suite must not fight a
+    `serve` a developer already has running, and must not silently record
+    against one whose `data/tickets.json` is not the one hashed above.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_for_app(port: int, proc: subprocess.Popen, timeout_s: float = 20) -> None:
+    """Block until the app answers, or say why it never will."""
+    deadline = time.monotonic() + timeout_s
+    url = f"http://127.0.0.1:{port}/api/tickets"
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise Refused(f"{SERVE} exited with status {proc.returncode}")
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:  # noqa: S310
+                if response.status == 200:
+                    return
+        except (urllib.error.URLError, OSError, TimeoutError):
+            time.sleep(0.2)
+    raise Refused(f"{SERVE} did not answer on port {port} within {timeout_s:.0f}s")
+
+
+def cmd_record(only: str | None, force: bool) -> int:
+    wanted = [t for t in takes(only) if force or not recorded(t) or stale(t)]
+    skipped = [t for t in takes(only) if t not in wanted]
+    for take in skipped:
+        print(f"cached   {take.name}")
+    if not wanted:
+        print("nothing to record; every take's frames match its inputs.")
+        return 0
+    port = free_port()
+    proc = subprocess.Popen(
+        [str(SERVE), "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        cwd=str(APP),
+    )
+    try:
+        wait_for_app(port, proc)
+        for take in wanted:
+            started = time.monotonic()
+            print(f"recording {take.name} …", flush=True)
+            done = subprocess.run(
+                ["uv", "run", str(take / "record.py")],
+                cwd=str(take),
+                env={
+                    **os.environ,
+                    "TICKET_QUEUE_URL": f"http://127.0.0.1:{port}",
+                    "DEMO_VIDEO_SKILL_DIR": str(SKILL),
+                },
+                capture_output=True,
+                text=True,
+            )
+            if done.returncode != 0:
+                sys.stderr.write(done.stdout + done.stderr)
+                raise Refused(f"{take.name} did not record (exit {done.returncode})")
+            # The marker is written **after** the take succeeded, so a crashed
+            # recording is not cached as a good one. Same reason `demo-grade`
+            # clears `review/` before it starts: an artifact that outlives the
+            # run it describes is the artifact lying.
+            (take / MARKER).write_text(
+                json.dumps(
+                    {
+                        "schema": MARKER_SCHEMA,
+                        "inputs": inputs_digest(take),
+                        "seconds": round(time.monotonic() - started, 1),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            print(f"recorded {take.name} in {time.monotonic() - started:.0f}s")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a wedged server
+            proc.kill()
+    return 0
+
+
+# --- the brief ---------------------------------------------------------------
+
+
+def cmd_brief(only: str | None) -> int:
+    for take in takes(only):
+        if not recorded(take):
+            raise Refused(
+                f"{take.name} has no frames to write a brief about. Run "
+                f"`tests/eval-grader record` first."
+            )
+        done = subprocess.run(
+            [str(DEMO_GRADE), "brief", str(take)], capture_output=True, text=True
+        )
+        if done.returncode != 0:
+            sys.stderr.write(done.stdout + done.stderr)
+            raise Refused(f"demo-grade brief refused {take.name}")
+        print(f"{take.name}: {take / 'review' / 'brief.md'}")
+    print(
+        "\nHand each brief, and its take's frames/ directory, to a reader that "
+        "has seen neither this file, the storyboard, nor expected.json. Save "
+        "each answer as <readings-dir>/<take>.json."
+    )
+    return 0
+
+
+# --- the score ---------------------------------------------------------------
+
+
+def outcome(kind: str, klass: str) -> str:
+    """What one clause's verdict class means, given what was planted in it.
+
+    The whole scoring rule, in one place, using the product's own threshold:
+    `agreement` is the only class that closes a clause without a human.
+    """
+    surfaced = klass != AGREEMENT
+    if kind == CLEAN:
+        return "false alarm" if surfaced else "quiet"
+    if kind == PLANTED:
+        return "caught" if surfaced else "MISSED"
+    return "UNEXPECTED CATCH" if surfaced else "missed (expected)"
+
+
+def score_take(take: Path, readings_dir: Path) -> list[dict]:
+    """Run the verdict for one take and pair each clause with its expectation."""
+    expected = expectation(take)
+    criteria = declared_criteria(take)
+    clauses = expected["clauses"]
+    unknown = sorted(set(clauses) - set(criteria))
+    if unknown:
+        raise Refused(
+            f"{take.name}/expected.json expects {', '.join(unknown)}, which the "
+            f"recorded take does not declare. Declared: {', '.join(criteria)}."
+        )
+    unexpected = sorted(set(criteria) - set(clauses))
+    if unexpected:
+        raise Refused(
+            f"{take.name} declares {', '.join(unexpected)} and expected.json "
+            f"says nothing about it. Every clause is scored or the corpus is "
+            f"reporting on a subset it does not name."
+        )
+    reading = readings_dir / f"{take.name}.json"
+    if not reading.is_file():
+        raise Refused(f"no reading for {take.name} at {reading}")
+    done = subprocess.run(
+        [str(DEMO_GRADE), "verdict", str(take), "--reading", str(reading)],
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        sys.stderr.write(done.stdout + done.stderr)
+        raise Refused(f"demo-grade verdict refused {take.name}")
+    verdict = json.loads((take / "review" / "verdict.json").read_text(encoding="utf-8"))
+    by_id = {row["criterion"]: row for row in verdict["clauses"]}
+    rows = []
+    for key, want in clauses.items():
+        got = by_id[key]
+        klass = got["agreement"]["class"]
+        status = got["reading"].get("status")
+        rows.append(
+            {
+                "take": take.name,
+                "criterion": key,
+                "kind": want["kind"],
+                "expect_status": want.get("expect_status"),
+                "expect_class": want.get("expect_class"),
+                "status": status,
+                "class": klass,
+                "outcome": outcome(want["kind"], klass),
+                "exact": (
+                    status == want.get("expect_status")
+                    and klass == want.get("expect_class")
+                ),
+                "frame": got["reading"].get("frame"),
+            }
+        )
+    return rows
+
+
+def _table(rows: list[dict]) -> str:
+    """The per-clause rows, as a fixed-width table."""
+    head = ("take", "clause", "planted", "reader said", "class", "outcome", "exact")
+    body = [
+        (
+            row["take"],
+            row["criterion"],
+            row["kind"],
+            str(row["status"]),
+            row["class"],
+            row["outcome"],
+            "yes" if row["exact"] else "no",
+        )
+        for row in rows
+    ]
+    widths = [max(len(str(c[n])) for c in [head, *body]) for n in range(len(head))]
+    lines = [
+        "  ".join(str(c).ljust(w) for c, w in zip(head, widths, strict=True)).rstrip()
+    ]
+    lines.append("  ".join("-" * w for w in widths))
+    for cells in body:
+        lines.append(
+            "  ".join(
+                str(c).ljust(w) for c, w in zip(cells, widths, strict=True)
+            ).rstrip()
+        )
+    return "\n".join(lines)
+
+
+def summary(rows: list[dict]) -> dict:
+    """The three numbers the score exists to report, and nothing derived."""
+    planted = [r for r in rows if r["kind"] == PLANTED]
+    clean = [r for r in rows if r["kind"] == CLEAN]
+    misses = [r for r in rows if r["kind"] == EXPECTED_MISS]
+    return {
+        "planted": len(planted),
+        "caught": sum(1 for r in planted if r["outcome"] == "caught"),
+        "clean": len(clean),
+        "false_alarms": sum(1 for r in clean if r["outcome"] == "false alarm"),
+        "expected_misses": len(misses),
+        "missed_as_expected": sum(
+            1 for r in misses if r["outcome"] == "missed (expected)"
+        ),
+        "unexpected_catches": sum(
+            1 for r in misses if r["outcome"] == "UNEXPECTED CATCH"
+        ),
+        "exact": sum(1 for r in rows if r["exact"]),
+        "clauses": len(rows),
+    }
+
+
+def cmd_score(only: str | None, readings_dir: Path) -> int:
+    started = time.monotonic()
+    if not readings_dir.is_dir():
+        raise Refused(f"there is no readings directory at {readings_dir}")
+    chosen = takes(only)
+    for take in chosen:
+        if not recorded(take):
+            raise Refused(f"{take.name} has no frames. Run `tests/eval-grader record`.")
+    rows = []
+    for take in chosen:
+        rows += score_take(take, readings_dir)
+    counts = summary(rows)
+    print(_table(rows))
+    print()
+    print(
+        f"planted defects caught       {counts['caught']}/{counts['planted']}\n"
+        f"clean clauses falsely flagged {counts['false_alarms']}/{counts['clean']}\n"
+        f"expected misses, missed      "
+        f"{counts['missed_as_expected']}/{counts['expected_misses']}  "
+        f"(expected — a corpus with none of these measures its own fixtures)\n"
+        f"exact status+class match     {counts['exact']}/{counts['clauses']}"
+    )
+    if counts["unexpected_catches"]:
+        print(
+            f"\n*** {counts['unexpected_catches']} clause(s) the reader was "
+            f"expected to miss were CAUGHT. That is a finding about the reader, "
+            f"not a fixture to correct. Report it; do not edit the expectation."
+        )
+    late = [t.name for t in chosen if stale(t)]
+    if late:
+        print(
+            f"\nNOTE: the frames for {', '.join(late)} were recorded from a "
+            f"different storyboard, app or recorder than the one on disk now. "
+            f"The score above is of those older pictures. `tests/eval-grader "
+            f"record` re-records them."
+        )
+    print(f"\nscored {len(rows)} clauses in {time.monotonic() - started:.1f}s")
+    # Exit 0 whatever it found, for `demo-grade verdict`'s reason: this reports
+    # a measurement of the reader to a person, and a measurement that can
+    # redden a build is one somebody turns off before they believe it.
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="command", required=True)
+    rec = sub.add_parser("record", help="record the corpus (cached)")
+    rec.add_argument("--force", action="store_true", help="re-record even if cached")
+    rec.add_argument("--take", help="one take by name")
+    bri = sub.add_parser("brief", help="write a blind reader's brief per take")
+    bri.add_argument("--take", help="one take by name")
+    sco = sub.add_parser("score", help="score readings against the expectations")
+    sco.add_argument("--readings", required=True, help="a directory of <take>.json")
+    sco.add_argument("--take", help="one take by name")
+    args = ap.parse_args(argv)
+    try:
+        if args.command == "record":
+            return cmd_record(args.take, args.force)
+        if args.command == "brief":
+            return cmd_brief(args.take)
+        return cmd_score(args.take, Path(args.readings))
+    except Refused as refusal:
+        print(f"eval-grader: refusing — {refusal}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

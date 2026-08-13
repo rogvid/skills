@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "take": "clean-search",
+  "what": "The second false-alarm control, a different shape: typing rather than clicking, and one clause whose evidence is a line of text where rows used to be.",
+  "clauses": {
+    "AC-1": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "Two beats type a word into the box and the queue narrows to a single row while the box fills; no button is pressed anywhere in the take."
+    },
+    "AC-2": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "Typing refund leaves the 'No tickets match this filter.' line in place of the rows, which is the clause verbatim on screen."
+    }
+  }
+}
