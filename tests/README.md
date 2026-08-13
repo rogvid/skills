@@ -81,6 +81,22 @@ tests/lint                        # ruff check + ruff format --check + doc fence
 tests/lint --self-test            # prove all three grade something
 ```
 
+**`tests/unit --fault-inject` runs only the tests each entry names, not the
+whole suite.** Every entry already declares which tests must fail, so that is
+what the inner run executes. It used to re-run all of `tests/unit` per entry,
+which made an injection cost `O(every test in this file)` — 302 entries × the
+whole suite — and the `unit (demo-video recorder)` job was cancelled twice, at
+10m17s and 15m16s. Measured on a 16-core developer box over the same 302
+entries: **557 s before, 63 s after**, all 302 caught either way.
+
+The reason that speed-up is not a hole: a targeted run that selects *nothing*
+runs no tests and exits 0, which reads exactly like "the injection was caught".
+So the driver reads the number of tests the inner run actually started and
+**aborts at exit 3** — the same refusal a search string that matched other than
+exactly once gets — unless it equals the number of tests the entry named. An
+entry naming a test that no longer exists aborts by name rather than arriving
+as a miss.
+
 **Lint with `tests/lint`, not with `uvx ruff`.** They are not the same command.
 `uvx ruff` resolves to whatever ruff is current, which on this tree sees a
 different set of files and disagrees about them — in the direction where you
