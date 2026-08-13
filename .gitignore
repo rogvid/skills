@@ -32,6 +32,13 @@ examples/*/demos/*/demo.mp4
 # to their demo folder, because `frames` is a plausible name for a directory of
 # real source; this repo has none, so a bare pattern is safe here.
 frames/
+# What `scripts/demo-grade` writes beside them: the brief handed to a blind
+# reader, and the comparison of that reader's answers with what the storyboard
+# claimed (issue #279). A sidecar and not part of timeline.json on purpose —
+# timeline.json is committed and diffed, and a model's reading of a picture
+# must not be carried in it forever. Anchored the way `frames/` is not, because
+# `review` is a likelier name for real source than `frames` is.
+examples/*/demos/*/review/
 # Left behind only when a take crashes before the recorder cleans up.
 .video/
 .frame.png

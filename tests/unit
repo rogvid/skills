@@ -9510,6 +9510,750 @@ class LogEarlyCause(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# A brief a second reader cannot see the claims through (issue #279)
+# --------------------------------------------------------------------------
+#
+# `scripts/demo-grade` has two halves and no model call in either. `brief`
+# writes what a blind reader is handed; `verdict` reads that reader's answers
+# back and compares them with `coverage.claimed`, which the reader never saw.
+# Both are functions of documents, which is what lets this suite grade the
+# whole thing without a model and without a browser.
+#
+# **The assertion this section exists for is `BriefIsBlind`.** The blindness is
+# structural — `render_brief_md(criteria, frames)` cannot be handed a claim —
+# but a structure is an argument, not a measurement. What is measured is the
+# artifact: `coverage.claimed` is mutated every way a storyboard could differ
+# (reordered, every timestamp changed, every still replaced, claimed nowhere,
+# claimed everywhere, the claims swapped between clauses, the key deleted
+# outright) and both brief files must come out **byte-identical**. Its control
+# is next to it, because a renderer that returned a constant would satisfy that
+# test perfectly: the same comparison is run over a changed clause and a
+# changed frame list, where the bytes must move.
+#
+# There are **three channels** a claim can leak through, and a mutation set
+# that closes two of them is a check with a hole in it. The claims can reach
+# the reader as *content* (a beat number, a timestamp, a still printed beside a
+# clause), as the *set* of frames listed, or as the *order* the clauses are
+# printed in. The last one leaves every byte of the text alone and still hands
+# the reader the storyboard's answer, and it survived the first version of this
+# section: every mutation preserved the two clauses' relative claim order, so a
+# `sorted(criteria, key=first_claimed_beat)` in `cmd_brief` was invisible. What
+# closes it is the fixture — see `GRADE_CRITERIA` — and the swap mutation, and
+# both are graded by an injection of exactly that shape.
+#
+# The fixture's numbers are not invented. They are a real take of
+# `examples/ticket-queue/demos/2026-08-11-criterion-card` graded by a blind
+# reader: AC-1 claimed on beats [4, 6, 8, 12, 13] and read at beat 10, AC-3
+# claimed on [18, 20, 25, 26, 31] and read at beat 23. Both readings are
+# correct and neither is in its claimed set — the caption goes up a beat or two
+# before the screen catches up — so a rule that asked for set membership, or
+# for one beat of tolerance, would report a disagreement on a demo that is
+# right. That is what the span rule is for and what `SpanRule` grades at its
+# boundary.
+
+GRADE_CLI = SKILL_DIR / "scripts" / "demo-grade"
+
+# The clauses, the claims and the readings of the measured take above, plus a
+# third clause whose **declaration order and claim order disagree**. That
+# disagreement is load-bearing and it is the fixture's job, not the shipped
+# code's: with two clauses declared in the order they are claimed, a leak that
+# reorders the brief *by* the claims produces the same file, and the
+# byte-identical check above never sees it. AC-2 is declared last and claimed
+# first, so any ordering derived from the claims — ascending or descending —
+# differs from the order the ticket declares.
+GRADE_CRITERIA = {
+    "AC-1": "A search box above the queue narrows the list as you type.",
+    "AC-3": "Search matches the requester as well as the title.",
+    "AC-2": "Search and the status filter combine, and the count agrees.",
+}
+GRADE_CLAIMED = {
+    "AC-1": [4, 6, 8, 12, 13],
+    "AC-3": [18, 20, 25, 26, 31],
+    "AC-2": [1, 2],
+}
+GRADE_READ = {
+    "AC-1": "beat-10.png",
+    "AC-3": "beat-23.png",
+    "AC-2": "beat-01.png",
+}
+
+
+def _grade_module():
+    """`scripts/demo-grade`, imported as a module.
+
+    Off `SKILL_DIR` rather than off the repository, so `--fault-inject` grades
+    the broken copy the way `OneClassifier` does for the target guard.
+    """
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("demo_grade", str(GRADE_CLI))
+    spec = importlib.util.spec_from_loader("demo_grade", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+grade = _grade_module()
+
+
+def _grade_claim_rows(beats: list[int]) -> list[dict]:
+    """`coverage.claimed[id]` rows, as `coverage.py` writes them."""
+    return [
+        {
+            "index": beat,
+            "segment": None,
+            "segment_index": beat,
+            "t_start": round(beat * 1.37, 3),
+            "still": f"images/{beat:02d}-x.png" if beat % 4 == 0 else None,
+        }
+        for beat in beats
+    ]
+
+
+def _grade_demo(
+    root,
+    criteria: dict | None = None,
+    claimed: dict | None = None,
+    frames: list[dict] | None = None,
+    coverage: object = ...,
+) -> Path:
+    """A take's output folder: a timeline, and a frames manifest beside it."""
+    demo = Path(root)
+    (demo / "frames").mkdir(parents=True, exist_ok=True)
+    criteria = GRADE_CRITERIA if criteria is None else criteria
+    claimed = GRADE_CLAIMED if claimed is None else claimed
+    if coverage is ...:
+        coverage = {
+            "criteria": criteria,
+            "claimed": {k: _grade_claim_rows(v) for k, v in claimed.items()},
+            "unclaimed": [k for k, v in claimed.items() if not v],
+            "tagged_beats": sum(len(v) for v in claimed.values()),
+            "untagged_beats": 3,
+        }
+    (demo / "timeline.json").write_text(
+        json.dumps({"schema": 1, "media": "demo.mp4", "coverage": coverage}),
+        encoding="utf-8",
+    )
+    if frames is None:
+        frames = [
+            {"file": f"beat-{i:02d}.png", "kind": "beat", "beat": i, "t": float(i)}
+            for i in range(35)
+        ]
+    (demo / "frames" / "frames.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "media": "demo.mp4",
+                "duration": 35.0,
+                "frames": frames,
+                "skipped": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return demo
+
+
+def _grade_reading(rows: list[dict], schema: int = 1) -> dict:
+    return {"schema": schema, "readings": rows}
+
+
+def _grade_row(criterion, frame, status="seen", why="the list narrows", conf="high"):
+    return {
+        "criterion": criterion,
+        "frame": frame,
+        "status": status,
+        "why": why,
+        "confidence": conf,
+    }
+
+
+class _GradeCase(unittest.TestCase):
+    """Runs the shipped CLI, because the exit status is half the contract."""
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(GRADE_CLI), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def brief(self, demo: Path) -> tuple[bytes, bytes]:
+        done = self.run_cli("brief", str(demo))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        review = demo / "review"
+        return (
+            (review / "brief.md").read_bytes(),
+            (review / "brief.json").read_bytes(),
+        )
+
+    def verdict(self, demo: Path, rows: list[dict], schema: int = 1) -> dict:
+        path = demo / "reading.json"
+        path.write_text(json.dumps(_grade_reading(rows, schema)), encoding="utf-8")
+        done = self.run_cli("verdict", str(demo), "--reading", str(path))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads((demo / "review" / "verdict.json").read_text())
+
+    def refused(self, *args: str) -> str:
+        """A refusal: exit 2, and the reason on stderr rather than a traceback."""
+        done = self.run_cli(*args)
+        self.assertEqual(done.returncode, 2, f"stdout={done.stdout} err={done.stderr}")
+        self.assertIn("refusing", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        return done.stderr
+
+
+class BriefIsBlind(_GradeCase):
+    """The brief is a pure function of the clauses and the frame manifest."""
+
+    # Every way a storyboard's claims can differ, applied to the same take.
+    # A brief that moved under any of them would be carrying the author's
+    # answer into the document written to keep it out.
+    def mutations(self, claimed: dict) -> list[tuple[str, object]]:
+        return [
+            (
+                "the claims are reordered",
+                {k: list(reversed(v)) for k, v in claimed.items()},
+            ),
+            (
+                "every timestamp is different",
+                {
+                    k: [{**row, "t_start": 99.9 - i} for i, row in enumerate(v)]
+                    for k, v in claimed.items()
+                },
+            ),
+            (
+                "every still is a different file",
+                {
+                    k: [{**row, "still": "images/99-elsewhere.png"} for row in v]
+                    for k, v in claimed.items()
+                },
+            ),
+            ("every clause is claimed nowhere", {k: [] for k in claimed}),
+            (
+                "every clause is claimed on every beat",
+                {k: _grade_claim_rows(list(range(35))) for k in claimed},
+            ),
+            # The ordering channel, and the only mutation that reaches it while
+            # every clause keeps a claim: each clause is given the next one's
+            # beats, so the rank the claims put the clauses in changes and not
+            # one byte of the text does. Without it, a brief ordered by the
+            # claims renders identically under every mutation above.
+            (
+                "the claims are swapped between the clauses",
+                {
+                    key: claimed[next_key]
+                    for key, next_key in zip(
+                        claimed,
+                        [*list(claimed)[1:], next(iter(claimed))],
+                        strict=True,
+                    )
+                },
+            ),
+            ("the claims are gone entirely", None),
+        ]
+
+    def test_the_brief_is_byte_identical_however_the_claims_are_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp)
+            first = self.brief(demo)
+            doc = json.loads((demo / "timeline.json").read_text())
+            claimed = doc["coverage"]["claimed"]
+            for name, mutated in self.mutations(claimed):
+                with self.subTest(mutation=name):
+                    if mutated is None:
+                        doc["coverage"].pop("claimed", None)
+                    else:
+                        doc["coverage"]["claimed"] = mutated
+                    (demo / "timeline.json").write_text(
+                        json.dumps(doc), encoding="utf-8"
+                    )
+                    self.assertEqual(
+                        self.brief(demo),
+                        first,
+                        f"the brief changed when {name} — the reader is being "
+                        f"handed the storyboard's answer",
+                    )
+
+    def test_the_brief_does_move_when_a_clause_or_a_frame_moves(self):
+        # The control on the test above, and it is not optional: a renderer
+        # that returned a constant string would pass every mutation perfectly.
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp)
+            first = self.brief(demo)
+            _grade_demo(tmp, criteria={**GRADE_CRITERIA, "AC-1": "Something else."})
+            self.assertNotEqual(self.brief(demo), first, "a reworded clause")
+            _grade_demo(
+                tmp,
+                frames=[
+                    {"file": "beat-00.png", "kind": "beat", "beat": 0, "t": 0.0},
+                    {"file": "beat-01.png", "kind": "beat", "beat": 1, "t": 1.0},
+                ],
+            )
+            self.assertNotEqual(self.brief(demo), first, "a different frame sheet")
+
+    def test_the_renderers_cannot_be_handed_a_claim_at_all(self):
+        # The structural half. `(criteria, frames)` and nothing else means a
+        # leak has to be written into the caller, where the test above sees it
+        # — rather than being one `doc.get("claimed")` away inside a renderer
+        # that was passed the whole coverage document.
+        for func in (grade.render_brief_md, grade.brief_doc):
+            with self.subTest(func=func.__name__):
+                self.assertEqual(
+                    list(inspect.signature(func).parameters),
+                    ["criteria", "frames"],
+                )
+
+    def test_the_brief_asks_for_localisation_and_not_for_a_verdict(self):
+        # #131 measured the aggregate answer unstable and the localisation
+        # stable, so the aggregate is not asked for. The words matter here:
+        # this is the whole instruction the reader acts on.
+        text = grade.render_brief_md(GRADE_CRITERIA, ["beat-00.png"])
+        self.assertIn("first", text)
+        self.assertIn("not seen", text)
+        self.assertIn("cannot tell", text)
+        self.assertIn("confidence", text)
+        self.assertIn("do not say whether it should ship", text.lower())
+
+    def test_the_brief_states_the_limit_it_cannot_design_away(self):
+        # Required by #279 in the artifact itself: the caption is burned into
+        # every frame the reader reads, so a storyboard whose caption asserts a
+        # misread requirement and whose screen agrees with it survives this
+        # check. A cross-check that does not carry its own boundary gets read
+        # as one that has none.
+        text = grade.render_brief_md(GRADE_CRITERIA, ["beat-00.png"])
+        self.assertIn("burned into the pixels", text)
+        self.assertIn("does **not**", text)
+        self.assertIn("agrees with the caption", text)
+
+
+class BriefRefusals(_GradeCase):
+    """Refusing is the correct answer to these, not an error path."""
+
+    def test_a_take_that_declared_no_criteria_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp, coverage=None)
+            self.assertIn("no acceptance criteria", self.refused("brief", str(demo)))
+
+    def test_a_take_with_an_empty_criteria_map_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp, coverage={"criteria": {}, "claimed": {}})
+            self.assertIn("no criteria", self.refused("brief", str(demo)))
+
+    def test_a_missing_frames_manifest_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp)
+            (demo / "frames" / "frames.json").unlink()
+            self.assertIn("frames.json", self.refused("brief", str(demo)))
+
+    def test_an_empty_frames_manifest_is_refused(self):
+        # A take whose frames were skipped — a segment, or a crash before the
+        # encode — has nothing for a reader to look at, and the manifest says
+        # why. A brief listing no frames would be a question with no evidence.
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp, frames=[])
+            self.assertIn("lists no frames", self.refused("brief", str(demo)))
+
+    def test_a_missing_timeline_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp)
+            (demo / "timeline.json").unlink()
+            self.assertIn("timeline.json", self.refused("brief", str(demo)))
+
+    def test_the_ordinary_take_is_not_refused(self):
+        # The control: without it every assertion above is satisfied by a
+        # command that refuses everything.
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp)
+            done = self.run_cli("brief", str(demo))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue((demo / "review" / "brief.md").is_file())
+
+
+class FrameOrder(_GradeCase):
+    """Beat index to frame file is not 1:1, and the manifest is what says so."""
+
+    # A scene frame inside a long beat, and a beat the host's clock deleted
+    # from the file — whose frame is cut at the last instant before the gap,
+    # so the sheet's name order and the video's order part company.
+    SHEET = [
+        {"file": "beat-00.png", "kind": "beat", "beat": 0, "t": 0.0},
+        {"file": "beat-01.png", "kind": "beat", "beat": 1, "t": 1.0},
+        {"file": "beat-01-scene-1.png", "kind": "scene", "beat": 1, "t": 2.5},
+        {"file": "beat-03.png", "kind": "beat", "beat": 3, "t": 9.0},
+        {"file": "beat-02.png", "kind": "beat", "beat": 2, "t": 4.0, "no_video": 1.2},
+    ]
+
+    def test_the_frames_are_listed_in_the_order_they_occur_in_the_video(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(tmp, frames=self.SHEET)
+            self.brief(demo)
+            listed = json.loads((demo / "review" / "brief.json").read_text())["frames"]
+            self.assertEqual(
+                listed,
+                [
+                    "beat-00.png",
+                    "beat-01.png",
+                    "beat-01-scene-1.png",
+                    "beat-02.png",
+                    "beat-03.png",
+                ],
+            )
+
+    def test_a_scene_frame_is_compared_against_the_beat_it_was_cut_from(self):
+        # The reading names `beat-01-scene-1.png`, which is beat 1 — a fact
+        # only the manifest holds. Read off the filename it would be beat 1 by
+        # luck; read off the sheet's position it would be the third frame.
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = _grade_demo(
+                tmp, claimed={"AC-1": [1, 2], "AC-3": [3]}, frames=self.SHEET
+            )
+            doc = self.verdict(
+                demo,
+                [
+                    _grade_row("AC-1", "beat-01-scene-1.png"),
+                    _grade_row("AC-3", "beat-03.png"),
+                ],
+            )
+            rows = {c["criterion"]: c for c in doc["clauses"]}
+            self.assertEqual(rows["AC-1"]["reading"]["beat"], 1)
+            self.assertEqual(rows["AC-1"]["agreement"]["class"], "agreement")
+
+
+class ReadingValidation(_GradeCase):
+    """What a reading may say, and what is refused rather than compared."""
+
+    def refuse_reading(self, doc: object, demo: Path) -> str:
+        path = demo / "reading.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return self.refused("verdict", str(demo), "--reading", str(path))
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.demo = _grade_demo(self._tmp.name)
+
+    def test_a_criterion_the_take_never_declared_is_refused(self):
+        said = self.refuse_reading(
+            _grade_reading([_grade_row("AC-9", "beat-10.png")]), self.demo
+        )
+        self.assertIn("AC-9", said)
+
+    def test_a_frame_that_is_not_in_the_manifest_is_refused(self):
+        # The reader can only have looked at the frames the brief listed, so a
+        # frame nobody photographed is a reading of something else.
+        said = self.refuse_reading(
+            _grade_reading([_grade_row("AC-1", "beat-99.png")]), self.demo
+        )
+        self.assertIn("beat-99.png", said)
+
+    def test_a_status_outside_the_three_is_refused(self):
+        said = self.refuse_reading(
+            _grade_reading([_grade_row("AC-1", "beat-10.png", status="met")]),
+            self.demo,
+        )
+        self.assertIn("met", said)
+
+    def test_a_confidence_outside_the_three_is_refused(self):
+        said = self.refuse_reading(
+            _grade_reading([_grade_row("AC-1", "beat-10.png", conf="pretty sure")]),
+            self.demo,
+        )
+        self.assertIn("pretty sure", said)
+
+    def test_a_seen_reading_with_no_frame_is_refused(self):
+        # `seen` without a frame answers the question the brief did not ask.
+        said = self.refuse_reading(
+            _grade_reading([_grade_row("AC-1", None)]), self.demo
+        )
+        self.assertIn("no frame", said)
+
+    def test_two_answers_for_one_clause_are_refused(self):
+        said = self.refuse_reading(
+            _grade_reading(
+                [_grade_row("AC-1", "beat-10.png"), _grade_row("AC-1", "beat-20.png")]
+            ),
+            self.demo,
+        )
+        self.assertIn("second answer", said)
+
+    def test_a_malformed_document_is_refused(self):
+        for name, doc in (
+            ("not an object", ["AC-1"]),
+            ("no readings list", {"schema": 1}),
+            ("another schema", _grade_reading([], schema=7)),
+            ("a row that is not an object", {"schema": 1, "readings": ["AC-1"]}),
+            (
+                "an empty why",
+                _grade_reading([_grade_row("AC-1", "beat-10.png", why="  ")]),
+            ),
+        ):
+            with self.subTest(document=name):
+                self.refuse_reading(doc, self.demo)
+
+    def test_the_measured_reading_is_accepted(self):
+        # The control. Every refusal above is satisfied by a command that
+        # refuses every document it is given.
+        doc = self.verdict(self.demo, [_grade_row(k, v) for k, v in GRADE_READ.items()])
+        self.assertEqual(doc["counts"]["agreement"], len(GRADE_CRITERIA))
+
+
+class SpanRule(unittest.TestCase):
+    """The comparison rule, graded at both ends of the span and outside it."""
+
+    CLAIMED = [4, 6, 8, 12, 13]
+
+    def kind(self, beat=None, status="seen", claimed=None):
+        reading = (
+            None
+            if status is None
+            else {"status": status, "frame": f"beat-{beat}.png", "beat": beat}
+        )
+        claimed = self.CLAIMED if claimed is None else claimed
+        return grade.classify(reading, claimed)[0]
+
+    def test_a_reading_inside_the_span_but_in_no_claimed_set_agrees(self):
+        # The measured case, and the whole reason the rule is a span: beat 10
+        # is between the claims at 8 and 12 because the caption led its
+        # evidence. Set membership, or one beat of tolerance, calls this a
+        # disagreement on a demo that is right.
+        self.assertEqual(self.kind(10), "agreement")
+
+    def test_the_two_ends_of_the_span_are_inside_it(self):
+        self.assertEqual(self.kind(4), "agreement")
+        self.assertEqual(self.kind(13), "agreement")
+
+    def test_one_beat_outside_each_end_is_a_disagreement(self):
+        # The boundary, from the other side. Without these two the rule could
+        # be any window at all and this class would not notice.
+        self.assertEqual(self.kind(3), "disagreement")
+        self.assertEqual(self.kind(14), "disagreement")
+
+    def test_a_clause_the_reader_found_that_nothing_claimed_disagrees(self):
+        self.assertEqual(self.kind(10, claimed=[]), "disagreement")
+
+    def test_a_claimed_clause_the_reader_could_not_find_disagrees(self):
+        # The finding this whole check exists for: the storyboard says the
+        # demo shows it and the frames do not.
+        self.assertEqual(self.kind(None, status="not seen"), "disagreement")
+
+    def test_neither_derivation_locating_it_is_not_demonstrated(self):
+        self.assertEqual(
+            self.kind(None, status="not seen", claimed=[]), "not demonstrated"
+        )
+
+    def test_cannot_tell_stays_cannot_tell_whatever_was_claimed(self):
+        self.assertEqual(self.kind(10, status="cannot tell"), "cannot tell")
+
+    def test_the_rule_and_its_weakness_are_written_down(self):
+        # An agreement rule nobody can read is a number with no argument. The
+        # weakness is stated with it: a wide claimed span makes agreement
+        # cheap, so agreement is weaker the more beats a clause claims.
+        rule = grade.agreement_rule()
+        self.assertIn("span", rule["rule"])
+        self.assertIn("beats, not seconds", rule["unit"])
+        self.assertIn("caption", rule["why"])
+        self.assertIn("wider the claimed span", rule["weakness"])
+
+
+class VerdictOutput(_GradeCase):
+    """What the comparison writes down, and what it refuses to leave out."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.demo = _grade_demo(self._tmp.name)
+
+    def test_a_clause_the_reader_did_not_see_still_exits_zero(self):
+        # The command may not fail a run for what it found. A grader that can
+        # redden a build is turned off long before it is believed, and "the
+        # demo does not show AC-3" is a finding for a human either way.
+        path = self.demo / "reading.json"
+        path.write_text(
+            json.dumps(
+                _grade_reading(
+                    [
+                        _grade_row("AC-1", GRADE_READ["AC-1"]),
+                        _grade_row("AC-3", None, status="not seen", why="never shown"),
+                    ]
+                )
+            ),
+            encoding="utf-8",
+        )
+        done = self.run_cli("verdict", str(self.demo), "--reading", str(path))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        doc = json.loads((self.demo / "review" / "verdict.json").read_text())
+        self.assertEqual(doc["counts"]["disagreement"], 1)
+
+    def test_a_declared_clause_the_reader_skipped_is_recorded_as_no_reading(self):
+        # Never silently absent, and never a pass: nothing derived a status
+        # for it, and that is itself the thing to report.
+        doc = self.verdict(
+            self.demo,
+            [
+                _grade_row("AC-1", GRADE_READ["AC-1"]),
+                _grade_row("AC-2", GRADE_READ["AC-2"]),
+            ],
+        )
+        rows = {c["criterion"]: c for c in doc["clauses"]}
+        self.assertEqual(set(rows), set(GRADE_CRITERIA))
+        self.assertEqual(rows["AC-3"]["agreement"]["class"], "no reading")
+        self.assertEqual(rows["AC-3"]["reading"]["status"], "no reading")
+        self.assertEqual(doc["counts"]["no reading"], 1)
+        self.assertIn("no reading", (self.demo / "review" / "verdict.md").read_text())
+
+    def test_disagreements_are_printed_before_agreements(self):
+        # In both artifacts, and in declaration order that is the wrong way
+        # round: AC-1 agrees and is declared first.
+        doc = self.verdict(
+            self.demo,
+            [
+                _grade_row("AC-1", GRADE_READ["AC-1"]),
+                _grade_row("AC-3", "beat-33.png"),
+                _grade_row("AC-2", GRADE_READ["AC-2"]),
+            ],
+        )
+        self.assertEqual(
+            [c["agreement"]["class"] for c in doc["clauses"]],
+            ["disagreement", "agreement", "agreement"],
+        )
+        self.assertEqual(doc["clauses"][0]["criterion"], "AC-3")
+        page = (self.demo / "review" / "verdict.md").read_text()
+        self.assertLess(page.index("## disagreement"), page.index("## agreement"))
+
+    def test_no_status_is_written_down_without_what_derived_it(self):
+        """#279's acceptance, asserted over all three fields rather than one.
+
+        Nothing is pre-ticked by whatever wrote the label. Each of the three
+        rows names what produced it, and the claim is different for each — so
+        checking one field and describing three is how a hole gets left. The
+        two that carry a **status** (what the reader answered, and how the two
+        derivations compared) may never name the storyboard: it wrote the
+        claim being checked, and a status attributed to it is the artifact
+        agreeing with itself. The third row *is* the storyboard's, and it must
+        say so — `claimed_beats` presented without its source reads as a fact
+        about the demo rather than as the tags somebody typed.
+        """
+        doc = self.verdict(
+            self.demo,
+            [
+                _grade_row("AC-1", GRADE_READ["AC-1"]),
+                _grade_row("AC-3", "beat-33.png"),
+                _grade_row("AC-2", GRADE_READ["AC-2"]),
+            ],
+        )
+        page = (self.demo / "review" / "verdict.md").read_text()
+        for row in doc["clauses"]:
+            for part in ("reading", "storyboard", "agreement"):
+                self.assertTrue(
+                    row[part].get("derivation"),
+                    f"{row['criterion']}'s {part} has no derivation",
+                )
+                self.assertIn(row[part]["derivation"], page)
+            for part in ("reading", "agreement"):
+                self.assertNotEqual(
+                    row[part]["derivation"],
+                    grade.BY_STORYBOARD,
+                    f"the storyboard is named as what derived {row['criterion']}'s "
+                    f"{part} status",
+                )
+            self.assertEqual(
+                row["storyboard"]["derivation"],
+                grade.BY_STORYBOARD,
+                "the claimed beats are printed without naming the tags they are",
+            )
+
+    def test_the_verdict_carries_the_limit_and_the_span_it_compared(self):
+        """...on the **storyboard's own row**, which is what was promised.
+
+        `agreement_rule()["weakness"]` says every row prints its span so a
+        reader can see how much room the rule was given, and the storyboard row
+        is the one that keeps that promise. Asserting a bare `span [4, 13]`
+        anywhere on the page does not: `classify()` writes "inside the claimed
+        span [4, 13]" into the agreement sentence, so the storyboard row could
+        be deleted whole and the check would stay green on the other line.
+        That is the dominated assertion out of `wip/verified-review`, so the
+        whole line is anchored, for every clause.
+        """
+        doc = self.verdict(self.demo, [_grade_row(k, v) for k, v in GRADE_READ.items()])
+        page = (self.demo / "review" / "verdict.md").read_text()
+        self.assertIn("cross-check, not a verification", page)
+        self.assertIn("agrees with the caption", page)
+        for row in doc["clauses"]:
+            beats = GRADE_CLAIMED[row["criterion"]]
+            self.assertEqual(row["storyboard"]["span"], [min(beats), max(beats)])
+            self.assertIn(
+                f"- **Storyboard:** claimed beats {beats}, "
+                f"span [{min(beats)}, {max(beats)}]",
+                page,
+                f"{row['criterion']}'s storyboard row does not print the span "
+                f"the rule was given",
+            )
+
+    def test_a_refused_run_leaves_no_verdict_from_the_run_before_it(self):
+        """A stale answer under a current mtime is the artifact lying.
+
+        The refusal is on stderr and in the exit status, and neither of those
+        is in the file: a reader who opens `review/verdict.md` after a refused
+        run would otherwise find the *previous* reading's comparison, with
+        nothing on it saying which run it belongs to. `frames.py` takes its
+        stale sheet off disk before writing for the same reason.
+        """
+        self.verdict(self.demo, [_grade_row(k, v) for k, v in GRADE_READ.items()])
+        written = [self.demo / "review" / n for n in ("verdict.json", "verdict.md")]
+        self.assertTrue(all(p.is_file() for p in written), "nothing to go stale")
+        path = self.demo / "reading.json"
+        path.write_text(
+            json.dumps(_grade_reading([_grade_row("AC-9", "beat-10.png")])),
+            encoding="utf-8",
+        )
+        done = self.run_cli("verdict", str(self.demo), "--reading", str(path))
+        self.assertEqual(done.returncode, 2, done.stderr)
+        for path in written:
+            self.assertFalse(
+                path.exists(),
+                f"{path.name} survived a refused run and now reads as its output",
+            )
+
+    def test_a_refused_brief_leaves_no_brief_from_the_run_before_it(self):
+        # The same failure through the other command, and the worse of the
+        # two: a stale brief is a document handed to a reader, listing another
+        # take's clauses.
+        self.brief(self.demo)
+        written = [self.demo / "review" / n for n in ("brief.md", "brief.json")]
+        self.assertTrue(all(p.is_file() for p in written), "nothing to go stale")
+        _grade_demo(self._tmp.name, coverage=None)
+        self.assertIn("no acceptance criteria", self.refused("brief", str(self.demo)))
+        for path in written:
+            self.assertFalse(
+                path.exists(),
+                f"{path.name} survived a refused run and now reads as its output",
+            )
+
+
+class ExitStatus(_GradeCase):
+    """Two codes, and the docstring names the ones the script actually uses."""
+
+    def test_a_usage_error_exits_two_like_a_refusal_does(self):
+        # argparse's own code, not overridden. It is worth pinning because the
+        # obvious thing to write in a docstring is 1, and a caller reading that
+        # would treat a mistyped path as "refused" or the other way round.
+        for args in (("brief",), ("verdict", "/nowhere"), ("nonsense", "/nowhere")):
+            with self.subTest(args=args):
+                done = self.run_cli(*args)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertNotIn("refusing", done.stderr)
+
+    def test_the_docstring_names_those_codes_and_no_others(self):
+        # The half that catches the drift: a paragraph promising an exit code
+        # the script cannot return is documentation that a caller's `if` is
+        # written against.
+        section = grade.__doc__.split("## Exit status")[1]
+        self.assertEqual(set(re.findall(r"\b([0-9])\b", section)), {"0", "2"})
+
+
+# --------------------------------------------------------------------------
 
 # Issue #203, as the overlay shipped before it was fixed and after it was.
 # Nothing below is rewritten by hand: the two are the same region of
@@ -13471,6 +14215,263 @@ INJECTIONS = [
         "(issue #278).\n"
         "    out += _ticket_md(doc)",
         ["TicketMd.test_the_ticket_is_named_above_the_table_of_clauses_quoted_from_it"],
+    ),
+    # -- scripts/demo-grade (issue #279) ------------------------------------
+    (
+        # **The defect the whole slice exists to prevent**, written the way
+        # somebody helpful would write it: the reader is told where to look, so
+        # that it "wastes less time". A reader handed the storyboard's answer
+        # is a reader agreeing with the storyboard, and the second derivation
+        # stops being a second derivation. Nothing else in this suite can see
+        # it — the brief still renders, still lists every clause and every
+        # frame, and still asks for a localisation.
+        "the brief tells the reader which beats the storyboard claimed",
+        "scripts/demo-grade",
+        "    # The two arguments below are the whole blindness of this feature."
+        " Nothing\n"
+        "    # read out of `claimed` is in scope by the time they are built, "
+        "and the two\n"
+        "    # renderers cannot reach for it.\n"
+        '    _write(demo, "brief.md", render_brief_md(criteria, frames))',
+        '    claimed = (timeline.get("coverage") or {}).get("claimed") or {}\n'
+        "    criteria = {\n"
+        '        key: f"{text} (claimed at beats "\n'
+        "        f\"{[row.get('index') for row in claimed.get(key, [])]})\"\n"
+        "        for key, text in criteria.items()\n"
+        "    }\n"
+        '    _write(demo, "brief.md", render_brief_md(criteria, frames))',
+        [
+            "BriefIsBlind."
+            "test_the_brief_is_byte_identical_however_the_claims_are_written"
+        ],
+    ),
+    (
+        # The same leak through the other file, carrying the other two fields.
+        # Without this entry the timestamp and still mutations above grade
+        # nothing: the beat-index leak leaves both of them byte-identical, and
+        # a mutation nothing can redden is decoration in a list that reads as
+        # coverage. It also grades that *both* artifacts are compared — this
+        # one leaves `brief.md` untouched.
+        "brief.json names the still and the time claimed for each clause",
+        "scripts/demo-grade",
+        "        json.dumps(brief_doc(criteria, frames), indent=2, "
+        'ensure_ascii=False) + "\\n",',
+        "        json.dumps(\n            brief_doc(\n                {\n"
+        '                    key: f"{text} "\n'
+        "                    f\"{[(r.get('t_start'), r.get('still')) for r in "
+        "((timeline.get('coverage') or {}).get('claimed') or {}).get(key, [])]}\"\n"
+        "                    for key, text in criteria.items()\n"
+        "                },\n                frames,\n            ),\n"
+        "            indent=2,\n            ensure_ascii=False,\n        )\n"
+        '        + "\\n",',
+        [
+            "BriefIsBlind."
+            "test_the_brief_is_byte_identical_however_the_claims_are_written"
+        ],
+    ),
+    (
+        # The frames are listed in the order they occur in the *video*, read
+        # off the manifest's own timestamps. Sorted by name they are almost
+        # always the same list, which is exactly why this needs an assertion:
+        # the cases that differ are a scene frame inside a long beat and a beat
+        # the host's clock deleted from the file.
+        "the brief lists the frames in filename order instead of video order",
+        "scripts/demo-grade",
+        '    return sorted(records, key=lambda record: float(record["t"]))',
+        '    return sorted(records, key=lambda record: str(record["file"]))',
+        ["FrameOrder.test_the_frames_are_listed_in_the_order_they_occur_in_the_video"],
+    ),
+    (
+        # A refusal reported as success. Both commands print the reason either
+        # way, so the only thing that changes is what a caller's `&&` does with
+        # it — which is the whole difference between a guard and a log line.
+        "a refusal exits 0",
+        "scripts/demo-grade",
+        '        print(f"demo-grade: refusing — {refusal}", file=sys.stderr)\n'
+        "        return 2",
+        '        print(f"demo-grade: refusing — {refusal}", file=sys.stderr)\n'
+        "        return 0",
+        [
+            "BriefRefusals.test_a_take_that_declared_no_criteria_is_refused",
+            "ReadingValidation.test_a_criterion_the_take_never_declared_is_refused",
+        ],
+    ),
+    (
+        # An empty sheet is what a segment take and a take that crashed before
+        # the encode both produce. A brief listing no frames is a question
+        # with no evidence attached, and it reads exactly like a brief for a
+        # demo that showed nothing.
+        "a frames manifest with no frames in it produces a brief anyway",
+        "scripts/demo-grade",
+        "    if not isinstance(records, list) or not records:",
+        "    if not isinstance(records, list):",
+        ["BriefRefusals.test_an_empty_frames_manifest_is_refused"],
+    ),
+    (
+        # A reading of a frame nobody photographed is a reading of something
+        # else. Accepted, it reaches the comparison as a beat that does not
+        # exist.
+        "a reading may name a frame that is not in the manifest",
+        "scripts/demo-grade",
+        "        if frame is not None and (\n"
+        "            not isinstance(frame, str) or frame not in beats_by_frame\n"
+        "        ):",
+        "        if frame is not None and not isinstance(frame, str):",
+        ["ReadingValidation.test_a_frame_that_is_not_in_the_manifest_is_refused"],
+    ),
+    (
+        # The status vocabulary, which is deliberately three words. A fourth
+        # spelling arriving from a model — "met", "demonstrated" — is not
+        # noticed by anything downstream: it falls through the comparison as
+        # though the reader had said `not seen`, which is a status the reader
+        # never gave.
+        "a status outside the three is compared instead of refused",
+        "scripts/demo-grade",
+        "        if status not in STATUSES:",
+        "        if status is None:",
+        ["ReadingValidation.test_a_status_outside_the_three_is_refused"],
+    ),
+    (
+        # The clause the reader skipped, dropped rather than recorded. The
+        # verdict then reads as a complete answer over a shorter ticket, and
+        # nobody counts the clauses.
+        "a clause with no reading disappears from the verdict",
+        "scripts/demo-grade",
+        "    clauses = []\n    for key, text in criteria.items():",
+        "    clauses = []\n"
+        "    for key, text in ((k, v) for k, v in criteria.items() if k in readings):",
+        [
+            "VerdictOutput."
+            "test_a_declared_clause_the_reader_skipped_is_recorded_as_no_reading"
+        ],
+    ),
+    (
+        # Ordering alone: every clause is still rendered, with the same class
+        # and the same derivations, and the disagreement is somewhere below
+        # the fold. Every presence assertion in this section passes on it.
+        "the verdict opens with the agreements",
+        "scripts/demo-grade",
+        '    clauses.sort(key=lambda row: CLASS_ORDER.index(row["agreement"]["class"]))',
+        '    clauses.sort(key=lambda row: row["criterion"])',
+        ["VerdictOutput.test_disagreements_are_printed_before_agreements"],
+    ),
+    (
+        # The rule at its boundary, widened by one beat either side — the
+        # shape a tolerance grows by when somebody is looking at one noisy
+        # take. The span's ends are still inside, so only the two readings
+        # just outside it can tell.
+        "the agreement span grows a beat of tolerance at each end",
+        "scripts/demo-grade",
+        '        if beats[0] <= reading["beat"] <= beats[-1]:',
+        '        if beats[0] - 1 <= reading["beat"] <= beats[-1] + 1:',
+        ["SpanRule.test_one_beat_outside_each_end_is_a_disagreement"],
+    ),
+    (
+        # The one thing this command may never do. A grader that can redden a
+        # build is turned off long before anybody believes it, and "the frames
+        # do not show AC-3" is a finding for a human either way.
+        "a disagreement fails the run",
+        "scripts/demo-grade",
+        "    # off long before it is believed.\n    return 0",
+        "    # off long before it is believed.\n"
+        "    return 2 if counts[DISAGREEMENT] else 0",
+        ["VerdictOutput.test_a_clause_the_reader_did_not_see_still_exits_zero"],
+    ),
+    (
+        # #279's acceptance, broken the way it would actually break: the
+        # agreement keeps its class and its sentence, and the thing named as
+        # having derived it becomes the storyboard — the one derivation that
+        # cannot produce a status, because it is the claim being checked.
+        "an agreement names the storyboard as what derived it",
+        "scripts/demo-grade",
+        "                        BY_NOTHING_TO_COMPARE if kind == NO_READING "
+        "else BY_COMPARISON",
+        "                        BY_STORYBOARD",
+        ["VerdictOutput.test_no_status_is_written_down_without_what_derived_it"],
+    ),
+    (
+        # **The third leak channel**, and the one the first version of this
+        # section could not see: the clauses are printed in the order the
+        # claims put them in. Not one byte of the text changes — same clauses,
+        # same wording, same frames — and the reader is handed the
+        # storyboard's ranking anyway. It is invisible to any mutation that
+        # leaves the clauses' relative claim order alone, which is why
+        # `GRADE_CRITERIA` declares AC-2 last and claims it first, and why the
+        # swap mutation exists.
+        "the brief orders the clauses by the beats that claim them",
+        "scripts/demo-grade",
+        '    timeline = _load_json(timeline_json, "timeline.json")\n'
+        "    criteria = declared_criteria(timeline, timeline_json)",
+        '    timeline = _load_json(timeline_json, "timeline.json")\n'
+        "    criteria = declared_criteria(timeline, timeline_json)\n"
+        '    _claimed = (timeline.get("coverage") or {}).get("claimed") or {}\n'
+        "    criteria = {\n"
+        "        key: criteria[key]\n"
+        "        for key in sorted(\n"
+        "            criteria,\n"
+        "            key=lambda k: min(\n"
+        '                [r.get("index", 99) for r in _claimed.get(k, [])] or [99]\n'
+        "            ),\n"
+        "        )\n"
+        "    }",
+        [
+            "BriefIsBlind."
+            "test_the_brief_is_byte_identical_however_the_claims_are_written"
+        ],
+    ),
+    (
+        # The reader's own row, attributed to the storyboard. The check that
+        # was supposed to catch this read one field of three and described
+        # three, so this exact line left the whole suite green.
+        "the reader's answer names the storyboard as what derived it",
+        "scripts/demo-grade",
+        '            "derivation": BY_READER,',
+        '            "derivation": BY_STORYBOARD,',
+        ["VerdictOutput.test_no_status_is_written_down_without_what_derived_it"],
+    ),
+    (
+        # The span dropped from the row that promised it. `classify()` still
+        # writes "inside the claimed span [4, 13]" into the agreement
+        # sentence, so a check for that substring anywhere on the page stays
+        # green while the storyboard row loses the number entirely — the
+        # dominated assertion, reproduced.
+        "the storyboard row stops printing the span the rule was given",
+        "scripts/demo-grade",
+        'f"- **Storyboard:** claimed beats {claimed}"\n'
+        '                + (f", span [{span[0]}, {span[1]}]" if span else ""),',
+        'f"- **Storyboard:** claimed beats {claimed}",',
+        ["VerdictOutput.test_the_verdict_carries_the_limit_and_the_span_it_compared"],
+    ),
+    (
+        # The docstring as it shipped, promising an exit code the script
+        # cannot return. A caller's `if status == 1` is written against this
+        # paragraph and nothing else.
+        "the exit-status paragraph goes back to claiming 1 for a usage error",
+        "scripts/demo-grade",
+        "refuses and when the arguments do not parse — argparse's own code, which this",
+        "refuses, and 1 for a usage error — argparse's own code, which this",
+        ["ExitStatus.test_the_docstring_names_those_codes_and_no_others"],
+    ),
+    (
+        # A refused run leaving the previous run's comparison on disk, under a
+        # current mtime, with nothing in the file saying which run it is. The
+        # refusal is on stderr and in the status; a reader who opens the file
+        # sees neither.
+        "a refused verdict leaves the previous run's verdict readable",
+        "scripts/demo-grade",
+        '    _clear_review(demo, ("verdict.json", "verdict.md"))',
+        "    _clear_review(demo, ())",
+        ["VerdictOutput.test_a_refused_run_leaves_no_verdict_from_the_run_before_it"],
+    ),
+    (
+        # The same failure through the other command, graded separately: one
+        # call site fixed and the other forgotten is exactly how this shape
+        # survives.
+        "a refused brief leaves the previous run's brief readable",
+        "scripts/demo-grade",
+        '    _clear_review(demo, ("brief.md", "brief.json"))',
+        "    _clear_review(demo, ())",
+        ["VerdictOutput.test_a_refused_brief_leaves_no_brief_from_the_run_before_it"],
     ),
 ]
 
