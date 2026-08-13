@@ -2334,6 +2334,42 @@ exactly where `--strict-only` came from.
 Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
 
+- **This suite's grading of itself is openly partial, by decision, since
+  2026-08-13.** Eighteen issues recording gaps in the harness's self-coverage
+  were closed that day as *recorded, not planned*, under `GOAL.md`: this repo's
+  product is a demo an independent agent can grade, and a harness that grades
+  its own assertions three times over is not that product. **Every measurement
+  survives in its issue body** — closed, not deleted — and each is listed here
+  so that a reader of this file does not have to know they exist to find them.
+
+  | what is ungraded | issues |
+  |---|---|
+  | Check functions reachable on an arm with no injection entry, so a pass proves only that they ran | [#233](https://github.com/rogvid/skills/issues/233), [#239](https://github.com/rogvid/skills/issues/239), [#240](https://github.com/rogvid/skills/issues/240), [#241](https://github.com/rogvid/skills/issues/241) |
+  | Assertions that can pass for the wrong reason, or grade less than the comment above them claims | [#288](https://github.com/rogvid/skills/issues/288), [#295](https://github.com/rogvid/skills/issues/295), [#296](https://github.com/rogvid/skills/issues/296), [#306](https://github.com/rogvid/skills/issues/306), [#321](https://github.com/rogvid/skills/issues/321) |
+  | Takes that never exercise the input the pass-through would be proved on | [#311](https://github.com/rogvid/skills/issues/311), [#318](https://github.com/rogvid/skills/issues/318) |
+  | Committed reference artifacts drifted from what the renderer or the manifest now produces | [#292](https://github.com/rogvid/skills/issues/292), [#302](https://github.com/rogvid/skills/issues/302), [#314](https://github.com/rogvid/skills/issues/314), [#317](https://github.com/rogvid/skills/issues/317), [#320](https://github.com/rogvid/skills/issues/320) |
+  | Arms that could not be built because Chromium's event timing defeated them | [#210](https://github.com/rogvid/skills/issues/210), [#228](https://github.com/rogvid/skills/issues/228) |
+
+  One of these deserves naming in prose rather than a table cell, because it
+  weakens what a green run means rather than merely leaving something unwatched.
+  **#320**: every `#24` regression check renders each committed `timeline.json`
+  on two revisions and diffs the outputs *against each other* — so a committed
+  `timeline.md` that no longer matches its own `timeline.json` is invisible to
+  it, and three of five have drifted. That is the *wrong-scope search* from
+  `wip/verified-review/SKILL.md`, and it is the scope every regression check in
+  this file uses.
+
+  A nineteenth, [#322](https://github.com/rogvid/skills/issues/322), was closed
+  the same way and reopened within the hour: `tests/lint`'s pointer check
+  decided from directories that happen to exist on the box it runs on, so an
+  untracked `.claude/` made the main checkout red and every worktree green. It
+  is fixed rather than listed — the triage bar is *does it block a phase of
+  `GOAL.md`*, and going red on the commit that closes it is that bar being met
+  out loud.
+
+  An honest gap beats a green check; eighteen tickets nobody picks up beats
+  neither.
+
 - **That the narration correction is right on a host whose clock really
   steps.** [#226](https://github.com/rogvid/skills/issues/226) puts each spoken
   clip at its own offset *plus the wall-clock steps its capture recorded before
@@ -3125,9 +3161,10 @@ knows is missing is worse than one that is openly absent.
   reviewer looking at a green pull request has not seen them pass. Five other
   check functions moved to merge-only with them; those five do have injections
   and are exercised nightly. Measured before the split rather than found after
-  it, and tracked in
-  [#233](https://github.com/rogvid/skills/issues/233), which is the entries
-  that would close it.
+  it, and recorded in
+  [#233](https://github.com/rogvid/skills/issues/233), which names the entries
+  that would have closed it and was itself closed as *recorded, not planned* in
+  the 2026-08-13 triage above.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.

@@ -3,6 +3,14 @@
 This repo holds reusable agent skills, installed by the
 [`skills`](https://github.com/vercel-labs/skills) CLI (`npx skills add`).
 
+## Read `GOAL.md` first
+
+`GOAL.md` states what this repo is for — reducing the **cognitive debt** that
+agent-speed development pushes onto reviewers — and how success is measured
+(seconds of human attention per reviewed ticket). Every rule below serves that;
+where a rule and the goal appear to disagree, the goal wins and the rule is
+wrong. Plan work against `GOAL.md`, not against the backlog.
+
 ## Layout
 
 - `skills/` — **finished, shareable** skills. Everything here is discoverable and
@@ -64,6 +72,16 @@ never sees it. This is the whole mechanism:
 reach it.** There is no `TODO.md`, no backlog file, no list of open questions
 buried in `docs/`. If work is worth remembering, it is an issue.
 
+**A true observation is not automatically work.** This is the rule the repo
+spent its first year missing, and its absence cost more than any defect in it:
+every genuine finding became a durable ticket, the backlog grew faster than it
+closed, and the quality ratchet ran with no throughput term. File an issue only
+if the thing **makes the demo lie to its reader, or blocks the next phase of
+`GOAL.md`**. Everything else true-but-minor goes in the pull-request body as a
+stated limit, with its measurement, and dies there. A limit stated in the pull
+request is not a lesser outcome than an issue — it is the same information
+without a ticket nobody will pick up.
+
 - Start of a work session, or before picking up anything vague: `gh issue list`.
   Read the whole issue before acting on it — `gh issue view <n>`.
 - Spotted follow-up work that is out of scope for what you are doing? **File it
@@ -110,7 +128,18 @@ proving ground for anything about delivery.
 
 **Read `wip/verified-review/SKILL.md` before reviewing a change, and before
 writing or fixing any assertion that gates one.** It is the house discipline
-and it is not optional here. Two rules:
+and it is not optional here.
+
+**Where it applies, and where it does not.** It applies to **recorder
+behaviour** and to anything that changes what a viewer sees or what an artifact
+claims — that is where a wrong answer reaches a human as a false verdict. It
+does **not** apply to documentation sentences, prose, README tables, test
+counts, or the wording of a comment: those get an ordinary read, and a
+disagreement about them is settled in one round, in the pull request. Running
+an adversarial round on prose is how roughly half of a year's merged work ended
+up being about prose.
+
+Two rules:
 
 - **Authoring: an assertion you have not seen fail is not evidence.** Break the
   thing it watches, run it, show the failure output in the pull request, then
