@@ -181,6 +181,24 @@ from .markdown import _fmt_t, _md_cell
 #                          `held` means the frames at the start of the video
 #                          are not frames the recording captured; see "the
 #                          blank opening".
+#   content.opening.card
+#                 dict?  — what this segment's **first frame** actually showed,
+#                          for a medium that can read its own (today:
+#                          `TerminalRecorder`; **null** for the web recorder,
+#                          which has no window to read beside). `luma` is the
+#                          mean luma of a strip of background next to the
+#                          terminal window on frame zero, `state` is that
+#                          number as one of `"card"`, `"bare"` or `"between"`
+#                          — the band between the two bars is deliberately
+#                          empty, so a card still becoming opaque is called
+#                          neither — `card_max`/`bare_min` are the bars it was
+#                          classified against, `raised` says whether the take
+#                          asked for an opening card at all, and `note` says
+#                          why when `luma` is null. **Reported, never
+#                          enforced**: nothing warns or refuses on it (issue
+#                          #235, and #128 for why). On a merged demo it is the
+#                          first segment's, like the rest of `opening`; a
+#                          later part's own is under `segments`.
 #   narration     dict?  — **null** on a take that mixed no speech into
 #                          `media` — narration off, no lines, or no mp4
 #                          encoded. Otherwise, where each spoken line's audio

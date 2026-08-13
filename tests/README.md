@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~45 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~47 min, nightly)
 ├── unit               # the browser-free half (~0.07 s, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -183,7 +183,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~225 s)
-tests/smoke-inject                # all 60 entries, ~45 min
+tests/smoke-inject                # all 64 entries, ~47 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -451,7 +451,7 @@ argument for keeping them is cost per check function moved. Dropping one from
 | arm | seconds | check functions it would move | seconds per check moved |
 |---|---|---|---|
 | segments | 29 | 11 | 2.6 |
-| polish | 26 | 2 | 13 |
+| polish | 26 | 3 | 8.7 |
 | overlay | 31 | 1 | 31 |
 | failure | 48 | 1 | 48 |
 | the three expensive arms | 457 | 8 | 57 |
@@ -459,9 +459,11 @@ argument for keeping them is cost per check function moved. Dropping one from
 Every one of the four buys check coverage more cheaply than the arms the
 decision *did* move, so a second cut inside the cheap tier would be a worse
 trade than the first one, made on no measurement. Two specifics on top of the
-ratio: `--polish-only`'s two functions (`check_opening_card`,
+ratio: two of `--polish-only`'s three functions (`check_opening_card`,
 `check_spotlight_transitions`) have no injection anywhere, so the per-push run
-is their only exercise in the repo; and `--failure-only` is the only thing that
+is their only exercise in the repo — the third,
+`check_reported_opening_card`, is the arm's own four entries
+([#235](https://github.com/rogvid/skills/issues/235)); and `--failure-only` is the only thing that
 runs the recorder's exception paths, which is where the catalogue's
 *clean-path-only assertion* lives. `--failure-only` is nonetheless the one to
 revisit first if the per-push budget ever binds — it is 22% of `--cheap` for
@@ -1244,6 +1246,25 @@ to run unless the pattern matched exactly once:
 | the card raised 400 ms into the document instead of at document start | first frame is bare, and the prefix is 0.00 s |
 | the card built at `opacity: 0` like `interlude()` builds it | the same two, plus the content floor |
 | the card never cleared | "the corner never reaches 150 mean luma — the card is never taken down" |
+
+**The same frame, from the other side (issue #235).** Everything above grades
+the video, and no demo directory ships one. So the recorder reads its own first
+frame after the encode — the same strip, off the live `#__term_win` box, on the
+segment's own frame zero — and writes it into `content.opening.card`:
+`luma`, `state` (one of `card`, `bare`, `between`), `raised` (whether this take
+asked for a card at all), the two bars it was classified against, and a `note`
+when there was no reading. **Reported, never enforced**: nothing warns, refuses
+or raises on it, because [#128](https://github.com/rogvid/skills/issues/128) is
+one CI run in nine reading 128 on a loaded runner and a bar that refuses there
+would be flaky on the runner it most needs to be trusted on.
+
+`check_reported_opening_card` grades that field on the same take: it is there
+and complete, it says `card`, it says the card was asked for, and — the one
+that keeps the rest from being a document agreeing with itself — the number in
+it is within `OPENING_CARD_AGREEMENT` (1.0) of frame zero re-read here. Both
+readings came out at **25.8** on this box, which is [#207](https://github.com/rogvid/skills/issues/207)'s
+number for the fixed take. Four `tests/smoke-inject` entries, one per statement,
+and the third of them is the injection #235's acceptance criterion names.
 
 **What this does not catch**, and is a stated limit rather than an oversight: a
 card that *fades in* over 450 ms rather than being painted opaque is invisible
@@ -2076,7 +2097,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-60 entries, 12 arms, ~44.6 min of takes
+64 entries, 13 arms, ~46.8 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -2109,6 +2130,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
+| `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the card raised 400 ms into the document, which is [#110](https://github.com/rogvid/skills/issues/110) itself and the injection that issue's acceptance criterion names; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
 | `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
@@ -2118,7 +2140,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 43 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 44 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -2179,9 +2201,11 @@ paragraph whose job is to say what this manifest does not cover.
   - **`--determinism-only`, 19 s an entry** — `check_determinism`.
     [#239](https://github.com/rogvid/skills/issues/239).
   - **`--polish-only`, 26 s an entry** — `check_spotlight_transitions`,
-    `check_opening_card`, `_check_video`. The arm carries no entry at all
-    today, so it also pays one baseline.
-    [#240](https://github.com/rogvid/skills/issues/240).
+    `check_opening_card`, `_check_video`.
+    [#240](https://github.com/rogvid/skills/issues/240). The arm is no longer
+    free of entries — the opening-card *report* has four of them
+    ([#235](https://github.com/rogvid/skills/issues/235)) — so its baseline is
+    already paid and each of these three now costs 26 s and nothing else.
   - **`--segments-only`, 29 s an entry** — `check_caption`, `check_take`,
     `check_content_healthy`, `check_merge_offset`, `_check_frame_captions`,
     `_check_stale_frames`, `_check_segment_refusal`, `_check_scene_fallback`.
@@ -2457,18 +2481,42 @@ knows is missing is worse than one that is openly absent.
   costs. **The timeline gap does not stand in for it** — see the
   `terminal-opening/` section above, and
   [#207](https://github.com/rogvid/skills/issues/207) for the two takes it was
-  measured on. What would close it is the same corner strip read off the live
-  `#__term_win` box at *record* time, on the segment's own first frame, written
-  into the take's report where a reviewer reads a number instead of squinting
-  — card `<= 60` mean luma, bare `>= 150`, the constants `check_opening_card`
-  already uses. That is
-  [#235](https://github.com/rogvid/skills/issues/235). Separately, the sweep
-  itself has no `tests/smoke-inject` entry — it is in the ungraded roster
-  above, it was fault-injected by hand when it was written, and since
-  [#61](https://github.com/rogvid/skills/issues/61) the per-push
+  measured on.
+
+  **What [#235](https://github.com/rogvid/skills/issues/235) changed, and what
+  it did not.** A terminal take now reads that strip itself, off its own frame
+  zero, and writes `content.opening.card` into `timeline.json` — which *is*
+  committed, so a re-recorded demo carries a number saying what its segment
+  opened on. What is still true is everything about the takes already on disk:
+  no demo in this repository has been re-recorded since, so
+  `2026-07-26-status-filter`'s committed timeline has no such field and remains
+  graded by the person who watched it. The field arrives with the next
+  re-record, not with this paragraph. And the number is *reported* — nothing in
+  the recorder refuses, warns or fails a take over it
+  ([#128](https://github.com/rogvid/skills/issues/128) is why), so a demo whose
+  part 2 opens bare ships with the flash and a truthful line about it.
+
+  Separately, the sweep itself has no `tests/smoke-inject` entry — it is in the
+  ungraded roster above, it was fault-injected by hand when it was written, and
+  since [#61](https://github.com/rogvid/skills/issues/61) the per-push
   `--polish-only` run is its only exercise in the repo (see **Why the four
   middle arms stayed on the push**, which is the measurement that kept it
-  there).
+  there). The four entries that arm now carries are aimed at
+  `check_reported_opening_card`, not at it.
+
+- **Nothing grades that a reported opening `state` follows the `luma` beside
+  it.** Every take `--polish-only` records opens *on* the card, so the healthy
+  answer there is `"card"` — and a `state` pinned to `"card"` could only ever
+  fail together with the assertion that the take says `card`, which is the
+  catalogue's dominated assertion. An assertion for it was written and deleted
+  rather than shipped unfirable. What carries the claim instead: the word is
+  derived from the published number in one expression
+  (`opening_card_report`), and `tests/unit`'s `OpeningCard` grades that
+  mapping at both bars and either side of each. What would close it properly
+  is a second terminal take in that arm which opens *without* `interlude=` —
+  it would have to report `bare`, `raised: false`, and would be the control
+  this pair is missing. It costs another recording in a locked 10-minute
+  suite, which is why it is written down here instead.
 
 - **Nothing here grades whether a tagged beat's frames show its criterion.**
   `tests/unit` grades the coverage report's arithmetic, `tests/smoke

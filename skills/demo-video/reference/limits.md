@@ -319,8 +319,21 @@ CI run read **128** and 0.00 s of cover — neither state, which is what a card
 still becoming opaque looks like. One failure in four observed CI runs, none in
 six local ones ([#128](https://github.com/rogvid/skills/issues/128)).
 
-What to do: use the constructor argument, and look at `frames/beat-00.png` of a
-terminal segment before shipping it.
+Neither residue is closed, but the second one is now *visible without
+watching*: every terminal take reads that same strip off its own first frame
+and writes the answer into `content.opening.card` in `timeline.json` —
+`state: "card"`, `"bare"` or `"between"`, beside the luma it was read from and
+whether the take asked for a card at all. It is reported and not enforced,
+precisely because of the 128 above: a take that lands in the empty band says so
+rather than failing ([#235](https://github.com/rogvid/skills/issues/235)). It
+also covers the *first* residue from the side nothing else does — a segment
+that opened with `interlude()` as its first statement records
+`raised: false` and `state: "bare"`, which is the flash, in the one file a demo
+directory commits.
+
+What to do: use the constructor argument, and read `content.opening.card` in
+the timeline of a terminal segment before shipping it. If it does not say
+`card`, look at `frames/beat-00.png`.
 
 ## Where the picture measurement goes quiet
 

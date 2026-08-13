@@ -118,7 +118,8 @@ the encoded frame, and writes down what it found:
              "static_for": 21.5, "static_from": 3.5, "static_limit": 15.0,
              "static_beats": [{ "index": 6, "verb": "caption", "acting": false },
                               { "index": 7, "verb": "hold", "acting": false }],
-             "opening": { "gap": 0.0, "held": 0.4, "limit": 1.5, "note": null },
+             "opening": { "gap": 0.0, "held": 0.4, "limit": 1.5, "note": null,
+                          "card": null },
              "warnings": [] }
 ```
 
@@ -137,7 +138,9 @@ the encoded frame, and writes down what it found:
   `content` itself is `null` only when the take encoded no mp4.
 - `opening` says what the take opened on — and, on a web take, what the
   recorder did about it. Read the next section: `held` above zero means the
-  first frames of your video are not frames the recording captured.
+  first frames of your video are not frames the recording captured. On a
+  terminal take `opening.card` says whether the segment's first frame was its
+  title card or a bare terminal.
 
 **What the take says out loud, and on which stream.** Which line the take
 prints decides the stream: **anything wrong — a warning, or the note that the
@@ -191,6 +194,41 @@ covering seconds of it would be inventing a demo rather than repairing one.
 inside the page, so it has no equivalent gap; open a terminal segment on a title
 card if you want its first frame to be deliberate (see *Opening a terminal
 segment on a title card*).
+
+### `opening.card` — what a terminal segment's first frame showed
+
+A terminal take reads its own frame zero after the encode and writes down what
+was there:
+
+```json
+"card": { "luma": 25.8, "state": "card", "raised": true,
+          "rect": [1214, 0, 58, 50],
+          "card_max": 60.0, "bare_min": 150.0, "note": null }
+```
+
+- `luma` is the mean luma of a strip of background **beside** the terminal
+  window on the segment's first frame. Outside the window on purpose: inside
+  it a title card and a terminal are both dark and telling them apart means
+  reading text. Outside it the card (`#1c1a17`, full bleed) reads ~26 and the
+  recorder's pastel background reads ~226.
+- `state` is that number as a word: `"card"`, `"bare"`, or `"between"`. The gap
+  between the two bars is wide and deliberately empty — a frame that lands in
+  it is a card still becoming opaque, and calling that either thing would be
+  this file claiming something nobody measured.
+- `raised` says whether the take asked for an opening card
+  (`TerminalRecorder(interlude=…)`). It is what makes `"bare"` readable: on a
+  take that asked, `"bare"` is the flash issue #110 is about; on a take that
+  did not, it is simply what the segment opens on.
+- `note` says why when there is no reading. `luma` and `state` are then `null`
+  rather than a guess.
+- `card` itself is `null` on a web take — there is no window to read beside.
+
+**Nothing enforces it.** No warning, no refusal, no failed take: one CI run in
+nine has read a value in the empty band on a loaded runner, and a bar that
+refused there would be unreliable exactly where it would be trusted most. This
+is a number to read, and the reason it exists is that the mp4 is the one
+artifact a demo directory does not commit — so without it, "does part 2 open on
+its card" can only be answered by watching.
 
 ### An overlay the recorder left up is reported exactly
 
