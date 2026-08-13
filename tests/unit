@@ -76,6 +76,7 @@ from demo_recording.content import (  # noqa: E402
 )
 from demo_recording.coverage import (  # noqa: E402
     _checked_criteria,
+    _checked_ticket,
     _declared_criteria,
     _merged_coverage,
     coverage_report,
@@ -114,6 +115,7 @@ from demo_recording.timeline import (  # noqa: E402
     STRICT_KINDS,
     TIMELINE_SCHEMA,
     _coverage_md,
+    _ticket_md,
     render_timeline_md,
     timeline_paths,
     write_timeline,
@@ -444,6 +446,133 @@ class MergedCoverage(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# coverage.py — which ticket the clauses were copied out of (issue #275)
+# --------------------------------------------------------------------------
+
+
+class CheckedTicket(unittest.TestCase):
+    """A free string, checked for one thing, and never resolved."""
+
+    def test_no_ticket_is_none_not_an_error(self):
+        # The ordinary take: recorded outside a ticket, and nothing about that
+        # is a mistake.
+        self.assertIsNone(_checked_ticket(None))
+
+    def test_any_non_empty_string_is_kept_whatever_tracker_it_names(self):
+        # The control on the two refusals below: without it they are satisfied
+        # by a function that refuses everything. Three spellings, because the
+        # stated rule is that a private tracker's id is not this recorder's
+        # business — a shape rule here would refuse takes rather than catch
+        # mistakes.
+        for named in (
+            "rogvid/skills#129",
+            "https://example.invalid/browse/QUEUE-4412",
+            "QUEUE-4412",
+        ):
+            self.assertEqual(_checked_ticket(named), named)
+
+    def test_a_blank_ticket_is_refused_rather_than_written_down_empty(self):
+        # A take that claims to have a source and cannot say what it is. The
+        # honest spelling of "no ticket" is the parameter left off.
+        for blank in ("", "   ", "\n\t"):
+            with self.assertRaises(ValueError):
+                _checked_ticket(blank)
+
+    def test_a_ticket_that_is_not_a_string_is_refused(self):
+        # `ticket=129` is the plausible mistake, and it reaches the envelope as
+        # a JSON number that no consumer's link-or-print rule knows what to do
+        # with.
+        for wrong in (129, ["rogvid/skills#129"], {"id": 129}):
+            with self.assertRaises(TypeError):
+                _checked_ticket(wrong)
+
+    def test_surrounding_whitespace_never_reaches_the_manifest(self):
+        # It is pasted into a URL by the pull-request comment, where a trailing
+        # newline is a link that 404s and looks exactly like one that works.
+        self.assertEqual(_checked_ticket("  rogvid/skills#129\n"), "rogvid/skills#129")
+
+
+class MergedTicket(unittest.TestCase):
+    """What a stitched demo says about the tickets its parts named (#275).
+
+    Driven through `_merged_timeline` rather than through the merge helper
+    alone: the claim is about the document `stitch()` writes, and a helper that
+    returned the right answer to a caller that dropped it on the floor would
+    satisfy an assertion made one level down.
+    """
+
+    def stitched(self, *tickets: str | None) -> dict:
+        names = [f"part{n + 1}" for n in range(len(tickets))]
+        docs = [
+            {
+                "recorder": "Recorder",
+                "segment": name,
+                "beats": [beat(0, "caption", 0.5, segment=name)],
+                **({"ticket": ticket} if ticket else {}),
+            }
+            for name, ticket in zip(names, tickets, strict=True)
+        ]
+        return _merged_timeline(
+            names,
+            [Path(f"{name}.seg.mp4") for name in names],
+            docs,
+            [4.0] * len(names),
+            # Never created: `_merged_timeline` probes it only for `duration`.
+            Path("demo.mp4"),
+        )
+
+    def test_parts_recorded_against_one_ticket_carry_it_into_the_merge(self):
+        # `stitch()` deletes the segment timelines, so whatever the merged
+        # envelope does not carry is gone.
+        doc = self.stitched("rogvid/skills#129", "rogvid/skills#129")
+        self.assertEqual(doc["ticket"], "rogvid/skills#129")
+        self.assertNotIn("ticket_conflicts", doc)
+
+    def test_parts_naming_different_tickets_report_both_and_choose_neither(self):
+        # The acceptance criterion of #275's merge half. Picking one would be
+        # the merged document stating something no segment said, about a demo
+        # half of which demonstrates the other ticket.
+        doc = self.stitched("rogvid/skills#129", "acme/app#7")
+        self.assertEqual(doc["ticket_conflicts"], ["rogvid/skills#129", "acme/app#7"])
+        self.assertNotIn("ticket", doc)
+
+    def test_a_part_that_named_none_does_not_conflict_with_one_that_did(self):
+        # Silence is not disagreement — the same reading `_declared_criteria`
+        # gives a segment that declared no criteria. Without this a demo whose
+        # terminal half was recorded without a ticket would report a conflict
+        # between one ticket and nothing.
+        doc = self.stitched("rogvid/skills#129", None)
+        self.assertEqual(doc["ticket"], "rogvid/skills#129")
+        self.assertNotIn("ticket_conflicts", doc)
+
+    def test_a_demo_no_part_of_which_named_a_ticket_carries_neither_key(self):
+        # The control on all three above, and the #24 rule at the merge: a
+        # stitched timeline from before this key existed reads as it always
+        # did.
+        doc = self.stitched(None, None)
+        self.assertNotIn("ticket", doc)
+        self.assertNotIn("ticket_conflicts", doc)
+
+    def test_each_part_keeps_the_ticket_it_was_recorded_against(self):
+        # Which part said what, not only that two things were said: on a
+        # conflict the merged envelope names both and the reader's next
+        # question is which half of the video belongs to which.
+        doc = self.stitched("rogvid/skills#129", "acme/app#7")
+        self.assertEqual(
+            [(s["segment"], s["ticket"]) for s in doc["segments"]],
+            [("part1", "rogvid/skills#129"), ("part2", "acme/app#7")],
+        )
+
+    def test_a_part_recorded_outside_a_ticket_has_no_ticket_in_its_record(self):
+        # The control on the assertion above: `"ticket": null` on every
+        # segment of every ticketless stitch is the noise the absent-key rule
+        # exists to keep out of a file this skill tells people to commit.
+        doc = self.stitched(None, "acme/app#7")
+        self.assertNotIn("ticket", doc["segments"][0])
+        self.assertEqual(doc["segments"][1]["ticket"], "acme/app#7")
+
+
+# --------------------------------------------------------------------------
 # timeline.py — the beat log's two renderings
 # --------------------------------------------------------------------------
 
@@ -668,6 +797,80 @@ class CoverageMd(unittest.TestCase):
         self.assertGreater(len(rows), 3)  # header + one row per claim
         widths = {len(split_row(r)) for r in rows}
         self.assertEqual(widths, {4})
+
+
+class TicketMd(unittest.TestCase):
+    """`timeline.md` names the ticket its clauses came out of (issue #275)."""
+
+    TICKET = "rogvid/skills#129"
+
+    def rendered(self, **over: object) -> str:
+        return render_timeline_md(
+            envelope(beats=[beat(0, "goto", 0.1)], coverage=CoverageMd.REPORT, **over)
+        )
+
+    def test_the_ticket_is_named_in_the_file_the_clauses_are_quoted_in(self):
+        self.assertIn(self.TICKET, self.rendered(ticket=self.TICKET))
+
+    def test_a_take_recorded_outside_a_ticket_says_nothing_about_one(self):
+        # The control on the assertion above, and the #24 rule at this end: a
+        # timeline written before this key existed has to read as it always
+        # did, and a document that always carried a sentence about tickets
+        # would satisfy every other assertion here.
+        text = self.rendered()
+        self.assertIn("## Acceptance criteria", text)  # control: a section ran
+        self.assertNotIn("Recorded against", text)
+        self.assertNotIn("never fetched", text)
+        self.assertEqual(_ticket_md({}), [])
+
+    def test_the_ticket_is_named_above_the_table_of_clauses_quoted_from_it(self):
+        # Ordering, not presence: a reader who meets four sentences before
+        # their source has already read them as the ticket's own words. Both
+        # positions are read off the rendered file rather than assumed.
+        text = self.rendered(ticket=self.TICKET)
+        self.assertLess(text.index(self.TICKET), text.index("| criterion |"))
+        self.assertLess(text.index(self.TICKET), text.index("**AC-1**"))
+
+    def test_the_file_says_nothing_compared_the_clauses_with_the_ticket(self):
+        # The sentence "recorded against #129" invites a reader to assume
+        # something checked the two against each other. Nothing has, and the
+        # artifact that named the ticket is the one that has to say so.
+        said = " ".join(_ticket_md({"ticket": self.TICKET}))
+        self.assertIn("never fetched", said)
+        self.assertIn("compared", said)
+
+    def test_a_stitched_demo_whose_parts_disagree_names_every_ticket(self):
+        # Both, and neither chosen. A merged demo half of which demonstrates
+        # another ticket has no single honest answer, and a file naming one of
+        # them would be stating something no segment said.
+        text = self.rendered(ticket_conflicts=["rogvid/skills#129", "acme/app#7"])
+        self.assertIn("rogvid/skills#129", text)
+        self.assertIn("acme/app#7", text)
+        self.assertIn("different tickets", text)
+
+    def test_a_pipe_in_a_ticket_does_not_add_a_column_to_the_table_below(self):
+        """Both branches of the renderer, not only the one a take reaches.
+
+        A free string an author typed, rendered a few lines above a markdown
+        table. Read from the renderer's side, like every other cell check
+        here.
+
+        The conflict branch is here because it was not (issue #315): the
+        single-ticket branch was graded and its twin was not, so unescaping
+        the merged rendering alone left all 427 tests green. Two branches
+        writing the same untrusted string are two places to escape it, and a
+        check that reads one of them reports the rule as held across text half
+        of which nothing opened.
+        """
+        for doc in (
+            {"ticket": "QUEUE-1|4"},
+            {"ticket_conflicts": ["QUEUE-1|4", "acme/app#7"]},
+        ):
+            said = " ".join(_ticket_md(doc))
+            self.assertIn("QUEUE-1\\|4", said, doc)
+            # The raw form absent, not only the escaped form present: a
+            # renderer that printed both would satisfy the line above.
+            self.assertNotIn("QUEUE-1|4", said, doc)
 
 
 class TimelineMd(unittest.TestCase):
@@ -5846,6 +6049,40 @@ class BeatLog(unittest.TestCase):
         # Issue #20 at this end: a take that wrote no mp4 must not probe a
         # previous run's file and report its length beside these beats.
         self.assertIsNone(self.envelope_of(self.storyboard())["duration"])
+
+    def test_the_envelope_names_the_ticket_the_storyboard_recorded_against(self):
+        # Issue #275: the storyboard quotes its clauses out of a ticket, and
+        # until this key nothing machine-readable said which one. Equality
+        # against the string the constructor was handed, because the whole
+        # point is that the recorder wrote down what it was told rather than
+        # resolving it into something else.
+        rec = recorder(self, page=NoisyPage(), ticket="rogvid/skills#129")
+        rec.pause(0)
+        self.assertEqual(self.envelope_of(rec)["ticket"], "rogvid/skills#129")
+
+    def test_the_terminal_recorder_carries_the_ticket_to_its_own_envelope(self):
+        """The other recorder's pass-through, graded (issue #313).
+
+        `ticket=` is declared on `_DemoBase` and forwarded by hand from each
+        subclass's `__init__`, so there are two of them and the assertion
+        above only travels one. Deleting `ticket=ticket` from
+        `TerminalRecorder`'s `super()` call left all 427 tests green: half the
+        feature could be removed with nothing to notice, on the medium whose
+        storyboards this repo runs least.
+
+        Read off the envelope rather than off `_ticket`, so it grades the same
+        thing for this recorder that the web assertion grades for that one —
+        the key a consumer reads, not the attribute behind it.
+        """
+        rec = recorder(self, cls=TermRec, ticket="rogvid/skills#129")
+        self.assertEqual(self.envelope_of(rec)["ticket"], "rogvid/skills#129")
+
+    def test_a_take_recorded_outside_a_ticket_writes_no_ticket_key(self):
+        # Absent, not null (issue #24): a timeline written before this key
+        # existed reads exactly like a take recorded outside a ticket, which is
+        # what it is. This is also the control on the assertion above — a key
+        # that was always present would satisfy it on every take.
+        self.assertNotIn("ticket", self.envelope_of(self.storyboard()))
 
     def test_the_envelope_carries_every_problem_and_the_count_that_saw_them_all(self):
         rec = self.watching_storyboard()
@@ -12825,6 +13062,151 @@ INJECTIONS = [
             "InterludePalette."
             "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",
         ],
+    ),
+    (
+        # The take never writes down the ticket it was handed — the state
+        # issue #275 is about, restored: four clauses in the manifest and
+        # nothing anywhere saying whose they are. The parameter still exists
+        # and is still validated, so a storyboard passing it sees no
+        # difference at all.
+        "the ticket a storyboard named never reaches the manifest",
+        "core.py",
+        "            **_ticket_field(self._ticket),",
+        "            **_ticket_field(None),",
+        [
+            "BeatLog.test_the_envelope_names_the_ticket_the_storyboard_recorded_against",
+            "BeatLog.test_the_terminal_recorder_carries_the_ticket_to_its_own_envelope",
+        ],
+    ),
+    (
+        # One recorder's pass-through, not the shared key: the parameter is
+        # declared on `_DemoBase` and forwarded by hand from each subclass, so
+        # there are two of these and each has to be watched separately. The
+        # review of this pull request removed exactly this and found all 427
+        # tests green (#313) — half the feature gone, on the medium whose
+        # storyboards this repo runs least.
+        "TerminalRecorder drops the ticket on the way to its base class",
+        "terminal.py",
+        "            criteria=criteria, ticket=ticket, allow_private=allow_private,",
+        "            criteria=criteria, allow_private=allow_private,",
+        ["BeatLog.test_the_terminal_recorder_carries_the_ticket_to_its_own_envelope"],
+    ),
+    (
+        # The web recorder's half of the same forwarding, broken on its own.
+        # It is here because #313 was found by asking "is the twin graded?" of
+        # a check that read one branch, and the honest answer to that question
+        # is a second injection rather than an assurance.
+        "Recorder drops the ticket on the way to its base class",
+        "web.py",
+        "            criteria=criteria, ticket=ticket, allow_private=allow_private,",
+        "            criteria=criteria, allow_private=allow_private,",
+        ["BeatLog.test_the_envelope_names_the_ticket_the_storyboard_recorded_against"],
+    ),
+    (
+        # The other direction, and the #24 rule: `ticket: null` on every take
+        # ever recorded. A timeline written before the key existed stops
+        # reading like the take it describes, and every consumer that asks
+        # "was this recorded against a ticket" gets a key to check instead of
+        # an absence.
+        "a take recorded outside a ticket says it has one and it is null",
+        "coverage.py",
+        '    return {"ticket": ticket} if ticket else {}',
+        '    return {"ticket": ticket}',
+        [
+            "BeatLog.test_a_take_recorded_outside_a_ticket_writes_no_ticket_key",
+            "MergedTicket.test_a_demo_no_part_of_which_named_a_ticket_carries_neither_key",
+            "MergedTicket.test_a_part_recorded_outside_a_ticket_has_no_ticket_in_its_record",
+        ],
+    ),
+    (
+        # A conflict resolved instead of named: the merged demo published
+        # against whichever ticket the first segment happened to name, while
+        # the other half of the video demonstrates something else. Everything
+        # about the document stays plausible — one ticket, linked, rendered —
+        # which is why nothing but this assertion can see it.
+        "a stitched demo whose parts disagree is published against the first",
+        "coverage.py",
+        "    if len(named) > 1:",
+        "    if len(named) > 99:",
+        [
+            "MergedTicket."
+            "test_parts_naming_different_tickets_report_both_and_choose_neither"
+        ],
+    ),
+    (
+        # The strip goes, so a ticket of spaces is a ticket. The manifest then
+        # carries a whitespace string that reads as "recorded against a
+        # ticket" to every consumer and names nothing, and a value with a
+        # trailing newline is pasted into a link that 404s.
+        "a blank ticket is written down as a ticket",
+        "coverage.py",
+        "    stripped = ticket.strip()",
+        "    stripped = ticket",
+        [
+            "CheckedTicket.test_a_blank_ticket_is_refused_rather_than_written_down_empty",
+            "CheckedTicket.test_surrounding_whitespace_never_reaches_the_manifest",
+        ],
+    ),
+    (
+        # `timeline.md` stops naming the ticket. The coverage table is
+        # untouched and still says "This take was recorded against a ticket",
+        # so the file reads as complete while the one fact that says *which*
+        # is gone — which is the whole of #275 in the human-readable artifact.
+        "timeline.md stops naming the ticket its clauses were quoted from",
+        "timeline.py",
+        "    out += _ticket_md(doc)",
+        "    out += _ticket_md({})",
+        [
+            "TicketMd.test_the_ticket_is_named_in_the_file_the_clauses_are_quoted_in",
+            "TicketMd.test_the_ticket_is_named_above_the_table_of_clauses_quoted_from_it",
+            "TicketMd.test_a_stitched_demo_whose_parts_disagree_names_every_ticket",
+        ],
+    ),
+    (
+        # The escaping on the **merged** rendering, which is the branch #315
+        # found unwatched: the identical removal in the single-ticket branch
+        # below was already caught, and this one left all 427 tests green. A
+        # `|` in a ticket a pull request edited shifts every column of the
+        # table three lines under it.
+        "a conflicting ticket reaches the reader unescaped",
+        "timeline.py",
+        "            f\"{', '.join(f'`{_md_cell(str(t))}`' for t in conflicts)}.**"
+        ' All of "',
+        "            f\"{', '.join(f'`{str(t)}`' for t in conflicts)}.** All of \"",
+        ["TicketMd.test_a_pipe_in_a_ticket_does_not_add_a_column_to_the_table_below"],
+    ),
+    (
+        # And its twin, broken on its own — the control that says the loop
+        # over the two branches reads both rather than passing on one.
+        "a single ticket reaches the reader unescaped",
+        "timeline.py",
+        '        f"Recorded against **{_md_cell(ticket)}**, as the storyboard names it. "',
+        '        f"Recorded against **{ticket}**, as the storyboard names it. "',
+        ["TicketMd.test_a_pipe_in_a_ticket_does_not_add_a_column_to_the_table_below"],
+    ),
+    (
+        # The ordering alone: everything is still rendered, and the source of
+        # the four sentences arrives after them. Nothing else in this suite
+        # can see it — every presence assertion above passes on this.
+        "timeline.md names the ticket below the clauses quoted from it",
+        "timeline.py",
+        "    out += _ticket_md(doc)\n"
+        "    # The failure goes in with it, not only into the section above: "
+        "without it\n"
+        "    # the acceptance table renders a crashed take's claims exactly "
+        "like a clean\n"
+        "    # take's, which is the artifact reporting success on failure "
+        "(issue #278).\n"
+        '    out += _coverage_md(doc.get("coverage"), failure)',
+        '    out += _coverage_md(doc.get("coverage"), failure)\n'
+        "    # The failure goes in with it, not only into the section above: "
+        "without it\n"
+        "    # the acceptance table renders a crashed take's claims exactly "
+        "like a clean\n"
+        "    # take's, which is the artifact reporting success on failure "
+        "(issue #278).\n"
+        "    out += _ticket_md(doc)",
+        ["TicketMd.test_the_ticket_is_named_above_the_table_of_clauses_quoted_from_it"],
     ),
 ]
 

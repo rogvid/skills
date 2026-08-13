@@ -1630,6 +1630,57 @@ refuses the word `clause` anywhere in that body, and which is therefore also
 what would redden if the sentence were later printed unconditionally without
 being reworded.
 
+**Which ticket the clauses were copied out of**
+([#275](https://github.com/rogvid/skills/issues/275)). `criteria={...}` quotes
+four sentences and, until #275, nothing machine-readable said whose they were —
+in the reference storyboard the ticket lived in a Python docstring. `ticket=` is
+a free string, stored and written into the envelope, and the shape of what is
+graded follows from what it is *not*: it is never fetched and never resolved, so
+no assertion anywhere compares a clause with the ticket it names.
+
+| grader | what it grades |
+|---|---|
+| `tests/unit`'s `CheckedTicket` | the one rule: a non-empty string, stripped. Its control is that three unrelated spellings — `owner/repo#N`, a URL, a bare tracker id — all pass, without which the two refusals hold over a function that refuses everything |
+| `tests/unit`'s `BeatLog` | the envelope carries the string the storyboard handed it, **by equality**, **on each recorder separately**, and a take recorded outside a ticket carries no `ticket` key at all (#24's rule, and the control on the equality) |
+| `tests/unit`'s `MergedTicket` | driven through `_merged_timeline`, not through the merge helper: parts agreeing carry the ticket, parts **disagreeing produce `ticket_conflicts` naming both and no `ticket`**, a silent part is not a disagreement, and each part keeps its own |
+| `tests/unit`'s `TicketMd` | `timeline.md` names it, names it **above** the clauses quoted from it, says nothing compared the two, and says nothing at all on a take that named none |
+| `tests/ci-unit`'s `Ticket` | the comment links `owner/repo#N` and a URL **by equality on the whole rendering**, prints anything else verbatim, and refuses a target that markdown would not survive — `timeline.json` is committed and a pull request may edit it |
+
+The ordering claim has an injection of its own that reorders the two renderings
+and changes nothing else, because every presence assertion above passes on a
+`timeline.md` that names the ticket underneath the four sentences it sourced.
+The comment's ticket line is swept for verdict words on `TICKETED`, with an
+injection that appends *verified* **after** the link — so the assertion about
+the link's own text stays green and the sweep is the only thing that can see it.
+
+**Two of these were added because a hand review broke what the manifest did
+not.** Both were the same shape — *one of a pair is graded and its twin is
+not* — and both are worth stating because the shape recurs:
+
+- **The parameter is forwarded by hand from each recorder** ([#313](https://github.com/rogvid/skills/issues/313)).
+  `ticket=` is declared on `_DemoBase`, so `Recorder` and `TerminalRecorder`
+  each pass it up separately and there are two things to break. The first
+  version of this suite read the envelope of the web recorder only; deleting
+  `ticket=ticket` from the terminal one left all 427 tests green. There is now
+  an assertion per recorder and **an injection per recorder**, the second of
+  which exists only because the honest answer to "is the twin graded?" is a
+  measurement rather than an assurance.
+- **`_ticket_md` escapes in two branches** ([#315](https://github.com/rogvid/skills/issues/315)).
+  A single ticket and a merged demo's conflicting ones are rendered by
+  different lines, and the pipe check read one of them. The escaping rule was
+  reported as held across text half of which nothing opened. The check now
+  loops over both branches and asserts the raw form is **absent** as well as
+  the escaped form present, and each branch has its own injection.
+
+**What none of it grades, and cannot:** that the ticket exists, that it is
+readable, or that the clauses appear in it. That needs a network and a token,
+it is [#276](https://github.com/rogvid/skills/issues/276), and it belongs in CI
+rather than in a take. Nor does anything grade that the recorder *did not*
+fetch: the assertion is that the envelope holds the constructor's own string,
+which a recorder that fetched and got the same answer would satisfy too. What
+stands behind that is the code — nothing in `coverage.py` or `core.py` opens a
+connection — and not a measurement.
+
 The injections that cover the acceptance section are enumerated in `ci-unit`'s
 `INJECTIONS`, and the number they add up to is deliberately not written here:
 it went stale the first time somebody added one, which is

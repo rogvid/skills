@@ -492,6 +492,7 @@ class Recorder(_DemoBase):
         locale: str | None = None,
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
+        ticket: str | None = None,
         allow_private: bool | None = None,
     ) -> None:
         super().__init__(
@@ -501,7 +502,7 @@ class Recorder(_DemoBase):
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
-            criteria=criteria, allow_private=allow_private,
+            criteria=criteria, ticket=ticket, allow_private=allow_private,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")

@@ -245,9 +245,9 @@ three it is not the variable lowercased, so do not infer it:
 
 `DEMO_VIDEO_BASE_URL` applies to the web `Recorder` only; the terminal
 `*` variables to `TerminalRecorder`. All the rest apply to both. The
-parameters with **no** env var are per-storyboard by nature: `segment`
-and `criteria` on both recorders, plus `TerminalRecorder`'s `interlude`,
-`interlude_hold` and `type_delay_ms`.
+parameters with **no** env var are per-storyboard by nature: `segment`,
+`criteria` and `ticket` on both recorders, plus `TerminalRecorder`'s
+`interlude`, `interlude_hold` and `type_delay_ms`.
 
 ## Recorder API (storyboard verbs)
 

@@ -289,6 +289,7 @@ class TerminalRecorder(_DemoBase):
         locale: str | None = None,
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
+        ticket: str | None = None,
         allow_private: bool | None = None,
         type_delay_ms: int = 45,
         interlude: str | None = None,
@@ -304,7 +305,7 @@ class TerminalRecorder(_DemoBase):
             speech_model=speech_model, strict=strict,
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
-            criteria=criteria, allow_private=allow_private,
+            criteria=criteria, ticket=ticket, allow_private=allow_private,
         )
         # Match the web recorder's effective caption height. Web composites
         # its page into a scaled, centered window, lifting its bottom:44px

@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 from .content import _common, media_duration, merge_content, print_content_summary
-from .coverage import _merged_coverage
+from .coverage import _merged_coverage, _merged_ticket_fields, _ticket_field
 from .frames import write_beat_frames
 from .timeline import (
     MAX_ISSUES,
@@ -505,6 +505,11 @@ def _merged_timeline(
                 "duration": duration,
                 "offset": round(offset, 3),
                 "beats": len(doc.get("beats") or []),
+                # This part's own ticket, absent when it named none — so a
+                # merged demo whose parts disagree can be read back to the
+                # segment that said each thing, rather than only to the list of
+                # what was said (issue #275).
+                **_ticket_field(doc.get("ticket")),
                 "recorder": doc.get("recorder"),
                 "determinism": doc.get("determinism"),
                 # Carried through rather than recomputed: the segment measured
@@ -535,6 +540,12 @@ def _merged_timeline(
         "generated_by": "demo-video",
         "recorder": _common([r["recorder"] for r in records], "mixed"),
         "segment": None,  # this document is the whole demo, not a part of one
+        # The ticket the parts were recorded against, when they agree on one.
+        # When they do not, `ticket_conflicts` names every one of them and
+        # `ticket` is absent — named rather than resolved, the treatment
+        # `coverage.conflicts` already gives a disagreement about wording
+        # (issue #275).
+        **_merged_ticket_fields(docs),
         "media": demo.name,
         "duration": total,
         "determinism": _merge_determinism([r["determinism"] for r in records]),

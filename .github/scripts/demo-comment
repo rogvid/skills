@@ -28,7 +28,10 @@ claimed clause pointed at the committed still a reviewer can open (issue #274),
 and on a take that died, that fact ahead of all of them (issue #278). It is a
 rendering of `timeline.json`'s `coverage` and it grades nothing — see
 `render_coverage`. It also states, in `DIFF_LIMIT`, the one question watching
-the take answers and the many it does not (issue #303).
+the take answers and the many it does not (issue #303). The take's own line
+says **which** ticket those clauses were copied out of, linked when the string
+can be turned into a URL without guessing (issue #275); nothing here reads
+that ticket.
 
 The body opens with an HTML marker so the workflow can find and rewrite this
 comment rather than appending a new one on every push.
@@ -39,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -103,6 +107,53 @@ def _and_list(items: list[str]) -> str:
     if len(items) < 3:
         return " and ".join(items)
     return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+#: `owner/repo#N`, the one ticket spelling that can be turned into a URL
+#: without guessing a host. Deliberately narrow: the string is free text a
+#: storyboard author typed, it is pasted into a link below, and anything this
+#: does not recognise is printed rather than linked.
+_TICKET_REF = re.compile(r"^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#([0-9]+)$")
+
+#: A URL safe to put in a markdown link target: http(s) only, and none of the
+#: characters that would end the target early or turn it into something else.
+_TICKET_URL = re.compile(r"^https?://[^\s<>()\[\]`\"']+$")
+
+
+def ticket_link(ticket: object) -> str | None:
+    """The ticket a take names, as one clickable thing — or as plain text.
+
+    `owner/repo#N` is linked at github.com and a URL is linked as itself.
+    Anything else is printed **verbatim**, in code, because a private
+    tracker's id is not this script's business to have opinions about and a
+    guessed link is worse than a name: it resolves somewhere, and a reviewer
+    who follows it reads the wrong requirement.
+
+    None when the timeline names no ticket, which is the ordinary take.
+    """
+    if not isinstance(ticket, str) or not ticket.strip():
+        return None
+    text = " ".join(ticket.split())
+    ref = _TICKET_REF.match(text)
+    if ref:
+        where = f"https://github.com/{ref.group(1)}/issues/{ref.group(2)}"
+        return f"[{_cell(text)}]({where})"
+    if _TICKET_URL.match(text):
+        return f"[{_cell(text)}]({text})"
+    return f"`{_cell(text)}`"
+
+
+def ticket_refs(timeline: dict) -> list[str]:
+    """Every ticket this timeline names, rendered. Usually one, sometimes none.
+
+    More than one only on a stitched demo whose segments disagree, which
+    `stitch()` records as `ticket_conflicts` and refuses to resolve. This
+    prints all of them for the same reason: the reviewer decides which of two
+    tickets a demo is about, not this script.
+    """
+    conflicts = timeline.get("ticket_conflicts")
+    named = conflicts if isinstance(conflicts, list) else [timeline.get("ticket")]
+    return [link for link in (ticket_link(t) for t in named) if link]
 
 
 def _claim_label(rows: list[dict]) -> str:
@@ -475,9 +526,20 @@ def render_demo(
     status = " — **the take did not finish**" if failure else ""
     lines.append(f"### `{name}`{status}")
     lines.append("")
-    lines.append(
-        f"{len(rows)} beats · {_duration(timeline)} · recorded by `{timeline.get('recorder', '?')}`"
+    meta = (
+        f"{len(rows)} beats · {_duration(timeline)} · recorded by "
+        f"`{timeline.get('recorder', '?')}`"
     )
+    # Where a reviewer can go and read the requirement, on the line that says
+    # what this take is (issue #275). Not inside the acceptance section: that
+    # section leads with the gap, and it is not rendered at all for a take that
+    # named a ticket without declaring clauses.
+    refs = ticket_refs(timeline)
+    if len(refs) == 1:
+        meta += f" · against {refs[0]}"
+    elif refs:
+        meta += f" · **its segments name different tickets**: {_and_list(refs)}"
+    lines.append(meta)
     lines.append("")
 
     # Above the beat table, because on a take recorded against a ticket it is

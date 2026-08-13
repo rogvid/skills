@@ -40,6 +40,28 @@ from .markdown import _fmt_t, _md_cell
 #   recorder      str    — "Recorder" | "TerminalRecorder" (which medium), or
 #                          "mixed" on a merged demo whose segments differ
 #   segment       str?   — the segment name, or null for a whole demo
+#   ticket        str?   — the ticket this take was recorded against, as its
+#                          author wrote it ("rogvid/skills#129", or a URL).
+#                          **Absent** on a take recorded outside a ticket, so a
+#                          timeline written before this key existed reads as it
+#                          always did (issue #24's rule). **Never fetched and
+#                          never resolved by the recorder** — see `coverage.py`
+#                          for why a call to a tracker inside a take is the one
+#                          thing this must not become. Nothing in this document
+#                          has compared the `coverage.criteria` below with what
+#                          that ticket says; a take can name any ticket.
+#                          On a merged demo (`stitch`) it is the ticket every
+#                          part that named one agreed on, and is absent when
+#                          they disagreed — see `ticket_conflicts`.
+#   ticket_conflicts
+#                 list?  — merged demos only, and **absent unless the segments
+#                          named different tickets**: every distinct ticket
+#                          they named, in order. `ticket` is absent whenever
+#                          this is present, because a demo half of which
+#                          demonstrates another ticket has no single honest
+#                          answer and picking one would be this document
+#                          stating something no segment said. Each part's own
+#                          is in `segments` either way.
 #   media         str    — the mp4 this timeline describes, e.g. "demo.mp4"
 #   duration      float? — that mp4's real duration (ffprobe), null if absent
 #   determinism   dict   — the conditions the take was recorded under:
@@ -131,7 +153,8 @@ from .markdown import _fmt_t, _md_cell
 #                          (ffprobe), `offset` (where it starts in `media`),
 #                          `beats`, `recorder`, `determinism`, `content`,
 #                          `narration` and that part's own `capture_clock`,
-#                          the last two on its own clock.
+#                          the last two on its own clock; plus that part's own
+#                          `ticket`, absent when it named none.
 #                          Absent from a timeline a single take wrote.
 #   content       dict?  — what the *picture* turned out to be, measured off
 #                          the encoded mp4 over the region the app occupies:
@@ -1085,6 +1108,39 @@ def _coverage_failure_md(failure: dict, criteria: dict, claimed: dict) -> list[s
     return out
 
 
+def _ticket_md(doc: dict) -> list[str]:
+    """Which ticket this take was recorded against (issue #275), or nothing.
+
+    Rendered whether or not the take declared `criteria=`, and immediately
+    above the coverage table when there is one: the clauses in that table are
+    quoted from *this* ticket, and a reader who has to take the storyboard's
+    word for where four sentences came from cannot check them against anything.
+
+    It says the recorder never fetched it, because that is the load-bearing
+    half. The sentence "recorded against #129" invites a reader to assume
+    something compared the two, and nothing here has.
+    """
+    conflicts = doc.get("ticket_conflicts")
+    if isinstance(conflicts, list) and conflicts:
+        return [
+            f"**The segments name different tickets: "
+            f"{', '.join(f'`{_md_cell(str(t))}`' for t in conflicts)}.** All of "
+            f"them are listed rather than one of them chosen — a demo half of "
+            f"which was recorded against another ticket has no single answer. "
+            f"Each part's own is in its `segments` record.",
+            "",
+        ]
+    ticket = doc.get("ticket")
+    if not isinstance(ticket, str) or not ticket.strip():
+        return []
+    return [
+        f"Recorded against **{_md_cell(ticket)}**, as the storyboard names it. "
+        f"The recorder never fetched it: nothing here has compared anything in "
+        f"this file with what that ticket says.",
+        "",
+    ]
+
+
 def _coverage_md(coverage: object, failure: object = None) -> list[str]:
     """The acceptance-criteria section of timeline.md, or nothing (issue #12).
 
@@ -1278,6 +1334,12 @@ def render_timeline_md(doc: dict) -> str:
     # when the take was recorded against a ticket — and because a reviewer who
     # scrolls past 28 beats first has already formed the impression the
     # coverage report exists to test (issue #12).
+    #
+    # The ticket first, because the clauses in the table are quoted from it and
+    # a reader who meets four sentences before their source has already read
+    # them as the ticket's own words (issue #275). It sits above the section's
+    # own heading, so the section still opens on the failure below.
+    out += _ticket_md(doc)
     # The failure goes in with it, not only into the section above: without it
     # the acceptance table renders a crashed take's claims exactly like a clean
     # take's, which is the artifact reporting success on failure (issue #278).

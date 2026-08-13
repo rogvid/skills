@@ -271,10 +271,11 @@ review in step 6 answers *"is this story clear?"*; a review gate has to answer
 *"does this show what the ticket asked for?"*, which is a different question
 with a different answer.
 
-Declare the criteria on the recorder and tag the beats that demonstrate them:
+Declare the criteria on the recorder, name the ticket they came out of, and tag
+the beats that demonstrate them:
 
 ```python
-with Recorder(OUT, criteria={
+with Recorder(OUT, ticket="rogvid/skills#129", criteria={
     "AC-1": "The queue can be filtered to one status.",
     "AC-2": "A filter that matches nothing explains itself.",
     "AC-3": "The CLI prints the same filtered list.",
@@ -287,9 +288,13 @@ with Recorder(OUT, criteria={
 ```
 
 `timeline.md` then carries a table above the beats, and `timeline.json` a
-`coverage` object:
+`coverage` object, with the ticket named above both:
 
 ```
+Recorded against **rogvid/skills#129**, as the storyboard names it. The
+recorder never fetched it: nothing here has compared anything in this file
+with what that ticket says.
+
 | criterion                                   | claimed by | at   | still                 |
 | **AC-1** — The queue can be filtered…       | beat 1     | 3.20 |                       |
 |                                             | beat 2     | 5.46 | `images/01-filtered…` |
@@ -325,6 +330,33 @@ re-record after a crash the *previous* take's file of that name is already on
 disk, and the embed puts a real photograph under this take's heading, this
 take's timestamp and this take's caption. The beat table is where that beat
 still appears, marked **raised**.
+
+### Name the ticket: `ticket=`
+
+`criteria={...}` quotes four sentences; `ticket=` is what says whose they are.
+Without it the source lives in a comment or a docstring, nothing machine-readable
+knows it, and a manifest quoting four clauses cannot be checked against the
+ticket they were copied from by anything — nor can a reviewer click through from
+the demo to the requirement.
+
+- **A free string**, checked only for being non-empty. `"rogvid/skills#129"`, a
+  URL, `"JIRA-4412"` — a private tracker's id is not this recorder's business to
+  have opinions about. The pull-request comment links `owner/repo#N` and URLs,
+  and prints anything else verbatim rather than guessing a link that would
+  resolve somewhere wrong.
+- **Never fetched and never resolved.** The recorder refuses a public target
+  before a browser opens; a call to a tracker inside a take is exactly the
+  coupling that machinery exists to avoid, and it would make re-running a
+  committed storyboard produce a *different* manifest whenever somebody edited
+  the issue. The artifact stays a function of the file in git.
+- **It lands in `timeline.json` as `ticket`**, absent on a take recorded outside
+  one, and `timeline.md` names it above the coverage table.
+- **`stitch()` carries it, and reports a conflict rather than choosing.**
+  Segments naming different tickets produce `ticket_conflicts` listing all of
+  them and *no* `ticket` — the same treatment a disagreement about a clause's
+  wording gets.
+- **Nothing has compared the clauses with the ticket.** Naming it makes that
+  check possible; it is not that check, and no artifact here implies otherwise.
 
 ### Put the clause on screen: `criterion()`
 
