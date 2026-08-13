@@ -13475,6 +13475,56 @@ INJECTIONS = [
 ]
 
 
+# The two things the inner run has to be able to tell the driver, and neither
+# of them is "I exited non-zero". A selection that matched nothing runs no
+# tests and exits 0, which reads exactly like "the injection was caught" — so
+# the driver reads a count off the inner run and refuses anything else.
+INNER_ABORT = "INNER-ABORT: "
+INNER_RAN = "INNER-RAN: "
+
+
+def inner_run(names: list[str]) -> int:
+    """Run exactly the `Class.method` tests named, or refuse to run at all.
+
+    `--fault-inject` spawns this once per manifest entry. It used to spawn the
+    whole suite, which made an injection cost `O(every test in this file)` —
+    every test added anywhere slowed every injection everywhere, and the CI job
+    was cancelled twice at ten and fifteen minutes. The entries already declare
+    which tests must fail; this runs those.
+
+    Selection is done by hand rather than through `unittest`'s loader because
+    the loader turns an unresolvable name into a synthetic test that *errors*
+    with that name in its id — so an entry naming a test that no longer exists
+    would produce `ERROR: Gone.test_gone`, and the driver's "did the named test
+    fire" check would read it as the injection being caught. A manifest naming
+    nothing would then grade nothing while printing all green.
+    """
+    if not names:
+        print(f"{INNER_ABORT}no tests were named", file=sys.stderr)
+        return 3
+    module = sys.modules["__main__"]
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    missing = []
+    for name in names:
+        cls_name, _, method = name.partition(".")
+        cls = getattr(module, cls_name, None)
+        if not (isinstance(cls, type) and issubclass(cls, unittest.TestCase)):
+            missing.append(name)
+        elif method not in loader.getTestCaseNames(cls):
+            missing.append(name)
+        else:
+            suite.addTest(cls(method))
+    if missing:
+        print(f"{INNER_ABORT}no such test: {', '.join(missing)}", file=sys.stderr)
+        return 3
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    # Printed last, and read by the driver: the number of tests that actually
+    # started, straight off the runner's own counter.
+    print(f"{INNER_RAN}{result.testsRun}", file=sys.stderr)
+    return 0 if result.wasSuccessful() else 1
+
+
 def fault_inject() -> int:
     """Break one thing at a time and require the named tests to notice."""
     failures = 0
@@ -13557,7 +13607,7 @@ def fault_inject() -> int:
             target.write_text(text.replace(old, new), encoding="utf-8")
 
             done = subprocess.run(
-                [sys.executable, str(unit), "--_inner"],
+                [sys.executable, str(unit), "--_inner", *must_fail],
                 capture_output=True,
                 text=True,
                 env={
@@ -13570,7 +13620,52 @@ def fault_inject() -> int:
                     "UNIT_EXAMPLES": str(examples),
                 },
             )
-            noticed = {t for t in must_fail if t in done.stderr}
+            # Before the verdict, and on the same footing as a pattern that did
+            # not match exactly once: an inner run that executed none of the
+            # tests it selected exits 0 and would be read as a catch. So the
+            # count is checked, not just the exit status, and a name the inner
+            # run could not resolve stops the whole thing rather than arriving
+            # as a green `ERROR:` line carrying its own name.
+            aborted = [
+                ln[len(INNER_ABORT) :]
+                for ln in done.stderr.splitlines()
+                if ln.startswith(INNER_ABORT)
+            ]
+            if aborted:
+                print(
+                    f"ABORT: injection {name!r} names a test the suite does "
+                    f"not have — {aborted[0]}. Nothing it would have proven "
+                    f"is proven.",
+                    file=sys.stderr,
+                )
+                return 3
+            ran = [
+                int(ln[len(INNER_RAN) :])
+                for ln in done.stderr.splitlines()
+                if ln.startswith(INNER_RAN)
+            ]
+            if ran != [len(must_fail)]:
+                print(
+                    f"ABORT: injection {name!r} selected {len(must_fail)} "
+                    f"test(s) but the inner run reported {ran or 'no count'}. "
+                    f"A run that executes nothing exits 0 and reads as a "
+                    f"catch, so this is a refusal, not a miss.",
+                    file=sys.stderr,
+                )
+                print(
+                    textwrap.indent(done.stderr[-1500:], "       | "), file=sys.stderr
+                )
+                return 3
+            # Scoped to the runner's own verdict lines: over a whole-suite run
+            # a name could only turn up there, but a targeted run also prints
+            # the names it selected, and a check that reads all of stderr would
+            # find them in its own bookkeeping.
+            verdicts = [
+                ln
+                for ln in done.stderr.splitlines()
+                if ln.startswith(("FAIL:", "ERROR:"))
+            ]
+            noticed = {t for t in must_fail if any(t in ln for ln in verdicts)}
             missed = set(must_fail) - noticed
             ok = done.returncode != 0 and not missed
             print(f"{'PASS' if ok else 'FAIL'}  break: {name}")
@@ -13692,6 +13787,8 @@ def main() -> int:
         return budget_report()
     if args.fault_inject:
         return fault_inject()
+    if args._inner:
+        return inner_run(rest)
     result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=1)
     return 0 if result.result.wasSuccessful() else 1
 
