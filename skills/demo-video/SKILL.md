@@ -467,34 +467,33 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    converge in ~2 rounds; cap at 3 and surface the rest to the user instead of
    looping. Findings that need a different feature demoed are future demos.
 
-   **6b. Conformance review (only when the take declared `criteria=`).** A
-   *second* reviewer, run alongside the one above and never instead of it —
-   they answer different questions, and a demo can pass either one while
-   failing the other. Step 6 asks whether the story is clear. This asks whether
-   it shows what the ticket asked for.
+   **6b. Locate each clause in the frames (only when the take declared
+   `criteria=`).** A *second* reader, run alongside the one above and never
+   instead of it: step 6 asks whether the story is clear, this asks where each
+   clause of the ticket is in the frames.
 
-   Dispatch a separate subagent and give it **the acceptance criteria as the
-   ticket words them**, `timeline.md`, and `frames/`. `evidence/beat-NN.json`
-   too if the criterion is about data rather than layout — the recorder was
-   driving the page, so the DOM or terminal buffer at that beat is recorded
-   exactly, and the reviewer does not have to squint at a picture to read a
-   number.
+   ```sh
+   scripts/demo-grade brief   <demo folder>          # → review/brief.md
+   scripts/demo-grade verdict <demo folder> --reading reading.json
+   ```
 
-   Ask for a verdict **per criterion**: DEMONSTRATED, NOT DEMONSTRATED, or
-   UNCLEAR, each with the beat and the frame it is based on. Tell it plainly:
+   Between the two, **dispatch a subagent that has seen nothing else** and give
+   it `review/brief.md` and the take's `frames/` — not the storyboard, not
+   `record.py`, not `timeline.md`, not the diff, not your own reasoning about
+   this change. The brief is blind by construction; **nothing in the tool can
+   enforce what else you hand over**, and that isolation is the whole value of
+   the pass. Save the reply verbatim as `reading.json`; `verdict` writes
+   `review/verdict.md`, the reading against the `ac=` tags the storyboard author
+   typed. Then, in the pull request, **report the disagreements and every
+   `cannot tell` first, and collapse the agreements** — those two classes are
+   what a human is being pulled in for.
 
-   > The `ac=` tags are the storyboard author's claims, not evidence. For each
-   > criterion, look at the frames the table points at and decide whether they
-   > actually show it. A criterion whose beats show something else is NOT
-   > DEMONSTRATED even though the table lists it.
-
-   That instruction is the whole point of the pass. Without it the reviewer
-   reads the coverage table back to you, which is a tautology — see
-   [reference/review.md](reference/review.md).
-
-   `unclaimed` needs no reviewer: nothing claimed those, and the timeline
-   already says so. Either the demo does not show them or the storyboard did
-   not say where, and both are fixed before review rather than during it.
+   The reader is asked for one clause, one frame, and not for a verdict on the
+   demo: that aggregate was measured unstable here
+   ([#131](https://github.com/rogvid/skills/issues/131)) where per-clause
+   localisation was stable. **What this check catches and what it does not** is
+   printed in `brief.md` and again in `verdict.md` — read it there, not from a
+   second copy here that would go stale.
 7. **Write `guide.md`** (when a written guide is wanted): what the feature
    is, how to use it step by step — each step referencing a still —
    opening with the strongest still. Don't link `demo.mp4` from it: the
@@ -585,8 +584,9 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 
 The skill is self-contained: this file, the `reference/` directory it links
 into, the `helpers/demo_recording/` package, `ensure.sh` at the skill root,
-`scripts/demo-target-guard`, the vendored `helpers/assets/xterm/` terminal
-assets, and `README.md`. Install it with the `skills` CLI — into the current project:
+`scripts/demo-grade` (step 6b) and `scripts/demo-target-guard` (the target
+classifier), the vendored `helpers/assets/xterm/` terminal assets, and
+`README.md`. Install it with the `skills` CLI — into the current project:
 
 ```sh
 npx skills add https://github.com/rogvid/skills/tree/main/skills/demo-video
