@@ -33,7 +33,7 @@ same terms, and their ship/no-ship fields disagreed. The stable half is asked
 for; the unstable half stays with the human. Any roll-up is arithmetic over the
 per-clause answers, done in code, with the rule written into the artifact.
 
-## The limit that cannot be designed away
+## The limit that cannot be designed away, and the one that can
 
 The reader is blind to the storyboard, the `ac` ids, the coverage table and the
 diff. It **cannot** be blind to the storyboard author's prose: captions are
@@ -42,12 +42,33 @@ burned into the picture (`helpers/demo_recording/core.py`'s `_CAPTION_JS` sets
 string. So every frame the reader looks at carries the author's claim in its
 pixels.
 
+That was long written down here as the blind spot — a caption asserting a
+misread requirement over a screen that agrees with it — and it is not the
+binding constraint. **The reader is never asked to compare the screen against
+the caption. It is given the ticket's clause text.** So a caption that
+overclaims against that text is something it can disbelieve, and does: this
+repository's eval corpus (`tests/eval/grader/`) planted exactly that defect as
+its negative control and two independent runs caught it, one of them noting
+that the query typed was a word from a ticket *title* and that the requester
+match the caption asserted was never demonstrated. Twice caught is not always
+caught — that is two runs over one take, a measurement rather than a property —
+but telling a reader not to bother with something they demonstrably can do is
+the more expensive error.
+
+The real blind spot is one level up, and no reading of any frame reaches it:
+**a declared clause text that is itself the misreading.** If `criteria={"AC-3":
+<a wrong paraphrase of the ticket>}` and the demo faithfully satisfies the
+paraphrase, the reader agrees, the storyboard agrees, and the ticket is still
+unmet, because every input the reader has is downstream of the paraphrase.
+Comparing the declared clause against the ticket's own words is the only thing
+that closes it, and that is issue #276.
+
 Consequence, stated the same way in `brief.md` and `verdict.md`: this catches a
 clause tagged on the wrong beat, a clause whose evidence never arrives, a
-tagged beat showing an error page, and a clause the demo never reaches. It does
-**not** catch a storyboard derived from the diff whose caption asserts a misread
-requirement and whose screen agrees with the caption — both readers read that
-caption.
+tagged beat showing an error page, a clause the demo never reaches, and — twice
+measured, not guaranteed — a caption overclaiming against the clause it was
+handed. It does **not** catch a ticket that was misread before its clauses were
+written down.
 
 ## Exit status
 
@@ -158,11 +179,20 @@ LIMIT = (
     "Agreement is a cross-check, not a verification. Two readers can share a "
     "bias, and a plausible-looking screen can fool both — and here they are not "
     "even fully independent: the caption the storyboard author wrote is burned "
-    "into every frame both of them read. This catches a clause tagged on the "
-    "wrong beat, a clause whose evidence never arrives, a tagged beat showing "
-    "an error page, and a clause the demo never reaches. It does not catch a "
-    "storyboard whose caption asserts a misread requirement and whose screen "
-    "agrees with the caption."
+    "into every frame both of them read. The reader is not asked to compare the "
+    "screen with that caption, though. It is handed the ticket's clause text, "
+    "so a caption overclaiming against the clause is something it can and does "
+    "disbelieve — measured twice on a take built to defeat it, which is a "
+    "measurement and not a guarantee. This catches a clause tagged on the wrong "
+    "beat, a clause whose evidence never arrives, a tagged beat showing an "
+    "error page, a clause the demo never reaches, and — twice measured — a "
+    "caption asserting what the screen was never shown doing. What it cannot "
+    "catch is one level up: a declared clause text that is itself a misreading "
+    "of the ticket. If the clauses above paraphrase the ticket wrongly and the "
+    "demo satisfies the paraphrase, both derivations agree and the ticket is "
+    "still unmet, because every input the reader has is downstream of that "
+    "paraphrase. Comparing the declared clause with the ticket's own words is "
+    "the only thing that closes it (issue #276)."
 )
 
 
@@ -341,12 +371,27 @@ def render_brief_md(criteria: dict[str, str], frames: list[str]) -> str:
         "",
         "The captions on these frames were written by the storyboard's author, "
         "and they are burned into the pixels — there is no framing of this "
-        "request that removes them. So your reading catches a clause placed on "
-        "the wrong beat, a clause whose evidence never arrives, a beat showing "
-        "an error page, and a clause the demo never reaches. It does **not** "
-        "catch a storyboard whose caption asserts a misread requirement and "
-        "whose screen agrees with the caption — you and the author read the "
-        "same caption there.",
+        "request that removes them. **You are not being asked to check the "
+        "screen against the caption.** You have the ticket's clause text above, "
+        "and that is what to hold the pictures against: where a caption asserts "
+        "something you are not shown the software doing, that is exactly the "
+        "`cannot tell` above, and readers here demonstrably catch it — on this "
+        "tool's own corpus, two independent runs caught a caption claiming a "
+        "match the screen never performed. Two runs over one recording is a "
+        "measurement, not a promise, so do not assume it of yourself; read the "
+        "pictures.",
+        "",
+        "So your reading catches a clause placed on the wrong beat, a clause "
+        "whose evidence never arrives, a beat showing an error page, a clause "
+        "the demo never reaches, and a caption overclaiming against a clause "
+        "above. What no reading of any frame can catch is one level up: a "
+        "clause above that is **itself** a misreading of the ticket. If these "
+        "clauses paraphrase the ticket wrongly and the demo faithfully "
+        "satisfies the paraphrase, you will agree, the author will agree, and "
+        "the ticket is still unmet — every input you have is downstream of that "
+        "paraphrase. This check does **not** catch that, and nothing you can do "
+        "with these frames would; closing it means comparing the clauses with "
+        "the ticket's own words, which you have not been given.",
         "",
         "## The clauses",
         "",

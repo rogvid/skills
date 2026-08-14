@@ -9817,15 +9817,35 @@ class BriefIsBlind(_GradeCase):
         self.assertIn("do not say whether it should ship", text.lower())
 
     def test_the_brief_states_the_limit_it_cannot_design_away(self):
-        # Required by #279 in the artifact itself: the caption is burned into
-        # every frame the reader reads, so a storyboard whose caption asserts a
-        # misread requirement and whose screen agrees with it survives this
-        # check. A cross-check that does not carry its own boundary gets read
-        # as one that has none.
+        """Required by #279 in the artifact itself, and #276 corrected which
+        limit that is.
+
+        The brief used to tell its reader that a caption asserting a misread
+        requirement over an agreeing screen survives this check. The eval
+        measured otherwise: the corpus planted that defect and two independent
+        runs caught it, because **the reader is not asked to compare the screen
+        with the caption — it is handed the ticket's clause text**. A stated
+        limit that is wrong in the conservative direction still costs a
+        reader's trust, and this one told them not to bother with the one thing
+        they demonstrably do.
+
+        So three things are asserted, and all three are load-bearing: that the
+        caption's presence is still stated (it is why the two derivations are
+        not fully independent), that what the reader *can* do is stated
+        plainly, and that the blind spot named is the real one — a clause text
+        that is itself the misreading, which no frame can show.
+        """
         text = grade.render_brief_md(GRADE_CRITERIA, ["beat-00.png"])
         self.assertIn("burned into the pixels", text)
+        self.assertIn("not being asked to check the screen against the caption", text)
         self.assertIn("does **not**", text)
-        self.assertIn("agrees with the caption", text)
+        self.assertIn("itself** a misreading of the ticket", text)
+        self.assertIn("downstream of that paraphrase", text)
+        # The hedge, in the other direction. Two runs on one take is not a
+        # property, and a brief that traded one overclaim for its opposite
+        # would pass every assertion above.
+        self.assertIn("measurement, not a promise", text)
+        self.assertNotIn("agrees with the caption", text)
 
 
 class BriefRefusals(_GradeCase):
@@ -10245,7 +10265,14 @@ class VerdictOutput(_GradeCase):
         doc = self.verdict(self.demo, [_grade_row(k, v) for k, v in GRADE_READ.items()])
         page = (self.demo / "review" / "verdict.md").read_text()
         self.assertIn("cross-check, not a verification", page)
-        self.assertIn("agrees with the caption", page)
+        # The corrected limit (#276): what the reader can do, said plainly,
+        # then the blind spot that is actually structural, then the hedge that
+        # keeps the correction from becoming the opposite overclaim.
+        self.assertIn("not asked to compare the screen with that caption", page)
+        self.assertIn("a declared clause text that is itself a misreading", page)
+        self.assertIn("issue #276", page)
+        self.assertIn("a measurement and not a guarantee", page)
+        self.assertNotIn("agrees with the caption", page)
         for row in doc["clauses"]:
             beats = GRADE_CLAIMED[row["criterion"]]
             self.assertEqual(row["storyboard"]["span"], [min(beats), max(beats)])
@@ -14453,15 +14480,42 @@ INJECTIONS = [
         ["VerdictOutput.test_disagreements_are_printed_before_agreements"],
     ),
     (
-        # The rule at its boundary, widened by one beat either side — the
-        # shape a tolerance grows by when somebody is looking at one noisy
-        # take. The span's ends are still inside, so only the two readings
-        # just outside it can tell.
-        "the agreement span grows a beat of tolerance at each end",
+        # The rule at the boundary that still carries evidence, widened by one
+        # beat — the shape a tolerance grows by when somebody is looking at one
+        # noisy take. The span's last beat is still inside, so only the reading
+        # just past it can tell.
+        "the agreement span grows a beat of tolerance past the last claim",
         "scripts/demo-grade",
-        '        if beats[0] <= reading["beat"] <= beats[-1]:',
-        '        if beats[0] - 1 <= reading["beat"] <= beats[-1] + 1:',
-        ["SpanRule.test_one_beat_outside_each_end_is_a_disagreement"],
+        '        if reading["beat"] <= beats[-1]:',
+        '        if reading["beat"] <= beats[-1] + 1:',
+        ["SpanRule.test_a_reading_after_the_last_claimed_beat_is_the_disagreement"],
+    ),
+    (
+        # **The way the false-alarm fix would actually be got wrong**: one
+        # branch for everything outside the span, so the reading that proves
+        # the claimed beats showed nothing becomes an agreement alongside the
+        # one that proves nothing at all. The class, the sentence and the count
+        # all keep working; the only thing lost is the finding.
+        "a reading past the last claim is swallowed by the before-the-span rule",
+        "scripts/demo-grade",
+        '        if reading["beat"] < beats[0]:',
+        '        if reading["beat"] < beats[0] or reading["beat"] > beats[-1]:',
+        ["SpanRule.test_a_reading_after_the_last_claimed_beat_is_the_disagreement"],
+    ),
+    (
+        # The distinction made and then not written down. `classify()` still
+        # returns it, the class is still right, and every row in both artifacts
+        # reads `inside the claimed span` — so an agreement located before
+        # anything claimed it is indistinguishable from an ordinary one in the
+        # only two files a human opens.
+        "every agreement is printed as though it were inside the claimed span",
+        "scripts/demo-grade",
+        '                    "position": position,',
+        '                    "position": INSIDE_SPAN,',
+        [
+            "VerdictOutput."
+            "test_an_agreement_read_before_the_claim_is_told_apart_in_both_files"
+        ],
     ),
     (
         # The one thing this command may never do. A grader that can redden a
