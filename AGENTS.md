@@ -158,6 +158,34 @@ The skill's catalogue of *measurements that grade nothing* is the reviewer's
 checklist. Every entry in it came from a change in this repo that had green CI
 and an honest author.
 
+### Where an eval replaces the injections
+
+**Code whose correctness is measured by an eval does not also owe injections.**
+The discipline above exists because a recorder defect is invisible until an
+assertion catches it. That reasoning does not carry to code that is graded by
+running it against a corpus with known answers — there, the corpus *is* the
+evidence, and it is better evidence, because it measures the thing the code is
+for rather than the code's own internals.
+
+This applies today to the grader (`skills/demo-video/scripts/demo-grade` and
+whatever reads its brief). Its question — *does a blind reader find the clause
+in the frames* — is answered by the eval corpus: takes with known defects
+planted, scored on what was caught and what was falsely flagged. Injections
+there are optional. Write them where they are cheap and skip them where they
+are not.
+
+The number that made this rule: a five-item assertion-hygiene round on the
+grader's own tests cost **85 minutes**, against an eval that answers the product
+question in **four**. Each item was individually defensible under the rules
+above, which is exactly why the scope had to be written down rather than left
+to judgement.
+
+An eval carries its own honesty requirement, and it is the same one: **a corpus
+with no expected misses is not a measurement.** It must contain at least one
+defect the reader is expected *not* to catch — the caption the screen agrees
+with is this repo's known blind spot — and the score must show it uncaught. A
+corpus that catches everything is measuring its own fixtures.
+
 ## Housekeeping
 
 - Never commit `node_modules/`, `dist/`, `build/`, `__pycache__/`, `.tts/`, or
