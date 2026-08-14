@@ -1,0 +1,356 @@
+{
+  "schema": 1,
+  "generated_by": "demo-video",
+  "recorder": "Recorder",
+  "segment": null,
+  "media": "demo.mp4",
+  "duration": 17.88,
+  "determinism": {
+    "deterministic": false,
+    "clock": null,
+    "timezone_id": "UTC",
+    "locale": "en-US"
+  },
+  "content": {
+    "measured": true,
+    "note": null,
+    "rect": [
+      128,
+      90,
+      1024,
+      460
+    ],
+    "sample_fps": 2,
+    "frames": 36,
+    "score": 24.05,
+    "floor": 1.0,
+    "static_for": 4.5,
+    "static_from": 0.5,
+    "static_beats": [
+      {
+        "index": 1,
+        "verb": "wait_for",
+        "acting": false
+      },
+      {
+        "index": 2,
+        "verb": "caption",
+        "acting": false
+      },
+      {
+        "index": 3,
+        "verb": "hold",
+        "acting": false
+      }
+    ],
+    "static_limit": 15.0,
+    "opening": {
+      "gap": 0.0,
+      "held": 0.4,
+      "limit": 1.5,
+      "note": null,
+      "card": null
+    },
+    "warnings": []
+  },
+  "capture_clock": {
+    "measured": true,
+    "note": null,
+    "steps": [
+      {
+        "t": 14.568,
+        "delta": -1.0348
+      }
+    ],
+    "total": -1.0348,
+    "sample_interval": 0.02,
+    "min_step": 0.005,
+    "max_gap": 0.0213,
+    "max_gap_limit": 0.25
+  },
+  "narration": null,
+  "coverage": {
+    "criteria": {
+      "AC-1": "The queue lists every ticket with its id, its title and the person who raised it.",
+      "AC-2": "A search box above the queue narrows the list as you type, with no button to press."
+    },
+    "claimed": {
+      "AC-1": [
+        {
+          "index": 2,
+          "segment": null,
+          "segment_index": 2,
+          "t_start": 1.08,
+          "still": null
+        },
+        {
+          "index": 4,
+          "segment": null,
+          "segment_index": 4,
+          "t_start": 5.592,
+          "still": "images/01-queue.png"
+        },
+        {
+          "index": 5,
+          "segment": null,
+          "segment_index": 5,
+          "t_start": 5.65,
+          "still": null
+        },
+        {
+          "index": 9,
+          "segment": null,
+          "segment_index": 9,
+          "t_start": 11.549,
+          "still": "images/02-row.png"
+        }
+      ],
+      "AC-2": [
+        {
+          "index": 11,
+          "segment": null,
+          "segment_index": 11,
+          "t_start": 12.196,
+          "still": null
+        },
+        {
+          "index": 14,
+          "segment": null,
+          "segment_index": 14,
+          "t_start": 17.047,
+          "still": "images/03-controls.png"
+        }
+      ]
+    },
+    "unclaimed": [],
+    "tagged_beats": 6,
+    "untagged_beats": 11
+  },
+  "beats": [
+    {
+      "index": 0,
+      "t_start": 0.479,
+      "t_end": 1.046,
+      "caption": "",
+      "verb": "goto",
+      "selector": "/",
+      "still": null,
+      "segment": null,
+      "segment_index": 0,
+      "evidence": "evidence/beat-00.json"
+    },
+    {
+      "index": 1,
+      "t_start": 1.046,
+      "t_end": 1.08,
+      "caption": "",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 1,
+      "evidence": "evidence/beat-01.json"
+    },
+    {
+      "index": 2,
+      "t_start": 1.08,
+      "t_end": 4.077,
+      "caption": "The queue, with every ticket on it.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 2,
+      "evidence": "evidence/beat-02.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 3,
+      "t_start": 4.077,
+      "t_end": 5.592,
+      "caption": "The queue, with every ticket on it.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 3,
+      "evidence": "evidence/beat-03.json"
+    },
+    {
+      "index": 4,
+      "t_start": 5.592,
+      "t_end": 5.65,
+      "caption": "The queue, with every ticket on it.",
+      "verb": "shot",
+      "selector": "01-queue",
+      "still": "images/01-queue.png",
+      "segment": null,
+      "segment_index": 4,
+      "evidence": "evidence/beat-04.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 5,
+      "t_start": 5.65,
+      "t_end": 9.661,
+      "caption": "Each row carries its id, its title and its requester.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 5,
+      "evidence": "evidence/beat-05.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 6,
+      "t_start": 9.661,
+      "t_end": 9.995,
+      "caption": "Each row carries its id, its title and its requester.",
+      "verb": "spotlight",
+      "selector": ".ticket[data-id='TQ-101']",
+      "still": null,
+      "segment": null,
+      "segment_index": 6,
+      "evidence": "evidence/beat-06.json"
+    },
+    {
+      "index": 7,
+      "t_start": 9.995,
+      "t_end": 10.023,
+      "caption": "Each row carries its id, its title and its requester.",
+      "verb": "wait_for",
+      "selector": ".ticket[data-id='TQ-101'] .ticket-requester",
+      "still": null,
+      "segment": null,
+      "segment_index": 7,
+      "evidence": "evidence/beat-07.json"
+    },
+    {
+      "index": 8,
+      "t_start": 10.023,
+      "t_end": 11.549,
+      "caption": "Each row carries its id, its title and its requester.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 8,
+      "evidence": "evidence/beat-08.json"
+    },
+    {
+      "index": 9,
+      "t_start": 11.549,
+      "t_end": 11.629,
+      "caption": "Each row carries its id, its title and its requester.",
+      "verb": "shot",
+      "selector": "02-row",
+      "still": "images/02-row.png",
+      "segment": null,
+      "segment_index": 9,
+      "evidence": "evidence/beat-09.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 10,
+      "t_start": 11.629,
+      "t_end": 12.196,
+      "caption": "Each row carries its id, its title and its requester.",
+      "verb": "spotlight",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 10,
+      "evidence": "evidence/beat-10.json"
+    },
+    {
+      "index": 11,
+      "t_start": 12.196,
+      "t_end": 15.192,
+      "caption": "The queue's controls sit above the list.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 11,
+      "evidence": "evidence/beat-11.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 12,
+      "t_start": 15.192,
+      "t_end": 15.525,
+      "caption": "The queue's controls sit above the list.",
+      "verb": "spotlight",
+      "selector": "#queue-search",
+      "still": null,
+      "segment": null,
+      "segment_index": 12,
+      "evidence": "evidence/beat-12.json"
+    },
+    {
+      "index": 13,
+      "t_start": 15.525,
+      "t_end": 17.047,
+      "caption": "The queue's controls sit above the list.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 13,
+      "evidence": "evidence/beat-13.json"
+    },
+    {
+      "index": 14,
+      "t_start": 17.047,
+      "t_end": 17.127,
+      "caption": "The queue's controls sit above the list.",
+      "verb": "shot",
+      "selector": "03-controls",
+      "still": "images/03-controls.png",
+      "segment": null,
+      "segment_index": 14,
+      "evidence": "evidence/beat-14.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 15,
+      "t_start": 17.127,
+      "t_end": 17.694,
+      "caption": "The queue's controls sit above the list.",
+      "verb": "spotlight",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 15,
+      "evidence": "evidence/beat-15.json"
+    },
+    {
+      "index": 16,
+      "t_start": 17.694,
+      "t_end": 18.005,
+      "caption": "",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 16,
+      "evidence": "evidence/beat-16.json"
+    }
+  ],
+  "strict": false,
+  "issues": [],
+  "issue_count": 0
+}

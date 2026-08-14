@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "take": "never-demonstrated",
+  "what": "AC-2 is declared and claimed, and the take never types a character, so the narrowing it describes happens in no frame. The coverage table cannot see this: AC-2 is claimed, so nothing is unclaimed.",
+  "clauses": {
+    "AC-1": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "The queue is on screen with every row's id, title and requester, and one beat spotlights a row to make the requester unmissable."
+    },
+    "AC-2": {
+      "kind": "planted",
+      "expect_status": "not seen",
+      "expect_class": "disagreement",
+      "why": "The search box is visible and is never used. The list never changes, so there is no frame in which it narrows as you type. A reader answering 'cannot tell' instead of 'not seen' still surfaces the clause to a human and still counts as caught; the exact-match column is what records the difference."
+    }
+  }
+}

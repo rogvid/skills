@@ -35,6 +35,16 @@ fires. Per-arm flags are what made it affordable — an injection aimed at
 nightly, and its own guards run on every push. See **The injection manifest**
 below for what it covers and what it does not.
 
+`eval-grader` is **not a suite at all**, and it is in this directory because it
+is the other way of getting evidence. The suites above assert; it *measures*.
+It scores `demo-grade`'s blind reader against four takes recorded against
+`examples/ticket-queue` whose answers are written down — what the reader
+caught, what it flagged on a clean demo, and what it was expected to miss. It
+gates nothing, exits 0 whatever it finds, and needs a model between its `brief`
+and `score` phases, so it is run deliberately rather than on a push. `AGENTS.md`
+("Where an eval replaces the injections") is why code graded this way does not
+also owe an injection manifest; `tests/eval/grader/README.md` is the corpus.
+
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
@@ -43,6 +53,9 @@ tests/
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
 │                      #   sees, plus the docs' python fences (~0.3 s)
+├── eval-grader        # scores the blind reader against a known-answer corpus
+│                      #   (record ~2 min and cached; score ~0.3 s)
+├── eval/grader/takes/ # the four corpus takes and their expectations
 └── fixture/
     └── index.html     # the app smoke records: static, dependency-free, deterministic
 ```

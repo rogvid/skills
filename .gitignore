@@ -20,6 +20,14 @@ __pycache__/
 # media. Anchored to examples/ so a hand-authored showcase elsewhere can still
 # be committed deliberately.
 examples/*/demos/*/demo.mp4
+# The same rule for the grader's eval corpus, which is takes recorded against
+# examples/ticket-queue that happen to live under tests/. `frames/` and
+# `evidence/` below are unanchored and already cover it; these two are not.
+# What IS committed there is the storyboard, timeline.json, images/ and
+# .eval-recording.json — see tests/eval/grader/README.md for why the frames
+# are not, and what that gives up.
+tests/eval/grader/takes/*/demo.mp4
+tests/eval/grader/takes/*/review/
 .tts/
 *.seg.mp4
 # Per-segment beat logs. The merged timeline.json/timeline.md next to
