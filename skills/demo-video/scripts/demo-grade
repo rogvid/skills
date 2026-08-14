@@ -64,11 +64,17 @@ Comparing the declared clause against the ticket's own words is the only thing
 that closes it, and that is issue #276.
 
 Consequence, stated the same way in `brief.md` and `verdict.md`: this catches a
-clause tagged on the wrong beat, a clause whose evidence never arrives, a
-tagged beat showing an error page, a clause the demo never reaches, and — twice
-measured, not guaranteed — a caption overclaiming against the clause it was
-handed. It does **not** catch a ticket that was misread before its clauses were
-written down.
+clause claimed *before* its evidence arrives and never arriving, a clause whose
+evidence never arrives at all, a tagged beat showing an error page, a clause the
+demo never reaches, and — twice measured, not guaranteed — a caption
+overclaiming against the clause it was handed.
+
+**Wrong-beat tagging has two directions and this catches one of them.** A
+reading *before* `min(claimed)` is an `agreement` — see `agreement_rule()` for
+why, and its `weakness` for what that gives up — so a clause whose evidence came
+and went before the beats that claimed it does not surface. Tagged too early
+surfaces; tagged too late does not. Nor does this catch a ticket that was
+misread before its clauses were written down.
 
 ## Exit status
 
@@ -183,12 +189,17 @@ LIMIT = (
     "screen with that caption, though. It is handed the ticket's clause text, "
     "so a caption overclaiming against the clause is something it can and does "
     "disbelieve — measured twice on a take built to defeat it, which is a "
-    "measurement and not a guarantee. This catches a clause tagged on the wrong "
-    "beat, a clause whose evidence never arrives, a tagged beat showing an "
-    "error page, a clause the demo never reaches, and — twice measured — a "
-    "caption asserting what the screen was never shown doing. What it cannot "
-    "catch is one level up: a declared clause text that is itself a misreading "
-    "of the ticket. If the clauses above paraphrase the ticket wrongly and the "
+    "measurement and not a guarantee. This catches a clause claimed before its "
+    "evidence arrives and never arriving, a clause whose evidence never arrives "
+    "at all, a tagged beat showing an error page, a clause the demo never "
+    "reaches, and — twice measured — a caption asserting what the screen was "
+    "never shown doing. Wrong-beat tagging has two directions and only one of "
+    "them is caught: a reading before the first claimed beat agrees, so a "
+    "clause visible early and gone by the beats that claimed it reads as "
+    "agreement here and reaches nobody. Tagged too early surfaces; tagged too "
+    "late does not. What it cannot catch is one level up: a declared clause "
+    "text that is itself a misreading of the ticket. If the clauses above "
+    "paraphrase the ticket wrongly and the "
     "demo satisfies the paraphrase, both derivations agree and the ticket is "
     "still unmet, because every input the reader has is downstream of that "
     "paraphrase. Comparing the declared clause with the ticket's own words is "
@@ -381,10 +392,13 @@ def render_brief_md(criteria: dict[str, str], frames: list[str]) -> str:
         "measurement, not a promise, so do not assume it of yourself; read the "
         "pictures.",
         "",
-        "So your reading catches a clause placed on the wrong beat, a clause "
-        "whose evidence never arrives, a beat showing an error page, a clause "
-        "the demo never reaches, and a caption overclaiming against a clause "
-        "above. What no reading of any frame can catch is one level up: a "
+        "So your reading catches a clause claimed before its evidence arrives "
+        "and never arriving, a clause whose evidence never arrives at all, a "
+        "beat showing an error page, a clause the demo never reaches, and a "
+        "caption overclaiming against a clause above. A mistimed claim is "
+        "caught in one direction only: a clause whose evidence came and went "
+        "*before* the beats that claimed it is not surfaced by this check. "
+        "What no reading of any frame can catch is one level up: a "
         "clause above that is **itself** a misreading of the ticket. If these "
         "clauses paraphrase the ticket wrongly and the demo faithfully "
         "satisfies the paraphrase, you will agree, the author will agree, and "

@@ -182,9 +182,20 @@ to judgement.
 
 An eval carries its own honesty requirement, and it is the same one: **a corpus
 with no expected misses is not a measurement.** It must contain at least one
-defect the reader is expected *not* to catch — the caption the screen agrees
-with is this repo's known blind spot — and the score must show it uncaught. A
-corpus that catches everything is measuring its own fixtures.
+defect the reader is expected *not* to catch, and the score must show it
+uncaught. A corpus that catches everything is measuring its own fixtures.
+
+**Which defect to plant, and which one not to.** The grader's real blind spot is
+**a declared clause text that is itself the misreading** (#276): the demo
+faithfully satisfies a wrong paraphrase of the ticket, so every input the reader
+has is downstream of the paraphrase and no reading of any frame reaches it. Do
+**not** plant "a caption the screen agrees with" — this file named that as the
+blind spot, and `skills/demo-video/scripts/demo-grade` retracted it after the
+corpus caught it twice. And note the gap rather than assuming it closed:
+**today's corpus holds no expected miss that is an instance of the real blind
+spot** (`tests/eval/grader/README.md` states it, and #276 is what closes it).
+The requirement above is not met by editing an `expected.json` until it agrees
+with a result — a corpus that can only agree with itself measures nothing.
 
 ## Housekeeping
 

@@ -76,10 +76,13 @@ worth telling apart and the rule above cannot.
 Stated here rather than left for a reader to work out, because a score with an
 unstated boundary is read as covering everything:
 
-* **Four takes and seven clauses.** A false-alarm rate over five clean clauses
-  has an enormous confidence interval. This distinguishes "the reader flags
-  clean demos constantly" from "it does not"; it does not put a number on how
-  often.
+* **A corpus this small.** `score` prints its exact shape — takes, clauses, and
+  the split by kind — on the line above the table, so that figure is read off
+  the corpus rather than copied into prose that then drifts from it. Today it
+  is four takes and eight clauses, six of them clean. A false-alarm rate over
+  six clean clauses has an enormous confidence interval. This distinguishes
+  "the reader flags clean demos constantly" from "it does not"; it does not put
+  a number on how often.
 * **One reader per clause per run**, so nothing here measures the reader's
   *variance*. Run it twice with different readers to see that, and #131 is the
   standing warning that the unstable half of this question is the half that is
@@ -498,6 +501,7 @@ def summary(rows: list[dict]) -> dict:
     clean = [r for r in rows if r["kind"] == CLEAN]
     misses = [r for r in rows if r["kind"] == EXPECTED_MISS]
     return {
+        "takes": len({r["take"] for r in rows}),
         "planted": len(planted),
         "caught": sum(1 for r in planted if r["outcome"] == "caught"),
         "clean": len(clean),
@@ -526,6 +530,18 @@ def cmd_score(only: str | None, readings_dir: Path) -> int:
     for take in chosen:
         rows += score_take(take, readings_dir)
     counts = summary(rows)
+    # The corpus's own shape, counted off the rows that were just scored and
+    # printed above the table. It is the denominator of every ratio below, and
+    # a figure a document copies is a figure that drifts from the corpus the
+    # next time a clause is added — this repo had "seven clauses" in two
+    # documents against a corpus of eight. Printed rather than asserted:
+    # nothing here can then be right in the scorer and wrong on the page.
+    print(
+        f"corpus: {counts['takes']} takes, {counts['clauses']} clauses — "
+        f"{counts['clean']} clean, {counts['planted']} planted, "
+        f"{counts['expected_misses']} expected-miss"
+    )
+    print()
     print(_table(rows))
     print()
     print(

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "take": "caption-overclaims",
-  "what": "The negative control. AC-3's caption asserts requester matching; the take types 'webhook', a word from TQ-104's title that appears in no requester. The reader is expected to miss it, because the caption it would have to disbelieve is burned into the frames it reads.",
+  "what": "The negative control. AC-3's caption asserts requester matching; the take types 'webhook', a word from TQ-104's title that appears in no requester. It was expected to be missed because the caption it would have to disbelieve is burned into the frames it reads — a limit demo-grade has since retracted (#276), and both committed runs in tests/eval/grader/readings/ caught this clause.",
   "clauses": {
     "AC-1": {
       "kind": "clean",
@@ -13,7 +13,7 @@
       "kind": "expected-miss",
       "expect_status": "seen",
       "expect_class": "agreement",
-      "why": "Everything on screen agrees with the caption except the one thing that would disprove it: the search box holds 'webhook', which is in the title and not the requester. The reader would have to read the box, know the requester list, and disbelieve the caption. demo-grade names this exact case as what it does not catch. If a run scores this as caught, report it — do not edit this expectation to match the result."
+      "why": "Everything on screen agrees with the caption except the one thing that would disprove it: the search box holds 'webhook', which is in the title and not the requester. The reader would have to read the box, know the requester list, and disbelieve the caption. demo-grade named this exact case as what it does not catch when this expectation was written, and no longer does — the limit was retracted (#276) after two independent runs caught this clause, and the readings are in tests/eval/grader/readings/. This expectation is kept unedited on purpose, so the score keeps reporting UNEXPECTED CATCH and keeps saying out loud that the corpus's negative control is not an instance of the blind spot it stands in for. Rebuilding the take to plant a wrong paraphrase is #276's work. If a run scores this as caught, report it — do not edit this expectation to match the result."
     }
   }
 }

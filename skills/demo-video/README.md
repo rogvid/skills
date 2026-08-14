@@ -161,7 +161,7 @@ demo-video/
     │   │                          #   ── everything below this line is browser-free:
     │   │                          #      no Playwright, no ffmpeg import, importable
     │   │                          #      and unit-testable on its own. tests/unit
-    │   │                          #      grades it in 0.07 s; tests/smoke the rest.
+    │   │                          #      grades it in ~3 s; tests/smoke the rest.
     │   ├── target.py              #   what host a take may be pointed at
     │   ├── timeline.py            #   the beat log: schema and its two renderings
     │   ├── coverage.py            #   acceptance criteria, and what claimed them

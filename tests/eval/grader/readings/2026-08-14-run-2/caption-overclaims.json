@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "The search field sitting above the ticket list now contains the typed text 'invoice' with the caret still in it, and the queue has narrowed from 7 rows to the single TQ-101 row (header reads 'Support queue (1)') without any search or submit button existing or being pressed.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-3",
+      "frame": null,
+      "status": "cannot tell",
+      "why": "Only two queries are ever typed - 'invoice' (beat-04) and 'webhook' (beat-10) - and both are words from the ticket titles that remain, so matching on a requester's name or address is asserted only by the burned-in caption at beat-06 and is never demonstrated on screen; the later highlight of leo.fontaine@northwind.example at beat-14 merely rings the requester column of a title-matched row.",
+      "confidence": "high"
+    }
+  ]
+}

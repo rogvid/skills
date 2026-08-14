@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "The search field above the queue now contains \"invoice\" and the list has shrunk from seven rows to the single TQ-101 row with the heading reading \"Support queue (1)\", with no search or submit button anywhere in the field.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": "beat-16.png",
+      "status": "seen",
+      "why": "With \"refund\" in the search box the heading reads \"Support queue (0)\" and the list area shows the line \"No tickets match this filter.\" rather than an empty space.",
+      "confidence": "high"
+    }
+  ]
+}

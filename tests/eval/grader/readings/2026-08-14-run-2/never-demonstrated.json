@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-00.png",
+      "status": "seen",
+      "why": "The queue list is on screen with seven rows, each showing an id (TQ-101 to TQ-107), a bold title, and a requester address such as dana.olsen@northwind.example.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": null,
+      "status": "not seen",
+      "why": "A search field sits above the list and is highlighted in beats 12-14, but it never receives a character - the placeholder stays in it through the final frame and the list remains all seven rows, so narrowing-as-you-type is never shown, only asserted by the caption.",
+      "confidence": "high"
+    }
+  ]
+}

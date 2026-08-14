@@ -17,7 +17,8 @@ takes an exclusive lock.
 
 `unit` answers everything that never needed a browser: the coverage report, the
 timeline's two renderings, the content and opening warnings, the merge a stitch
-performs, and whether `SKILL.md`'s reference links still resolve. It costs 0.07 s and has no dependencies at all.
+performs, and whether `SKILL.md`'s reference links still resolve. It costs about
+3 s for its 499 tests and has no dependencies at all.
 
 **That split is the point, not tidiness.** [#136] measured the asymmetry it
 exists to remove: the fault-injection rule was *executed* for `ci-unit` and
@@ -49,13 +50,16 @@ also owe an injection manifest; `tests/eval/grader/README.md` is the corpus.
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
 ├── smoke-inject       # proves smoke's assertions can still fail (~47 min, nightly)
-├── unit               # the browser-free half (~0.07 s, no dependencies)
+├── unit               # the browser-free half (~3 s, 499 tests, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
 │                      #   sees, plus the docs' python fences (~0.3 s)
 ├── eval-grader        # scores the blind reader against a known-answer corpus
 │                      #   (record ~2 min and cached; score ~0.3 s)
 ├── eval/grader/takes/ # the four corpus takes and their expectations
+├── eval/grader/readings/
+│                      # what a blind reader answered on the runs the corpus's
+│                      #   published numbers come from
 └── fixture/
     └── index.html     # the app smoke records: static, dependency-free, deterministic
 ```
@@ -96,11 +100,16 @@ tests/lint --self-test            # prove all three grade something
 
 **`tests/unit --fault-inject` runs only the tests each entry names, not the
 whole suite.** Every entry already declares which tests must fail, so that is
-what the inner run executes. It used to re-run all of `tests/unit` per entry,
-which made an injection cost `O(every test in this file)` — 302 entries × the
-whole suite — and the `unit (demo-video recorder)` job was cancelled twice, at
-10m17s and 15m16s. Measured on a 16-core developer box over the same 302
-entries: **557 s before, 63 s after**, all 302 caught either way.
+what the inner run executes. The manifest holds **322 entries** today. It used
+to re-run all of `tests/unit` per entry, which made an injection cost
+`O(every test in this file)` — every entry × the whole suite — and the
+`unit (demo-video recorder)` job was cancelled twice, at 10m17s and 15m16s.
+
+**The figures below are a frozen benchmark, not a current reading.** They were
+taken on a 16-core developer box when the manifest held 302 entries, and are
+deliberately not re-measured as entries are added — the ratio is what the
+paragraph is for. Over those 302 entries: **557 s before, 63 s after**, all 302
+caught either way.
 
 The reason that speed-up is not a hole: a targeted run that selects *nothing*
 runs no tests and exits 0, which reads exactly like "the injection was caught".
@@ -159,12 +168,14 @@ lands in.
 ([#211](https://github.com/rogvid/skills/issues/211)). A parse check, not a
 lint: the fences legitimately name things that do not exist here (`rec`, `OUT`,
 `mytool`), so `ruff check` semantics would be wrong even if ruff read Markdown.
-It walks the tracked `*.md` — 21 files, 39 fences — and `compile()`s the 10
-whose info string says `python`/`py`/`python3`. The other 29 are skipped **by
-language and counted out loud** (`sh` 11, none 8, `json` 5, `yaml` 2, `bash` 2,
-`html` 1), because a checker that silently skipped everything reports the same
-clean line a healthy tree does; `MIN_PY_FENCES` is the floor that fires if the
-walker stops finding fences at all.
+It walks the tracked `*.md` — 45 fences at the time of writing — and
+`compile()`s the 11 whose info string says `python`/`py`/`python3`. The other 34
+are skipped **by language and counted out loud** (`sh` 14, none 9, `json` 6,
+`yaml` 2, `bash` 2, `html` 1), because a checker that silently skipped
+everything reports the same clean line a healthy tree does; `MIN_PY_FENCES` is
+the floor that fires if the walker stops finding fences at all. Nothing grades
+these figures — every run prints its own, so read them off the run rather than
+off this paragraph, which moves whenever a document gains a fence.
 
 A fence's own indent is stripped before it is compiled, so a block inside a
 list item is graded as the Python it renders as. Two things that look like
@@ -226,9 +237,12 @@ and the bars that measure *time* — `MAX_BLANK_RUN_S` and the duration ranges �
 go red on a recorder that is working perfectly. Two such false failures cost an
 afternoon, and worse, they made a genuine intermittent bug undiagnosable
 because every red run had a second, more plausible explanation.
-[#78](https://github.com/rogvid/skills/issues/78) is about the bars themselves
-and stays open. `--allow-concurrent` overrides the refusal; a run that needed
-it cannot be read as a verdict.
+[#78](https://github.com/rogvid/skills/issues/78) is about the bars themselves,
+and it was **closed as `not planned` on 2026-08-13** in the same triage the
+*Known gaps* section below records — the lock is the answer this repo shipped,
+and tightening the bars was not worth a ticket nobody would pick up. The
+measurement survives in its issue body. `--allow-concurrent` overrides the
+refusal; a run that needed it cannot be read as a verdict.
 
 Prerequisites: `uv`, `ffmpeg`/`ffprobe` on PATH, and Chromium for Playwright
 (`uv run --with playwright playwright install chromium`; add `--with-deps` on a
@@ -2364,7 +2378,7 @@ Things a pass does **not** prove. They are listed because an assertion nobody
 knows is missing is worse than one that is openly absent.
 
 - **This suite's grading of itself is openly partial, by decision, since
-  2026-08-13.** Eighteen issues recording gaps in the harness's self-coverage
+  2026-08-13.** Nineteen issues recording gaps in the harness's self-coverage
   were closed that day as *recorded, not planned*, under `GOAL.md`: this repo's
   product is a demo an independent agent can grade, and a harness that grades
   its own assertions three times over is not that product. **Every measurement
@@ -2374,7 +2388,7 @@ knows is missing is worse than one that is openly absent.
   | what is ungraded | issues |
   |---|---|
   | Check functions reachable on an arm with no injection entry, so a pass proves only that they ran | [#233](https://github.com/rogvid/skills/issues/233), [#239](https://github.com/rogvid/skills/issues/239), [#240](https://github.com/rogvid/skills/issues/240), [#241](https://github.com/rogvid/skills/issues/241) |
-  | Assertions that can pass for the wrong reason, or grade less than the comment above them claims | [#288](https://github.com/rogvid/skills/issues/288), [#295](https://github.com/rogvid/skills/issues/295), [#296](https://github.com/rogvid/skills/issues/296), [#306](https://github.com/rogvid/skills/issues/306), [#321](https://github.com/rogvid/skills/issues/321) |
+  | Assertions that can pass for the wrong reason, grade less than the comment above them claims, or fail naming the wrong cause | [#288](https://github.com/rogvid/skills/issues/288), [#295](https://github.com/rogvid/skills/issues/295), [#296](https://github.com/rogvid/skills/issues/296), [#298](https://github.com/rogvid/skills/issues/298), [#306](https://github.com/rogvid/skills/issues/306), [#321](https://github.com/rogvid/skills/issues/321) |
   | Takes that never exercise the input the pass-through would be proved on | [#311](https://github.com/rogvid/skills/issues/311), [#318](https://github.com/rogvid/skills/issues/318) |
   | Committed reference artifacts drifted from what the renderer or the manifest now produces | [#292](https://github.com/rogvid/skills/issues/292), [#302](https://github.com/rogvid/skills/issues/302), [#314](https://github.com/rogvid/skills/issues/314), [#317](https://github.com/rogvid/skills/issues/317), [#320](https://github.com/rogvid/skills/issues/320) |
   | Arms that could not be built because Chromium's event timing defeated them | [#210](https://github.com/rogvid/skills/issues/210), [#228](https://github.com/rogvid/skills/issues/228) |
@@ -2388,7 +2402,7 @@ knows is missing is worse than one that is openly absent.
   `wip/verified-review/SKILL.md`, and it is the scope every regression check in
   this file uses.
 
-  A nineteenth, [#322](https://github.com/rogvid/skills/issues/322), was closed
+  A twentieth, [#322](https://github.com/rogvid/skills/issues/322), was closed
   the same way and reopened within the hour: `tests/lint`'s pointer check
   decided from directories that happen to exist on the box it runs on, so an
   untracked `.claude/` made the main checkout red and every worktree green. It
@@ -2396,7 +2410,7 @@ knows is missing is worse than one that is openly absent.
   `GOAL.md`*, and going red on the commit that closes it is that bar being met
   out loud.
 
-  An honest gap beats a green check; eighteen tickets nobody picks up beats
+  An honest gap beats a green check; nineteen tickets nobody picks up beats
   neither.
 
 - **That the narration correction is right on a host whose clock really
