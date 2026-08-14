@@ -33,7 +33,7 @@ same terms, and their ship/no-ship fields disagreed. The stable half is asked
 for; the unstable half stays with the human. Any roll-up is arithmetic over the
 per-clause answers, done in code, with the rule written into the artifact.
 
-## The limit that cannot be designed away
+## The limit that cannot be designed away, and the one that can
 
 The reader is blind to the storyboard, the `ac` ids, the coverage table and the
 diff. It **cannot** be blind to the storyboard author's prose: captions are
@@ -42,12 +42,33 @@ burned into the picture (`helpers/demo_recording/core.py`'s `_CAPTION_JS` sets
 string. So every frame the reader looks at carries the author's claim in its
 pixels.
 
+That was long written down here as the blind spot — a caption asserting a
+misread requirement over a screen that agrees with it — and it is not the
+binding constraint. **The reader is never asked to compare the screen against
+the caption. It is given the ticket's clause text.** So a caption that
+overclaims against that text is something it can disbelieve, and does: this
+repository's eval corpus (`tests/eval/grader/`) planted exactly that defect as
+its negative control and two independent runs caught it, one of them noting
+that the query typed was a word from a ticket *title* and that the requester
+match the caption asserted was never demonstrated. Twice caught is not always
+caught — that is two runs over one take, a measurement rather than a property —
+but telling a reader not to bother with something they demonstrably can do is
+the more expensive error.
+
+The real blind spot is one level up, and no reading of any frame reaches it:
+**a declared clause text that is itself the misreading.** If `criteria={"AC-3":
+<a wrong paraphrase of the ticket>}` and the demo faithfully satisfies the
+paraphrase, the reader agrees, the storyboard agrees, and the ticket is still
+unmet, because every input the reader has is downstream of the paraphrase.
+Comparing the declared clause against the ticket's own words is the only thing
+that closes it, and that is issue #276.
+
 Consequence, stated the same way in `brief.md` and `verdict.md`: this catches a
 clause tagged on the wrong beat, a clause whose evidence never arrives, a
-tagged beat showing an error page, and a clause the demo never reaches. It does
-**not** catch a storyboard derived from the diff whose caption asserts a misread
-requirement and whose screen agrees with the caption — both readers read that
-caption.
+tagged beat showing an error page, a clause the demo never reaches, and — twice
+measured, not guaranteed — a caption overclaiming against the clause it was
+handed. It does **not** catch a ticket that was misread before its clauses were
+written down.
 
 ## Exit status
 
@@ -102,6 +123,15 @@ NO_READING = "no reading"
 AGREEMENT = "agreement"
 CLASS_ORDER = (DISAGREEMENT, CANNOT_TELL, NO_READING, NOT_DEMONSTRATED, AGREEMENT)
 
+# Where the reader's beat fell relative to the beats the storyboard claimed.
+# Three events, and the classes above collapse two of them: a reading before
+# the first claimed beat and a reading after the last are not the same finding
+# at all. `classify()` carries the argument; this is the vocabulary, printed
+# beside every agreement so the two kinds of agreement stay distinguishable.
+BEFORE_SPAN = "before the first claimed beat"
+INSIDE_SPAN = "inside the claimed span"
+AFTER_SPAN = "after the last claimed beat"
+
 # Where each status came from. **Never the storyboard**: a status that appears
 # beside the thing that derived it can be weighed, and one that appears alone
 # is taken for a fact. `coverage.claimed` names beats, and naming beats is all
@@ -130,9 +160,16 @@ BY_NOTHING_TO_COMPARE = (
 # The agreement rule, in one sentence, carried into every artifact that uses
 # it. See `agreement_rule()` for the argument and the weakness.
 SPAN_RULE = (
-    "A reading agrees when the beat of the frame the reader named lies within "
-    "the closed span [first claimed beat, last claimed beat] for that clause, "
-    "and disagrees when it falls outside that span entirely."
+    "The reader is asked for the *first* frame in which a clause is visible, "
+    "so its answer is a lower bound and not the only place the clause can be "
+    "seen. A reading inside the closed span [first claimed beat, last claimed "
+    "beat] agrees. A reading before the first claimed beat also agrees, and is "
+    "marked `before the first claimed beat`: a lower bound earlier than the "
+    "claim contradicts nothing the storyboard said, and it is what a clause "
+    "already true when the demo opens has to look like. A reading after the "
+    "last claimed beat disagrees, and that is the one direction that is "
+    "evidence: it says the clause was in no frame up to and including the last "
+    "beat that claimed it."
 )
 
 # The sentence #279 requires in the artifact, and the reason it cannot be
@@ -142,11 +179,20 @@ LIMIT = (
     "Agreement is a cross-check, not a verification. Two readers can share a "
     "bias, and a plausible-looking screen can fool both — and here they are not "
     "even fully independent: the caption the storyboard author wrote is burned "
-    "into every frame both of them read. This catches a clause tagged on the "
-    "wrong beat, a clause whose evidence never arrives, a tagged beat showing "
-    "an error page, and a clause the demo never reaches. It does not catch a "
-    "storyboard whose caption asserts a misread requirement and whose screen "
-    "agrees with the caption."
+    "into every frame both of them read. The reader is not asked to compare the "
+    "screen with that caption, though. It is handed the ticket's clause text, "
+    "so a caption overclaiming against the clause is something it can and does "
+    "disbelieve — measured twice on a take built to defeat it, which is a "
+    "measurement and not a guarantee. This catches a clause tagged on the wrong "
+    "beat, a clause whose evidence never arrives, a tagged beat showing an "
+    "error page, a clause the demo never reaches, and — twice measured — a "
+    "caption asserting what the screen was never shown doing. What it cannot "
+    "catch is one level up: a declared clause text that is itself a misreading "
+    "of the ticket. If the clauses above paraphrase the ticket wrongly and the "
+    "demo satisfies the paraphrase, both derivations agree and the ticket is "
+    "still unmet, because every input the reader has is downstream of that "
+    "paraphrase. Comparing the declared clause with the ticket's own words is "
+    "the only thing that closes it (issue #276)."
 )
 
 
@@ -325,12 +371,27 @@ def render_brief_md(criteria: dict[str, str], frames: list[str]) -> str:
         "",
         "The captions on these frames were written by the storyboard's author, "
         "and they are burned into the pixels — there is no framing of this "
-        "request that removes them. So your reading catches a clause placed on "
-        "the wrong beat, a clause whose evidence never arrives, a beat showing "
-        "an error page, and a clause the demo never reaches. It does **not** "
-        "catch a storyboard whose caption asserts a misread requirement and "
-        "whose screen agrees with the caption — you and the author read the "
-        "same caption there.",
+        "request that removes them. **You are not being asked to check the "
+        "screen against the caption.** You have the ticket's clause text above, "
+        "and that is what to hold the pictures against: where a caption asserts "
+        "something you are not shown the software doing, that is exactly the "
+        "`cannot tell` above, and readers here demonstrably catch it — on this "
+        "tool's own corpus, two independent runs caught a caption claiming a "
+        "match the screen never performed. Two runs over one recording is a "
+        "measurement, not a promise, so do not assume it of yourself; read the "
+        "pictures.",
+        "",
+        "So your reading catches a clause placed on the wrong beat, a clause "
+        "whose evidence never arrives, a beat showing an error page, a clause "
+        "the demo never reaches, and a caption overclaiming against a clause "
+        "above. What no reading of any frame can catch is one level up: a "
+        "clause above that is **itself** a misreading of the ticket. If these "
+        "clauses paraphrase the ticket wrongly and the demo faithfully "
+        "satisfies the paraphrase, you will agree, the author will agree, and "
+        "the ticket is still unmet — every input you have is downstream of that "
+        "paraphrase. This check does **not** catch that, and nothing you can do "
+        "with these frames would; closing it means comparing the clauses with "
+        "the ticket's own words, which you have not been given.",
         "",
         "## The clauses",
         "",
@@ -469,12 +530,32 @@ def agreement_rule() -> dict:
     reports a disagreement on a demo that is right. A cross-check whose false
     alarms outnumber its findings is one nobody reads.
 
+    **Why before the span is not the same event as after it.** Span
+    containment on its own reads `0 < 2` as a disagreement, and that is a false
+    alarm every clause that is already true when the demo opens will produce —
+    measured on the eval corpus, where a queue listing every ticket's id, title
+    and requester is true from the first painted frame, was claimed on beats
+    [2, 4, 5, 9], and was correctly read at beat 0. The reader is asked for the
+    *first* frame, so its beat is a **lower bound** on where the clause is
+    visible. A lower bound below the claim is consistent with the claim: the
+    clause was visible earlier and may well still be visible on every beat that
+    claimed it. A lower bound above the claim is a proof against it: the reader
+    found no earlier frame, so none of the claimed beats showed the clause.
+    Only the second direction is evidence, so only the second direction
+    disagrees.
+
     **Its weakness, which is the other half of stating a rule.** Agreement gets
     cheaper the wider the claimed span: a clause claimed on beats 2 and 30
     agrees with a reading anywhere between them, and a storyboard that tagged
     every beat with every clause would agree with everything. So agreement is
     weaker evidence the more beats a clause claims, and the span is printed
-    beside every row so a reader can see how much room the rule was given.
+    beside every row so a reader can see how much room the rule was given. The
+    before-the-span agreement adds a second, narrower gap for the same reason
+    it is not a disagreement: a lower bound says the clause was visible *then*
+    and not that it was still visible later, so a clause shown early and gone
+    by the beats that claimed it agrees here. That is why the position and the
+    distance in beats are printed on the row rather than folded into the word
+    `agreement`.
     """
     return {
         "rule": SPAN_RULE,
@@ -491,59 +572,125 @@ def agreement_rule() -> dict:
             "[4, 6, 8, 12, 13] and [18, 20, 25, 26, 31] were correctly read at "
             "beats 10 and 23 — inside both spans, in neither claimed set."
         ),
+        "before_the_span": (
+            "A reading before the first claimed beat agrees, and says so on its "
+            "row. The reader is asked for the first frame showing a clause, so "
+            "its beat is a lower bound: below the claim it contradicts nothing, "
+            "and it is what a clause already true when the demo opens has to "
+            "look like — measured on the eval corpus, a queue listing every "
+            "ticket's id, title and requester was true from the first painted "
+            "frame, claimed on beats [2, 4, 5, 9], and read at beat 0. Above "
+            "the claim the same lower bound is a proof against it: no earlier "
+            "frame showed the clause, so none of the claimed beats did. Only "
+            "that direction disagrees."
+        ),
         "weakness": (
             "Agreement is cheaper the wider the claimed span. A clause claimed "
             "on beats 2 and 30 agrees with a reading anywhere between them, so "
             "agreement is weaker evidence the more beats a clause claims. Every "
-            "row below prints its span for exactly this reason."
+            "row below prints its span for exactly this reason. A "
+            "before-the-span agreement is weaker again: a lower bound says the "
+            "clause was visible then, not that it was still visible on the "
+            "beats that claimed it, so a clause shown early and gone by its "
+            "claimed beats agrees here. Those rows print their position and how "
+            "many beats early, so the two kinds of agreement can be told apart "
+            "without reading the frames."
         ),
     }
 
 
-def classify(reading: dict | None, beats: list[int]) -> tuple[str, str]:
-    """(class, why) for one clause. The whole comparison, in one place."""
+def classify(reading: dict | None, beats: list[int]) -> tuple[str, str, str | None]:
+    """(class, why, position) for one clause. The whole comparison, in one place.
+
+    `position` is where the reader's beat fell relative to the claimed span,
+    and it is `None` for every clause where no such comparison happened. It
+    exists because the class alone cannot say which of the two agreements a
+    row is — see `agreement_rule()` for why a reading before the span agrees
+    at all, and for what that agreement does not prove.
+    """
     span = f"[{beats[0]}, {beats[-1]}]" if beats else "nothing"
     if reading is None:
-        return NO_READING, (
-            "The reading names no answer for this clause. Nothing derived a "
-            "status here — it is neither seen nor unseen, and it is recorded "
-            f"as unanswered rather than as either. The storyboard claimed {span}."
+        return (
+            NO_READING,
+            (
+                "The reading names no answer for this clause. Nothing derived a "
+                "status here — it is neither seen nor unseen, and it is recorded "
+                f"as unanswered rather than as either. The storyboard claimed "
+                f"{span}."
+            ),
+            None,
         )
     if reading["status"] == CANNOT_TELL:
-        return CANNOT_TELL, (
-            f"The reader could not tell from the frames; the storyboard claimed "
-            f"{span}. This is one of the two cases a human is pulled in for."
+        return (
+            CANNOT_TELL,
+            (
+                f"The reader could not tell from the frames; the storyboard "
+                f"claimed {span}. This is one of the two cases a human is "
+                f"pulled in for."
+            ),
+            None,
         )
     if reading["status"] == SEEN:
         if not beats:
-            return DISAGREEMENT, (
-                f"The reader located this clause at beat {reading['beat']} "
-                f"(`{reading['frame']}`) and the storyboard claimed no beat for "
-                f"it at all — it is in `unclaimed`."
+            return (
+                DISAGREEMENT,
+                (
+                    f"The reader located this clause at beat {reading['beat']} "
+                    f"(`{reading['frame']}`) and the storyboard claimed no beat "
+                    f"for it at all — it is in `unclaimed`."
+                ),
+                None,
             )
-        if beats[0] <= reading["beat"] <= beats[-1]:
-            return AGREEMENT, (
-                f"The reader located this clause at beat {reading['beat']} "
-                f"(`{reading['frame']}`), inside the claimed span {span}."
+        if reading["beat"] < beats[0]:
+            return (
+                AGREEMENT,
+                (
+                    f"The reader located this clause at beat {reading['beat']} "
+                    f"(`{reading['frame']}`), {beats[0] - reading['beat']} "
+                    f"beat(s) before the claimed span {span} — it was already "
+                    f"visible before anything claimed it. The reader was asked "
+                    f"for the *first* frame showing the clause, so this is a "
+                    f"lower bound and contradicts nothing the storyboard said. "
+                    f"It does not prove the clause was still visible on the "
+                    f"claimed beats."
+                ),
+                BEFORE_SPAN,
             )
-        outside = (
-            beats[0] - reading["beat"]
-            if reading["beat"] < beats[0]
-            else reading["beat"] - beats[-1]
-        )
-        return DISAGREEMENT, (
-            f"The reader located this clause at beat {reading['beat']} "
-            f"(`{reading['frame']}`), {outside} beat(s) outside the claimed "
-            f"span {span}."
+        if reading["beat"] <= beats[-1]:
+            return (
+                AGREEMENT,
+                (
+                    f"The reader located this clause at beat {reading['beat']} "
+                    f"(`{reading['frame']}`), inside the claimed span {span}."
+                ),
+                INSIDE_SPAN,
+            )
+        return (
+            DISAGREEMENT,
+            (
+                f"The reader located this clause at beat {reading['beat']} "
+                f"(`{reading['frame']}`), {reading['beat'] - beats[-1]} beat(s) "
+                f"after the claimed span {span}. No earlier frame showed it, so "
+                f"none of the beats the storyboard claimed did."
+            ),
+            AFTER_SPAN,
         )
     if beats:
-        return DISAGREEMENT, (
-            f"The storyboard claimed this clause on beats {beats} and the "
-            f"reader could not find it in any frame."
+        return (
+            DISAGREEMENT,
+            (
+                f"The storyboard claimed this clause on beats {beats} and the "
+                f"reader could not find it in any frame."
+            ),
+            None,
         )
-    return NOT_DEMONSTRATED, (
-        "Neither derivation locates this clause: nothing claimed it and the "
-        "reader did not find it."
+    return (
+        NOT_DEMONSTRATED,
+        (
+            "Neither derivation locates this clause: nothing claimed it and the "
+            "reader did not find it."
+        ),
+        None,
     )
 
 
@@ -558,7 +705,7 @@ def verdict_doc(
     for key, text in criteria.items():
         claimed = beats.get(key, [])
         reading = readings.get(key)
-        kind, why = classify(reading, claimed)
+        kind, why, position = classify(reading, claimed)
         clauses.append(
             {
                 "criterion": key,
@@ -577,6 +724,7 @@ def verdict_doc(
                 },
                 "agreement": {
                     "class": kind,
+                    "position": position,
                     "why": why,
                     "derivation": (
                         BY_NOTHING_TO_COMPARE if kind == NO_READING else BY_COMPARISON
@@ -595,6 +743,13 @@ def verdict_doc(
         "limit": LIMIT,
         "frames_read": len(frames),
         "counts": counts,
+        # Counted separately from `counts` rather than as a sixth class: it is
+        # not a class, it is which of two agreements a row is, and a reader who
+        # only ever looks at the headline should still be told how many of the
+        # agreements were read before the beats that claimed them.
+        "agreements_before_the_claim": sum(
+            1 for row in clauses if row["agreement"]["position"] == BEFORE_SPAN
+        ),
         "clauses": clauses,
     }
 
@@ -616,10 +771,15 @@ def _reader_line(reading: dict) -> str:
 def render_verdict_md(doc: dict) -> str:
     """The comparison as a page: what disagrees, then everything else."""
     counts = doc["counts"]
+    early = doc["agreements_before_the_claim"]
+    parts = [f"{counts[kind]} {kind}" for kind in CLASS_ORDER]
+    if early:
+        parts.append(f"{early} of them before the first claimed beat")
+    headline = " · ".join(parts)
     out = [
         "# Two derivations of where each clause is",
         "",
-        " · ".join(f"{counts[kind]} {kind}" for kind in CLASS_ORDER),
+        headline,
         "",
         "One derivation is the `ac=` tags the storyboard author typed. The "
         "other is a reader who was given the clause text and the frames and "
@@ -635,6 +795,9 @@ def render_verdict_md(doc: dict) -> str:
         "",
         f"*Why a span:* {doc['agreement_rule']['why']}",
         "",
+        f"*Why before the span is not after it:* "
+        f"{doc['agreement_rule']['before_the_span']}",
+        "",
         f"*What it gives up:* {doc['agreement_rule']['weakness']}",
         "",
     ]
@@ -648,10 +811,12 @@ def render_verdict_md(doc: dict) -> str:
             board = row["storyboard"]
             span = board["span"]
             claimed = board["claimed_beats"] or "none"
+            position = row["agreement"]["position"]
+            label = f"{kind}, {position}" if position else kind
             out += [
                 f"### {row['criterion']} — {row['text']}",
                 "",
-                f"- **{kind}** — {row['agreement']['why']}",
+                f"- **{label}** — {row['agreement']['why']}",
                 f"  *Derived by:* {row['agreement']['derivation']}.",
                 _reader_line(reading),
                 f"  *Derived by:* {reading['derivation']}.",

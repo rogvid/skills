@@ -25,11 +25,23 @@ it runs in seconds, and no model's opinion is ever a committed file.
 
 `AGENTS.md`, under "Where an eval replaces the injections": *a corpus with no
 expected misses is not a measurement.* A corpus of defects the reader catches
-measures its own fixtures. So `caption-overclaims` plants the defect
-`demo-grade`'s own docstring says it cannot catch — a caption asserting a
-misread requirement over a screen that agrees with it — and the table below
-prints that clause as an **expected** miss rather than as a failure. If a run
-ever scores it caught, that is a finding to report, not an expectation to edit.
+measures its own fixtures. So `caption-overclaims` plants what `demo-grade`'s
+docstring named as its blind spot when this corpus was written — a caption
+asserting a misread requirement over a screen that agrees with it — and the
+table below prints that clause as an **expected** miss rather than as a failure.
+If a run ever scores it caught, that is a finding to report, not an expectation
+to edit.
+
+**It has been caught, twice, and the expectation still stands.** That is the
+rule working: the docstring's limit was wrong, because the reader is never
+asked to compare the screen with the caption — it is handed the ticket's clause
+text, and it disbelieves a caption that overclaims against it. `demo-grade` now
+states the real blind spot instead: a declared clause text that is itself the
+misreading, which no reading of any frame can reach. Rebuilding this take to
+plant *that* is issue #276, and until it is, the corpus's own negative control
+is not an instance of the blind spot it is standing in for. So the table below
+is honest about the reader and weaker than it looks about the boundary; see
+`tests/eval/grader/README.md`.
 
 ## The mechanic the corpus is built around
 

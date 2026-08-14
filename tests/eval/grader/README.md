@@ -44,16 +44,51 @@ a narrowed list, another's is a line of text where the rows used to be.
 
 **`caption-overclaims` is the negative control and it is not a joke.**
 `AGENTS.md`, under *Where an eval replaces the injections*: a corpus with no
-expected misses is not a measurement. `demo-grade`'s own docstring names this
-exact defect as the one it cannot catch — the storyboard author's caption is
-burned into every frame, so the blind reader and the author read the same
-sentence. The take types `webhook`, a word from TQ-104's **title** that appears
-in no requester in `data/tickets.json`, under a caption asserting that search
-matches the requester. The screen genuinely narrows; the caption genuinely
-overclaims.
+expected misses is not a measurement. When this corpus was written,
+`demo-grade`'s own docstring named this exact defect as the one it cannot catch
+— the storyboard author's caption is burned into every frame, so the blind
+reader and the author read the same sentence. The take types `webhook`, a word
+from TQ-104's **title** that appears in no requester in `data/tickets.json`,
+under a caption asserting that search matches the requester. The screen
+genuinely narrows; the caption genuinely overclaims.
 
 > If a run scores that clause as **caught**, that is a finding about the
 > reader. Report it. Do not edit `expected.json` to match the result.
+
+### The corpus's own stated limit: the negative control is not an instance of the blind spot
+
+That clause has now been caught **twice**, by independent readers, and the
+expectation has not been edited. The finding it produced is about the limit
+rather than about the reader: the reasoning behind it — "the caption is burned
+into the pixels, so both readers read it" — is true and is not the binding
+constraint, because **the reader is never asked to compare the screen against
+the caption. It is given the ticket's clause text.** A caption that overclaims
+against that text is therefore catchable, and one reader said so in as many
+words:
+
+> *"matching on a requester's name or address is asserted only by the burned-in
+> caption at beat-06 and is never demonstrated on screen; the later highlight of
+> `leo.fontaine@northwind.example` merely rings the requester column of a
+> title-matched row."*
+
+`demo-grade` now states the real blind spot: **a declared clause text that is
+itself the misreading.** If `criteria={"AC-3": <a wrong paraphrase of the
+ticket>}` and the demo faithfully satisfies the paraphrase, the reader agrees,
+the storyboard agrees, and the ticket is still unmet — every input the reader
+has is downstream of the paraphrase. Issue **#276** is what closes it, by
+comparing the declared clause with the ticket's own words.
+
+**So this corpus currently has no expected miss that is an instance of the
+blind spot it claims to hold.** `caption-overclaims` stays an `expected-miss`
+and stays reported as an `UNEXPECTED CATCH`, because the score has to keep
+saying out loud that the negative control does not do its job. Rebuilding it to
+plant a wrong paraphrase the demo faithfully satisfies is #276's work, not this
+corpus's. Until then, read the score as: honest about what the reader catches,
+and untested about what it cannot.
+
+Two runs on one take is also not a proof that a caption overclaim is *always*
+caught. It is two observations, and the corrected limit in `demo-grade` says so
+in those words.
 
 ## What "caught" means
 

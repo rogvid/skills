@@ -9817,15 +9817,35 @@ class BriefIsBlind(_GradeCase):
         self.assertIn("do not say whether it should ship", text.lower())
 
     def test_the_brief_states_the_limit_it_cannot_design_away(self):
-        # Required by #279 in the artifact itself: the caption is burned into
-        # every frame the reader reads, so a storyboard whose caption asserts a
-        # misread requirement and whose screen agrees with it survives this
-        # check. A cross-check that does not carry its own boundary gets read
-        # as one that has none.
+        """Required by #279 in the artifact itself, and #276 corrected which
+        limit that is.
+
+        The brief used to tell its reader that a caption asserting a misread
+        requirement over an agreeing screen survives this check. The eval
+        measured otherwise: the corpus planted that defect and two independent
+        runs caught it, because **the reader is not asked to compare the screen
+        with the caption — it is handed the ticket's clause text**. A stated
+        limit that is wrong in the conservative direction still costs a
+        reader's trust, and this one told them not to bother with the one thing
+        they demonstrably do.
+
+        So three things are asserted, and all three are load-bearing: that the
+        caption's presence is still stated (it is why the two derivations are
+        not fully independent), that what the reader *can* do is stated
+        plainly, and that the blind spot named is the real one — a clause text
+        that is itself the misreading, which no frame can show.
+        """
         text = grade.render_brief_md(GRADE_CRITERIA, ["beat-00.png"])
         self.assertIn("burned into the pixels", text)
+        self.assertIn("not being asked to check the screen against the caption", text)
         self.assertIn("does **not**", text)
-        self.assertIn("agrees with the caption", text)
+        self.assertIn("itself** a misreading of the ticket", text)
+        self.assertIn("downstream of that paraphrase", text)
+        # The hedge, in the other direction. Two runs on one take is not a
+        # property, and a brief that traded one overclaim for its opposite
+        # would pass every assertion above.
+        self.assertIn("measurement, not a promise", text)
+        self.assertNotIn("agrees with the caption", text)
 
 
 class BriefRefusals(_GradeCase):
@@ -10000,18 +10020,43 @@ class ReadingValidation(_GradeCase):
 
 
 class SpanRule(unittest.TestCase):
-    """The comparison rule, graded at both ends of the span and outside it."""
+    """The comparison rule, graded at both ends of the span and outside it.
+
+    **The rule is three-way, not two-way**, and the eval is what said so. The
+    corpus's `never-demonstrated` take declares a clause — "the queue lists
+    every ticket with its id, title and requester" — that is true from the
+    first painted frame. The reader is asked for the *first* frame showing a
+    clause, so it correctly named `beat-00`; the storyboard claimed beats
+    [2, 4, 5, 9]; span containment read `0 < 2` as a disagreement and the
+    score counted a false alarm on a clean clause. Any clause already true
+    when the demo opens produces that, so it is structural and not a fixture
+    artifact.
+
+    What the reader's answer *is* settles the direction: a lower bound. Below
+    the claim, it contradicts nothing — the clause was visible earlier and may
+    still be visible on every claimed beat. Above the claim, the same lower
+    bound is a proof against it — no earlier frame showed the clause, so none
+    of the claimed beats did. Only the second direction is evidence, so only
+    the second direction disagrees, and the first is an agreement that says on
+    its own row which of the two agreements it is.
+    """
 
     CLAIMED = [4, 6, 8, 12, 13]
 
-    def kind(self, beat=None, status="seen", claimed=None):
+    def classify(self, beat=None, status="seen", claimed=None):
         reading = (
             None
             if status is None
             else {"status": status, "frame": f"beat-{beat}.png", "beat": beat}
         )
         claimed = self.CLAIMED if claimed is None else claimed
-        return grade.classify(reading, claimed)[0]
+        return grade.classify(reading, claimed)
+
+    def kind(self, beat=None, status="seen", claimed=None):
+        return self.classify(beat, status, claimed)[0]
+
+    def position(self, beat=None, status="seen", claimed=None):
+        return self.classify(beat, status, claimed)[2]
 
     def test_a_reading_inside_the_span_but_in_no_claimed_set_agrees(self):
         # The measured case, and the whole reason the rule is a span: beat 10
@@ -10019,19 +10064,48 @@ class SpanRule(unittest.TestCase):
         # evidence. Set membership, or one beat of tolerance, calls this a
         # disagreement on a demo that is right.
         self.assertEqual(self.kind(10), "agreement")
+        self.assertEqual(self.position(10), grade.INSIDE_SPAN)
 
     def test_the_two_ends_of_the_span_are_inside_it(self):
         self.assertEqual(self.kind(4), "agreement")
         self.assertEqual(self.kind(13), "agreement")
+        self.assertEqual(self.position(4), grade.INSIDE_SPAN)
+        self.assertEqual(self.position(13), grade.INSIDE_SPAN)
 
-    def test_one_beat_outside_each_end_is_a_disagreement(self):
-        # The boundary, from the other side. Without these two the rule could
-        # be any window at all and this class would not notice.
-        self.assertEqual(self.kind(3), "disagreement")
+    def test_a_reading_after_the_last_claimed_beat_is_the_disagreement(self):
+        # The boundary, from the side that carries evidence. The reader found
+        # no earlier frame, so no beat the storyboard claimed showed it.
         self.assertEqual(self.kind(14), "disagreement")
+        self.assertEqual(self.position(14), grade.AFTER_SPAN)
+
+    def test_a_reading_before_the_first_claimed_beat_agrees_and_says_so(self):
+        # The false alarm the eval found, and the fix. Beat 3 is one before the
+        # span and beat 0 is the arrival-true case the corpus actually hit;
+        # neither contradicts a claim, because the reader was asked for the
+        # first frame and not for the only one.
+        for beat in (3, 0):
+            self.assertEqual(self.kind(beat), "agreement", f"beat {beat}")
+            self.assertEqual(self.position(beat), grade.BEFORE_SPAN, f"beat {beat}")
+
+    def test_the_two_agreements_are_told_apart_by_more_than_the_class(self):
+        # Without this, "before the span agrees" is indistinguishable from the
+        # rule having no lower bound at all, and a genuine early reading would
+        # be swallowed into the same word as an ordinary one. The sentence has
+        # to carry the distance too — a reader who sees only `agreement` on a
+        # clause read 4 beats early has been told less than the run knows.
+        _, before_why, before_where = self.classify(0)
+        _, inside_why, inside_where = self.classify(10)
+        self.assertNotEqual(before_where, inside_where)
+        self.assertIn("before the claimed span [4, 13]", before_why)
+        self.assertIn("4 beat(s) before", before_why)
+        self.assertIn("does not prove the clause was still visible", before_why)
+        self.assertIn("inside the claimed span [4, 13]", inside_why)
 
     def test_a_clause_the_reader_found_that_nothing_claimed_disagrees(self):
+        # Nothing claimed it, so there is no span to be before or after: the
+        # before-the-span agreement must not reach a clause in `unclaimed`.
         self.assertEqual(self.kind(10, claimed=[]), "disagreement")
+        self.assertIsNone(self.position(10, claimed=[]))
 
     def test_a_claimed_clause_the_reader_could_not_find_disagrees(self):
         # The finding this whole check exists for: the storyboard says the
@@ -10046,15 +10120,27 @@ class SpanRule(unittest.TestCase):
     def test_cannot_tell_stays_cannot_tell_whatever_was_claimed(self):
         self.assertEqual(self.kind(10, status="cannot tell"), "cannot tell")
 
+    def test_a_class_with_no_comparison_has_no_position(self):
+        # `position` is where the reader's beat fell against the claim, so a
+        # clause where no such comparison happened must not carry one. A
+        # default of "inside the claimed span" would read as a measurement.
+        self.assertIsNone(self.position(None, status="not seen"))
+        self.assertIsNone(self.position(10, status="cannot tell"))
+        self.assertIsNone(self.position(None, status=None))
+
     def test_the_rule_and_its_weakness_are_written_down(self):
         # An agreement rule nobody can read is a number with no argument. The
         # weakness is stated with it: a wide claimed span makes agreement
-        # cheap, so agreement is weaker the more beats a clause claims.
+        # cheap, so agreement is weaker the more beats a clause claims — and
+        # the before-the-span agreement is weaker again, because a lower bound
+        # does not say the clause was still there when it was claimed.
         rule = grade.agreement_rule()
         self.assertIn("span", rule["rule"])
         self.assertIn("beats, not seconds", rule["unit"])
         self.assertIn("caption", rule["why"])
         self.assertIn("wider the claimed span", rule["weakness"])
+        self.assertIn("before-the-span agreement is weaker", rule["weakness"])
+        self.assertIn("lower bound", rule["before_the_span"])
 
 
 class VerdictOutput(_GradeCase):
@@ -10179,7 +10265,14 @@ class VerdictOutput(_GradeCase):
         doc = self.verdict(self.demo, [_grade_row(k, v) for k, v in GRADE_READ.items()])
         page = (self.demo / "review" / "verdict.md").read_text()
         self.assertIn("cross-check, not a verification", page)
-        self.assertIn("agrees with the caption", page)
+        # The corrected limit (#276): what the reader can do, said plainly,
+        # then the blind spot that is actually structural, then the hedge that
+        # keeps the correction from becoming the opposite overclaim.
+        self.assertIn("not asked to compare the screen with that caption", page)
+        self.assertIn("a declared clause text that is itself a misreading", page)
+        self.assertIn("issue #276", page)
+        self.assertIn("a measurement and not a guarantee", page)
+        self.assertNotIn("agrees with the caption", page)
         for row in doc["clauses"]:
             beats = GRADE_CLAIMED[row["criterion"]]
             self.assertEqual(row["storyboard"]["span"], [min(beats), max(beats)])
@@ -10190,6 +10283,37 @@ class VerdictOutput(_GradeCase):
                 f"{row['criterion']}'s storyboard row does not print the span "
                 f"the rule was given",
             )
+
+    def test_an_agreement_read_before_the_claim_is_told_apart_in_both_files(self):
+        """The eval's false alarm, in the artifacts a human actually opens.
+
+        A reading before the first claimed beat agrees — see `SpanRule` for
+        why — and an agreement that does not say which of the two it is has
+        swallowed the distinction rather than settled it. So the position is a
+        field in `verdict.json`, a word on the row in `verdict.md`, and a
+        count in the headline, and this asserts all three: a run that dropped
+        any one of them would still be a run that folded an early reading into
+        an ordinary agreement somewhere a reader looks.
+        """
+        doc = self.verdict(
+            self.demo,
+            [
+                _grade_row("AC-1", GRADE_READ["AC-1"]),
+                _grade_row("AC-3", GRADE_READ["AC-3"]),
+                # AC-2 is claimed on [1, 2] and read at beat 0.
+                _grade_row("AC-2", "beat-00.png"),
+            ],
+        )
+        by_id = {row["criterion"]: row for row in doc["clauses"]}
+        self.assertEqual(by_id["AC-2"]["agreement"]["class"], "agreement")
+        self.assertEqual(by_id["AC-2"]["agreement"]["position"], grade.BEFORE_SPAN)
+        self.assertEqual(by_id["AC-1"]["agreement"]["position"], grade.INSIDE_SPAN)
+        self.assertEqual(doc["agreements_before_the_claim"], 1)
+        page = (self.demo / "review" / "verdict.md").read_text()
+        self.assertIn("1 of them before the first claimed beat", page)
+        self.assertIn(f"- **agreement, {grade.BEFORE_SPAN}** —", page)
+        self.assertIn(f"- **agreement, {grade.INSIDE_SPAN}** —", page)
+        self.assertIn(grade.agreement_rule()["before_the_span"], page)
 
     def test_a_refused_run_leaves_no_verdict_from_the_run_before_it(self):
         """A stale answer under a current mtime is the artifact lying.
@@ -14356,15 +14480,42 @@ INJECTIONS = [
         ["VerdictOutput.test_disagreements_are_printed_before_agreements"],
     ),
     (
-        # The rule at its boundary, widened by one beat either side — the
-        # shape a tolerance grows by when somebody is looking at one noisy
-        # take. The span's ends are still inside, so only the two readings
-        # just outside it can tell.
-        "the agreement span grows a beat of tolerance at each end",
+        # The rule at the boundary that still carries evidence, widened by one
+        # beat — the shape a tolerance grows by when somebody is looking at one
+        # noisy take. The span's last beat is still inside, so only the reading
+        # just past it can tell.
+        "the agreement span grows a beat of tolerance past the last claim",
         "scripts/demo-grade",
-        '        if beats[0] <= reading["beat"] <= beats[-1]:',
-        '        if beats[0] - 1 <= reading["beat"] <= beats[-1] + 1:',
-        ["SpanRule.test_one_beat_outside_each_end_is_a_disagreement"],
+        '        if reading["beat"] <= beats[-1]:',
+        '        if reading["beat"] <= beats[-1] + 1:',
+        ["SpanRule.test_a_reading_after_the_last_claimed_beat_is_the_disagreement"],
+    ),
+    (
+        # **The way the false-alarm fix would actually be got wrong**: one
+        # branch for everything outside the span, so the reading that proves
+        # the claimed beats showed nothing becomes an agreement alongside the
+        # one that proves nothing at all. The class, the sentence and the count
+        # all keep working; the only thing lost is the finding.
+        "a reading past the last claim is swallowed by the before-the-span rule",
+        "scripts/demo-grade",
+        '        if reading["beat"] < beats[0]:',
+        '        if reading["beat"] < beats[0] or reading["beat"] > beats[-1]:',
+        ["SpanRule.test_a_reading_after_the_last_claimed_beat_is_the_disagreement"],
+    ),
+    (
+        # The distinction made and then not written down. `classify()` still
+        # returns it, the class is still right, and every row in both artifacts
+        # reads `inside the claimed span` — so an agreement located before
+        # anything claimed it is indistinguishable from an ordinary one in the
+        # only two files a human opens.
+        "every agreement is printed as though it were inside the claimed span",
+        "scripts/demo-grade",
+        '                    "position": position,',
+        '                    "position": INSIDE_SPAN,',
+        [
+            "VerdictOutput."
+            "test_an_agreement_read_before_the_claim_is_told_apart_in_both_files"
+        ],
     ),
     (
         # The one thing this command may never do. A grader that can redden a
