@@ -1,0 +1,776 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Hand a blind reader the ticket's clauses and the frames; compare what they
+found with what the storyboard claimed.
+
+    <skill-dir>/scripts/demo-grade brief   <demo-dir>
+    <skill-dir>/scripts/demo-grade verdict <demo-dir> --reading reading.json
+
+**No model call happens in this file.** The reader is an *input*: `brief`
+writes the document you hand to an agent that has seen neither the storyboard
+nor the diff, and `verdict` reads that agent's answers back and compares them,
+in ordinary arithmetic, with what the storyboard claimed. Everything gradable
+here is a function of documents, so the comparison can be run — and tested —
+without a model, and a model's opinion never reaches a committed file.
+
+## Why there are two derivations at all
+
+Every timestamp in a take's coverage table comes from one source: an `ac=` tag
+the storyboard author typed. `helpers/demo_recording/coverage.py` says plainly
+that this is a claim and not evidence. A second derivation is available that
+does not read the tag — a reader who is given the clause text and the frames,
+and asked to *locate* each clause — and where two independent derivations of
+the same fact disagree, the disagreement is the finding.
+
+**Localisation, not a verdict.** The reader is asked, per clause, for the first
+frame in which they can see it. It is deliberately not asked whether the demo
+should ship: that question was measured unstable here — two readers over the
+same frames with the same instructions named the same beat, correctly, in the
+same terms, and their ship/no-ship fields disagreed. The stable half is asked
+for; the unstable half stays with the human. Any roll-up is arithmetic over the
+per-clause answers, done in code, with the rule written into the artifact.
+
+## The limit that cannot be designed away
+
+The reader is blind to the storyboard, the `ac` ids, the coverage table and the
+diff. It **cannot** be blind to the storyboard author's prose: captions are
+burned into the picture (`helpers/demo_recording/core.py`'s `_CAPTION_JS` sets
+`el.textContent` on a fixed lower third), and narration is speech of the same
+string. So every frame the reader looks at carries the author's claim in its
+pixels.
+
+Consequence, stated the same way in `brief.md` and `verdict.md`: this catches a
+clause tagged on the wrong beat, a clause whose evidence never arrives, a
+tagged beat showing an error page, and a clause the demo never reaches. It does
+**not** catch a storyboard derived from the diff whose caption asserts a misread
+requirement and whose screen agrees with the caption — both readers read that
+caption.
+
+## Exit status
+
+Two codes. 0 when the command produced its artifacts, and 2 both when it
+refuses and when the arguments do not parse — argparse's own code, which this
+does not override, so a caller cannot tell the two apart by status. The stderr
+line does: a refusal opens with `demo-grade: refusing`.
+
+`verdict` **never** fails a run for what it found: a clause nobody could see is
+a finding, not an error, and a grader that could redden a build would be turned
+off before it was believed.
+
+A refused run also **leaves no artifact of its own behind**. Both commands take
+the previous run's output off disk before they do anything else, so a reader
+who opens `review/` after a refusal finds nothing rather than the last run's
+answer sitting there reading as this one's — the same reason `frames.py`
+removes its stale sheet before writing a new one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "helpers"))
+
+from demo_recording.frames import frames_paths  # noqa: E402
+from demo_recording.timeline import timeline_paths  # noqa: E402
+
+REVIEW_DIRNAME = "review"
+BRIEF_SCHEMA = 1
+READING_SCHEMA = 1
+VERDICT_SCHEMA = 1
+
+# What a reading may say. Narrow on purpose: these become keys in a comparison
+# and headings in a document, and a fourth spelling of "seen" arriving from a
+# model would be counted as its own class rather than noticed.
+SEEN = "seen"
+NOT_SEEN = "not seen"
+CANNOT_TELL = "cannot tell"
+STATUSES = (SEEN, NOT_SEEN, CANNOT_TELL)
+CONFIDENCES = ("high", "medium", "low")
+
+# The classes a comparison can land in, in the order a human should read them.
+# Disagreements first: they are the thing worth the attention, and a document
+# that opens with its agreements has already spent the reader's first screen.
+DISAGREEMENT = "disagreement"
+NOT_DEMONSTRATED = "not demonstrated"
+NO_READING = "no reading"
+AGREEMENT = "agreement"
+CLASS_ORDER = (DISAGREEMENT, CANNOT_TELL, NO_READING, NOT_DEMONSTRATED, AGREEMENT)
+
+# Where each status came from. **Never the storyboard**: a status that appears
+# beside the thing that derived it can be weighed, and one that appears alone
+# is taken for a fact. `coverage.claimed` names beats, and naming beats is all
+# it is allowed to do here.
+BY_READER = (
+    "a reader given the clause text and the frame filenames, and neither the "
+    "storyboard, the ac tags, the coverage table nor the diff"
+)
+BY_STORYBOARD = (
+    "coverage.claimed in timeline.json — the ac= tags the storyboard author "
+    "typed, which are evidence of intent and nothing else"
+)
+BY_COMPARISON = (
+    "demo-grade, comparing the reader's answer with the beats the storyboard "
+    "claimed — the rule, including the span it uses when both derivations "
+    "locate the clause, is stated in this document"
+)
+# The one class where nothing was compared, and it says so rather than
+# borrowing the sentence above: a rule named beside a status it did not
+# produce is the artifact attributing a status to the wrong place.
+BY_NOTHING_TO_COMPARE = (
+    "demo-grade, from the absence of an answer for this clause — there was "
+    "nothing to compare the storyboard's claim with"
+)
+
+# The agreement rule, in one sentence, carried into every artifact that uses
+# it. See `agreement_rule()` for the argument and the weakness.
+SPAN_RULE = (
+    "A reading agrees when the beat of the frame the reader named lies within "
+    "the closed span [first claimed beat, last claimed beat] for that clause, "
+    "and disagrees when it falls outside that span entirely."
+)
+
+# The sentence #279 requires in the artifact, and the reason it cannot be
+# designed away. Printed in `verdict.md`, and said again in the reader's own
+# words in `brief.md`.
+LIMIT = (
+    "Agreement is a cross-check, not a verification. Two readers can share a "
+    "bias, and a plausible-looking screen can fool both — and here they are not "
+    "even fully independent: the caption the storyboard author wrote is burned "
+    "into every frame both of them read. This catches a clause tagged on the "
+    "wrong beat, a clause whose evidence never arrives, a tagged beat showing "
+    "an error page, and a clause the demo never reaches. It does not catch a "
+    "storyboard whose caption asserts a misread requirement and whose screen "
+    "agrees with the caption."
+)
+
+
+class Refused(Exception):
+    """The command cannot do its job on this input, and says why."""
+
+
+# --- reading the take's own documents ----------------------------------------
+
+
+def _load_json(path: Path, what: str) -> dict:
+    """One of the take's documents, or a refusal naming what is missing."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise Refused(f"there is no {what} at {path}") from None
+    except OSError as exc:
+        raise Refused(f"cannot read {what} at {path}: {exc}") from None
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        raise Refused(f"{path} is not readable JSON: {exc}") from None
+    if not isinstance(doc, dict):
+        raise Refused(f"{path} is not a JSON object")
+    return doc
+
+
+def declared_criteria(timeline: dict, where: Path) -> dict[str, str]:
+    """The clauses this take was recorded against, as the ticket words them.
+
+    Refuses when there are none. A take that declared no criteria has nothing
+    to grade — there is no question to put to a reader — and answering that
+    with an empty brief would produce a document whose emptiness reads like a
+    demo that showed nothing.
+    """
+    coverage = timeline.get("coverage")
+    if not isinstance(coverage, dict):
+        raise Refused(
+            f"{where} declares no acceptance criteria (`coverage` is absent or "
+            f"null), so there is nothing for a reader to locate. Record the "
+            f"take with criteria={{...}} to grade it against a ticket."
+        )
+    criteria = coverage.get("criteria")
+    if not isinstance(criteria, dict) or not criteria:
+        raise Refused(
+            f"{where}'s coverage names no criteria, so there is nothing for a "
+            f"reader to locate."
+        )
+    return {str(key): str(text) for key, text in criteria.items()}
+
+
+def frame_records(manifest: dict, where: Path) -> list[dict]:
+    """The manifest's frames, in the order they occur in **the video**.
+
+    Sorted on the manifest's own `t`, which is where the frame was cut out of
+    `demo.mp4`, rather than left in the order the records were planned. The two
+    are usually the same and are not always: `frames.py` writes `beat-NN.png`
+    plus up to three `beat-NN-scene-K.png` per beat, skips a beat whose
+    `t_start` is not a number, drops a record whose extraction failed, and cuts
+    a beat the host's clock deleted from the file at the last instant before
+    the gap. So the mapping from beat index to file is neither 1:1 nor
+    monotone in the filename, and it is read off the manifest here rather than
+    guessed from the pattern.
+    """
+    records = manifest.get("frames")
+    if not isinstance(records, list) or not records:
+        skipped = manifest.get("skipped")
+        raise Refused(
+            f"{where} lists no frames"
+            + (f": {skipped}" if skipped else "")
+            + ". There is nothing for a reader to look at; `beat_frames("
+            "out_dir)` regenerates the sheet from demo.mp4 and timeline.json."
+        )
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("file"), str)
+            or not isinstance(record.get("beat"), int)
+            or not isinstance(record.get("t"), (int, float))
+        ):
+            raise Refused(
+                f"{where} has a frame record without a file, a beat and a "
+                f"timestamp: {record!r}. The beat is what a reading is "
+                f"compared against, and it cannot be inferred from the name."
+            )
+    return sorted(records, key=lambda record: float(record["t"]))
+
+
+# --- the brief: what a blind reader is given ---------------------------------
+#
+# **The blindness is structural.** `brief_doc` and `render_brief_md` take the
+# criteria and the frame filenames and nothing else — not the coverage
+# document with the claims filtered out afterwards, which is a promise, but two
+# arguments that cannot carry a claim in the first place. `tests/unit` grades
+# it from the outside as well, by mutating `coverage.claimed` arbitrarily and
+# requiring both artifacts to come out byte-identical.
+
+
+def brief_doc(criteria: dict[str, str], frames: list[str]) -> dict:
+    """The brief, for a tool. A pure function of the clauses and the frames."""
+    return {
+        "schema": BRIEF_SCHEMA,
+        "generated_by": "demo-video",
+        "criteria": dict(criteria),
+        "frames": list(frames),
+        "reading_schema": READING_SCHEMA,
+        "statuses": list(STATUSES),
+        "confidences": list(CONFIDENCES),
+    }
+
+
+def _reading_template(criteria: dict[str, str]) -> str:
+    """The shape `demo-grade verdict --reading` accepts, one row per clause."""
+    rows = [
+        {
+            "criterion": key,
+            "frame": "beat-NN.png",
+            "status": "seen | not seen | cannot tell",
+            "why": "one sentence",
+            "confidence": "high | medium | low",
+        }
+        for key in criteria
+    ]
+    return json.dumps(
+        {"schema": READING_SCHEMA, "readings": rows}, indent=2, ensure_ascii=False
+    )
+
+
+def render_brief_md(criteria: dict[str, str], frames: list[str]) -> str:
+    """The document handed to the reader. Same two inputs, and no others."""
+    out = [
+        "# Locate each clause in the frames",
+        "",
+        "You are reading a recording of a change, frame by frame, against the "
+        "clauses of the ticket it was written for. You have not been shown the "
+        "storyboard, the code, the diff, or where anybody thinks each clause "
+        "is. That is deliberate: what makes your answer worth having is that "
+        "it is derived from the pictures alone.",
+        "",
+        "## What to do",
+        "",
+        "Read the frames in the order listed below — that is the order they "
+        "occur in the video. Then, **for each clause separately**, name the "
+        "**first** frame in which you can see that clause happening, or say it "
+        "is not seen.",
+        "",
+        "For every clause, answer with exactly these five things:",
+        "",
+        "- `criterion` — the clause id, exactly as written below;",
+        "- `frame` — the first frame filename in which you can see it "
+        "(`null` when you cannot);",
+        "- `status` — `seen`, `not seen`, or `cannot tell`;",
+        "- `why` — **one sentence** saying what in that frame shows it;",
+        "- `confidence` — `high`, `medium` or `low`.",
+        "",
+        "Answer every clause, including the ones you cannot find. Do **not** "
+        "give an overall judgement of the demo, and do not say whether it "
+        "should ship: that is not what you are being asked for, and it is not "
+        "yours to decide here. One clause, one frame, one sentence.",
+        "",
+        "**Answer `cannot tell` when the only thing showing the clause is the "
+        "caption text burned into the picture.** A caption is the storyboard "
+        "author asserting the clause, not the software doing it. If you cannot "
+        "see the software do the thing — only a line of text saying it does — "
+        "that is `cannot tell`, and say so in your sentence.",
+        "",
+        "Captions are written *before* the action they introduce, so a caption "
+        "normally leads the picture that evidences it by a frame or two. Name "
+        "the frame where you can **see** the clause, not the frame where a "
+        "line of text announces it.",
+        "",
+        "## What this check does and does not catch",
+        "",
+        "Stated here because you are half of it, and half of a cross-check that "
+        "does not know its own boundary is worse than no cross-check.",
+        "",
+        "The captions on these frames were written by the storyboard's author, "
+        "and they are burned into the pixels — there is no framing of this "
+        "request that removes them. So your reading catches a clause placed on "
+        "the wrong beat, a clause whose evidence never arrives, a beat showing "
+        "an error page, and a clause the demo never reaches. It does **not** "
+        "catch a storyboard whose caption asserts a misread requirement and "
+        "whose screen agrees with the caption — you and the author read the "
+        "same caption there.",
+        "",
+        "## The clauses",
+        "",
+    ]
+    for key, text in criteria.items():
+        out += [f"**{key}** — {text}", ""]
+    out += [
+        f"## The frames, in order ({len(frames)})",
+        "",
+    ]
+    out += [f"{n}. `{name}`" for n, name in enumerate(frames, 1)]
+    out += [
+        "",
+        "## Reply with exactly this shape",
+        "",
+        "```json",
+        _reading_template(criteria),
+        "```",
+        "",
+    ]
+    return "\n".join(out).rstrip() + "\n"
+
+
+# --- the verdict: the reader's answers against the storyboard's claims -------
+
+
+def claimed_beats(timeline: dict) -> dict[str, list[int]]:
+    """Which beats the storyboard claimed for each clause, by id.
+
+    The reader never saw any of this. It is read here and nowhere earlier.
+    """
+    coverage = timeline.get("coverage")
+    claimed = coverage.get("claimed") if isinstance(coverage, dict) else None
+    out: dict[str, list[int]] = {}
+    for key, rows in (claimed or {}).items():
+        beats = [
+            row.get("index")
+            for row in (rows or [])
+            if isinstance(row, dict) and isinstance(row.get("index"), int)
+        ]
+        out[str(key)] = sorted(beats)
+    return out
+
+
+def checked_readings(
+    doc: object, criteria: dict[str, str], beats_by_frame: dict[str, int]
+) -> dict[str, dict]:
+    """The reader's answers, validated strictly, keyed by criterion.
+
+    Strict because every one of these refusals is a document that would
+    otherwise be compared as though it said something it does not: an id
+    nobody declared, a frame nobody photographed, a status invented on the
+    spot. A comparison run over any of those is confidently wrong, which is
+    worse than absent.
+    """
+    if not isinstance(doc, dict):
+        raise Refused("the reading is not a JSON object")
+    if doc.get("schema") != READING_SCHEMA:
+        raise Refused(
+            f"the reading declares schema {doc.get('schema')!r}, and this "
+            f"command reads schema {READING_SCHEMA}"
+        )
+    rows = doc.get("readings")
+    if not isinstance(rows, list):
+        raise Refused("the reading has no `readings` list")
+    out: dict[str, dict] = {}
+    for n, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise Refused(f"reading {n} is not an object: {row!r}")
+        key = row.get("criterion")
+        if not isinstance(key, str) or key not in criteria:
+            raise Refused(
+                f"reading {n} names criterion {key!r}, which this take did not "
+                f"declare. Declared: {', '.join(criteria) or 'none'}."
+            )
+        if key in out:
+            raise Refused(
+                f"reading {n} is a second answer for {key}. One clause, one "
+                f"frame — two answers have no single reading to compare."
+            )
+        status = row.get("status")
+        if status not in STATUSES:
+            raise Refused(
+                f"reading {n} ({key}) has status {status!r}; it must be one of "
+                f"{', '.join(repr(s) for s in STATUSES)}"
+            )
+        confidence = row.get("confidence")
+        if confidence not in CONFIDENCES:
+            raise Refused(
+                f"reading {n} ({key}) has confidence {confidence!r}; it must be "
+                f"one of {', '.join(repr(c) for c in CONFIDENCES)}"
+            )
+        why = row.get("why")
+        if not isinstance(why, str) or not why.strip():
+            raise Refused(
+                f"reading {n} ({key}) says nothing under `why`. The sentence is "
+                f"what tells a reviewer whether to trust the frame."
+            )
+        frame = row.get("frame")
+        if frame is not None and (
+            not isinstance(frame, str) or frame not in beats_by_frame
+        ):
+            raise Refused(
+                f"reading {n} ({key}) names frame {frame!r}, which is not in "
+                f"the frames manifest. A reading can only be of a frame the "
+                f"brief listed."
+            )
+        if status == SEEN and frame is None:
+            raise Refused(
+                f"reading {n} ({key}) is {SEEN!r} with no frame. The whole "
+                f"question is where — a status without one locates nothing."
+            )
+        out[key] = {
+            "status": status,
+            "frame": frame,
+            "beat": beats_by_frame[frame] if frame is not None else None,
+            "why": why.strip(),
+            "confidence": confidence,
+            "derivation": BY_READER,
+        }
+    return out
+
+
+def agreement_rule() -> dict:
+    """The comparison rule, written into the artifact rather than implied.
+
+    **Why a span and not a set.** A storyboard tags the beat where the caption
+    goes up, and SKILL.md's step 6 says captions are written before the action
+    they introduce — so the screen catches up a beat or two later, and the
+    reader, asked where the software visibly does the thing, names that later
+    beat. Measured on a real take of the criterion-card demo: AC-1 was claimed
+    on beats [4, 6, 8, 12, 13] and read at beat 10; AC-3 was claimed on
+    [18, 20, 25, 26, 31] and read at beat 23. Both readings are correct and
+    neither is in the claimed set, so "the reader's beat must be one of the
+    claimed beats" — and a naive one-beat tolerance either side of one —
+    reports a disagreement on a demo that is right. A cross-check whose false
+    alarms outnumber its findings is one nobody reads.
+
+    **Its weakness, which is the other half of stating a rule.** Agreement gets
+    cheaper the wider the claimed span: a clause claimed on beats 2 and 30
+    agrees with a reading anywhere between them, and a storyboard that tagged
+    every beat with every clause would agree with everything. So agreement is
+    weaker evidence the more beats a clause claims, and the span is printed
+    beside every row so a reader can see how much room the rule was given.
+    """
+    return {
+        "rule": SPAN_RULE,
+        "unit": (
+            "beats, not seconds: the beat log and the video run on different "
+            "clocks, so a tolerance in seconds would mean different things in "
+            "different takes"
+        ),
+        "why": (
+            "A storyboard tags the beat where the caption goes up, and captions "
+            "are written before the action they introduce, so the picture that "
+            "evidences a clause arrives a beat or two after the beat that "
+            "claims it. On a measured take, clauses claimed on beats "
+            "[4, 6, 8, 12, 13] and [18, 20, 25, 26, 31] were correctly read at "
+            "beats 10 and 23 — inside both spans, in neither claimed set."
+        ),
+        "weakness": (
+            "Agreement is cheaper the wider the claimed span. A clause claimed "
+            "on beats 2 and 30 agrees with a reading anywhere between them, so "
+            "agreement is weaker evidence the more beats a clause claims. Every "
+            "row below prints its span for exactly this reason."
+        ),
+    }
+
+
+def classify(reading: dict | None, beats: list[int]) -> tuple[str, str]:
+    """(class, why) for one clause. The whole comparison, in one place."""
+    span = f"[{beats[0]}, {beats[-1]}]" if beats else "nothing"
+    if reading is None:
+        return NO_READING, (
+            "The reading names no answer for this clause. Nothing derived a "
+            "status here — it is neither seen nor unseen, and it is recorded "
+            f"as unanswered rather than as either. The storyboard claimed {span}."
+        )
+    if reading["status"] == CANNOT_TELL:
+        return CANNOT_TELL, (
+            f"The reader could not tell from the frames; the storyboard claimed "
+            f"{span}. This is one of the two cases a human is pulled in for."
+        )
+    if reading["status"] == SEEN:
+        if not beats:
+            return DISAGREEMENT, (
+                f"The reader located this clause at beat {reading['beat']} "
+                f"(`{reading['frame']}`) and the storyboard claimed no beat for "
+                f"it at all — it is in `unclaimed`."
+            )
+        if beats[0] <= reading["beat"] <= beats[-1]:
+            return AGREEMENT, (
+                f"The reader located this clause at beat {reading['beat']} "
+                f"(`{reading['frame']}`), inside the claimed span {span}."
+            )
+        outside = (
+            beats[0] - reading["beat"]
+            if reading["beat"] < beats[0]
+            else reading["beat"] - beats[-1]
+        )
+        return DISAGREEMENT, (
+            f"The reader located this clause at beat {reading['beat']} "
+            f"(`{reading['frame']}`), {outside} beat(s) outside the claimed "
+            f"span {span}."
+        )
+    if beats:
+        return DISAGREEMENT, (
+            f"The storyboard claimed this clause on beats {beats} and the "
+            f"reader could not find it in any frame."
+        )
+    return NOT_DEMONSTRATED, (
+        "Neither derivation locates this clause: nothing claimed it and the "
+        "reader did not find it."
+    )
+
+
+def verdict_doc(
+    criteria: dict[str, str],
+    beats: dict[str, list[int]],
+    readings: dict[str, dict],
+    frames: list[str],
+) -> dict:
+    """The comparison, ordered so the disagreements are read first."""
+    clauses = []
+    for key, text in criteria.items():
+        claimed = beats.get(key, [])
+        reading = readings.get(key)
+        kind, why = classify(reading, claimed)
+        clauses.append(
+            {
+                "criterion": key,
+                "text": text,
+                "reading": reading
+                or {
+                    "status": NO_READING,
+                    "derivation": (
+                        "nothing — the reading file has no entry for this clause"
+                    ),
+                },
+                "storyboard": {
+                    "claimed_beats": claimed,
+                    "span": [claimed[0], claimed[-1]] if claimed else None,
+                    "derivation": BY_STORYBOARD,
+                },
+                "agreement": {
+                    "class": kind,
+                    "why": why,
+                    "derivation": (
+                        BY_NOTHING_TO_COMPARE if kind == NO_READING else BY_COMPARISON
+                    ),
+                },
+            }
+        )
+    clauses.sort(key=lambda row: CLASS_ORDER.index(row["agreement"]["class"]))
+    counts = {kind: 0 for kind in CLASS_ORDER}
+    for row in clauses:
+        counts[row["agreement"]["class"]] += 1
+    return {
+        "schema": VERDICT_SCHEMA,
+        "generated_by": "demo-video",
+        "agreement_rule": agreement_rule(),
+        "limit": LIMIT,
+        "frames_read": len(frames),
+        "counts": counts,
+        "clauses": clauses,
+    }
+
+
+def _reader_line(reading: dict) -> str:
+    """The reader's answer as one bullet: status, where, and their sentence."""
+    parts = [f"- **Reader:** {reading['status']}"]
+    if reading.get("frame"):
+        parts.append(f", `{reading['frame']}`")
+    if reading.get("beat") is not None:
+        parts.append(f" (beat {reading['beat']})")
+    if reading.get("confidence"):
+        parts.append(f", confidence {reading['confidence']}")
+    if reading.get("why"):
+        parts.append(f" — {reading['why']}")
+    return "".join(parts)
+
+
+def render_verdict_md(doc: dict) -> str:
+    """The comparison as a page: what disagrees, then everything else."""
+    counts = doc["counts"]
+    out = [
+        "# Two derivations of where each clause is",
+        "",
+        " · ".join(f"{counts[kind]} {kind}" for kind in CLASS_ORDER),
+        "",
+        "One derivation is the `ac=` tags the storyboard author typed. The "
+        "other is a reader who was given the clause text and the frames and "
+        "none of the rest — not the storyboard, not the tags, not this table. "
+        "Where they disagree, the disagreement is the finding, and it is "
+        "printed first.",
+        "",
+        f"**{LIMIT}**",
+        "",
+        "## The rule this page compares under",
+        "",
+        f"{doc['agreement_rule']['rule']} Measured in {doc['agreement_rule']['unit']}.",
+        "",
+        f"*Why a span:* {doc['agreement_rule']['why']}",
+        "",
+        f"*What it gives up:* {doc['agreement_rule']['weakness']}",
+        "",
+    ]
+    for kind in CLASS_ORDER:
+        rows = [row for row in doc["clauses"] if row["agreement"]["class"] == kind]
+        if not rows:
+            continue
+        out += [f"## {kind} ({len(rows)})", ""]
+        for row in rows:
+            reading = row["reading"]
+            board = row["storyboard"]
+            span = board["span"]
+            claimed = board["claimed_beats"] or "none"
+            out += [
+                f"### {row['criterion']} — {row['text']}",
+                "",
+                f"- **{kind}** — {row['agreement']['why']}",
+                f"  *Derived by:* {row['agreement']['derivation']}.",
+                _reader_line(reading),
+                f"  *Derived by:* {reading['derivation']}.",
+                f"- **Storyboard:** claimed beats {claimed}"
+                + (f", span [{span[0]}, {span[1]}]" if span else ""),
+                f"  *Derived by:* {board['derivation']}.",
+                "",
+            ]
+    return "\n".join(out).rstrip() + "\n"
+
+
+# --- the two commands --------------------------------------------------------
+
+
+def _write(demo: Path, name: str, text: str) -> Path:
+    """One artifact into `<demo-dir>/review/`, which is a working file."""
+    review = demo / REVIEW_DIRNAME
+    review.mkdir(parents=True, exist_ok=True)
+    path = review / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _clear_review(demo: Path, names: tuple[str, ...]) -> None:
+    """Take the previous run's answer off disk before this run starts.
+
+    **Before the refusals, not after the last one.** A refused run writes
+    nothing, so without this the file a reader opens afterwards is the previous
+    run's — a verdict about another reading, or a brief listing another
+    ticket's clauses, sitting under a current mtime with nothing on it saying
+    which run it belongs to. Exit 2 and a line on stderr are the only signals
+    that it is stale, and neither is in the file. That is the artifact lying,
+    which is the one failure this whole feature cannot afford.
+
+    Bounded to the names its command writes, never the directory — the same
+    rule, and the same reasoning, as `frames.py` taking its stale sheet off
+    disk before it cuts a new one.
+    """
+    for name in names:
+        try:
+            (demo / REVIEW_DIRNAME / name).unlink(missing_ok=True)
+        except OSError:  # noqa: PERF203 - a leftover is worth reporting, not fatal
+            print(
+                f"demo-grade: WARNING — could not remove the stale {name}, "
+                f"which is now a file about an earlier run",
+                file=sys.stderr,
+            )
+
+
+def cmd_brief(demo: Path) -> int:
+    _clear_review(demo, ("brief.md", "brief.json"))
+    timeline_json = timeline_paths(demo)[0]
+    frames_json = frames_paths(demo)[1]
+    timeline = _load_json(timeline_json, "timeline.json")
+    criteria = declared_criteria(timeline, timeline_json)
+    records = frame_records(_load_json(frames_json, "frames/frames.json"), frames_json)
+    frames = [str(record["file"]) for record in records]
+    # The two arguments below are the whole blindness of this feature. Nothing
+    # read out of `claimed` is in scope by the time they are built, and the two
+    # renderers cannot reach for it.
+    _write(demo, "brief.md", render_brief_md(criteria, frames))
+    _write(
+        demo,
+        "brief.json",
+        json.dumps(brief_doc(criteria, frames), indent=2, ensure_ascii=False) + "\n",
+    )
+    print(
+        f"wrote {demo / REVIEW_DIRNAME}/brief.md ({len(criteria)} clause(s), "
+        f"{len(frames)} frames). Hand it, and the frames, to an agent that has "
+        f"seen neither the storyboard nor the diff."
+    )
+    return 0
+
+
+def cmd_verdict(demo: Path, reading_path: Path) -> int:
+    _clear_review(demo, ("verdict.json", "verdict.md"))
+    timeline_json = timeline_paths(demo)[0]
+    timeline = _load_json(timeline_json, "timeline.json")
+    frames_json = frames_paths(demo)[1]
+    criteria = declared_criteria(timeline, timeline_json)
+    records = frame_records(_load_json(frames_json, "frames/frames.json"), frames_json)
+    frames = [str(record["file"]) for record in records]
+    beats_by_frame = {str(r["file"]): int(r["beat"]) for r in records}
+    readings = checked_readings(
+        _load_json(reading_path, "the reading"), criteria, beats_by_frame
+    )
+    doc = verdict_doc(criteria, claimed_beats(timeline), readings, frames)
+    _write(demo, "verdict.md", render_verdict_md(doc))
+    _write(demo, "verdict.json", json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    counts = doc["counts"]
+    print(
+        f"wrote {demo / REVIEW_DIRNAME}/verdict.md — "
+        + ", ".join(f"{counts[kind]} {kind}" for kind in CLASS_ORDER)
+    )
+    # Exit 0 whatever it found. A clause nobody could see is a finding for a
+    # human, not a broken build, and a check that can redden one gets turned
+    # off long before it is believed.
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="command", required=True)
+    brief = sub.add_parser("brief", help="write the document a blind reader gets")
+    brief.add_argument("demo_dir", help="a take's output folder")
+    verdict = sub.add_parser("verdict", help="compare a reading with the claims")
+    verdict.add_argument("demo_dir", help="a take's output folder")
+    verdict.add_argument(
+        "--reading", required=True, help="the reader's answers, as JSON"
+    )
+    args = ap.parse_args(argv)
+    try:
+        if args.command == "brief":
+            return cmd_brief(Path(args.demo_dir))
+        return cmd_verdict(Path(args.demo_dir), Path(args.reading))
+    except Refused as refusal:
+        print(f"demo-grade: refusing — {refusal}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
