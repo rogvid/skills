@@ -6,17 +6,26 @@
 does not do.
 
 This is the defect the grader is **expected to miss**, and it is in the corpus
-for that reason. `skills/demo-video/scripts/demo-grade` states the limit in its
-own docstring and prints it into every brief and every verdict: the storyboard
-author's caption is burned into the pixels, so the blind reader and the author
-read the same sentence, and a caption asserting a misread requirement over a
-screen that agrees with it is invisible to both.
+for that reason. When it was written, `demo-grade` named this exact case in its
+own docstring as what it cannot catch: the storyboard author's caption is burned
+into the pixels, so the blind reader and the author read the same sentence.
 
-Here that is AC-2, the requester clause. The take types `webhook`, which is a
-word from TQ-104's **title** and appears in no requester in `data/tickets.json`
-— so nothing on screen demonstrates requester matching. Everything else agrees
-with the caption: the queue really narrows to one row, and that row really does
-carry a requester. A reader who takes the caption at its word answers `seen`.
+**That limit has since been retracted and `demo-grade` no longer names this
+case.** The reader is not asked to compare the screen with the caption; it is
+handed the ticket's clause text, and two independent runs disbelieved the
+caption on this very take (`tests/eval/grader/readings/`). The real blind spot
+is one level up — a declared clause text that is itself the misreading — and
+this take is not an instance of it. The expectation below is deliberately left
+as written anyway, so the score keeps saying out loud that the corpus's negative
+control does not do its job; rebuilding it to plant a wrong paraphrase is
+[#276](https://github.com/rogvid/skills/issues/276)'s work.
+
+Here the overclaim is AC-3, the requester clause. The take types `webhook`,
+which is a word from TQ-104's **title** and appears in no requester in
+`data/tickets.json` — so nothing on screen demonstrates requester matching.
+Everything else agrees with the caption: the queue really narrows to one row,
+and that row really does carry a requester. A reader who takes the caption at
+its word answers `seen`.
 
 The app itself is not broken — `examples/ticket-queue` does match requesters.
 The storyboard is what misreads the clause, which is the failure

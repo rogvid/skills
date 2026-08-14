@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "The Open pill is now the selected (dark) one and the list has dropped from the seven rows of beat-00 to just the four rows badged open (TQ-101, TQ-102, TQ-104, TQ-106), with the heading count changing from 7 to 4.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": "beat-14.png",
+      "status": "seen",
+      "why": "The All pill is selected, all seven tickets TQ-101 through TQ-107 are back in the list, and the heading directly above it reads \"Support queue (7)\", naming the queue being listed.",
+      "confidence": "high"
+    }
+  ]
+}

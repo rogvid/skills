@@ -63,9 +63,15 @@ and not the product.
 
 ## Rules that follow from this
 
-- **Never ask a human to judge a pixel, a colour, a duration or a count.** That
-  question goes to the harness. If a human is being asked to eyeball a number,
-  that is a bug in the harness.
+- **Never ask a human to *measure* a pixel, a colour, a duration or a count.**
+  Arbitrating a value across screenshots, or comparing two hex codes by eye, is
+  the harness's job, and a human doing it is a bug in the harness. **Asking one
+  whether the result reads right is not that.** The harness answers what the
+  value *is*; only a person answers whether it *works* — #291 was a card the
+  harness measured correctly, 1.3 luma levels of separation with every
+  assertion green, that a viewer watching read as a terminal window
+  (`skills/demo-video/reference/review.md`). Do not route that question away
+  from them.
 - **A true observation is not automatically work.** See `CLAUDE.md`.
 - **CI is a gate before merge, not the iteration loop.** If the loop is slow,
   fix the loop rather than routing around it through a human.

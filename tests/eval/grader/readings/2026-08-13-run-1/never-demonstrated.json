@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-00.png",
+      "status": "seen",
+      "why": "The rendered queue shows all seven rows TQ-101 through TQ-107, each carrying its ticket id, a bold title and a requester email address, with no caption needed to assert it.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": null,
+      "status": "not seen",
+      "why": "A search box is present above the list and is spotlighted around beat-11 to beat-14, but it still shows its empty placeholder text in every frame and the list stays at all seven tickets throughout, so nothing is ever typed and no narrowing is ever shown.",
+      "confidence": "high"
+    }
+  ]
+}

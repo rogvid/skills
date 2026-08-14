@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "The search field above the queue now contains \"invoice\" and the list has narrowed from seven rows to the single TQ-101 row with the header count changing from (7) to (1), with no search button anywhere in the UI.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-3",
+      "frame": "beat-10.png",
+      "status": "cannot tell",
+      "why": "The caption from beat-06 onward asserts that part of a requester's name finds that person's tickets, but the only query ever typed under it is \"webhook\" (beat-10), a word from the ticket title, so nothing on screen shows a name or address matching the requester field - only the caption says so.",
+      "confidence": "high"
+    }
+  ]
+}

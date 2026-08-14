@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "The search field above the ticket list contains the typed text 'invoice' and the queue has narrowed from seven rows to the single matching TQ-101 with the header count changed to (1), with no submit button anywhere in the control.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": "beat-16.png",
+      "status": "seen",
+      "why": "With 'refund' typed in the search field the header reads (0) and the list area shows the line 'No tickets match this filter.' rather than an empty region.",
+      "confidence": "high"
+    }
+  ]
+}

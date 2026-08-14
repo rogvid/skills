@@ -10,6 +10,10 @@ tests/eval-grader brief                   # one brief per take
 tests/eval-grader score --readings DIR    # seconds
 ```
 
+`readings/` holds the answers the published numbers were scored from, so
+`tests/eval-grader score --readings tests/eval/grader/readings/2026-08-14-run-2`
+reproduces them without dispatching a reader.
+
 ## Why this exists
 
 The blind reader in `skills/demo-video/scripts/demo-grade` had been measured
@@ -58,7 +62,10 @@ genuinely narrows; the caption genuinely overclaims.
 ### The corpus's own stated limit: the negative control is not an instance of the blind spot
 
 That clause has now been caught **twice**, by independent readers, and the
-expectation has not been edited. The finding it produced is about the limit
+expectation has not been edited. Both readings are committed, in
+[`readings/`](readings/), so that sentence can be checked from a clean checkout
+rather than believed; that directory's README says when each was produced and
+what its reader was given. The finding it produced is about the limit
 rather than about the reader: the reasoning behind it — "the caption is burned
 into the pixels, so both readers read it" — is true and is not the binding
 constraint, because **the reader is never asked to compare the screen against
@@ -105,7 +112,11 @@ the reason we expected" are worth telling apart.
 ## What is committed, and what is not
 
 Committed: `record.py`, `expected.json`, `timeline.json`, `timeline.md`,
-`images/`, and `.eval-recording.json`.
+`images/`, and `.eval-recording.json` — plus `readings/`, the answers a blind
+reader gave on the runs this corpus's published numbers come from. Those are
+committed for the reason the rest of this section argues the frames are not:
+they are what a claim in a shipped document rests on, they are small, and
+nothing regenerates them.
 
 **Not committed: `frames/`.** This was a judgement call and here is the
 argument, so it can be overruled on its merits — it costs one line of
@@ -136,8 +147,11 @@ becomes the thing in dispute, committing `frames/` is the fix.
 Also in `tests/eval-grader`'s docstring, which is where a reader of the score
 will be:
 
-- **Seven clauses.** Enough to tell "flags clean demos constantly" from "does
-  not". Not enough for a rate.
+- **Eight clauses — six clean, one planted, one expected miss**, over four
+  takes. `tests/eval-grader score` prints that shape on the line above its
+  table, counted off the corpus, so this sentence has a printed counterpart to
+  be checked against rather than being the only place the number lives. Enough
+  to tell "flags clean demos constantly" from "does not". Not enough for a rate.
 - **One reader per clause per run**, so nothing here measures variance. #131 is
   the standing warning about the unstable half of this question.
 - **One app, one recorder, one storyboard author.** Nothing about terminal
