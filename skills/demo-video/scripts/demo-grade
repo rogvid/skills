@@ -76,6 +76,18 @@ and went before the beats that claimed it does not surface. Tagged too early
 surfaces; tagged too late does not. Nor does this catch a ticket that was
 misread before its clauses were written down.
 
+## What `verdict` leaves behind, and what reads it
+
+`review/verdict.md` for a human, `review/verdict.json` for a tool, and
+`review/frames/` — the handful of frames the reading actually cited, copied out
+of the working `frames/` sheet under the names the reader used, one sha256
+each. Those three are what a consumer commits; the brief and the sheet are
+working files. A pull-request comment renderer that shows a reviewer the
+picture behind a finding needs a *committed* file to link, and it must be the
+frame the reader named rather than the still the storyboard author chose for
+that beat — see `cited_pictures`. `basis_digest` is how the same renderer tells
+a verdict that still describes the take beside it from one that does not.
+
 ## Exit status
 
 Two codes. 0 when the command produced its artifacts, and 2 both when it
@@ -97,7 +109,10 @@ removes its stale sheet before writing a new one.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -107,6 +122,11 @@ from demo_recording.frames import frames_paths  # noqa: E402
 from demo_recording.timeline import timeline_paths  # noqa: E402
 
 REVIEW_DIRNAME = "review"
+#: Where the frames a reading names are copied to, inside `review/`. `frames/`
+#: itself is a working directory regenerated wholesale by every recording and
+#: is not committed anywhere; these few are, because a verdict a reviewer
+#: cannot see the picture of is a verdict they have to take on trust.
+REVIEW_FRAMES = "frames"
 BRIEF_SCHEMA = 1
 READING_SCHEMA = 1
 VERDICT_SCHEMA = 1
@@ -708,11 +728,107 @@ def classify(reading: dict | None, beats: list[int]) -> tuple[str, str, str | No
     )
 
 
+#: A frame filename this command is willing to copy. The manifest is a file on
+#: disk beside an editable `timeline.json`, and its `file` values are pasted
+#: into a path this command **writes** to — so `../../../.ssh/id_rsa` is the
+#: shape to refuse, and a name rather than a path is the whole allowance.
+_FRAME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.png")
+
+
+def basis_digest(criteria: dict[str, str], beats: dict[str, list[int]]) -> str:
+    """One hash over everything this comparison is a function of but the reading.
+
+    **What it is for.** `verdict.json` is written once, beside a take, and read
+    later — by a reviewer, and by `.github/scripts/demo-comment`, which renders
+    it into a pull-request comment against a take CI has just re-recorded. A
+    verdict is only about that take if the clauses and the claims are still the
+    ones it was computed from: change the ticket's wording, retag a beat, or
+    add a clause, and every class in this document was decided against a
+    question nobody is asking any more.
+
+    Keyed on the sorted clause ids, so re-ordering the ticket's clauses — which
+    changes nothing about any comparison — does not read as drift.
+
+    **What it does not cover, which is the larger term.** The pixels. The same
+    storyboard recorded against changed application code produces the same
+    clauses and the same claimed beats and an entirely different video, and
+    nothing in these two documents can see that. A consumer that re-records has
+    to answer staleness some other way; `demo-comment` answers it by asking
+    whether the branch under review changed the verdict at all.
+    """
+    sha = hashlib.sha256()
+    for key in sorted(criteria):
+        sha.update(key.encode("utf-8"))
+        sha.update(b"\0")
+        sha.update(criteria[key].encode("utf-8"))
+        sha.update(b"\0")
+        sha.update(",".join(str(b) for b in beats.get(key, [])).encode("utf-8"))
+        sha.update(b"\0")
+    return sha.hexdigest()
+
+
+def cited_pictures(demo: Path, frames_dir: Path, readings: dict[str, dict]) -> dict:
+    """The frames the reading names, copied where a reviewer can open them.
+
+    **The frame the reader named, and not one beside it.** `frames/` is a
+    working directory: it is regenerated wholesale by every recording, it is
+    gitignored in this repository and in every consumer, and it is 16 MB of
+    sheet that no pull request wants. So the handful of frames a reading
+    actually cites are copied out of it, under the name the reader used, by the
+    same run that checked that name against the manifest. Pointing a reviewer
+    at `images/` instead would be a *plausible* picture — the still the
+    storyboard author chose for that beat — and a plausible wrong picture is
+    worse evidence than none.
+
+    Each entry carries the copy's sha256, so a consumer can tell the file it is
+    about to show from a file of the same name that arrived some other way.
+    A frame the manifest lists and the directory does not hold is recorded with
+    its reason and no path: absent is a fact worth printing, and a silently
+    dropped entry reads as a clause nobody photographed.
+    """
+    out: dict[str, dict] = {}
+    dest = demo / REVIEW_DIRNAME / REVIEW_FRAMES
+    for row in readings.values():
+        name = row.get("frame")
+        if not isinstance(name, str) or name in out:
+            continue
+        if not _FRAME_NAME.fullmatch(name):
+            out[name] = {
+                "path": None,
+                "sha256": None,
+                "why": (
+                    f"{name!r} is not a plain frame filename, so it was not "
+                    f"copied — the manifest names where this command writes"
+                ),
+            }
+            continue
+        try:
+            data = (frames_dir / name).read_bytes()
+        except OSError as exc:
+            out[name] = {
+                "path": None,
+                "sha256": None,
+                "why": (
+                    f"the frames manifest lists {name} and it could not be read "
+                    f"from {frames_dir}: {exc}"
+                ),
+            }
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / name).write_bytes(data)
+        out[name] = {
+            "path": f"{REVIEW_DIRNAME}/{REVIEW_FRAMES}/{name}",
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    return out
+
+
 def verdict_doc(
     criteria: dict[str, str],
     beats: dict[str, list[int]],
     readings: dict[str, dict],
     frames: list[str],
+    pictures: dict | None = None,
 ) -> dict:
     """The comparison, ordered so the disagreements are read first."""
     clauses = []
@@ -756,6 +872,23 @@ def verdict_doc(
         "agreement_rule": agreement_rule(),
         "limit": LIMIT,
         "frames_read": len(frames),
+        # What this comparison was made against, so a reader of the file later
+        # can tell whether it is still about the take beside it. See
+        # `basis_digest` for what the hash covers and what it cannot.
+        "basis": {
+            "digest": basis_digest(criteria, beats),
+            "how": (
+                "sha256 over the clause ids and their text, and over the beats "
+                "coverage.claimed names for each, by sorted id. A take whose "
+                "criteria or ac= tags have moved produces a different digest, "
+                "and this document is then a comparison of a question nobody "
+                "is asking. It says nothing about the pixels: the same "
+                "storyboard over changed application code hashes the same."
+            ),
+        },
+        # Keyed by the frame filename the reading names, which is the only
+        # coordinate the reader, the manifest and this document share.
+        "pictures": pictures or {},
         "counts": counts,
         # Counted separately from `counts` rather than as a sixth class: it is
         # not a class, it is which of two agreements a row is, and a reader who
@@ -880,6 +1013,28 @@ def _clear_review(demo: Path, names: tuple[str, ...]) -> None:
             )
 
 
+def _clear_review_frames(demo: Path) -> None:
+    """Take the previous run's copied frames off disk, the whole directory.
+
+    Wholesale, unlike `_clear_review`, and for the reason `frames.py` removes
+    its sheet wholesale: this command writes the directory's entire contents in
+    one go from one reading, so a file in it that this run did not write is a
+    picture from an earlier reading sitting under a current verdict. That is
+    the pairing a consumer trusts — and `verdict.json` records a sha256 per
+    picture precisely because nothing else could tell the two apart.
+    """
+    try:
+        shutil.rmtree(demo / REVIEW_DIRNAME / REVIEW_FRAMES)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        print(
+            "demo-grade: WARNING — could not remove the stale review frames, "
+            "which are now pictures from an earlier reading",
+            file=sys.stderr,
+        )
+
+
 def cmd_brief(demo: Path) -> int:
     _clear_review(demo, ("brief.md", "brief.json"))
     timeline_json = timeline_paths(demo)[0]
@@ -922,6 +1077,8 @@ def cmd_brief(demo: Path) -> int:
 
 def cmd_verdict(demo: Path, reading_path: Path) -> int:
     _clear_review(demo, ("verdict.json", "verdict.md"))
+    _clear_review_frames(demo)
+    frames_dir = frames_paths(demo)[0]
     timeline_json = timeline_paths(demo)[0]
     timeline = _load_json(timeline_json, "timeline.json")
     frames_json = frames_paths(demo)[1]
@@ -932,7 +1089,13 @@ def cmd_verdict(demo: Path, reading_path: Path) -> int:
     readings = checked_readings(
         _load_json(reading_path, "the reading"), criteria, beats_by_frame
     )
-    doc = verdict_doc(criteria, claimed_beats(timeline), readings, frames)
+    doc = verdict_doc(
+        criteria,
+        claimed_beats(timeline),
+        readings,
+        frames,
+        cited_pictures(demo, frames_dir, readings),
+    )
     _write(demo, "verdict.md", render_verdict_md(doc))
     _write(demo, "verdict.json", json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     counts = doc["counts"]

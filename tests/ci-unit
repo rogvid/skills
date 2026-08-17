@@ -25,6 +25,7 @@ file; read it before treating a green run as coverage of the workflow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -73,6 +74,12 @@ comment = load("demo-comment", _DIR)
 # one file is graded through both doors.
 guard = load("target.py", _SKILL / "helpers" / "demo_recording")
 GUARD_CLI = _SKILL / "scripts" / "demo-target-guard"
+
+# The grader, for the two places `demo-comment` has to agree with it and
+# cannot import it: the classes it can report, and the digest that says a
+# committed verdict is still about the take beside it. Loaded off `_SKILL` so
+# `--fault-inject` grades the broken copy, the way `guard` is.
+grade = load("demo-grade", _SKILL / "scripts")
 
 
 # --------------------------------------------------------------------------
@@ -1062,6 +1069,32 @@ def _quoted(timeline: dict) -> list[str]:
     return [s for s in dict.fromkeys(spans) if s]
 
 
+def _quoted_reader(verdict: object) -> list[str]:
+    """The blind reader's sentences, which `demo-comment` copies rather than writes.
+
+    **The third exemption, and the same rule as the first two.** The sweep
+    grades what this renderer *writes*. A ticket's clause is the ticket
+    author's wording, a caption is the storyboard author's, and this is a
+    reader's one sentence about one picture — printed as a blockquote, under an
+    attribution line, in a section whose every other word `demo-comment`
+    composed and is swept on.
+
+    Nothing else out of `verdict.json` is exempted, which is the boundary that
+    keeps the exemption from being a hole: `demo-grade`'s class names and its
+    own `why` sentences are not printed by the comment at all, precisely so
+    that they never need to be subtracted here. If a future renderer prints
+    one, the sweep is what refuses it — `not demonstrated` is one of them.
+    """
+    if not isinstance(verdict, dict):
+        return []
+    out = []
+    for row in verdict.get("clauses") or []:
+        why = str(((row.get("reading") or {}).get("why")) or "").strip()
+        if why:
+            out.append(why)
+    return list(dict.fromkeys(out))
+
+
 # A ticket whose own clause reads as a verdict, and a storyboard whose captions
 # do too. This is the false positive the widened list would otherwise produce,
 # and it is a fixture rather than a hypothetical because both halves are real
@@ -1081,6 +1114,143 @@ QUOTED_VERDICT = dict(
         ),
     ),
 )
+
+
+# --------------------------------------------------------------------------
+# The verdict a blind reader produced, rendered in the comment (#279)
+# --------------------------------------------------------------------------
+#
+# `demo-comment` does not grade anything here either, and the boundary is
+# narrower than the one above: it renders a comparison **another tool** made,
+# and one of that tool's five class names is `not demonstrated`. So the rule
+# these fixtures hold the renderer to is that the sentences around the finding
+# are the comment's own and swept like every other, while the one sentence of
+# judgement per clause is the reader's, quoted, and exempted the way a caption
+# and a ticket's clause text already are.
+#
+# `READER_WHY["AC-3"]` is copied verbatim out of
+# `tests/eval/grader/readings/2026-08-14-run-2/caption-overclaims.json`, and it
+# carries `demonstrated`. That is not decoration: it is a real reader's real
+# sentence about a real take in this repository, it would redden the sweep if
+# the exemption were not there, and a fixture invented to be clean would have
+# proven the exemption unnecessary.
+READER_WHY = {
+    "AC-1": (
+        "The search field sitting above the ticket list contains the typed text "
+        "'invoice' and the queue has narrowed from 7 rows to the single TQ-101 "
+        "row, with no submit button anywhere in the control."
+    ),
+    "AC-2": (
+        "The heading still reads the unfiltered count in every frame after the "
+        "status filter is applied, so the two controls are never seen agreeing."
+    ),
+    "AC-3": (
+        "matching on a requester's name or address is asserted only by the "
+        "burned-in caption at beat-06 and is never demonstrated on screen; the "
+        "later highlight merely rings the requester column of a title-matched "
+        "row."
+    ),
+}
+
+
+def reading(status: str, frame: str | None, beat: int | None, why: str) -> dict:
+    """One clause's row of the reader's answers, as `demo-grade` records it."""
+    return {
+        "status": status,
+        "frame": frame,
+        "beat": beat,
+        "why": why,
+        "confidence": "high",
+        "derivation": "a reader given the clause text and the frame filenames",
+    }
+
+
+def verdict_clause(key: str, kind: str, beats: list[int], read: dict) -> dict:
+    """One clause of `verdict.json`, shaped as `verdict_doc` writes it."""
+    return {
+        "criterion": key,
+        "text": COVERAGE["criteria"][key],
+        "reading": read,
+        "storyboard": {
+            "claimed_beats": beats,
+            "span": [beats[0], beats[-1]] if beats else None,
+            "derivation": "coverage.claimed in timeline.json",
+        },
+        "agreement": {
+            "class": kind,
+            "position": "inside the claimed span" if kind == "agreement" else None,
+            "why": "the grader's own sentence, which the comment does not print",
+            "derivation": "demo-grade",
+        },
+    }
+
+
+def verdict_doc(coverage: dict, clauses: list[dict], pictures: dict) -> dict:
+    """A verdict for `coverage`, with its basis digest computed over it.
+
+    The digest is built with the renderer's own function on purpose: the
+    fixture asserts nothing by carrying a hash somebody typed, and the check
+    that grades the digest is `test_a_verdict_computed_against_other_clauses_
+    is_not_rendered`, which hands the same renderer a take whose clauses moved.
+
+    `counts` is deliberately absent. `render_verdict` derives its headline from
+    the rows it is about to print, for the same reason `render_coverage`
+    derives `unclaimed` from `claimed` — a headline and a list that come from
+    two places can disagree about one take.
+    """
+    return {
+        "schema": 1,
+        "generated_by": "demo-video",
+        "basis": {
+            "digest": comment.basis_digest(
+                coverage["criteria"], comment.claimed_beats(coverage)
+            ),
+            "how": "sha256 over the clause ids, their text and the claimed beats",
+        },
+        "pictures": pictures,
+        "clauses": clauses,
+    }
+
+
+#: The four classes a reviewer meets, in the order `demo-grade` sorts them:
+#: a clause the reader put where nothing claimed it, one it could not tell,
+#: one neither derivation located, and one they agreed on. The agreement is
+#: last and is the one that gets folded away.
+VERDICT_CLAUSES = [
+    verdict_clause(
+        "AC-2",
+        "disagreement",
+        [],
+        reading("seen", "beat-07.png", 7, READER_WHY["AC-2"]),
+    ),
+    verdict_clause(
+        "AC-3",
+        "cannot tell",
+        [6, 9],
+        reading("cannot tell", None, None, READER_WHY["AC-3"]),
+    ),
+    verdict_clause(
+        "AC-4",
+        "not demonstrated",
+        [],
+        reading(
+            "not seen",
+            None,
+            None,
+            "nothing on any frame narrows on a query that matches nothing",
+        ),
+    ),
+    verdict_clause(
+        "AC-1", "agreement", [3], reading("seen", "beat-03.png", 3, READER_WHY["AC-1"])
+    ),
+]
+
+#: The frames those readings cite, as `cited_pictures` records them. The
+#: sha256s are filled in by the test's `setUp`, off the bytes it writes.
+VERDICT_FRAMES = {
+    "beat-03.png": b"\x89PNG beat three",
+    "beat-07.png": b"\x89PNG beat seven",
+}
 
 
 #: The sentence #303 adds, hand-written here rather than imported from
@@ -1190,7 +1360,7 @@ class Coverage(unittest.TestCase):
         """
         return self.row(body, key)[3]
 
-    def swept(self, body: str, timeline: dict) -> str:
+    def swept(self, body: str, timeline: dict, verdict: object = None) -> str:
         """`body` with the spans the renderer quotes subtracted out of it.
 
         Span by span, and never by a bare `body.replace(...)` on anything
@@ -1200,16 +1370,18 @@ class Coverage(unittest.TestCase):
         exempted — the strict direction, so the failure is loud.
         """
         out = body
-        for span in _quoted(timeline):
+        for span in _quoted(timeline) + _quoted_reader(verdict):
             flat = _as_rendered(span)
             self.assertGreaterEqual(len(flat), 16, f"too short to subtract: {flat!r}")
             self.assertIn(flat, out, f"quoted span never reached the reader: {flat!r}")
             out = out.replace(flat, " ")
         return out
 
-    def assert_no_verdict(self, body: str, timeline: dict) -> None:
+    def assert_no_verdict(
+        self, body: str, timeline: dict, verdict: object = None
+    ) -> None:
         """No sentence `demo-comment` writes reads as a machine's verdict."""
-        swept = self.swept(body, timeline)
+        swept = self.swept(body, timeline, verdict)
         # The control on the sweep, read off the swept text rather than the
         # body: without it every assertion here holds over a comment that
         # rendered no coverage at all, and a subtraction that ate the section
@@ -1629,6 +1801,360 @@ class Coverage(unittest.TestCase):
         )
         self.assertEqual(self.cell(self.body(stitched), "AC-1"), "beat 6 (`part2`)")
 
+    # -- what a blind reader found, in the comment (#279) --------------------
+
+    #: The checkout, as a directory that is **not** the staging area. The
+    #: workflow's `--demo-root` is a scratch copy of what the take just
+    #: published and its `--verdict-root` is the working tree, and the whole
+    #: point of the verdict being a committed file is that it is only in the
+    #: second. With one directory standing in for both, a renderer that read
+    #: the verdict out of staging would pass every test below.
+    CHECKOUT = "checkout"
+
+    def graded(self, clauses=None, coverage=None, pictures=None, frames=None):
+        """A take with `review/verdict.json` beside it, and the frames it cites."""
+        review = self.root / self.CHECKOUT / "demos/x/review"
+        (review / "frames").mkdir(parents=True, exist_ok=True)
+        shot = {}
+        for name, data in (VERDICT_FRAMES if frames is None else frames).items():
+            (review / "frames" / name).write_bytes(data)
+            shot[name] = {
+                "path": f"review/frames/{name}",
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        doc = verdict_doc(
+            COVERAGE if coverage is None else coverage,
+            VERDICT_CLAUSES if clauses is None else clauses,
+            shot if pictures is None else pictures,
+        )
+        (review / "verdict.json").write_text(json.dumps(doc), encoding="utf-8")
+        return doc
+
+    def verdict_body(self, timeline=None, **kw):
+        opts = dict(verdict_root=str(self.root / self.CHECKOUT))
+        opts.update(kw)
+        return self.body(TAGGED if timeline is None else timeline, **opts)
+
+    def picture(self, body: str, key: str) -> str:
+        """The picture line of one clause's block in the verdict section.
+
+        Read off the block rather than out of the whole body, for the reason
+        `look_at` is: every picture in the comment shares a URL prefix, so a
+        body-wide search for one is satisfied by another clause's.
+        """
+        lines = body.splitlines()
+        starts = [n for n, ln in enumerate(lines) if ln.startswith(f"##### `{key}` ")]
+        self.assertEqual(len(starts), 1, f"no single verdict block for {key}")
+        rest = lines[starts[0] + 1 :]
+        end = next(
+            (n for n, ln in enumerate(rest) if ln.startswith(("##### ", "</details>"))),
+            len(rest),
+        )
+        # The last line of the block, structurally rather than by matching what
+        # a picture looks like: every branch of `_frame_picture` ends the block,
+        # and a test that grepped for `<img` would find nothing on exactly the
+        # branches where the absence is the finding.
+        found = [ln for ln in rest[:end] if ln.strip()]
+        self.assertTrue(found, f"the verdict block for {key} is empty")
+        return found[-1]
+
+    def test_the_verdict_is_read_under_the_limit_and_over_the_claimed_table(self):
+        # The same ordering claim #303 makes about `DIFF_LIMIT`, retested on
+        # the section that most invites being read as the whole of review. A
+        # reviewer who meets a per-clause finding first has already decided what
+        # this comment is for; the sentence saying what it is *not* is worth
+        # nothing after that.
+        self.graded()
+        body = self.verdict_body()
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+        where = body.index("#### A second reader was asked where each clause is")
+        self.assertGreater(where, body.index(DIFF_LIMIT))
+        self.assertLess(where, body.index("| clause | claimed at | look at |"))
+        self.assertLess(where, body.index("| # | at | Caption |"))
+
+    def test_the_verdict_is_read_from_the_checkout_and_never_from_staging(self):
+        """The one path fact this whole slice rests on.
+
+        Every other file the comment describes was published by the take that
+        just ran, and is read out of the staging directory the freshness filter
+        filled. A verdict cannot be: there is no model in CI, so nothing this
+        run did produced one, and staging would hold it only if some earlier
+        run's copy had leaked in. Reading it from staging would therefore
+        render nothing at all today and the wrong take's findings the day
+        somebody widens what gets staged.
+        """
+        self.graded()
+        staged = self.root / "demos/x/review"
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "verdict.json").write_text(
+            json.dumps({"schema": 1, "clauses": []}), encoding="utf-8"
+        )
+        # The staged copy says the take has no clauses; the checkout's says
+        # four. What comes out is the checkout's.
+        body = self.verdict_body()
+        self.assertNotIn("names no clauses", body)
+        self.assertIn("##### `AC-2` ", body)
+
+    def test_the_findings_are_read_first_and_the_agreements_are_folded_away(self):
+        # The routing decision, which is the whole product: three clauses need
+        # a person and one does not, and the one that does not is the one a
+        # reviewer with thirty seconds must not spend them on.
+        self.graded()
+        body = self.verdict_body()
+        fold = body.index("<details><summary>1 clause where the reader and")
+        for surfaced in ("AC-2", "AC-3", "AC-4"):
+            self.assertLess(body.index(f"##### `{surfaced}` "), fold, surfaced)
+        self.assertGreater(body.index("##### `AC-1` "), fold)
+        self.assertIn(
+            "**3 of 4 clauses need a person to look: 1 where the two "
+            "derivations put this clause in different places, 1 where the "
+            "reader could not tell from the frames and 1 where nothing claimed "
+            "this clause and the reader did not find it.**",
+            body,
+        )
+
+    def test_the_frame_the_reader_judged_on_is_shown_at_the_recorded_commit(self):
+        # The whole line by equality, not a substring: this is the reviewer's
+        # one picture of the finding, and a picture of the right *name* at the
+        # wrong commit, or of a nearby still, is #300 — worse than none.
+        self.graded()
+        url = f"{self.REPO_URL}/raw/{self.SHA}/demos/x/review/frames/beat-07.png"
+        self.assertEqual(
+            self.picture(self.verdict_body(), "AC-2"),
+            f'<a href="{url}"><img src="{url}" width="420" alt="beat-07.png"></a>',
+        )
+
+    def test_a_clause_is_shown_its_own_frame_and_not_another_clauses(self):
+        # Two frames in the document and two clauses that cite them. A renderer
+        # reading `pictures` flat satisfies "an image is present" perfectly.
+        self.graded()
+        body = self.verdict_body()
+        self.assertIn("beat-07.png", self.picture(body, "AC-2"))
+        self.assertNotIn("beat-03.png", self.picture(body, "AC-2"))
+        self.assertIn("beat-03.png", self.picture(body, "AC-1"))
+
+    def test_a_picture_whose_bytes_are_not_the_ones_recorded_is_not_shown(self):
+        # `review/frames/` and `review/verdict.json` are two committed files
+        # that have to agree, and a commit can carry one without the other. A
+        # file of the right name holding another recording's pixels is the
+        # plausible wrong picture, and a checksum is available to refuse it.
+        self.graded()
+        (self.root / self.CHECKOUT / "demos/x/review/frames/beat-07.png").write_bytes(
+            b"\x89PNG other"
+        )
+        line = self.picture(self.verdict_body(), "AC-2")
+        self.assertIn("is not the file this verdict recorded", line)
+        self.assertNotIn("<img", line)
+        # The control: the other clause's picture is untouched and still shown.
+        self.assertIn("<img", self.picture(self.verdict_body(), "AC-1"))
+
+    def test_a_picture_the_branch_does_not_hold_is_named_and_not_shown(self):
+        self.graded()
+        (self.root / self.CHECKOUT / "demos/x/review/frames/beat-07.png").unlink()
+        line = self.picture(self.verdict_body(), "AC-2")
+        self.assertIn("beat-07.png", line)
+        self.assertNotIn("<img", line)
+
+    def test_a_picture_pointing_outside_the_demo_is_not_shown(self):
+        """`verdict.json` is committed, and a pull request may edit it.
+
+        Its `path` is untrusted text pasted into a URL — the branch
+        `_inside_demo` exists for on the stills, arriving here on a file a
+        model wrote and a human committed.
+
+        **The file the traversal lands on is real, and its checksum matches.**
+        Without both, every later gate refuses it for a reason that has nothing
+        to do with the guard: the read fails, or the digest does. The whole
+        point is that this picture is otherwise perfectly renderable and is
+        still refused, because it is not this demo's.
+        """
+        escape = self.root / self.CHECKOUT / "leaked.png"
+        escape.parent.mkdir(parents=True, exist_ok=True)
+        escape.write_bytes(b"\x89PNG somebody else's picture")
+        self.graded(
+            pictures={
+                "beat-07.png": {
+                    "path": "../../leaked.png",
+                    "sha256": hashlib.sha256(escape.read_bytes()).hexdigest(),
+                },
+                "beat-03.png": {
+                    "path": "review/frames/beat-03.png",
+                    "sha256": hashlib.sha256(VERDICT_FRAMES["beat-03.png"]).hexdigest(),
+                },
+            }
+        )
+        line = self.picture(self.verdict_body(), "AC-2")
+        self.assertIn("leaked.png", line)
+        self.assertNotIn("<img", line)
+        # The control: the same renderer, on the same take, is demonstrably
+        # able to produce a picture — so the refusal above is the guard and not
+        # a renderer that has stopped rendering anything.
+        self.assertIn("<img", self.picture(self.verdict_body(), "AC-1"))
+
+    def test_a_verdict_computed_against_other_clauses_is_not_rendered(self):
+        # The basis digest doing its job: the ticket was reworded, or a beat
+        # was retagged, so every class in the file was decided against a
+        # question this take no longer asks.
+        moved = dict(
+            COVERAGE, criteria=dict(COVERAGE["criteria"], **{"AC-1": "reworded"})
+        )
+        self.graded(coverage=moved)
+        body = self.verdict_body()
+        self.assertIn("is not about this take", body)
+        # And nothing of it is rendered: not the headline, not a clause block.
+        self.assertNotIn("need a person to look", body)
+        self.assertNotIn("##### `AC-2` ", body)
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+
+    def test_a_verdict_the_branch_did_not_regrade_says_so_above_its_findings(self):
+        # A demo is recorded here only because the branch touched its
+        # storyboard or the app under it, so a verdict the branch did not also
+        # change was read off an earlier recording — and no digest can see
+        # that, because the same storyboard over changed code hashes the same.
+        self.graded()
+        body = self.verdict_body(changed=frozenset({"demos/x/record.py"}))
+        lead = "**This branch changed what this take records, and did not re-run"
+        self.assertIn(lead, body)
+        self.assertLess(body.index(lead), body.index("##### `AC-2` "))
+        # The findings are still rendered under it: a reviewer with an old
+        # reading and a warning is better served than one with neither.
+        self.assertIn("<img", self.picture(body, "AC-2"))
+
+    def test_a_branch_that_regraded_the_take_is_not_told_it_did_not(self):
+        # The control on the sentence above, and the branch a reviewer meets on
+        # a pull request that followed the flow. Also the boundary in the other
+        # direction: with no list at all, the comment says nothing either way.
+        self.graded()
+        for changed in (frozenset({"demos/x/review/verdict.json"}), None):
+            body = self.verdict_body(changed=changed)
+            self.assertNotIn("did not re-run", body)
+            self.assertIn("##### `AC-2` ", body)  # control: it did render
+
+    def test_a_take_with_no_verdict_beside_it_renders_as_it_always_did(self):
+        # The #24 rule at this section's edge: nobody has graded most takes,
+        # and those must read exactly as they did before this slice.
+        body = self.verdict_body()
+        self.assertIn("| clause | claimed at | look at |", body)  # control
+        for added in ("second reader", "person to look", "review/verdict"):
+            self.assertNotIn(added, body)
+
+    def test_the_readers_own_sentence_reaches_the_reviewer_verbatim(self):
+        # The one sentence of judgement on the page, and the only reason the
+        # finding is worth anything: a class name says a clause needs a person,
+        # and this says what the person is about to look for.
+        self.graded()
+        body = self.verdict_body()
+        self.assertIn(f"> {READER_WHY['AC-3']}", body)
+        self.assertIn("— the reader, quoted from `review/verdict.json`.", body)
+
+    def test_a_clause_the_take_does_not_declare_is_not_rendered_as_one(self):
+        # `verdict.json` is committed and editable, and a row for a clause this
+        # take never declared would otherwise render beside four that it did,
+        # indistinguishable from them.
+        stray = verdict_clause(
+            "AC-1", "disagreement", [], reading("seen", None, 1, "x")
+        )
+        stray["criterion"] = "AC-9"
+        self.graded(clauses=[*VERDICT_CLAUSES, stray])
+        body = self.verdict_body()
+        self.assertIn("`AC-9` is in `review/verdict.json`", body)
+        self.assertNotIn("##### `AC-9` ", body)
+
+    def test_no_sentence_the_comment_writes_around_a_finding_is_a_verdict(self):
+        # The sweep over every sentence this slice adds — the headline, the
+        # class phrases, the attribution, the picture's absences. The reader's
+        # own sentence is subtracted, and `READER_WHY['AC-3']` carries
+        # `demonstrated`, so this test is also what says the exemption is
+        # load-bearing rather than precautionary.
+        doc = self.graded()
+        self.assert_no_verdict(self.verdict_body(), TAGGED, doc)
+
+    def test_the_same_words_are_refused_on_the_stale_and_absent_branches(self):
+        # Three more sentences the renderer writes, in branches the fixture
+        # above reaches by not having: the two staleness leads, and a picture
+        # that could not be shown.
+        doc = self.graded()
+        self.assert_no_verdict(
+            self.verdict_body(changed=frozenset({"demos/x/record.py"})), TAGGED, doc
+        )
+        (self.root / self.CHECKOUT / "demos/x/review/frames/beat-07.png").write_bytes(
+            b"\x89PNG other"
+        )
+        self.assert_no_verdict(self.verdict_body(), TAGGED, doc)
+        moved = dict(
+            COVERAGE, criteria=dict(COVERAGE["criteria"], **{"AC-1": "reworded"})
+        )
+        self.graded(coverage=moved)
+        self.assert_no_verdict(self.verdict_body(), TAGGED)
+
+
+class VerdictBasis(unittest.TestCase):
+    """The digest that says a verdict is still about the take beside it.
+
+    Two implementations, in two scripts that cannot import each other: one
+    ships inside the skill with `npx skills add`, the other under
+    `.github/scripts/` and is reached through the reusable workflow. The
+    duplication is deliberate and stated in both docstrings; this is what keeps
+    it from being a lie.
+
+    Drift fails in the safe direction — the digests stop matching and every
+    comment reports every verdict as not describing its take — which is exactly
+    the failure nobody would debug from the artifact. It is cheaper to catch
+    here.
+    """
+
+    def test_the_two_scripts_hash_the_same_document_the_same_way(self):
+        self.assertEqual(
+            grade.basis_digest(COVERAGE["criteria"], grade.claimed_beats(TAGGED)),
+            comment.basis_digest(COVERAGE["criteria"], comment.claimed_beats(COVERAGE)),
+        )
+
+    def test_a_retagged_beat_changes_the_hash(self):
+        # The control: without it the assertion above holds over two functions
+        # that both return a constant.
+        retagged = dict(
+            COVERAGE, claimed=dict(COVERAGE["claimed"], **{"AC-1": [claim(4)]})
+        )
+        self.assertNotEqual(
+            comment.basis_digest(COVERAGE["criteria"], comment.claimed_beats(COVERAGE)),
+            comment.basis_digest(COVERAGE["criteria"], comment.claimed_beats(retagged)),
+        )
+
+    def test_reordering_the_ticket_s_clauses_does_not_read_as_drift(self):
+        # A clause order is not a comparison. Keying on the sorted ids is what
+        # stops a cosmetic edit reporting every finding as stale, which is how
+        # a staleness check gets switched off.
+        flipped = {k: COVERAGE["criteria"][k] for k in reversed(COVERAGE["criteria"])}
+        self.assertEqual(
+            comment.basis_digest(COVERAGE["criteria"], comment.claimed_beats(COVERAGE)),
+            comment.basis_digest(flipped, comment.claimed_beats(COVERAGE)),
+        )
+
+
+class VerdictVocabulary(unittest.TestCase):
+    """Every class the grader can report has a sentence of the comment's own.
+
+    The reason there is a table at all rather than the grader's word printed
+    straight through: one of those words is `not demonstrated`, and a heading
+    this script writes is this script's claim whoever first wrote the words. A
+    class the table does not know renders as an unrecognised row, on the take
+    it matters on, which is the failure this couples against.
+    """
+
+    def test_every_class_the_grader_can_report_has_a_phrase_here(self):
+        self.assertEqual(set(comment.VERDICT_PHRASE), set(grade.CLASS_ORDER))
+
+    def test_the_early_agreement_is_recognised_by_the_graders_own_spelling(self):
+        self.assertEqual(comment.BEFORE_SPAN, grade.BEFORE_SPAN)
+
+    def test_no_phrase_this_comment_writes_is_itself_a_verdict(self):
+        # The table is prose, and prose is where the sweep's word list earns
+        # its keep. Graded here as well as through a rendered body, because a
+        # phrase for a class no fixture reaches would otherwise be unswept.
+        for kind, phrase in comment.VERDICT_PHRASE.items():
+            self.assertEqual(_verdict_hits(phrase), [], f"{kind}: {phrase}")
+        self.assertEqual(_verdict_hits(comment.VERDICT_EARLY), [])
+
 
 class Ticket(unittest.TestCase):
     """Which ticket the clauses were copied out of, in the comment (#275).
@@ -1751,6 +2277,24 @@ class CommentStep(unittest.TestCase):
         # that is how the regression `WorkflowGates` was written for happened.
         run = "\n".join(self.lines)
         self.assertIn(f'--path-prefix "${name}"', run)
+
+    def test_the_branchs_changed_files_reach_the_comment(self):
+        """The other fact only the workflow knows: what this branch touched.
+
+        Same shape as the coupling above and the same failure mode. A demo is
+        recorded only because the branch changed its storyboard or the app
+        under it, so a committed verdict the branch left alone was read off an
+        earlier recording — and nothing inside `demo-comment` can work that
+        out, because the same storyboard over changed code declares the same
+        clauses and tags the same beats. Without this argument the comment
+        renders a stale reading with no lead saying so, which reads exactly
+        like a fresh one.
+
+        `$CHANGED` is set in the job's `env:` rather than this step's, because
+        discovery writes it three steps earlier; `step_env` would not see it,
+        so the assertion is on the invocation.
+        """
+        self.assertIn('--changed-file "$CHANGED"', "\n".join(self.lines))
 
 
 class VerdictAlphabet(unittest.TestCase):
@@ -2116,8 +2660,8 @@ INJECTIONS = [
         # *is* a coverage claim, whatever the sentence under it says.
         "the acceptance section leads with what was claimed instead of the gap",
         "demo-comment",
-        "    return gap + limit + table + note",
-        "    return table + gap + limit + note",
+        "    return gap + limit + found + table + note",
+        "    return table + gap + limit + found + note",
         [
             "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
             "Coverage.test_the_clauses_with_no_picture_are_named_before_the_claimed_table",
@@ -2208,8 +2752,8 @@ INJECTIONS = [
         "        # a clean take's, five lines above a block that says the take "
         "failed\n"
         "        # (issue #278).\n"
-        "        failure=failure,\n    )",
-        "    lines += []",
+        "        failure=failure,",
+        "    lines += [] and render_coverage(\n        None,",
         [
             "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
             "Coverage.test_every_declared_clause_reaches_the_comment_with_its_own_text",
@@ -2222,8 +2766,8 @@ INJECTIONS = [
         # clean take's, five lines above a block saying the take failed.
         "the coverage section is not told the take failed",
         "demo-comment",
-        "        failure=failure,\n    )",
-        "    )",
+        "        failure=failure,\n        verdict=",
+        "        verdict=",
         [
             "Coverage.test_a_failed_take_says_so_before_anything_it_claimed",
             "Coverage.test_the_lead_counts_the_clauses_no_returning_beat_claimed",
@@ -2732,8 +3276,8 @@ INJECTIONS = [
         # through what it covers.
         "the limit is printed under the clause table rather than over it",
         "demo-comment",
-        "    return gap + limit + table + note",
-        "    return gap + table + limit + note",
+        "    return gap + limit + found + table + note",
+        "    return gap + found + table + limit + note",
         ["Coverage.test_the_limit_is_read_with_the_clauses_and_not_after_the_captions"],
     ),
     (
@@ -2748,6 +3292,220 @@ INJECTIONS = [
         "    \"demo, and is still the diff's to answer. "
         + 'The clauses below were demonstrated."',
         ["Coverage.test_no_sentence_promotes_a_claim_to_a_verdict"],
+    ),
+    # -- the verdict a blind reader produced, in the comment (#279) ---------
+    (
+        # The whole point of a committed verdict, undone: read out of the
+        # staging area, where nothing this run did could have put one. The
+        # comment then renders no finding on every pull request, and the day
+        # something else leaks into staging it renders another take's.
+        "the verdict is read from the staging area instead of the checkout",
+        "demo-comment",
+        "        directory=verdict_dir if verdict_dir is not None else directory,",
+        "        directory=directory,",
+        [
+            "Coverage.test_the_verdict_is_read_from_the_checkout_and_never_from_staging",
+            "Coverage.test_the_frame_the_reader_judged_on_is_shown_at_the_recorded_commit",
+        ],
+    ),
+    (
+        # Above `DIFF_LIMIT` instead of below it. Every count is unchanged and
+        # every finding is still there — a per-clause verdict read before the
+        # sentence saying what watching does not replace, which is the reading
+        # order the sentence exists to prevent.
+        "the findings are read before the sentence that bounds them",
+        "demo-comment",
+        "    return gap + limit + found + table + note",
+        "    return gap + found + limit + table + note",
+        [
+            "Coverage.test_the_verdict_is_read_under_the_limit_and_over_the_claimed_table"
+        ],
+    ),
+    (
+        # The agreements unfolded, inline with the findings. Nothing is lost
+        # and nothing is wrong; the reviewer's first screen is spent on the one
+        # class that closes a clause without them, which is the class the rule
+        # itself calls the weakest thing on the page.
+        "the agreements are printed beside the findings rather than folded away",
+        "demo-comment",
+        "    findings = [row for row in rows if _class_of(row) != AGREEMENT]",
+        "    findings = list(rows)",
+        [
+            "Coverage.test_the_findings_are_read_first_and_the_agreements_are_folded_away"
+        ],
+    ),
+    (
+        # #300's exact shape in the new column: every clause pointed at the
+        # first picture in the document. Every row has an image, every image
+        # resolves, and every row after the first is of another clause.
+        "every clause is shown the first frame the verdict cited",
+        "demo-comment",
+        "                pictures.get(frame.strip()),",
+        "                next(iter(pictures.values()), None),",
+        ["Coverage.test_a_clause_is_shown_its_own_frame_and_not_another_clauses"],
+    ),
+    (
+        # The thumbnail demoted back to a link, which is the state a reviewer
+        # asked to move on from: "it would be even better if the images could
+        # be presented in the rendered message".
+        "the judged frame is linked rather than rendered in the comment",
+        "demo-comment",
+        '    return f\'<a href="{href}"><img src="{href}" width="420" '
+        + 'alt="{_cell(name)}"></a>\'',
+        '    return f"[{_cell(name)}]({href})"',
+        [
+            "Coverage.test_the_frame_the_reader_judged_on_is_shown_at_the_recorded_commit"
+        ],
+    ),
+    (
+        # The checksum gone. A file of the right name holding another
+        # recording's pixels is then rendered as the frame this reading was
+        # made from — a picture that is plausible, resolvable, and of something
+        # else.
+        "a frame whose bytes are not the verdict's is rendered anyway",
+        "demo-comment",
+        '    if hashlib.sha256(data).hexdigest() != entry.get("sha256"):',
+        "    if False:",
+        ["Coverage.test_a_picture_whose_bytes_are_not_the_ones_recorded_is_not_shown"],
+    ),
+    (
+        # `verdict.json` is committed and a pull request may edit it, so its
+        # `path` is untrusted text pasted into a URL — the same branch the
+        # stills have, on a file a model wrote.
+        "a picture pointing outside the demo is rendered because it parses",
+        "demo-comment",
+        "    rel = _inside_demo(path.strip())\n    if rel is None:",
+        "    rel = path.strip()\n    if False:",
+        ["Coverage.test_a_picture_pointing_outside_the_demo_is_not_shown"],
+    ),
+    (
+        # The basis digest never consulted. A verdict computed against a
+        # reworded ticket, or against beats that have since been retagged, is
+        # then rendered clause by clause as though it were about this take.
+        "a verdict about another question is rendered as this take's",
+        "demo-comment",
+        "    if recorded != basis_digest(criteria, claimed):",
+        "    if False:",
+        ["Coverage.test_a_verdict_computed_against_other_clauses_is_not_rendered"],
+    ),
+    (
+        # The staleness lead gone. The comment then shows a reviewer a reading
+        # of an earlier recording, with this run's video beside it and nothing
+        # saying they are of different pixels.
+        "a verdict the branch never re-ran the grader on is presented as current",
+        "demo-comment",
+        "    if regraded is False:",
+        "    if regraded is None:",
+        [
+            "Coverage.test_a_verdict_the_branch_did_not_regrade_says_so_above_its_findings",
+            "Coverage.test_a_branch_that_regraded_the_take_is_not_told_it_did_not",
+        ],
+    ),
+    (
+        # And the same lead over-reporting, which is how a warning gets
+        # ignored: printed on the pull request that did re-grade, and on every
+        # caller that passes no list at all.
+        "the staleness lead is printed on takes that were re-graded",
+        "demo-comment",
+        "    if regraded is False:",
+        "    if regraded is not True:",
+        ["Coverage.test_a_branch_that_regraded_the_take_is_not_told_it_did_not"],
+    ),
+    (
+        # A row for a clause this take never declared, rendered beside four
+        # that it did — from a committed file a pull request can edit.
+        "a clause the take never declared is rendered as one of its own",
+        "demo-comment",
+        '    rows = [row for row in rows if row["criterion"] in criteria]',
+        "    rows = list(rows)",
+        ["Coverage.test_a_clause_the_take_does_not_declare_is_not_rendered_as_one"],
+    ),
+    (
+        # The reader's sentence dropped. The class alone says a clause needs a
+        # person; this is the line that says what the person is about to look
+        # for, and it is the only judgement on the page.
+        "the reader's own sentence is dropped from the finding",
+        "demo-comment",
+        "    if isinstance(why, str) and why.strip():",
+        "    if False:",
+        ["Coverage.test_the_readers_own_sentence_reaches_the_reviewer_verbatim"],
+    ),
+    (
+        # A take nobody graded, reported as one whose verdict could not be
+        # read. Most takes are that take, so this is the branch every reader
+        # of this comment meets.
+        "a take nobody graded is reported as one with an unreadable verdict",
+        "demo-comment",
+        "    except OSError:\n        return None",
+        "    except OSError:\n        return {}",
+        ["Coverage.test_a_take_with_no_verdict_beside_it_renders_as_it_always_did"],
+    ),
+    (
+        # The sweep over the sentences this slice adds. Appended to the
+        # attribution rather than replacing it, so every assertion about that
+        # paragraph's presence stays green and only the sweep can notice.
+        "the section around the finding promotes it to a verdict",
+        "demo-comment",
+        '        f"cannot. Nothing in this comment graded a clause.",',
+        '        f"cannot. Nothing in this comment graded a clause. Each clause '
+        + 'below was demonstrated.",',
+        ["Coverage.test_no_sentence_the_comment_writes_around_a_finding_is_a_verdict"],
+    ),
+    (
+        # The same, in the staleness lead — a branch no fixture above reaches
+        # by having, and one where a reassuring sentence is most tempting.
+        "the staleness lead promotes the findings under it",
+        "demo-comment",
+        '            "this storyboard, and the pictures under it are that recording\'s "',
+        '            "this storyboard, and the clauses were verified anyway. "',
+        ["Coverage.test_the_same_words_are_refused_on_the_stale_and_absent_branches"],
+    ),
+    (
+        # What the reader-sentence exemption is worth. Without it the sweep
+        # would redden on a real reader's real sentence about a real take in
+        # this repository; with it subtracting nothing, the sweep must redden
+        # on exactly that sentence and on nothing else — which is what says the
+        # exemption is load-bearing rather than a hole somebody widened.
+        "the reader's sentence stops being exempted from the verdict sweep",
+        "tests/ci-unit",
+        "    for row in verdict.get(" + '"clauses") or []:',
+        "    for row in []:",
+        ["Coverage.test_no_sentence_the_comment_writes_around_a_finding_is_a_verdict"],
+    ),
+    (
+        # The two copies of the digest drifting apart. In production this is
+        # silent: every verdict is reported as not describing its take, on
+        # every pull request, and the artifact says nothing about why.
+        "the grader and the comment stop hashing a take the same way",
+        "scripts/demo-grade",
+        '        sha.update(",".join(str(b) for b in beats.get(key, [])).encode("utf-8"))',
+        '        sha.update(";".join(str(b) for b in beats.get(key, [])).encode("utf-8"))',
+        ["VerdictBasis.test_the_two_scripts_hash_the_same_document_the_same_way"],
+    ),
+    (
+        # A class the comment has no words of its own for. It renders as an
+        # unrecognised row on the take it matters on — and the tempting fix,
+        # printing the grader's own word, is what the whole table exists to
+        # avoid: one of those words is `not demonstrated`.
+        "the comment loses its own wording for a class the grader reports",
+        "demo-comment",
+        '    "no reading": "the reading has no answer for this clause",\n',
+        "",
+        ["VerdictVocabulary.test_every_class_the_grader_can_report_has_a_phrase_here"],
+    ),
+    (
+        # The other half of the coupling, in the workflow: the branch's own
+        # file list never reaches the script that needs it, so no verdict is
+        # ever reported as stale. Same shape as `--path-prefix` above, and
+        # invisible from any reading of `demo-comment`.
+        "the comment step stops passing the branch's changed files",
+        "demo-video.yml",
+        # Anchored on the line above it: discovery invokes `demo-storyboards`
+        # with the same flag and the same indentation three steps earlier, so
+        # the flag alone matches twice and the injection would abort.
+        '            --demo-root "$STAGE_DEMO" \\\n            --changed-file "$CHANGED" \\\n',
+        '            --demo-root "$STAGE_DEMO" \\\n',
+        ["CommentStep.test_the_branchs_changed_files_reach_the_comment"],
     ),
 ]
 
@@ -2849,9 +3607,12 @@ def fault_inject() -> int:
             shutil.copy(Path(__file__).resolve(), inner)
             if script == "target.py":
                 target = skill / "helpers" / "demo_recording" / script
-            elif script == "scripts/demo-target-guard":
-                # The CLI ships with the skill rather than under
-                # `.github/scripts/`, and `GuardExitCode` runs the copy.
+            elif script in ("scripts/demo-target-guard", "scripts/demo-grade"):
+                # Both CLIs ship with the skill rather than under
+                # `.github/scripts/`. `GuardExitCode` runs the first; `grade`
+                # at the top of this file imports the second, which is how an
+                # injection into the grader reddens the couplings the comment
+                # has with it and cannot import.
                 target = skill / script
             elif script == "demo-video.yml":
                 target = workflow
