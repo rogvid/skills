@@ -150,6 +150,8 @@ demo-video/
 ├── README.md                      # this file — humans read this
 ├── ensure.sh                      # installs uv, restores exec bits — run once
 ├── scripts/
+│   ├── demo-grade                 # the blind reader's brief, and the verdict
+│   │                              #   comparing it with the ac= tags (step 6b)
 │   └── demo-target-guard          # the target classifier, on the command line
 └── helpers/
     ├── demo_recording/            # package: the recorders, and what reads their output

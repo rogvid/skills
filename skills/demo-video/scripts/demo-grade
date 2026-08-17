@@ -902,6 +902,21 @@ def cmd_brief(demo: Path) -> int:
         f"{len(frames)} frames). Hand it, and the frames, to an agent that has "
         f"seen neither the storyboard nor the diff."
     )
+    # Said here, at the moment the caller is about to dispatch, rather than in
+    # SKILL.md — a second copy of a caution is a copy that goes stale, and this
+    # one is easy to obey by accident and impossible to notice breaking. A
+    # subagent dispatched inside a project inherits that project's CLAUDE.md
+    # and AGENTS.md, which in this repository describe this tool, the corpus
+    # and which take is its negative control. A reader that has read them is
+    # not the fresh reader the pass is worth having, and its answer will look
+    # exactly like one that is.
+    print(
+        "  note: a subagent dispatched inside a project also reads that "
+        "project's CLAUDE.md and AGENTS.md. Copy the brief and the frames "
+        "somewhere neutral, or the reader inherits what it was meant not to "
+        "know — and you cannot tell from its answer that it did.",
+        file=sys.stderr,
+    )
     return 0
 
 
