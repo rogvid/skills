@@ -507,6 +507,9 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    the merged pair `stitch()` wrote next to `demo.mp4`; the per-segment
    `*.seg.timeline.*` are working files that go with `*.seg.mp4`, and
    `stitch()` removes them for you unless you asked to keep the parts.
+   **When 6b graded the take**, `review/verdict.json`, `review/verdict.md`
+   and `review/frames/` go in too — the comment renders them out of the
+   checkout, so a verdict you do not commit reaches nobody.
    **`demo.mp4` does not.** A video is
    stale by the next change to the feature and bloats history permanently,
    and anyone with the skill installed can regenerate it with
@@ -514,7 +517,8 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    segment parts, `*.seg.timeline.*`, `<demo folder>/frames/` (regenerated
    from the two by `beat_frames(out_dir)` — anchor the pattern to the demo
    folder rather than writing a bare `frames/`, which matches a directory
-   of that name anywhere in the repo), `.tts/` narration caches, and
+   of that name anywhere in the repo **including `review/frames/`, so
+   negate that one**), `.tts/` narration caches, `review/brief.*`, and
    `<demo folder>/evidence/` — the last two are **working files**, inputs to
    a review that happens once, and the file table at the top of this skill
    says so in the same column that says the mp4 is not committed. `evidence/`

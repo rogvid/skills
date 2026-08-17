@@ -1806,7 +1806,24 @@ _EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
 # number nobody reads — the catalogue's "measurement that grades nothing" — and
 # the point of splitting it out is to keep it able to fail somewhere that does
 # not block.
-SKILL_LINE_BUDGET = 600
+# Raised 600 → 610 on 2026-08-18, once, for a stage the skill did not have when
+# 600 was set: step 6b now grades the take with `demo-grade`, and step 8 has to
+# say that the verdict, the frames it cites and nothing else are committed —
+# because the pull-request comment renders them out of the checkout, so a
+# verdict nobody commits reaches nobody. Four lines, +101 tokens, 0.7%.
+#
+# Raised rather than paid for by cutting step 8's prose, which was the
+# alternative and is the worse one: trimming true sentences to fit a round
+# number is the catalogue's "widen the bar to make it green" run backwards, and
+# it would have deleted content to protect a figure. The number exists to make
+# length visible, not to hold it fixed; a budget that forces correct
+# instructions out of the always-loaded file has stopped doing its job.
+#
+# What would make this wrong: raising it again for the next paragraph. A
+# ratchet that only goes up is not a budget either. The next increase should
+# have to argue that something already in the file earns its place less than
+# the thing being added.
+SKILL_LINE_BUDGET = 610
 
 # `reference/` holding fewer than this is `reference/` being emptied, which
 # would make both assertions below hold trivially. Not a count of the files
