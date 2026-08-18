@@ -536,16 +536,8 @@ jobs:
             if [ -n "$dir" ]; then args+=(--demo "$dir"); fi
           done < "$DEMO_DIRS"
           if [ -n "$FAILURE_URL" ]; then args+=(--failure-artifact-url "$FAILURE_URL"); fi
-          # `--changed-file` is the same list discovery selected on. A demo is
-          # recorded here only because this branch touched its storyboard or
-          # the app under it, so a committed verdict the branch did *not* also
-          # change was read off an earlier recording of this storyboard — and
-          # its pictures are that recording's frames. No digest can see that:
-          # the same storyboard over changed application code declares the same
-          # clauses and tags the same beats. The branch's own file list can.
           "$SCRIPTS/demo-comment" "${args[@]}" \
             --demo-root "$STAGE_DEMO" \
-            --changed-file "$CHANGED" \
             --artifact-url "$ARTIFACT_URL" \
             --artifact-bytes "${ARTIFACT_BYTES:-0}" \
             --retention-days "$RETENTION" \

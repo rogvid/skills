@@ -33,15 +33,6 @@ says **which** ticket those clauses were copied out of, linked when the string
 can be turned into a URL without guessing (issue #275); nothing here reads
 that ticket.
 
-A take that was **graded** carries a fourth thing, between that sentence and
-the clause table: what a blind reader found, per clause, with the frame they
-judged on shown inline (issue #279's other half). CI has no model and cannot
-produce a verdict, so `review/verdict.json` is read out of the *checkout* — it
-travelled here in the commit — and `render_verdict` says out loud when the
-branch changed the take without re-running the grader. Nothing here decides a
-class; every one of them is `demo-grade`'s arithmetic, and the one sentence of
-judgement per clause is the reader's, quoted.
-
 The body opens with an HTML marker so the workflow can find and rewrite this
 comment rather than appending a new one on every push.
 """
@@ -49,7 +40,6 @@ comment rather than appending a new one on every push.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -58,57 +48,6 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 MARKER = "<!-- demo-video-ci: one comment per pull request, rewritten on every push -->"
-
-#: `demo-grade verdict`'s output, beside the take. **Read out of the checkout
-#: and never out of the staging area**, and that is the whole reason it exists
-#: as a committed file: CI has no model, so it cannot produce a verdict, and
-#: this run did not publish one. Everything else this comment renders comes
-#: from what the take just wrote; this one thing travelled in the commit.
-VERDICT_JSON = "review/verdict.json"
-VERDICT_MD = "review/verdict.md"
-VERDICT_SCHEMA = 1
-
-#: The one class in `demo-grade`'s vocabulary that closes a clause without a
-#: person looking at it. Everything else puts it in front of somebody.
-AGREEMENT = "agreement"
-
-#: What this comment says for each class `demo-grade` can report — **in this
-#: comment's own words**, not in the grader's.
-#:
-#: The distinction is the point rather than a style choice. `tests/ci-unit`'s
-#: verdict sweep grades the sentences this script writes and exempts the ones
-#: it quotes, so a phrase copied out of `verdict.json` and printed as a heading
-#: would be this comment asserting a finding under somebody else's authority —
-#: and one of the classes is literally called `not demonstrated`. So the
-#: reader's own sentence is quoted, as a quotation, and every word around it is
-#: written here and swept. `demo-grade`'s exact wording is one click away in
-#: `verdict.md`, which is linked beside the count.
-#:
-#: `VerdictVocabulary` in `tests/ci-unit` requires these keys to be exactly the
-#: classes `demo-grade` declares, because a class this table does not know
-#: would otherwise be rendered as an unrecognised row on the take it matters on.
-VERDICT_PHRASE = {
-    "disagreement": "the two derivations put this clause in different places",
-    "cannot tell": "the reader could not tell from the frames",
-    "no reading": "the reading has no answer for this clause",
-    "not demonstrated": "nothing claimed this clause and the reader did not find it",
-    AGREEMENT: "the reader found this clause where the storyboard claimed it",
-}
-
-#: The same, for the one class that is two findings under one word: a reading
-#: before the first claimed beat agrees, and agrees more weakly. `demo-grade`'s
-#: `agreement_rule().weakness` is the argument; this is the one line of it a
-#: reviewer needs beside the row.
-VERDICT_EARLY = (
-    "the reader found this clause before anything claimed it, which the "
-    "comparison rule counts as agreement"
-)
-
-#: `demo-grade`'s own spelling of the position that earns the phrase above.
-#: A literal, because the two scripts do not import each other; a rewording
-#: there costs the distinction here and nothing else, which is why the phrase
-#: is a refinement of an agreement rather than a different class.
-BEFORE_SPAN = "before the first claimed beat"
 
 #: What this comment is evidence of, and what it leaves to the diff (issue
 #: #303). Everything else here defends against the artifact *lying* — a still
@@ -395,374 +334,6 @@ def _failure_lead(failure: dict, criteria: dict, claimed: dict) -> list[str]:
     return out
 
 
-def claimed_beats(coverage: dict) -> dict[str, list[int]]:
-    """Which beats `coverage.claimed` names for each clause, sorted, by id."""
-    out: dict[str, list[int]] = {}
-    for key, rows in (coverage.get("claimed") or {}).items():
-        beats = [
-            row.get("index")
-            for row in (rows or [])
-            if isinstance(row, dict) and isinstance(row.get("index"), int)
-        ]
-        out[str(key)] = sorted(beats)
-    return out
-
-
-def basis_digest(criteria: dict[str, str], claimed: dict[str, list[int]]) -> str:
-    """`demo-grade`'s `basis_digest`, computed here over the take CI recorded.
-
-    **A second implementation on purpose, and the duplication is stated rather
-    than hidden.** `demo-grade` ships inside the skill and this script ships
-    under `.github/scripts/`; a consumer installs the first with `npx skills
-    add` and reaches the second through the reusable workflow, so there is no
-    import that reaches from here to there. Copying eight lines is the price.
-
-    It fails in the safe direction. If the two ever disagree the digests never
-    match, and this comment reports the verdict as not describing the take
-    beside it rather than rendering it as though it did. `VerdictBasis` in
-    `tests/ci-unit` runs both functions over one document and requires the same
-    hash, so the drift is caught where it is cheap rather than in a comment.
-    """
-    sha = hashlib.sha256()
-    for key in sorted(criteria):
-        sha.update(key.encode("utf-8"))
-        sha.update(b"\0")
-        sha.update(str(criteria[key]).encode("utf-8"))
-        sha.update(b"\0")
-        sha.update(",".join(str(b) for b in claimed.get(key, [])).encode("utf-8"))
-        sha.update(b"\0")
-    return sha.hexdigest()
-
-
-def _frame_picture(
-    entry: object,
-    name: str,
-    *,
-    demo: str,
-    directory: Path,
-    repo_url: str | None,
-    sha: str | None,
-) -> str:
-    """The judged frame as something a reviewer can look at, or why it is not.
-
-    Every branch that is not a picture **names the frame anyway**. The reader's
-    sentence above it is about that frame, and a row that silently drops the
-    picture reads like a clause nobody photographed.
-
-    The sha256 check is what separates this from `_picture`'s existence test.
-    `review/frames/` and `review/verdict.json` are two committed files that
-    have to agree, and a commit can carry one without the other — a partial
-    `git add`, a merge that took one side. A file of the right name whose bytes
-    are not the ones the reading was made from is issue #300's failure with a
-    checksum available to prevent it, so it is not rendered.
-
-    (The word is `rendered` and not the obvious one because `tests/ci-unit`'s
-    verdict sweep refuses `shown` in any sentence this script writes — see
-    `VERDICT_WORDS`. The check is right and the wording moved.)
-    """
-    if not isinstance(entry, dict):
-        return f"*`{_cell(name)}` is the frame the reader named; this verdict copied no picture of it.*"
-    path = entry.get("path")
-    if not isinstance(path, str) or not path.strip():
-        return f"*`{_cell(name)}` is the frame the reader named; no copy of it was published.*"
-    rel = _inside_demo(path.strip())
-    if rel is None:
-        return (
-            f"*`{_cell(path)}` is not a path inside this demo, so it is not rendered.*"
-        )
-    try:
-        data = (directory / rel).read_bytes()
-    except OSError:
-        return f"*`{_cell(rel)}` is named here, but this branch holds no such file.*"
-    if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
-        return (
-            f"*`{_cell(rel)}` on this branch is not the file this verdict "
-            f"recorded, so it is not rendered.*"
-        )
-    href = _still_href(repo_url, sha, f"{demo}/{rel}")
-    if not href:
-        return f"`{_cell(rel)}`"
-    # Inline, because the point of the whole slice is that a reviewer does not
-    # have to click to see it; linked to the same URL so they can open it full
-    # size when the thumbnail is not enough.
-    return f'<a href="{href}"><img src="{href}" width="420" alt="{_cell(name)}"></a>'
-
-
-def _verdict_lead(
-    doc: dict,
-    *,
-    criteria: dict,
-    claimed: dict[str, list[int]],
-    regraded: bool | None,
-) -> str | None:
-    """Why the verdict beside this take might not be about it, or None.
-
-    Two questions, and they are different. The first is answered by the
-    documents: `basis_digest` covers the clause text and the `ac=` tags, so a
-    mismatch means the comparison was made against a question this take no
-    longer asks, and nothing in it is worth rendering.
-
-    The second is answered by the branch. A demo is re-recorded here only
-    because this branch changed the storyboard or the application under it —
-    that is what `demo-storyboards` selects on — so a verdict the branch did
-    **not** also change was read off an earlier recording. Its frames are that
-    recording's. The digest cannot see this: the same storyboard over changed
-    application code hashes identically, and the pixels are the whole point.
-    That is the cost of carrying the verdict in the commit, and it is stated
-    where a reviewer reads it rather than in a design note.
-    """
-    basis = doc.get("basis")
-    recorded = basis.get("digest") if isinstance(basis, dict) else None
-    if recorded != basis_digest(criteria, claimed):
-        return (
-            "**The verdict committed beside this take is not about this take.** "
-            "`review/verdict.json` was computed against different clause text "
-            "or different `ac=` tags, so none of its findings are rendered "
-            "here. Re-run the grader on this take."
-        )
-    if regraded is False:
-        return (
-            "**This branch changed what this take records, and did not re-run "
-            "the grader.** What follows was read off an earlier recording of "
-            "this storyboard, and the pictures under it are that recording's "
-            "frames rather than this run's. Re-run the grader before merging."
-        )
-    return None
-
-
-def render_verdict(
-    doc: object,
-    criteria: dict,
-    claimed: dict[str, list[int]],
-    *,
-    demo: str,
-    directory: Path,
-    repo_url: str | None,
-    sha: str | None,
-    regraded: bool | None,
-) -> list[str]:
-    """What a blind reader found, per clause, with the frame they judged on.
-
-    **This comment renders a finding; it does not make one.** Every status here
-    was decided by `demo-grade` comparing a reader's answers with the `ac=`
-    tags, in arithmetic, in a committed file — and the one sentence of judgement
-    on each row is the reader's own, printed as a quotation, in their words.
-    Everything around it is written here, in the vocabulary of `VERDICT_PHRASE`,
-    and is swept by `tests/ci-unit` like every other sentence this script
-    writes. A comment that reused the grader's headings would be borrowing an
-    authority it does not have, and one of those headings contains the word the
-    sweep exists to refuse.
-
-    **Findings first, agreements folded away.** `demo-grade` has already sorted
-    its clauses so the disagreements lead; this keeps that order and puts every
-    `agreement` inside a `<details>`. Agreement is the one class that closes a
-    clause without a person, and it is the weakest thing here — see the rule's
-    own `weakness` — so it is the part a reviewer with thirty seconds should
-    not be reading.
-    """
-    if not isinstance(doc, dict) or doc.get("schema") != VERDICT_SCHEMA:
-        # Absent is the ordinary take: nobody graded it. A document this script
-        # cannot read is not, and saying so is better than a silent omission
-        # that looks exactly like a take nobody graded.
-        if isinstance(doc, dict):
-            return [
-                f"*`{VERDICT_JSON}` declares schema {doc.get('schema')!r} and "
-                f"this comment reads schema {VERDICT_SCHEMA}, so it is not "
-                f"rendered.*",
-                "",
-            ]
-        return []
-    rows = [
-        row
-        for row in (doc.get("clauses") or [])
-        if isinstance(row, dict) and isinstance(row.get("criterion"), str)
-    ]
-    if not rows:
-        return [f"*`{VERDICT_JSON}` names no clauses, so it is not rendered.*", ""]
-
-    out = ["#### A second reader was asked where each clause is", ""]
-    lead = _verdict_lead(doc, criteria=criteria, claimed=claimed, regraded=regraded)
-    if lead:
-        out += [lead, ""]
-        if lead.startswith("**The verdict committed"):
-            return out
-
-    # Which of them are undeclared is a fact about the file, not a judgement:
-    # `verdict.json` is committed and a pull request may edit it, and a row for
-    # a clause this take does not declare would otherwise render beside four
-    # that it does, indistinguishable from them.
-    stray = [row["criterion"] for row in rows if row["criterion"] not in criteria]
-    rows = [row for row in rows if row["criterion"] in criteria]
-    if stray:
-        out += [
-            f"*{_and_list([f'`{_cell(key)}`' for key in stray])} "
-            f"{_plural(len(stray), 'is', 'are')} in `{VERDICT_JSON}` and "
-            f"{_plural(len(stray), 'is', 'are')} not "
-            f"{_plural(len(stray), 'a clause', 'clauses')} of this take, so "
-            f"{_plural(len(stray), 'it is', 'they are')} not rendered.*",
-            "",
-        ]
-
-    findings = [row for row in rows if _class_of(row) != AGREEMENT]
-    agreed = [row for row in rows if _class_of(row) == AGREEMENT]
-    counted: dict[str, int] = {}
-    for row in findings:
-        counted[_class_of(row)] = counted.get(_class_of(row), 0) + 1
-    total = len(rows)
-    if findings:
-        parts = [
-            f"{n} where {VERDICT_PHRASE.get(kind, 'this comment does not know the class ' + repr(kind))}"
-            for kind, n in counted.items()
-        ]
-        out.append(
-            f"**{len(findings)} of {total} "
-            f"{_plural(total, 'clause', 'clauses')} "
-            f"{_plural(len(findings), 'needs', 'need')} a person to look: "
-            f"{_and_list(parts)}.**"
-        )
-    else:
-        out.append(
-            f"**Every one of the {total} "
-            f"{_plural(total, 'clause', 'clauses')} came back as agreement "
-            f"between the two derivations.** Agreement is the weakest thing on "
-            f"this page; the document linked below says why."
-        )
-    out.append("")
-
-    where = _still_href(repo_url, sha, f"{demo}/{VERDICT_MD}")
-    page = f"[`{VERDICT_MD}`]({where})" if where else f"`{VERDICT_MD}`"
-    out += [
-        f"The reader was given the clause text and the frames, and neither the "
-        f"storyboard, the `ac=` tags, the coverage table nor the diff. "
-        f"Agreement between the two is a cross-check and not a check of the "
-        f"ticket itself — {page} states in full what it catches and what it "
-        f"cannot. Nothing in this comment graded a clause.",
-        "",
-    ]
-
-    pictures = doc.get("pictures")
-    shot = pictures if isinstance(pictures, dict) else {}
-    for row in findings:
-        out += _verdict_row(
-            row,
-            criteria,
-            shot,
-            demo=demo,
-            directory=directory,
-            repo_url=repo_url,
-            sha=sha,
-        )
-    if agreed:
-        out += [
-            f"<details><summary>{len(agreed)} "
-            f"{_plural(len(agreed), 'clause', 'clauses')} where the reader and "
-            f"the storyboard agreed</summary>",
-            "",
-        ]
-        for row in agreed:
-            out += _verdict_row(
-                row,
-                criteria,
-                shot,
-                demo=demo,
-                directory=directory,
-                repo_url=repo_url,
-                sha=sha,
-            )
-        out += ["</details>", ""]
-    return out
-
-
-def _class_of(row: dict) -> str:
-    agreement = row.get("agreement")
-    return str(agreement.get("class")) if isinstance(agreement, dict) else "no reading"
-
-
-def _verdict_row(
-    row: dict,
-    criteria: dict,
-    pictures: dict,
-    *,
-    demo: str,
-    directory: Path,
-    repo_url: str | None,
-    sha: str | None,
-) -> list[str]:
-    """One clause: what was found, the reader's sentence, and the picture.
-
-    The clause text comes from **this take's** `timeline.json` and not from the
-    verdict document, even though a matching basis digest means the two agree
-    today: the table below this section is rendered from the same place, and
-    two renderings of one clause that could ever disagree is a comment arguing
-    with itself.
-    """
-    key = row["criterion"]
-    reading = row.get("reading") if isinstance(row.get("reading"), dict) else {}
-    board = row.get("storyboard") if isinstance(row.get("storyboard"), dict) else {}
-    agreement = row.get("agreement") if isinstance(row.get("agreement"), dict) else {}
-    kind = _class_of(row)
-    phrase = VERDICT_PHRASE.get(kind)
-    if kind == AGREEMENT and agreement.get("position") == BEFORE_SPAN:
-        phrase = VERDICT_EARLY
-    if phrase is None:
-        phrase = (
-            "`demo-grade` reported a class this comment does not know, so the "
-            "row is printed without one"
-        )
-
-    beats = board.get("claimed_beats")
-    beats = beats if isinstance(beats, list) and beats else []
-    at = []
-    if reading.get("beat") is not None:
-        at.append(f"the reader put it at beat {_cell(str(reading['beat']))}")
-    if beats:
-        where = ", ".join(str(b) for b in beats)
-        at.append(
-            f"the storyboard claimed "
-            f"{_plural(len(beats), 'beat', 'beats')} {_cell(where)}"
-        )
-    else:
-        at.append("no beat claimed it")
-    confidence = reading.get("confidence")
-    tail = f", confidence {_cell(str(confidence))}" if confidence else ""
-
-    where = _and_list(at)
-    out = [
-        f"##### `{_cell(key)}` — {_cell(str(criteria.get(key, '')))}",
-        "",
-        f"{phrase[0].upper()}{phrase[1:]}{tail}. {where[0].upper()}{where[1:]}.",
-        "",
-    ]
-    why = reading.get("why")
-    if isinstance(why, str) and why.strip():
-        # A blockquote with the attribution under it, and that is the
-        # load-bearing part: this is the reader's sentence about a picture, the
-        # only judgement on the page, and the only line of it this script did
-        # not write.
-        out += [
-            f"> {_cell(why)}",
-            "",
-            f"<sub>— the reader, quoted from `{VERDICT_JSON}`.</sub>",
-            "",
-        ]
-    frame = reading.get("frame")
-    if isinstance(frame, str) and frame.strip():
-        out += [
-            _frame_picture(
-                pictures.get(frame.strip()),
-                frame.strip(),
-                demo=demo,
-                directory=directory,
-                repo_url=repo_url,
-                sha=sha,
-            ),
-            "",
-        ]
-    else:
-        out += ["*The reader named no frame.*", ""]
-    return out
-
-
 def render_coverage(
     coverage: object,
     *,
@@ -771,9 +342,6 @@ def render_coverage(
     repo_url: str | None,
     sha: str | None,
     failure: object = None,
-    verdict: object = None,
-    verdict_dir: Path | None = None,
-    regraded: bool | None = None,
 ) -> list[str]:
     """The ticket's clauses and what claimed them, **gap first** (issue #273).
 
@@ -809,13 +377,11 @@ def render_coverage(
     threw, so a file of that name is a previous recording's. **A demo that
     failed must never render a clean "AC-2 — shown at 0:12."**
 
-    A take that was graded carries `verdict` as well, and it goes **under**
-    `DIFF_LIMIT` and above the claimed table. Under, because a reviewer who
-    meets a per-clause finding first has already decided what this comment is
-    for, and the sentence that says what watching does *not* replace is worth
-    nothing after that. Above the table, because it is the reason somebody
-    opened the comment: the table says what the storyboard author asserted, and
-    the verdict says what somebody who never saw the storyboard could find.
+    What a blind reader found is **not** rendered here. CI has no model, so no
+    verdict exists on this runner, and nothing under `review/` is committed.
+    The grader's result reaches the reviewer as text in the pull-request
+    description instead — `demo-grade pr-block` renders it, beside the take
+    that was graded, on the machine that graded it.
     """
     doc = coverage if isinstance(coverage, dict) else {}
     criteria = doc.get("criteria")
@@ -881,20 +447,6 @@ def render_coverage(
     # too, which is the one it is most needed on.
     limit = [DIFF_LIMIT, ""]
 
-    found = render_verdict(
-        verdict,
-        criteria,
-        claimed_beats(doc),
-        demo=demo,
-        # The **checkout**, not the staging area every other path here reads:
-        # `review/` is committed and this take did not publish it, so the
-        # freshness filter that fills staging would hold it back by design.
-        directory=verdict_dir if verdict_dir is not None else directory,
-        repo_url=repo_url,
-        sha=sha,
-        regraded=regraded,
-    )
-
     table = ["| clause | claimed at | look at |", "|---|---|---|"]
     for key, text in criteria.items():
         rows = claimed.get(key) or []
@@ -919,10 +471,8 @@ def render_coverage(
     # The gap first, and the order is the whole point rather than a layout
     # choice: a rendering that opened with the claimed table would *be* a
     # coverage claim, whatever the words under it said. `limit` follows for the
-    # same reason: below it, a reader has already started judging the clauses —
-    # and `found` is the strongest reason yet to have read it, so it goes below
-    # and never above.
-    return gap + limit + found + table + note
+    # same reason: below it, a reader has already started judging the clauses.
+    return gap + limit + table + note
 
 
 def _human_size(n: int | None) -> str:
@@ -964,27 +514,6 @@ def repo_path(prefix: str, name: str) -> str:
     return "/".join(parts)
 
 
-def load_verdict(directory: Path) -> object:
-    """`review/verdict.json` beside a take, or None when nobody graded it.
-
-    Unreadable JSON comes back as `{}` rather than as None, and the difference
-    matters: None is the ordinary take and prints nothing, while a file that is
-    there and cannot be read is a fact the comment states. Swallowing it would
-    render exactly like a take nobody graded, which is the more comfortable of
-    two wrong impressions.
-    """
-    path = directory / VERDICT_JSON
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        doc = json.loads(text)
-    except ValueError:
-        return {}
-    return doc if isinstance(doc, dict) else {}
-
-
 def render_demo(
     name: str,
     timeline: dict,
@@ -993,8 +522,6 @@ def render_demo(
     path_prefix: str,
     repo_url: str | None,
     sha: str | None,
-    verdict_root: str = "",
-    changed: frozenset[str] | None = None,
 ) -> str:
     """One demo's section: the heading, the beat table, and what went wrong."""
     beats = timeline.get("beats") or []
@@ -1025,7 +552,6 @@ def render_demo(
     # the reason somebody opened the comment — and a reviewer who scrolls past
     # twenty captions first has already formed the impression the coverage
     # report exists to test (issue #273, the same ordering `timeline.md` uses).
-    checkout = demo_dir(verdict_root, name)
     lines += render_coverage(
         timeline.get("coverage"),
         demo=repo_path(path_prefix, name),
@@ -1036,17 +562,6 @@ def render_demo(
         # a clean take's, five lines above a block that says the take failed
         # (issue #278).
         failure=failure,
-        verdict=load_verdict(checkout),
-        verdict_dir=checkout,
-        # `None` when the caller gave no changed-file list, and that is not the
-        # same as "the branch left it alone": with nothing to check against,
-        # this comment says nothing about the verdict's age rather than
-        # guessing an answer in either direction.
-        regraded=(
-            None
-            if changed is None
-            else f"{repo_path(path_prefix, name)}/{VERDICT_JSON}" in changed
-        ),
     )
 
     if rows:
@@ -1109,8 +624,6 @@ def render(
     repo_url: str | None,
     demo_root: str,
     path_prefix: str,
-    verdict_root: str = "",
-    changed: frozenset[str] | None = None,
 ) -> str:
     failed = any(t.get("failure") for _, t in demos)
     lines = [MARKER, ""]
@@ -1129,8 +642,6 @@ def render(
                 path_prefix=path_prefix,
                 repo_url=repo_url,
                 sha=sha,
-                verdict_root=verdict_root,
-                changed=changed,
             )
         )
 
@@ -1230,42 +741,8 @@ def main(argv: list[str] | None = None) -> int:
             "examples/ticket-queue is linked at the repository root and 404s."
         ),
     )
-    ap.add_argument(
-        "--verdict-root",
-        default="",
-        help=(
-            "directory the --demo paths' review/verdict.json is read from. "
-            "Defaults to the working directory, which in CI is the checkout — "
-            "deliberately not --demo-root: staging holds what this take "
-            "published, and a verdict is by construction not that. CI has no "
-            "model, so the verdict travelled here in the commit."
-        ),
-    )
-    ap.add_argument(
-        "--changed-file",
-        help=(
-            "a file of repository-relative paths this branch changed, one per "
-            "line — the workflow already computes it to decide what to record. "
-            "A demo is recorded only because the branch touched its storyboard "
-            "or the app under it, so a verdict the branch did not also change "
-            "was read off an earlier recording, and the comment says so. "
-            "Without this argument the comment says nothing either way."
-        ),
-    )
     ap.add_argument("--out", required=True, help="where to write the comment body")
     args = ap.parse_args(argv)
-
-    changed: frozenset[str] | None = None
-    if args.changed_file:
-        try:
-            lines = Path(args.changed_file).read_text(encoding="utf-8").splitlines()
-        except OSError:
-            # An unreadable list is not an empty one. Reporting every verdict as
-            # stale off a missing file would train a reviewer to skip the lead
-            # that matters, so this falls back to saying nothing.
-            changed = None
-        else:
-            changed = frozenset(line.strip() for line in lines if line.strip())
 
     demos: list[tuple[str, dict]] = []
     for raw in args.demo:
@@ -1310,8 +787,6 @@ def main(argv: list[str] | None = None) -> int:
         repo_url=args.repo_url or None,
         demo_root=args.demo_root,
         path_prefix=args.path_prefix,
-        verdict_root=args.verdict_root,
-        changed=changed,
     )
     Path(args.out).write_text(body, encoding="utf-8")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

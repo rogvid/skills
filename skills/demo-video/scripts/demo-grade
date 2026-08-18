@@ -6,8 +6,9 @@
 """Hand a blind reader the ticket's clauses and the frames; compare what they
 found with what the storyboard claimed.
 
-    <skill-dir>/scripts/demo-grade brief   <demo-dir>
-    <skill-dir>/scripts/demo-grade verdict <demo-dir> --reading reading.json
+    <skill-dir>/scripts/demo-grade brief    <demo-dir>
+    <skill-dir>/scripts/demo-grade verdict  <demo-dir> --reading reading.json
+    <skill-dir>/scripts/demo-grade pr-block <demo-dir>
 
 **No model call happens in this file.** The reader is an *input*: `brief`
 writes the document you hand to an agent that has seen neither the storyboard
@@ -81,12 +82,14 @@ misread before its clauses were written down.
 `review/verdict.md` for a human, `review/verdict.json` for a tool, and
 `review/frames/` — the handful of frames the reading actually cited, copied out
 of the working `frames/` sheet under the names the reader used, one sha256
-each. Those three are what a consumer commits; the brief and the sheet are
-working files. A pull-request comment renderer that shows a reviewer the
-picture behind a finding needs a *committed* file to link, and it must be the
-frame the reader named rather than the still the storyboard author chose for
-that beat — see `cited_pictures`. `basis_digest` is how the same renderer tells
-a verdict that still describes the take beside it from one that does not.
+each. All of it stays local and gitignored, like the brief and the sheet.
+`pr-block` is what carries the result to a reviewer: it reads
+`review/verdict.json` and prints a markdown block for the pull-request
+description, with each finding pointed at a beat's *committed* still — the
+`images/*.png` a take already commits — linked raw at the head commit. The
+exact frame the reader read stays in the local `review/frames/`, and the block
+says so. `basis_digest` is how `pr-block` tells a verdict that still describes
+the take beside it from one that does not.
 
 ## Exit status
 
@@ -113,8 +116,10 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "helpers"))
 
@@ -123,9 +128,10 @@ from demo_recording.timeline import timeline_paths  # noqa: E402
 
 REVIEW_DIRNAME = "review"
 #: Where the frames a reading names are copied to, inside `review/`. `frames/`
-#: itself is a working directory regenerated wholesale by every recording and
-#: is not committed anywhere; these few are, because a verdict a reviewer
-#: cannot see the picture of is a verdict they have to take on trust.
+#: itself is a working directory regenerated wholesale by every recording;
+#: these few are kept apart so that a disputed finding can be checked against
+#: the exact frame the reader read. Local only — nothing under `review/` is
+#: committed.
 REVIEW_FRAMES = "frames"
 BRIEF_SCHEMA = 1
 READING_SCHEMA = 1
@@ -739,12 +745,12 @@ def basis_digest(criteria: dict[str, str], beats: dict[str, list[int]]) -> str:
     """One hash over everything this comparison is a function of but the reading.
 
     **What it is for.** `verdict.json` is written once, beside a take, and read
-    later — by a reviewer, and by `.github/scripts/demo-comment`, which renders
-    it into a pull-request comment against a take CI has just re-recorded. A
-    verdict is only about that take if the clauses and the claims are still the
-    ones it was computed from: change the ticket's wording, retag a beat, or
-    add a clause, and every class in this document was decided against a
-    question nobody is asking any more.
+    later — by a reviewer, and by `pr-block`, which renders it for a
+    pull-request description. A verdict is only about that take if the clauses
+    and the claims are still the ones it was computed from: change the ticket's
+    wording, retag a beat, or add a clause, and every class in this document
+    was decided against a question nobody is asking any more. `pr-block`
+    recomputes this hash from the timeline and refuses on a mismatch.
 
     Keyed on the sorted clause ids, so re-ordering the ticket's clauses — which
     changes nothing about any comparison — does not read as drift.
@@ -752,9 +758,7 @@ def basis_digest(criteria: dict[str, str], beats: dict[str, list[int]]) -> str:
     **What it does not cover, which is the larger term.** The pixels. The same
     storyboard recorded against changed application code produces the same
     clauses and the same claimed beats and an entirely different video, and
-    nothing in these two documents can see that. A consumer that re-records has
-    to answer staleness some other way; `demo-comment` answers it by asking
-    whether the branch under review changed the verdict at all.
+    nothing in these two documents can see that.
     """
     sha = hashlib.sha256()
     for key in sorted(criteria):
@@ -775,10 +779,10 @@ def cited_pictures(demo: Path, frames_dir: Path, readings: dict[str, dict]) -> d
     gitignored in this repository and in every consumer, and it is 16 MB of
     sheet that no pull request wants. So the handful of frames a reading
     actually cites are copied out of it, under the name the reader used, by the
-    same run that checked that name against the manifest. Pointing a reviewer
-    at `images/` instead would be a *plausible* picture — the still the
-    storyboard author chose for that beat — and a plausible wrong picture is
-    worse evidence than none.
+    same run that checked that name against the manifest. They stay local —
+    `pr-block` links the beat's committed still instead, and says so — but a
+    disputed finding is settled against these, the exact pixels the reader
+    read, not against the still the storyboard author chose for that beat.
 
     Each entry carries the copy's sha256, so a consumer can tell the file it is
     about to show from a file of the same name that arrived some other way.
@@ -1109,6 +1113,277 @@ def cmd_verdict(demo: Path, reading_path: Path) -> int:
     return 0
 
 
+# --- the pull-request block: how a verdict reaches a reviewer -----------------
+#
+# Nothing under `review/` is committed. What IS committed, with every take, is
+# `images/*.png` — the stills the storyboard chose. So the block a reviewer
+# reads embeds those, raw off GitHub at the head commit, and the verdict itself
+# travels as text in the pull-request description. No file is added to the
+# repository to carry it.
+
+
+#: The one host this block can build an image URL for. A remote elsewhere gets
+#: a refusal rather than a guessed URL that resolves nowhere.
+_GITHUB_REMOTE = re.compile(
+    r"github\.com[:/](?P<owner>[^/\s]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$"
+)
+
+
+def _git(demo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(demo), *args], capture_output=True, text=True
+    )
+
+
+def _git_fact(demo: Path, *args: str) -> str:
+    """One fact from git, or a refusal that names the command that failed."""
+    done = _git(demo, *args)
+    if done.returncode != 0:
+        raise Refused(
+            f"`git {' '.join(args)}` failed in {demo}: "
+            f"{done.stderr.strip() or 'it printed no reason'}"
+        )
+    return done.stdout.strip()
+
+
+def github_repo(remote: str) -> str:
+    """`owner/repo` out of the origin remote URL, or a refusal."""
+    found = _GITHUB_REMOTE.search(remote.strip())
+    if not found:
+        raise Refused(
+            f"the origin remote is {remote.strip()!r}, which is not a "
+            f"github.com URL, so there is no raw.githubusercontent.com URL to "
+            f"build the pictures from."
+        )
+    return f"{found.group('owner')}/{found.group('repo')}"
+
+
+def beat_stills(timeline: dict) -> dict[int, str]:
+    """Which committed still each beat wrote, by beat index, from the beat log."""
+    out: dict[int, str] = {}
+    for beat in timeline.get("beats") or []:
+        index = beat.get("index")
+        still = beat.get("still")
+        if isinstance(index, int) and isinstance(still, str) and still.strip():
+            out[index] = still.strip()
+    return out
+
+
+def _take_relative(still: str) -> str | None:
+    """`still` as a plain path inside the take, or None.
+
+    `timeline.json` is committed and editable, and this value is pasted into a
+    URL and a `git cat-file` argument. `../../elsewhere.png` is the shape to
+    refuse; a normalised relative path is the whole allowance.
+    """
+    if still.startswith("/") or "\\" in still:
+        return None
+    parts = [p for p in still.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def cited_beat_still(
+    row: dict, stills: dict[int, str]
+) -> tuple[int | None, str | None]:
+    """The beat this row's picture is of, and that beat's still, if any.
+
+    The reader's beat first — it is where they say the clause is — then the
+    storyboard's claimed beats, in order. The first cited beat that wrote a
+    still wins. When no cited beat wrote one, the first cited beat comes back
+    with no still, and the row says so instead of borrowing a picture.
+    """
+    reading = row.get("reading") or {}
+    cited: list[int] = []
+    if isinstance(reading.get("beat"), int):
+        cited.append(reading["beat"])
+    board = row.get("storyboard") or {}
+    for beat in board.get("claimed_beats") or []:
+        if isinstance(beat, int) and beat not in cited:
+            cited.append(beat)
+    if not cited:
+        return None, None
+    for beat in cited:
+        if beat in stills:
+            return beat, stills[beat]
+    return cited[0], None
+
+
+def _beats_phrase(beats: list[int]) -> str:
+    if len(beats) == 1:
+        return f"beat {beats[0]}"
+    listed = ", ".join(str(b) for b in beats[:-1])
+    return f"beats {listed} and {beats[-1]}"
+
+
+def _placement(row: dict) -> str:
+    """Where each derivation puts the clause, in two short sentences."""
+    reading = row.get("reading") or {}
+    status = reading.get("status")
+    claimed = [
+        b
+        for b in (row.get("storyboard") or {}).get("claimed_beats") or []
+        if isinstance(b, int)
+    ]
+    if status == SEEN:
+        placed = f"The reader placed it at beat {reading.get('beat')}."
+    elif status == CANNOT_TELL:
+        placed = "The reader could not tell from the frames."
+    elif status == NOT_SEEN:
+        placed = "The reader did not find it in any frame."
+    else:
+        placed = "The reading has no answer for this clause."
+    claims = (
+        f"The storyboard claims {_beats_phrase(claimed)}."
+        if claimed
+        else "No beat claims it."
+    )
+    return f"{placed} {claims}"
+
+
+def _agrees_line(row: dict) -> str:
+    reading = row.get("reading") or {}
+    early = (
+        ", before the first claimed beat"
+        if (row.get("agreement") or {}).get("position") == BEFORE_SPAN
+        else ""
+    )
+    return (
+        f"{row.get('criterion')} — reader placed it at beat "
+        f"{reading.get('beat')}{early} (agrees)."
+    )
+
+
+def _row_class(row: dict) -> str:
+    agreement = row.get("agreement")
+    return str(agreement.get("class")) if isinstance(agreement, dict) else NO_READING
+
+
+def render_pr_block(doc: dict, stills: dict[int, str], url_for) -> str:
+    """The verdict as markdown for a pull-request description.
+
+    Findings and `cannot tell` rows first, each with the clause text, the
+    reader's placement, their one sentence, and the cited beat's committed
+    still. Agreements collapse to a line each. `url_for(still)` turns a
+    take-relative still path into the URL a picture is embedded at.
+    """
+    rows = [row for row in doc.get("clauses") or [] if isinstance(row, dict)]
+    findings = [row for row in rows if _row_class(row) != AGREEMENT]
+    agreed = [row for row in rows if _row_class(row) == AGREEMENT]
+    pictured = 0
+    out = ["## Where a blind reader found each clause", ""]
+    if findings:
+        n, total = len(findings), len(rows)
+        out += [
+            f"**{n} of {total} clause{'s' if total != 1 else ''} "
+            f"need{'s' if n == 1 else ''} a person to look.**",
+            "",
+        ]
+    for row in findings:
+        out += [
+            f"### {row.get('criterion')} — {row.get('text')}",
+            "",
+            _placement(row),
+            "",
+        ]
+        why = (row.get("reading") or {}).get("why")
+        if isinstance(why, str) and why.strip():
+            out += [f"> {why.strip()}", "", "<sub>— the reader.</sub>", ""]
+        beat, still = cited_beat_still(row, stills)
+        if beat is None:
+            out += ["No beat cites this clause, so there is no still to look at.", ""]
+        elif still is None:
+            out += [f"No still exists for beat {beat}.", ""]
+        else:
+            pictured += 1
+            out += [
+                f"![{row.get('criterion')}]({url_for(still)})",
+                "",
+                f"The still is beat {beat}'s.",
+                "",
+            ]
+    for row in agreed:
+        out.append(_agrees_line(row))
+    if agreed:
+        out.append("")
+    if not findings:
+        total = len(rows)
+        out += [
+            f"The reader and the storyboard agree on all {total} "
+            f"clause{'s' if total != 1 else ''}.",
+            "",
+        ]
+    if pictured:
+        out += [
+            "Each picture above is the committed still of the beat named "
+            "under it, not the frame the reader read. That frame lives in the "
+            "demo's local `review/frames/`, which is not committed.",
+        ]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def cmd_pr_block(demo: Path) -> int:
+    verdict_path = demo / REVIEW_DIRNAME / "verdict.json"
+    doc = _load_json(verdict_path, "verdict (run `demo-grade verdict` first)")
+    if doc.get("schema") != VERDICT_SCHEMA:
+        raise Refused(
+            f"{verdict_path} declares schema {doc.get('schema')!r}, and this "
+            f"command reads schema {VERDICT_SCHEMA}"
+        )
+    timeline_json = timeline_paths(demo)[0]
+    timeline = _load_json(timeline_json, "timeline.json")
+    basis = doc.get("basis") or {}
+    criteria = declared_criteria(timeline, timeline_json)
+    if basis.get("digest") != basis_digest(criteria, claimed_beats(timeline)):
+        raise Refused(
+            f"{verdict_path} was computed against different clauses or "
+            f"different ac= tags than {timeline_json} declares, so its "
+            f"findings are about a question this take no longer asks. Re-run "
+            f"`demo-grade verdict` on this take."
+        )
+    dirty = _git_fact(demo, "status", "--porcelain", "--", ".")
+    if dirty:
+        raise Refused(
+            f"the demo directory has uncommitted changes:\n{dirty}\n"
+            f"The block links stills at HEAD, and HEAD does not hold what is "
+            f"on disk. Commit the take, then re-run."
+        )
+    sha = _git_fact(demo, "rev-parse", "HEAD")
+    repo = github_repo(_git_fact(demo, "remote", "get-url", "origin"))
+    # Where the demo sits in the repository, e.g. `examples/app/demos/x/`.
+    prefix = _git_fact(demo, "rev-parse", "--show-prefix")
+    stills: dict[int, str] = {}
+    for index, still in beat_stills(timeline).items():
+        rel = _take_relative(still)
+        if rel is None:
+            # Not a path inside the take, so it is never linked. The beat then
+            # reads as one that wrote no still, which is the honest rendering.
+            continue
+        stills[index] = rel
+
+    def url_for(rel: str) -> str:
+        path = f"{prefix}{rel}"
+        if _git(demo, "cat-file", "-e", f"{sha}:{path}").returncode != 0:
+            raise Refused(
+                f"commit {sha[:12]} does not hold {path}, which this block "
+                f"would embed. Commit the still, then re-run — and push the "
+                f"commit, because the raw.githubusercontent.com URLs resolve "
+                f"only once it is on GitHub."
+            )
+        return f"https://raw.githubusercontent.com/{repo}/{sha}/{quote(path)}"
+
+    block = render_pr_block(doc, stills, url_for)
+    print(block, end="")
+    if "raw.githubusercontent.com" in block:
+        print(
+            f"  note: the image URLs point at commit {sha[:12]}. Push it "
+            f"before pasting the block, or the pictures do not load.",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -1119,10 +1394,16 @@ def main(argv: list[str] | None = None) -> int:
     verdict.add_argument(
         "--reading", required=True, help="the reader's answers, as JSON"
     )
+    pr = sub.add_parser(
+        "pr-block", help="render the verdict for a pull-request description"
+    )
+    pr.add_argument("demo_dir", help="a take's output folder")
     args = ap.parse_args(argv)
     try:
         if args.command == "brief":
             return cmd_brief(Path(args.demo_dir))
+        if args.command == "pr-block":
+            return cmd_pr_block(Path(args.demo_dir))
         return cmd_verdict(Path(args.demo_dir), Path(args.reading))
     except Refused as refusal:
         print(f"demo-grade: refusing — {refusal}", file=sys.stderr)
