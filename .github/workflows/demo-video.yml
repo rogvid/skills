@@ -9,6 +9,8 @@ name: Demo video
 #       permissions:
 #         contents: read
 #         pull-requests: write
+#         issues: read     # so the ticket re-read (#276) can fetch the issue;
+#                          # without it that check reports `not checked`
 #       uses: rogvid/skills/.github/workflows/demo-video.yml@main
 #       with:
 #         working-directory: examples/ticket-queue
@@ -135,6 +137,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # For the ticket re-read (#276) only. A caller who does not grant it
+      # gets `not checked` in the comment rather than a failed check.
+      issues: read
     outputs:
       recorded: ${{ steps.discover.outputs.count }}
       artifact-url: ${{ steps.upload-demo.outputs.artifact-url }}
@@ -188,7 +193,7 @@ jobs:
           dir="$root/.github/scripts"
           skill="$root/skills/demo-video"
           # Packaging and some checkout paths drop the executable bit.
-          chmod +x "$dir"/demo-storyboards "$dir"/demo-comment
+          chmod +x "$dir"/demo-storyboards "$dir"/demo-comment "$dir"/demo-ticket-check
           chmod +x "$skill"/scripts/demo-target-guard
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "skill=$skill" >> "$GITHUB_OUTPUT"
@@ -505,6 +510,28 @@ jobs:
           path: ${{ github.workspace }}/.demo-video-ci/failure
           if-no-files-found: warn
           retention-days: ${{ inputs.evidence-retention-days }}
+
+      # Did the ticket move under the storyboard? Each staged timeline.json
+      # names the ticket its clauses were copied out of (#275); the take
+      # itself never fetches it, so this step — outside the take — re-reads
+      # the issue and writes review/ticket-check.json beside the staged
+      # timeline for the comment step below to render (#276). Never fatal:
+      # a reworded issue is not a broken demo, and a check that reddens
+      # because somebody fixed a typo in the ticket teaches people to ignore
+      # it. The script exits 0 on every path; whatever it could not read it
+      # reports as `not checked`, with the reason, in the sidecar.
+      - name: Re-read the ticket each demo names
+        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r dir; do
+            if [ -n "$dir" ]; then args+=(--demo "$dir"); fi
+          done < "$DEMO_DIRS"
+          "$SCRIPTS/demo-ticket-check" "${args[@]}" --demo-root "$STAGE_DEMO"
 
       - name: Render the comment
         if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'

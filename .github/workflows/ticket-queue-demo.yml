@@ -33,6 +33,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # So the ticket re-read (#276) can fetch the issue a storyboard names;
+      # without it that check reports every clause `not checked`.
+      issues: read
     uses: ./.github/workflows/demo-video.yml
     with:
       working-directory: examples/ticket-queue

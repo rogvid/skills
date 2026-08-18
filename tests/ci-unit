@@ -37,6 +37,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import urllib.error
 from pathlib import Path
 from types import ModuleType
 
@@ -65,6 +66,7 @@ _SKILL = Path(os.environ.get("CI_UNIT_SKILL", SKILL))
 _WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
 storyboards = load("demo-storyboards", _DIR)
 comment = load("demo-comment", _DIR)
+ticket_check = load("demo-ticket-check", _DIR)
 
 # **The classifier is the skill's, not the workflow's** — `demo-target-guard`
 # moved under `skills/demo-video/` so that `npx skills add` carries it, and the
@@ -1849,6 +1851,346 @@ class Ticket(unittest.TestCase):
         self.assertIn("https://github.com/acme/app/issues/7", body)
 
 
+# --------------------------------------------------------------------------
+# demo-ticket-check — does the ticket still say what the storyboard quotes
+# --------------------------------------------------------------------------
+
+# The recorded fixture body the check is graded against — never the live API
+# (issue #276). It holds AC-1's declared text, rewrapped across lines with
+# ragged spacing the way issue bodies are, and nothing that reads like AC-2's.
+FIXTURE_ISSUE_BODY = textwrap.dedent(
+    """\
+    ## Acceptance
+
+    - A search box above the queue narrows
+      the list   as you type.
+    - The heading counts only what is on screen.
+    """
+)
+
+#: Sidecars shaped as `demo-ticket-check` writes them. `TICKET_CHECKED` is
+#: #276's acceptance case: the issue still holds AC-1's text and no longer
+#: AC-2's. `TICKET_UNCHECKED` is the no-token run, whose reason must reach
+#: the reader rather than being folded into silence.
+TICKET_CHECKED = {
+    "ticket": "rogvid/skills#129",
+    "clauses": {
+        "AC-1": {"state": "matched"},
+        "AC-2": {"state": "not verbatim"},
+        "AC-3": {"state": "matched"},
+        "AC-4": {"state": "matched"},
+    },
+}
+TICKET_UNCHECKED = {
+    "ticket": "rogvid/skills#129",
+    "reason": ("no token in GH_TOKEN or GITHUB_TOKEN, so the ticket was never read"),
+    "clauses": {key: {"state": "not checked"} for key in COVERAGE["criteria"]},
+}
+
+#: The limit sentence #276 puts in the artifact itself, hand-written here the
+#: way DIFF_LIMIT is rather than imported: copied text goes stale loudly,
+#: which is the direction to be wrong in.
+TICKET_LIMIT = (
+    "**This grades quotation, not meaning.** A storyboard that quotes a "
+    "clause word for word can still record something else entirely; whether "
+    "the frames show the clause is the reviewer's call, not this line's."
+)
+
+
+class TicketCheck(unittest.TestCase):
+    """Three states per clause, never two, and exit 0 on every path (#276).
+
+    Graded against `FIXTURE_ISSUE_BODY`, never the live API: the fetched
+    paths hand `main` a fake fetch, and the paths that must not fetch run
+    with `GITHUB_API_URL` pointed at a closed loopback port, so a fetch that
+    escaped its guard fails loudly instead of quietly reading github.com.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "demos/x").mkdir(parents=True)
+
+    def write_timeline(self, timeline: dict) -> None:
+        (self.root / "demos/x/timeline.json").write_text(
+            json.dumps(timeline), encoding="utf-8"
+        )
+
+    def sidecar(self) -> dict:
+        path = self.root / "demos/x/review/ticket-check.json"
+        self.assertTrue(path.exists(), "no sidecar was written")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def states(self, doc: dict) -> dict:
+        return {key: row["state"] for key, row in doc["clauses"].items()}
+
+    def with_token(self) -> None:
+        """GH_TOKEN set for an in-process `main`, restored afterwards."""
+        old = {key: os.environ.get(key) for key in ("GH_TOKEN", "GITHUB_TOKEN")}
+
+        def restore():
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore)
+        os.environ["GH_TOKEN"] = "test-token"
+        os.environ.pop("GITHUB_TOKEN", None)
+
+    def run_main(self, fetch) -> int:
+        return ticket_check.main(
+            ["--demo", "demos/x", "--demo-root", str(self.root)], fetch=fetch
+        )
+
+    def cli_env(self, **extra: str) -> dict:
+        out = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("GH_TOKEN", "GITHUB_TOKEN")
+        }
+        out["GITHUB_API_URL"] = "http://127.0.0.1:9"
+        out.update(extra)
+        return out
+
+    def run_cli(self, env: dict) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(_DIR / "demo-ticket-check"),
+                "--demo",
+                "demos/x",
+                "--demo-root",
+                str(self.root),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    # -- the match rule, exactly ---------------------------------------------
+
+    def test_a_clause_the_body_holds_is_matched_and_one_it_does_not_is_not(self):
+        states = ticket_check.clause_states(COVERAGE["criteria"], FIXTURE_ISSUE_BODY)
+        self.assertEqual(states["AC-1"], {"state": "matched"})
+        self.assertEqual(states["AC-2"], {"state": "not verbatim"})
+
+    def test_the_match_survives_rewrapping_and_nothing_else(self):
+        # The whole rule: whitespace is normalised on both sides, case is
+        # not. A rule that folded case would be the first step down the
+        # "close enough" slope the three states exist to prevent.
+        rewrapped = {
+            "AC-1": "A search box above\n   the queue narrows the list as you type."
+        }
+        self.assertEqual(
+            ticket_check.clause_states(rewrapped, FIXTURE_ISSUE_BODY)["AC-1"],
+            {"state": "matched"},
+        )
+        lowered = {"AC-1": "a search box above the queue narrows the list as you type."}
+        self.assertEqual(
+            ticket_check.clause_states(lowered, FIXTURE_ISSUE_BODY)["AC-1"],
+            {"state": "not verbatim"},
+        )
+
+    def test_an_empty_clause_is_not_reported_matched(self):
+        # "" occurs in every body, and `matched` about nothing is the
+        # confidently-wrong artifact this file exists to refuse.
+        states = ticket_check.clause_states({"AC-1": "   "}, FIXTURE_ISSUE_BODY)
+        self.assertEqual(states["AC-1"], {"state": "not verbatim"})
+
+    # -- the three acceptance cases, each of them green (#276) ---------------
+
+    def test_a_fetched_body_yields_both_states_and_exit_zero(self):
+        self.write_timeline(TICKETED)
+        self.with_token()
+        calls = []
+
+        def fetch(ref, token):
+            calls.append((ref.group(1), ref.group(2), token))
+            return FIXTURE_ISSUE_BODY
+
+        self.assertEqual(self.run_main(fetch), 0)
+        doc = self.sidecar()
+        self.assertEqual(self.states(doc)["AC-1"], "matched")
+        self.assertEqual(self.states(doc)["AC-2"], "not verbatim")
+        self.assertEqual(calls, [("rogvid/skills", "129", "test-token")])
+        # The sidecar states its own rule and its own limit, so a reader of
+        # the file does not have to guess what produced the states in it.
+        self.assertIn("case-sensitive substring", doc["rule"])
+        self.assertIn("quotation, not meaning", doc["limit"])
+
+    def test_with_no_token_every_clause_is_not_checked_and_says_why(self):
+        self.write_timeline(TICKETED)
+        done = self.run_cli(self.cli_env())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        doc = self.sidecar()
+        self.assertEqual(len(self.states(doc)), 4)
+        self.assertEqual(set(self.states(doc).values()), {"not checked"})
+        self.assertIn("token", doc["reason"])
+
+    def test_an_unreadable_issue_is_not_checked_with_the_status(self):
+        self.write_timeline(TICKETED)
+        self.with_token()
+
+        def fetch(ref, token):
+            raise urllib.error.HTTPError("u", 404, "Not Found", None, io.BytesIO())
+
+        self.assertEqual(self.run_main(fetch), 0)
+        doc = self.sidecar()
+        self.assertEqual(set(self.states(doc).values()), {"not checked"})
+        self.assertIn("404", doc["reason"])
+
+    # -- the paths that never fetch ------------------------------------------
+
+    def test_an_unrecognised_reference_is_not_checked_never_guessed_at(self):
+        # A URL, a bare `#129`, a private tracker's id: a fetch against an
+        # invented host would grade the clauses against somebody else's
+        # requirement, which is worse than answering nothing.
+        self.write_timeline(
+            dict(TAGGED, ticket="https://example.invalid/browse/QUEUE-4412")
+        )
+        done = self.run_cli(self.cli_env(GH_TOKEN="test-token"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        doc = self.sidecar()
+        self.assertEqual(set(self.states(doc).values()), {"not checked"})
+        self.assertIn("QUEUE-4412", doc["reason"])
+
+    def test_clauses_with_no_ticket_are_not_checked_rather_than_silent(self):
+        self.write_timeline(TAGGED)
+        done = self.run_cli(self.cli_env(GH_TOKEN="test-token"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        doc = self.sidecar()
+        self.assertEqual(set(self.states(doc).values()), {"not checked"})
+        self.assertIn("names no ticket", doc["reason"])
+
+    def test_a_take_with_no_declared_clauses_writes_no_sidecar(self):
+        # There is no text to look for, and a sidecar would be a file about
+        # nothing that the comment would then have to explain.
+        self.write_timeline(dict(TIMELINE, ticket="rogvid/skills#129"))
+        done = self.run_cli(self.cli_env(GH_TOKEN="test-token"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse((self.root / "demos/x/review").exists())
+
+    def test_a_timeline_that_cannot_be_read_is_reported_not_fatal(self):
+        # Never fatal (#276): a take that crashed before writing a readable
+        # timeline already failed the check that owns that; this one says so
+        # on stderr and moves on.
+        (self.root / "demos/x/timeline.json").write_text("{not json", "utf-8")
+        done = self.run_cli(self.cli_env(GH_TOKEN="test-token"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("not checked", done.stderr)
+        self.assertFalse((self.root / "demos/x/review").exists())
+
+
+class TicketCheckRender(unittest.TestCase):
+    """The sidecar in the comment: three states, `not checked` printed (#276)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "demos/x").mkdir(parents=True)
+
+    def sidecar(self, doc: dict) -> None:
+        review = self.root / "demos/x/review"
+        review.mkdir(exist_ok=True)
+        (review / "ticket-check.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    def body(self, timeline=None, **kw):
+        opts = dict(
+            artifact_url=None,
+            artifact_bytes=None,
+            retention_days=30,
+            evidence_retention_days=None,
+            failure_artifact_url=None,
+            run_url=None,
+            sha=None,
+            repo_url=None,
+            demo_root=str(self.root),
+            path_prefix="",
+        )
+        opts.update(kw)
+        return comment.render([("demos/x", timeline or TICKETED)], **opts)
+
+    def line(self, body: str) -> str:
+        found = [
+            ln
+            for ln in body.splitlines()
+            if ln.startswith("**The ticket's body, re-read")
+        ]
+        self.assertEqual(len(found), 1, f"no single ticket-check line in:\n{body}")
+        return found[0]
+
+    def test_each_clause_reports_its_own_state(self):
+        # #276's acceptance case, in the artifact a reviewer actually opens:
+        # the issue still holds AC-1's text and no longer AC-2's.
+        self.sidecar(TICKET_CHECKED)
+        line = self.line(self.body())
+        self.assertIn("`AC-1` matched", line)
+        self.assertIn("`AC-2` not verbatim", line)
+
+    def test_not_checked_is_printed_with_the_reason_not_omitted(self):
+        # A reader who sees nothing assumes the check came back clean, and
+        # the confidently-wrong artifact is the one blocking finding in
+        # wip/verified-review/SKILL.md that this repo will not ship.
+        self.sidecar(TICKET_UNCHECKED)
+        body = self.body()
+        line = self.line(body)
+        for key in COVERAGE["criteria"]:
+            self.assertIn(f"`{key}` not checked", line)
+        self.assertIn(TICKET_UNCHECKED["reason"], body)
+
+    def test_the_block_states_its_own_limit(self):
+        # In the artifact itself, on the clean branch too — the take where
+        # every clause matched is the one where "so the demo is right" is
+        # most tempting, and the sentence exists for exactly that reader.
+        for doc in (TICKET_CHECKED, TICKET_UNCHECKED):
+            self.sidecar(doc)
+            self.assertEqual(self.body().count(TICKET_LIMIT), 1)
+
+    def test_a_take_with_no_sidecar_renders_no_ticket_check(self):
+        # A local render, or a take the CI step did not run on: the check
+        # made no statement, so the comment repeats none.
+        body = self.body()
+        self.assertIn("AC-1", body)  # control: the clause table is there
+        self.assertNotIn("re-read", body)
+        self.assertNotIn(TICKET_LIMIT, body)
+
+    def test_a_state_the_renderer_does_not_recognise_reads_as_not_checked(self):
+        # Whatever a fourth state meant, it was not `matched`, and the
+        # degradation has to point away from the clean reading.
+        self.sidecar(dict(TICKET_CHECKED, clauses={"AC-1": {"state": "ok"}}))
+        self.assertIn("`AC-1` not checked", self.line(self.body()))
+
+    def test_the_states_render_under_the_clause_table(self):
+        # Below the table they are a statement about, not among the gap
+        # headlines above it: a drifted quotation is a finding about text,
+        # and the gaps above the table are findings about the take.
+        self.sidecar(TICKET_CHECKED)
+        body = self.body()
+        self.assertLess(
+            body.index("| clause | claimed at | look at |"),
+            body.index(self.line(body)),
+        )
+
+    def test_no_rendered_sentence_reads_as_a_verdict(self):
+        # The same sweep the rest of the comment lives under, over both
+        # branches this renderer writes. The reason is a sentence
+        # `demo-ticket-check` wrote, so it is swept too, not subtracted.
+        for doc in (TICKET_CHECKED, TICKET_UNCHECKED):
+            self.sidecar(doc)
+            swept = self.body()
+            for span in _quoted(TICKETED):
+                flat = _as_rendered(span)
+                self.assertIn(flat, swept)
+                swept = swept.replace(flat, " ")
+            self.assertIn("re-read", swept)  # control: the block survived
+            hits = _verdict_hits(swept)
+            self.assertEqual(hits, [], f"{hits} read as a verdict in:\n{swept}")
+
+
 class CommentStep(unittest.TestCase):
     """The one fact about the repository only the workflow knows (#274).
 
@@ -3463,6 +3805,124 @@ INJECTIONS += [
         "    elif refs:",
         "    elif not refs:",
         ["Ticket.test_a_stitched_demo_whose_parts_disagree_names_every_ticket"],
+    ),
+]
+
+# -- demo-ticket-check: does the ticket still say what was quoted (#276) -----
+
+INJECTIONS += [
+    (
+        # The check that can only agree: every clause `matched`, whatever the
+        # body says. The drift this whole step exists to notice is exactly
+        # what this break makes invisible.
+        "every clause is reported matched regardless of the body",
+        "demo-ticket-check",
+        '        state = "matched" if needle and needle in haystack else "not verbatim"',
+        '        state = "matched"',
+        [
+            "TicketCheck.test_a_clause_the_body_holds_is_matched_and_one_it_does_not_is_not",
+            "TicketCheck.test_a_fetched_body_yields_both_states_and_exit_zero",
+        ],
+    ),
+    (
+        # The first step down the "close enough" slope the issue rules out:
+        # a case fold reads as harmless and is precisely the fuzzy match
+        # MATCH_RULE says there is none of.
+        "the match rule folds case, so a reworded clause still matches",
+        "demo-ticket-check",
+        '        state = "matched" if needle and needle in haystack else "not verbatim"',
+        '        state = "matched" if needle and needle.lower() in haystack.lower() else "not verbatim"',
+        ["TicketCheck.test_the_match_survives_rewrapping_and_nothing_else"],
+    ),
+    (
+        # `"" in body` is True for every body, so an empty declared text
+        # would read as the strongest state the check can produce.
+        "an empty clause is reported matched because it occurs everywhere",
+        "demo-ticket-check",
+        '        state = "matched" if needle and needle in haystack else "not verbatim"',
+        '        state = "matched" if needle in haystack else "not verbatim"',
+        ["TicketCheck.test_an_empty_clause_is_not_reported_matched"],
+    ),
+    (
+        # The two-state check #276 forbids, in the likeliest shape: nothing
+        # to say, so say nothing. A reader who sees nothing assumes the check
+        # came back clean.
+        "the no-token run writes no sidecar instead of not checked",
+        "demo-ticket-check",
+        "    elif not token:\n"
+        "        states, reason = unchecked(\n"
+        "            criteria,\n"
+        '            "no token in GH_TOKEN or GITHUB_TOKEN, so the ticket was never read",\n'
+        "        )",
+        "    elif not token:\n        return None",
+        ["TicketCheck.test_with_no_token_every_clause_is_not_checked_and_says_why"],
+    ),
+    (
+        # Never fatal is the acceptance criterion, not a nicety: a step that
+        # reddens the check because a timeline was unreadable teaches people
+        # to ignore the check.
+        "an unreadable timeline fails the step instead of being reported",
+        "demo-ticket-check",
+        "        except Exception as error:  # never fatal, by design (#276)\n"
+        '            print(f"{name}: not checked — {error}", file=sys.stderr)\n'
+        "            continue",
+        "        except Exception as error:  # never fatal, by design (#276)\n"
+        '            raise SystemExit(f"{name}: {error}")',
+        ["TicketCheck.test_a_timeline_that_cannot_be_read_is_reported_not_fatal"],
+    ),
+    (
+        # `not checked` omitted, which is #276's one explicit rendering rule:
+        # the line survives, the clauses the check could not read vanish, and
+        # their absence reads as the clean state.
+        "the renderer omits the clauses the check could not read",
+        "demo-comment",
+        "        states[key] = state",
+        '        if state != "not checked":\n            states[key] = state',
+        ["TicketCheckRender.test_not_checked_is_printed_with_the_reason_not_omitted"],
+    ),
+    (
+        # The degradation pointed the wrong way: a state this renderer does
+        # not know is not the clean one, whatever it turns out to mean.
+        "an unrecognised sidecar state reads as matched",
+        "demo-comment",
+        '        if state not in _TICKET_STATES:\n            state = "not checked"',
+        '        if state not in _TICKET_STATES:\n            state = "matched"',
+        [
+            "TicketCheckRender.test_a_state_the_renderer_does_not_recognise_reads_as_not_checked"
+        ],
+    ),
+    (
+        # The limit gone from the artifact itself, which is where #276 says
+        # it lives — a comment nobody reads is not a substitute.
+        "the ticket-check block stops stating its own limit",
+        "demo-comment",
+        '    lines += [TICKET_CHECK_LIMIT, ""]',
+        '    lines += [""]',
+        ["TicketCheckRender.test_the_block_states_its_own_limit"],
+    ),
+    (
+        # The sentence a `matched` row invites, appended so the assertions
+        # that locate the limit stay green and only the sweep can notice —
+        # the same shape as the per-word disclaimer injections.
+        "the ticket-check limit promotes the matched clauses",
+        "demo-comment",
+        "    \"the frames show the clause is the reviewer's call, not this line's.\"",
+        "    \"the frames show the clause is the reviewer's call, not this line's. \"\n"
+        '    "Each matched clause was verified against the ticket."',
+        ["TicketCheckRender.test_no_rendered_sentence_reads_as_a_verdict"],
+    ),
+    (
+        # The wiring: the renderer can be perfect and never be handed the
+        # sidecar. Same break class as `render_demo stops rendering the
+        # coverage section`.
+        "render_demo stops reading the ticket-check sidecar",
+        "demo-comment",
+        "    lines += render_ticket_check(_ticket_check(demo_dir(demo_root, name)))",
+        "    lines += render_ticket_check(None)",
+        [
+            "TicketCheckRender.test_each_clause_reports_its_own_state",
+            "TicketCheckRender.test_not_checked_is_printed_with_the_reason_not_omitted",
+        ],
     ),
 ]
 

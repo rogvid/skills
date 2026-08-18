@@ -34,7 +34,10 @@ rendering of `timeline.json`'s `coverage` and it grades nothing — see
 the take answers and the many it does not (issue #303). The take's own line
 says **which** ticket those clauses were copied out of, linked when the string
 can be turned into a URL without guessing (issue #275); nothing here reads
-that ticket.
+that ticket. What did read it, when the CI step ran, is `demo-ticket-check`
+(issue #276): its gitignored sidecar `review/ticket-check.json` is rendered
+under the clause table by `render_ticket_check` — three states per clause,
+`not checked` printed rather than omitted.
 
 The body opens with an HTML marker so the workflow can find and rewrite this
 comment rather than appending a new one on every push.
@@ -72,6 +75,24 @@ DIFF_LIMIT = (
     "below?** It answers nothing else. A widened permission, a deleted check "
     "or a new dependency is invisible to a demo. The diff still answers those."
 )
+
+
+#: What the ticket re-read is and is not evidence of (issue #276). Printed
+#: with the states, unconditionally, because `matched` beside a clause is
+#: exactly where "so the demo is right" is tempting — and the check compared
+#: two pieces of text, never a frame. Fixed text, hand-written here rather
+#: than read out of the sidecar: the sidecar is a generated file, and a
+#: sentence about this comment's own reach is this script's to state. It
+#: carries no word from `tests/ci-unit`'s `VERDICT_WORDS` and is swept like
+#: every other sentence this script writes.
+TICKET_CHECK_LIMIT = (
+    "**This grades quotation, not meaning.** A storyboard that quotes a "
+    "clause word for word can still record something else entirely; whether "
+    "the frames show the clause is the reviewer's call, not this line's."
+)
+
+#: The only states the sidecar may carry, three and never two (#276).
+_TICKET_STATES = ("matched", "not verbatim", "not checked")
 
 
 def _cell(text: str) -> str:
@@ -291,6 +312,69 @@ def _picture(
             False,
         )
     return _Picture("*no still*", False)
+
+
+def _ticket_check(directory: Path) -> dict | None:
+    """The ticket re-read this run left beside the timeline, if it ran (#276).
+
+    `review/ticket-check.json` is a gitignored working file of one review,
+    written by `demo-ticket-check` after the recording. Absent on every take
+    the CI step did not run on — a local render, a take with no declared
+    clauses — and rendering nothing then is correct: the check made no
+    statement. A file that exists but cannot be parsed is also rendered as
+    nothing, which is a stated limit rather than an oversight: the states in
+    a half-written file are not states this comment can repeat.
+    """
+    path = directory / "review" / "ticket-check.json"
+    if not path.exists():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def render_ticket_check(check: object) -> list[str]:
+    """Whether each quoted clause still occurs in the ticket's body (#276).
+
+    One line, three states, and `not checked` is printed rather than
+    omitted: a reader who sees nothing assumes the check came back clean,
+    and the confidently-wrong artifact is the one blocking finding this
+    repository will not ship. A state this renderer does not recognise is
+    printed as `not checked` for the same reason — whatever it meant, it was
+    not `matched`.
+
+    The wording is about text and says so. `matched` is a statement that two
+    strings agree, `not verbatim` that they no longer do; neither is a
+    verdict on the take, and `TICKET_CHECK_LIMIT` closes the block by saying
+    exactly that.
+    """
+    doc = check if isinstance(check, dict) else {}
+    clauses = doc.get("clauses")
+    if not isinstance(clauses, dict) or not clauses:
+        return []
+    states = {}
+    for key, row in clauses.items():
+        state = row.get("state") if isinstance(row, dict) else None
+        if state not in _TICKET_STATES:
+            state = "not checked"
+        states[key] = state
+    parts = " · ".join(f"`{_cell(key)}` {state}" for key, state in states.items())
+    lines = [f"**The ticket's body, re-read after the take:** {parts}.", ""]
+    if "not verbatim" in states.values():
+        lines += [
+            "*not verbatim*: the issue body no longer contains that clause's "
+            "declared text word for word. The ticket moved, or the storyboard "
+            "never quoted it.",
+            "",
+        ]
+    if "not checked" in states.values():
+        reason = doc.get("reason")
+        why = _cell(str(reason)) if reason else "the sidecar gives no reason"
+        lines += [f"*not checked*: {why}.", ""]
+    lines += [TICKET_CHECK_LIMIT, ""]
+    return lines
 
 
 def _failure_lead(failure: dict, criteria: dict, claimed: dict) -> list[str]:
@@ -590,6 +674,11 @@ def render_demo(
         # (issue #278).
         failure=failure,
     )
+
+    # Under the clause table it is a statement about, above the diagnostics:
+    # the ticket re-read, if this run made one (#276). Reads the same staged
+    # directory the stills were checked against, for the same reason.
+    lines += render_ticket_check(_ticket_check(demo_dir(demo_root, name)))
 
     if failure:
         beat = failure.get("beat")
