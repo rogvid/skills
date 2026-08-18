@@ -118,6 +118,22 @@ committed for the reason the rest of this section argues the frames are not:
 they are what a claim in a shipped document rests on, they are small, and
 nothing regenerates them.
 
+Also committed, on `caption-overclaims` and `clean-search`: `review/` —
+`verdict.json`, `verdict.md`, and the two or three frames those readings cited,
+which `demo-grade verdict` copies out of the sheet into `review/frames/`. Same
+argument as `readings/`, one step downstream, plus one this corpus does not
+otherwise have a use for: a verdict is a **committed** file precisely so that
+`.github/scripts/demo-comment` can render it into a pull-request comment, and
+these two takes are what that rendering was checked against. Roughly 500 kB for
+both, against the 16 MB `frames/` would cost.
+
+Their `basis` digest survives a re-recording, which is the property the
+renderer leans on and is worth stating where somebody will re-record: both
+takes were re-recorded while this was written, `timeline.json` moved (beat
+timestamps, the odd extra scene frame), and the digest did not — it is over the
+clause text and the tagged beat indices, both of which come from the
+storyboard.
+
 **Not committed: `frames/`.** This was a judgement call and here is the
 argument, so it can be overruled on its merits — it costs one line of
 `.gitignore`.
