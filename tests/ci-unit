@@ -1143,7 +1143,8 @@ def reading(status: str, frame: str | None, beat: int | None, why: str) -> dict:
 #: The readings `PrBlock` hands the grader, one per clause, keyed by clause.
 #: AC-2 is a disagreement (the reader placed it where nothing claimed it),
 #: AC-3 a `cannot tell`, AC-4 a clause neither derivation located, and AC-1
-#: the one agreement — the class that collapses to a line.
+#: the one agreement — the class that renders below the findings, with its
+#: clause text and its still but without the reader's quoted sentence (#337).
 PR_READINGS = {
     "AC-2": reading("seen", "beat-07.png", 7, READER_WHY["AC-2"]),
     "AC-3": reading("cannot tell", None, None, READER_WHY["AC-3"]),
@@ -2147,29 +2148,41 @@ class PrBlock(unittest.TestCase):
         self.assertEqual(code, 0, err)
         return out
 
-    def test_the_findings_lead_and_the_agreement_is_a_line_below_them(self):
+    def test_the_findings_lead_and_the_agreement_is_a_row_below_them(self):
         # The routing decision, which is the whole product: three clauses need
         # a person and one does not, and the one that does not must not spend
         # the reviewer's first screen.
         self.take()
         body = self.block()
-        agree = body.index("AC-1 — reader placed it at beat 3 (agrees).")
+        agree = body.index(f"**AC-1 — {COVERAGE['criteria']['AC-1']}**")
         for key in ("AC-2", "AC-3", "AC-4"):
             self.assertLess(body.index(f"### {key} — "), agree, key)
         # A finding carries the ticket's own clause text, not just the id: the
         # text is what the person about to look judges the still against.
         self.assertIn(f"### AC-2 — {COVERAGE['criteria']['AC-2']}", body)
 
-    def test_an_agreement_is_one_line_and_gets_no_picture(self):
+    def test_an_agreement_shows_its_clause_and_its_still(self):
+        # PR #337, measured: bare agreement lines sent the reviewer into the
+        # diff to find the pictures. The agreement row carries the clause
+        # text, the reader's placement, and the beat's committed still.
         self.take()
         body = self.block()
-        self.assertIn("AC-1 — reader placed it at beat 3 (agrees).", body)
+        self.assertIn(f"**AC-1 — {COVERAGE['criteria']['AC-1']}**", body)
+        self.assertIn("Reader placed it at beat 3.", body)
+        self.assertIn(
+            "![AC-1](https://raw.githubusercontent.com/o/r/"
+            f"{self.sha}/demos/x/images/03-search.png)",
+            body,
+        )
+        # Not the finding treatment: no header, no quoted reader sentence.
         self.assertNotIn("### AC-1", body)
-        self.assertNotIn("![AC-1]", body)
+        self.assertNotIn(READER_WHY["AC-1"], body)
 
-    def test_a_take_where_everything_agrees_is_lines_and_one_summary(self):
-        # No callout asking for human attention: an all-agree block that still
-        # called for a person would train reviewers to stop reading callouts.
+    def test_a_take_where_everything_agrees_leads_with_the_summary(self):
+        # The summary is the decision, so it prints first. The rows below it
+        # are the evidence, one per clause (#337). No callout asking for human
+        # attention: an all-agree block that still called for a person would
+        # train reviewers to stop reading callouts.
         claimed = {"AC-1": [3], "AC-2": [7], "AC-3": [6], "AC-4": [8]}
         self.take(
             readings={
@@ -2184,11 +2197,21 @@ class PrBlock(unittest.TestCase):
             claimed=claimed,
         )
         body = self.block()
+        summary = body.index("The reader and the storyboard agree on all 4 clauses.")
         for key, beats in claimed.items():
-            self.assertIn(
-                f"{key} — reader placed it at beat {beats[0]} (agrees).", body
-            )
-        self.assertIn("The reader and the storyboard agree on all 4 clauses.", body)
+            row = body.index(f"**{key} — {COVERAGE['criteria'][key]}**")
+            self.assertLess(summary, row, key)
+            self.assertIn(f"Reader placed it at beat {beats[0]}.", body)
+        # Beat 3 wrote a committed still, so AC-1's row embeds it.
+        self.assertIn(
+            "![AC-1](https://raw.githubusercontent.com/o/r/"
+            f"{self.sha}/demos/x/images/03-search.png)",
+            body,
+        )
+        # Beat 7 wrote none, so AC-2's row says so instead of borrowing one.
+        self.assertIn("No still exists for beat 7.", body)
+        # Pictures were embedded, so the honest last line prints here too.
+        self.assertIn("not the frame the reader read", body)
         self.assertNotIn("need a person to look", body)
         self.assertNotIn("###", body)
 
@@ -3057,8 +3080,8 @@ INJECTIONS = [
         "    findings = [row for row in rows if _row_class(row) == AGREEMENT]\n"
         "    agreed = [row for row in rows if _row_class(row) != AGREEMENT]",
         [
-            "PrBlock.test_the_findings_lead_and_the_agreement_is_a_line_below_them",
-            "PrBlock.test_an_agreement_is_one_line_and_gets_no_picture",
+            "PrBlock.test_the_findings_lead_and_the_agreement_is_a_row_below_them",
+            "PrBlock.test_an_agreement_shows_its_clause_and_its_still",
         ],
     ),
     (
@@ -3069,8 +3092,22 @@ INJECTIONS = [
         "    findings = [row for row in rows if _row_class(row) != AGREEMENT]\n",
         "    findings = list(rows)\n",
         [
-            "PrBlock.test_a_take_where_everything_agrees_is_lines_and_one_summary",
-            "PrBlock.test_an_agreement_is_one_line_and_gets_no_picture",
+            "PrBlock.test_a_take_where_everything_agrees_leads_with_the_summary",
+            "PrBlock.test_an_agreement_shows_its_clause_and_its_still",
+        ],
+    ),
+    (
+        # #337 undone: the agreement row keeps its clause text and drops its
+        # still. The reviewer is back to digging in the diff for the picture,
+        # and an all-agree block with no pictures also loses the honest last
+        # line.
+        "the agreement row loses its still",
+        "scripts/demo-grade",
+        "        agreed_lines, embedded = _still_lines(row, stills, url_for)",
+        "        agreed_lines, embedded = [], False",
+        [
+            "PrBlock.test_an_agreement_shows_its_clause_and_its_still",
+            "PrBlock.test_a_take_where_everything_agrees_leads_with_the_summary",
         ],
     ),
     (
@@ -3096,8 +3133,8 @@ INJECTIONS = [
         # plausible wrong picture, worse evidence than none.
         "a beat with no still borrows another beat's picture",
         "scripts/demo-grade",
-        '            out += [f"No still exists for beat {beat}.", ""]',
-        '            out += [f"![x]({url_for(next(iter(stills.values())))})", ""]',
+        '        return [f"No still exists for beat {beat}.", ""], False',
+        '        return [f"![x]({url_for(next(iter(stills.values())))})", ""], True',
         ["PrBlock.test_a_cited_beat_with_no_still_says_so_instead_of_borrowing_one"],
     ),
     (
