@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "The search box above the queue holds the typed text 'export' with the caret still in it, the list has narrowed from 7 tickets to 1 and the header count reads (1), and the only control beside the box is a clear '×' — no submit button exists on screen — though still frames cannot show per-keystroke narrowing, so an Enter-press cannot be fully ruled out.",
+      "confidence": "medium"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "Typing 'export', a word from the title of TQ-102 'Export to CSV times out on large accounts', narrows the queue to exactly that ticket — and the later 'dashboard' pass (beat-10, with the matching title outlined in beat-14) corroborates that the match is in the title.",
+      "confidence": "high"
+    }
+  ]
+}

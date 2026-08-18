@@ -38,7 +38,7 @@ below for what it covers and what it does not.
 
 `eval-grader` is **not a suite at all**, and it is in this directory because it
 is the other way of getting evidence. The suites above assert; it *measures*.
-It scores `demo-grade`'s blind reader against four takes recorded against
+It scores `demo-grade`'s blind reader against five takes recorded against
 `examples/ticket-queue` whose answers are written down — what the reader
 caught, what it flagged on a clean demo, and what it was expected to miss. It
 gates nothing, exits 0 whatever it finds, and needs a model between its `brief`
@@ -56,7 +56,7 @@ tests/
 │                      #   sees, plus the docs' python fences (~0.3 s)
 ├── eval-grader        # scores the blind reader against a known-answer corpus
 │                      #   (record ~2 min and cached; score ~0.3 s)
-├── eval/grader/takes/ # the four corpus takes and their expectations
+├── eval/grader/takes/ # the five corpus takes and their expectations
 ├── eval/grader/readings/
 │                      # what a blind reader answered on the runs the corpus's
 │                      #   published numbers come from

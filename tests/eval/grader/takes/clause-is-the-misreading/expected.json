@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "take": "clause-is-the-misreading",
+  "what": "The blind-spot instance (#276). The ticket's own words — 'Search matches the requester — typing part of a name or an address finds that person's tickets.' — live only in this file and in record.py's docstring. The declared AC-2 substitutes title for requester, and the demo faithfully shows the substitution: a title word, typed, narrows the queue to that ticket. Every input the reader has is downstream of the paraphrase.",
+  "clauses": {
+    "AC-1": {
+      "kind": "clean",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "Typing export narrows the queue to one row while the box fills, and no button is pressed anywhere in the take."
+    },
+    "AC-2": {
+      "kind": "expected-miss",
+      "expect_status": "seen",
+      "expect_class": "agreement",
+      "why": "The clause text is itself the misreading: the ticket asks for requester matching, the declared clause says title, and the screen genuinely does what the declared text says. The reader is handed the paraphrase, so agreement is the correct output of a blind read — the miss is structural, not a weak reader. What would catch it is a quotation check of the declared clause against the ticket's own words, the other half of #276; no reading of any frame can. If a run scores this as caught, report it — do not edit this expectation to match the result."
+    }
+  }
+}

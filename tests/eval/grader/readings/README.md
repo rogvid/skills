@@ -6,7 +6,7 @@ trust.
 
 ```sh
 tests/eval-grader record                                     # the frames
-tests/eval-grader score --readings tests/eval/grader/readings/2026-08-14-run-2
+tests/eval-grader score --readings tests/eval/grader/readings/2026-08-18-run-3
 ```
 
 ## Why these files are here at all
@@ -30,15 +30,25 @@ Each run is one directory of `<take>.json`, in exactly the shape
 |---|---|---|---|
 | `2026-08-13-run-1` | 2026-08-13 | `0cd1bc5` (#330), the corpus's first real run | caught — `cannot tell` |
 | `2026-08-14-run-2` | 2026-08-14 | `52d5159` (#331), the run that retracted the limit | caught — `cannot tell` |
+| `2026-08-18-run-3` | 2026-08-18 | the commit that added `clause-is-the-misreading` (#276's corpus half) | caught — `cannot tell` |
 
-Each run is one reading per take, four in all, each from a separate reader
-handed exactly two things — the take's `review/brief.md` as
-`tests/eval-grader brief` wrote it, and that take's `frames/` directory. None
-of them saw `record.py`, `timeline.json`, `expected.json`, another take, or
-each other. That is the whole provenance the artifacts carry.
+Each run is one reading per take — four in the first two runs, five from run 3
+— each from a separate reader handed exactly two things: the take's
+`review/brief.md` as `tests/eval-grader brief` wrote it, and that take's
+`frames/` directory. None of them saw `record.py`, `timeline.json`,
+`expected.json`, another take, or each other. That is the whole provenance the
+artifacts carry. In run 3 the brief and frames were first copied to a directory
+outside the repository under neutral aliases (`take-a` … `take-e`), so not even
+a take's name reached its reader.
 
-**These two are the runs the word "twice" refers to**, not a count of every run
-this corpus has ever had. #331 took two further runs while measuring the span
+Run 3 is the first reading of `clause-is-the-misreading`. Its AC-2 answer is
+`seen`, high confidence, citing the title match as the evidence — agreement
+with a clause text that is itself the misreading, which is the structural miss
+that take was built to show, and it scores as `missed (expected)`.
+
+**Runs 1 and 2 are the runs the word "twice" refers to** — the two that
+predated the retraction — not a count of every run this corpus has ever had;
+run 3 caught the same clause a third time. #331 took two further runs while measuring the span
 fix (clean clauses falsely flagged `1/6 → 0/6`); they are evidence for that
 ratio rather than for the sentence above, and they are not collected here.
 
@@ -72,4 +82,6 @@ do here and is how #331 was measured: the reader's answer is a function of the
 frames alone, so the comparison rule can be changed underneath a recorded
 reading without invalidating it. What it cannot survive is the corpus's clauses
 changing; a run recorded against clauses a take no longer declares is refused by
-`score`, by name.
+`score`, by name. The corpus *growing* has the same effect on a whole-corpus
+score: runs 1 and 2 predate `clause-is-the-misreading` and hold no reading for
+it, so they now score per take (`--take`), not whole.

@@ -10,7 +10,7 @@
     tests/eval-grader score --readings DIR             # the table
 
 The grader had been measured once, on one take, by three readers who agreed.
-That is an anecdote. This is the measurement: four takes recorded against
+That is an anecdote. This is the measurement: five takes recorded against
 `examples/ticket-queue`, each clause carrying a written-down expectation, and a
 score that says what the reader caught, what it cried wolf on, and what it was
 expected to miss and did.
@@ -21,7 +21,7 @@ reader gets; the reader is dispatched by hand or by a harness; `score` reads
 the answers back off disk. So the scoring phase is arithmetic over documents,
 it runs in seconds, and no model's opinion is ever a committed file.
 
-## What the corpus has to contain, and why the fourth take is not a joke
+## What the corpus has to contain, and why the expected misses are not a joke
 
 `AGENTS.md`, under "Where an eval replaces the injections": *a corpus with no
 expected misses is not a measurement.* A corpus of defects the reader catches
@@ -37,10 +37,13 @@ rule working: the docstring's limit was wrong, because the reader is never
 asked to compare the screen with the caption — it is handed the ticket's clause
 text, and it disbelieves a caption that overclaims against it. `demo-grade` now
 states the real blind spot instead: a declared clause text that is itself the
-misreading, which no reading of any frame can reach. Rebuilding this take to
-plant *that* is issue #276, and until it is, the corpus's own negative control
-is not an instance of the blind spot it is standing in for. So the table below
-is honest about the reader and weaker than it looks about the boundary; see
+misreading, which no reading of any frame can reach. `clause-is-the-misreading`
+plants exactly that — the corpus half of issue #276. The ticket's own words,
+held only in that take's docstring and `expected.json`, say the search matches
+the *requester*; the declared clause says *title*; the demo faithfully shows
+title matching, and the reader's agreement scores as the structural miss it
+is. What would catch it is a quotation check of the declared clause against
+the ticket's own words, which is #276's other half; see
 `tests/eval/grader/README.md`.
 
 ## The mechanic the corpus is built around
@@ -52,9 +55,13 @@ answer, and a corpus built out of such mutations would measure `demo-grade`'s
 arithmetic — which `tests/unit` already covers — while reporting a number about
 the reader.
 
-Every defect here is therefore in the **pixels**: a clause the storyboard
+Every defect here is therefore in the **pixels** — a clause the storyboard
 claims on a beat whose screen never does the thing (`never-demonstrated`), and
-a caption that asserts what the screen does not do (`caption-overclaims`).
+a caption that asserts what the screen does not do (`caption-overclaims`) —
+with one deliberate exception: `clause-is-the-misreading` plants its defect in
+the declared clause *text*, the one input the reader is handed, because the
+blind spot it instantiates is exactly that nothing compares this text with the
+ticket's own words.
 
 ## What "caught" means here
 
@@ -79,8 +86,8 @@ unstated boundary is read as covering everything:
 * **A corpus this small.** `score` prints its exact shape — takes, clauses, and
   the split by kind — on the line above the table, so that figure is read off
   the corpus rather than copied into prose that then drifts from it. Today it
-  is four takes and eight clauses, six of them clean. A false-alarm rate over
-  six clean clauses has an enormous confidence interval. This distinguishes
+  is five takes and ten clauses, seven of them clean. A false-alarm rate over
+  seven clean clauses has an enormous confidence interval. This distinguishes
   "the reader flags clean demos constantly" from "it does not"; it does not put
   a number on how often.
 * **One reader per clause per run**, so nothing here measures the reader's

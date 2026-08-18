@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-00.png",
+      "status": "seen",
+      "why": "The queue titled 'Support queue (7)' shows seven rows, each with an id (TQ-101 through TQ-107), a bold title, and a requester email address.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": null,
+      "status": "not seen",
+      "why": "A search box sits above the queue and is highlighted in beat-12 through beat-14, but no frame ever shows text typed into it or the list narrowing — all seven tickets remain visible in every frame.",
+      "confidence": "high"
+    }
+  ]
+}

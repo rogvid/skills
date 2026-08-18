@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-02-scene-1.png",
+      "status": "seen",
+      "why": "With only the partial word 'invo' typed in the search box above the queue, the list has already narrowed from 7 tickets to the single matching TQ-101 with no search button pressed or even present.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-3",
+      "frame": null,
+      "status": "cannot tell",
+      "why": "The caption at beat-06 asserts that part of a requester's name finds that person's tickets, but every query actually typed ('invoice', 'webhook') is a title word and no frame ever shows a name or address fragment being searched, so only the caption text claims this clause.",
+      "confidence": "high"
+    }
+  ]
+}

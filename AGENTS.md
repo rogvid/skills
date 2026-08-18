@@ -191,11 +191,15 @@ faithfully satisfies a wrong paraphrase of the ticket, so every input the reader
 has is downstream of the paraphrase and no reading of any frame reaches it. Do
 **not** plant "a caption the screen agrees with" — this file named that as the
 blind spot, and `skills/demo-video/scripts/demo-grade` retracted it after the
-corpus caught it twice. And note the gap rather than assuming it closed:
-**today's corpus holds no expected miss that is an instance of the real blind
-spot** (`tests/eval/grader/README.md` states it, and #276 is what closes it).
-The requirement above is not met by editing an `expected.json` until it agrees
-with a result — a corpus that can only agree with itself measures nothing.
+corpus caught it twice. The corpus now holds one expected miss that **is** an
+instance of the real blind spot: `tests/eval/grader/takes/clause-is-the-misreading`,
+whose declared clause says *title* where the ticket it documents says
+*requester*, and whose committed reading shows the reader agreeing with the
+paraphrase — the miss is structural, and only #276's quotation check against
+the ticket's own words would catch it. The rule that made it stands: a corpus
+with no expected misses is not a measurement, and the requirement is not met by
+editing an `expected.json` until it agrees with a result — a corpus that can
+only agree with itself measures nothing.
 
 ## Housekeeping
 
