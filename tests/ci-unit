@@ -770,6 +770,16 @@ class Render(unittest.TestCase):
         # The control: with one fact to state, the footnote is still there.
         self.assertIn("<sub>Recorded from `abcdef1`.", self.body())
 
+    def test_the_caption_table_is_folded_and_the_captions_still_arrive(self):
+        # #337's third read: the caption table is the durable record, not the
+        # first read, so it folds into a <details> block — present, complete,
+        # and out of the way of the clauses and the video.
+        body = self.body()
+        opened = body.index("<details><summary>Every caption")
+        table = body.index("| # | at | Caption |")
+        self.assertLess(opened, table)
+        self.assertIn("</details>", body[table:])
+
     def test_a_caption_containing_a_pipe_does_not_break_the_table(self):
         piped = dict(TIMELINE, beats=beats((1.0, "run: cat x | wc -l")))
         rows = [ln for ln in self.body(piped).splitlines() if ln.startswith("| 1 |")]
@@ -1171,6 +1181,20 @@ PR_STILLS = {
     9: "images/09-highlight.png",
 }
 
+#: The storyboard captions the fixture take carries, by beat index. The third
+#: live read of #337 said beat numbers are recorder bookkeeping a reviewer
+#: cannot map to anything, so each still is labelled with its beat's own
+#: caption instead. Beat 6's carries `met` — the same ticket-ish English as
+#: `QUOTED_VERDICT` — so the sweep's caption exemption below is watched
+#: subtracting something real rather than passing on clean fixtures.
+PR_CAPTIONS = {
+    3: "Typing invoice narrows the queue to one ticket.",
+    6: "The heading shows every criterion the release has met.",
+    7: "The heading keeps the unfiltered count on screen.",
+    8: "A search matching nothing keeps the empty line up.",
+    9: "The requester column is ringed on the matched row.",
+}
+
 
 #: The sentence #303 adds, hand-written here rather than imported from
 #: `comment`. Importing it would make this pair of tests agree with the script
@@ -1178,10 +1202,9 @@ PR_STILLS = {
 #: would still be "present". Copied text goes stale loudly, which is the
 #: direction to be wrong in.
 DIFF_LIMIT = (
-    "**Watching this replaces reading the diff for one question only: whether "
-    "the take shows the clauses below.** Anything else the change touches — a "
-    "widened permission, a deleted check, a new dependency — is invisible to a "
-    "demo, and is still the diff's to answer."
+    "**Watching this answers one question: does the take show the clauses "
+    "below?** It answers nothing else. A widened permission, a deleted check "
+    "or a new dependency is invisible to a demo. The diff still answers those."
 )
 
 
@@ -1474,6 +1497,20 @@ class Coverage(unittest.TestCase):
         self.assertLess(where, body.index("| clause | claimed at | look at |"))
         self.assertLess(where, body.index("**AC-1**"))
         self.assertLess(where, body.index("| # | at | Caption |"))
+
+    def test_the_video_link_is_met_before_the_clauses(self):
+        # #337's third read: the video is what the reviewer opens, so it sits
+        # under the demo's own line, before the clause table it is evidence
+        # for — not at the bottom of the comment under everything else.
+        body = self.body(
+            TAGGED,
+            artifact_url="https://github.com/o/r/actions/runs/1/artifacts/2",
+            artifact_bytes=4_200_000,
+        )
+        link = body.index("Download the recording")
+        self.assertLess(body.index("recorded by"), link)
+        self.assertLess(link, body.index(self.headline(body)))
+        self.assertLess(link, body.index("| clause | claimed at | look at |"))
 
     # -- one picture per clause, and the clauses with none (#274) -----------
 
@@ -2094,24 +2131,28 @@ class PrBlock(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout.strip()
 
-    def take(self, readings=None, claimed=None, stills=None, unwritten=()):
+    def take(
+        self, readings=None, claimed=None, stills=None, unwritten=(), captions=None
+    ):
         """A committed take with a local, uncommitted verdict beside it.
 
         Real files and a real repository rather than a mock: the thing being
         graded is what `pr-block` does with git's own answers. `unwritten`
         names stills the timeline cites and no file backs — the shape the
-        missing-blob refusal exists for.
+        missing-blob refusal exists for. `captions` is the beat log's caption
+        column; an empty dict is a storyboard that captioned nothing.
         """
         readings = PR_READINGS if readings is None else readings
         claimed = PR_CLAIMED if claimed is None else claimed
         stills = PR_STILLS if stills is None else stills
+        captions = PR_CAPTIONS if captions is None else captions
         criteria = COVERAGE["criteria"]
         timeline = {
             "beats": [
                 {
                     "index": i,
                     "t_start": float(i),
-                    "caption": f"beat {i}",
+                    "caption": captions.get(i, ""),
                     "still": stills.get(i),
                 }
                 for i in range(10)
@@ -2167,18 +2208,23 @@ class PrBlock(unittest.TestCase):
         self.assertIn(f"### AC-2 — {COVERAGE['criteria']['AC-2']}", body)
 
     def test_an_agreement_shows_its_clause_and_its_still(self):
-        # PR #337, measured: bare agreement lines sent the reviewer into the
-        # diff to find the pictures. The agreement row carries the clause
-        # text, the reader's placement, and the beat's committed still.
+        # PR #337, measured twice: bare agreement lines sent the reviewer
+        # into the diff for the pictures, and the third read asked what
+        # "Reader placed it at beat 20" was even for. The agreement row is
+        # the clause text and the captioned still — the summary line above
+        # the rows already carries the reader's conclusion.
         self.take()
         body = self.block()
         self.assertIn(f"**AC-1 — {COVERAGE['criteria']['AC-1']}**", body)
-        self.assertIn("Reader placed it at beat 3.", body)
+        self.assertNotIn("placed it at beat 3", body)
         self.assertIn(
             "![AC-1](https://raw.githubusercontent.com/o/r/"
             f"{self.sha}/demos/x/images/03-search.png)",
             body,
         )
+        # The still is labelled with the beat's own storyboard caption,
+        # which is a sentence a reviewer can hold the picture against.
+        self.assertIn(f"*{PR_CAPTIONS[3]}*", body)
         # Not the finding treatment: no header, no quoted reader sentence.
         self.assertNotIn("### AC-1", body)
         self.assertNotIn(READER_WHY["AC-1"], body)
@@ -2203,10 +2249,12 @@ class PrBlock(unittest.TestCase):
         )
         body = self.block()
         summary = body.index("The reader and the storyboard agree on all 4 clauses.")
-        for key, beats in claimed.items():
+        for key in claimed:
             row = body.index(f"**{key} — {COVERAGE['criteria'][key]}**")
             self.assertLess(summary, row, key)
-            self.assertIn(f"Reader placed it at beat {beats[0]}.", body)
+        # The summary line is the blind reader's whole conclusion; no row
+        # repeats it as beat bookkeeping (#337, third read).
+        self.assertNotIn("placed it at beat", body)
         # Beat 3 wrote a committed still, so AC-1's row embeds it.
         self.assertIn(
             "![AC-1](https://raw.githubusercontent.com/o/r/"
@@ -2216,7 +2264,7 @@ class PrBlock(unittest.TestCase):
         # Beat 7 wrote none, so AC-2's row says so instead of borrowing one.
         self.assertIn("No still exists for beat 7.", body)
         # Pictures were embedded, so the honest last line prints here too.
-        self.assertIn("not the frame the reader read", body)
+        self.assertIn("the storyboard's own stills", body)
         self.assertNotIn("need a person to look", body)
         self.assertNotIn("###", body)
 
@@ -2237,17 +2285,17 @@ class PrBlock(unittest.TestCase):
             f"{self.sha}/demos/x/images/09-highlight.png)",
             body,
         )
-        self.assertIn("The still is beat 6's.", body)
+        self.assertIn(f"*{PR_CAPTIONS[6]}*", body)
 
     def test_a_clause_with_two_claimed_stills_shows_both_in_beat_order(self):
         # PR #337, measured in 30 seconds of a reviewer's time: the
         # first-with-a-still rule picked one half of a two-sided clause and
         # withheld the other. AC-3's row shows both stills, beat 6 first,
-        # each followed by its own label line.
+        # each captioned with its own beat's storyboard sentence.
         self.take()
         body = self.block()
-        six = body.index("The still is beat 6's.")
-        nine = body.index("The still is beat 9's.")
+        six = body.index(f"*{PR_CAPTIONS[6]}*")
+        nine = body.index(f"*{PR_CAPTIONS[9]}*")
         url9 = body.index("images/09-highlight.png")
         self.assertLess(six, url9)
         self.assertLess(url9, nine)
@@ -2265,14 +2313,14 @@ class PrBlock(unittest.TestCase):
             },
         )
         body = self.block()
-        six = body.index("The still is beat 6's.")
-        seven = body.index("The still is beat 7's.")
+        six = body.index(f"*{PR_CAPTIONS[6]}*")
+        seven = body.index(f"*{PR_CAPTIONS[7]}*")
         self.assertLess(six, seven)
         self.assertIn("![AC-2](", body)
 
     def test_two_beats_sharing_one_image_embed_it_once(self):
         # Dedup is by image path. Two claimed beats that wrote the same file
-        # show it once, labelled with the first beat in beat order.
+        # show it once, captioned by the first beat in beat order.
         self.take(
             stills={
                 3: "images/03-search.png",
@@ -2282,8 +2330,16 @@ class PrBlock(unittest.TestCase):
         )
         body = self.block()
         self.assertEqual(body.count("images/06-requester.png"), 1, body)
+        self.assertIn(f"*{PR_CAPTIONS[6]}*", body)
+        self.assertNotIn(f"*{PR_CAPTIONS[9]}*", body)
+
+    def test_a_beat_with_no_caption_keeps_the_bookkeeping_line(self):
+        # The fallback: a storyboard that captioned nothing still labels each
+        # still, with the old beat-number line rather than an empty italic.
+        self.take(captions={})
+        body = self.block()
+        self.assertIn("The still is beat 3's.", body)
         self.assertIn("The still is beat 6's.", body)
-        self.assertNotIn("The still is beat 9's.", body)
 
     def test_a_cited_beat_with_no_still_says_so_instead_of_borrowing_one(self):
         # AC-2's reader beat is 7, nothing claims it, and beat 7 wrote no
@@ -2295,11 +2351,17 @@ class PrBlock(unittest.TestCase):
         self.assertNotIn("![AC-2]", body)
 
     def test_the_block_says_the_picture_is_not_the_frame_the_reader_read(self):
-        # The honest line: the embedded picture is the beat's committed still;
-        # the exact frame the reader read lives only in the local, uncommitted
-        # review/frames/.
+        # The honest line, in plain words (#337, third read): the pictures
+        # are the storyboard's committed stills, and what the reader graded
+        # was the video frames, which are not committed. The whole sentence,
+        # because the distinction is the honesty and half of it reads as the
+        # other claim.
         self.take()
-        self.assertIn("not the frame the reader read", self.block())
+        self.assertIn(
+            "These pictures are the storyboard's own stills; the reader "
+            "graded the video frames, which are not committed.",
+            self.block(),
+        )
 
     def test_a_dirty_demo_directory_is_refused(self):
         self.take()
@@ -2323,16 +2385,21 @@ class PrBlock(unittest.TestCase):
 
     def test_no_rendered_sentence_reads_as_a_verdict(self):
         # The same sweep the comment lives under, over the sentences pr-block
-        # writes. The reader's sentence is quoted, not written, and
-        # `READER_WHY["AC-3"]` carries `demonstrated` — so the control below is
-        # what says the subtraction subtracts something real.
+        # writes. Three kinds of quoted prose are subtracted, the same rule
+        # as `_quoted`: the ticket's clauses, the reader's sentences, and the
+        # storyboard's captions. `READER_WHY["AC-3"]` carries `demonstrated`
+        # and `PR_CAPTIONS[6]` carries `met`, so both controls below say the
+        # subtraction subtracts something real.
         self.take()
         body = self.block()
         self.assertIn(READER_WHY["AC-3"], body)
+        self.assertIn(PR_CAPTIONS[6], body)
         swept = body
-        for span in list(COVERAGE["criteria"].values()) + [
-            row["why"] for row in PR_READINGS.values()
-        ]:
+        for span in (
+            list(COVERAGE["criteria"].values())
+            + [row["why"] for row in PR_READINGS.values()]
+            + list(PR_CAPTIONS.values())
+        ):
             swept = swept.replace(span, " ")
         self.assertIn("AC-2", swept)  # control: the block survived the sweep
         hits = _verdict_hits(swept)
@@ -2673,8 +2740,9 @@ INJECTIONS = [
         # alive while it stays silent.
         "the failure lead promotes what the take got through to a verdict",
         "demo-comment",
-        '        f"`with` block at {where}.",',
-        '        f"`with` block at {where}. Everything before it was demonstrated.",',
+        '        f"the part of the ticket it got through, not the whole of it.",',
+        '        f"the part of the ticket it got through, not the whole of it. "\n'
+        '        f"Everything before it was demonstrated.",',
         [
             "Coverage.test_the_same_words_are_refused_on_a_take_that_did_not_finish",
         ],
@@ -2735,9 +2803,31 @@ INJECTIONS = [
     (
         "the comment stops stating the retention",
         "demo-comment",
-        '            f"Kept for **{retention_days} days**, then this link dies. The beat table above "',
-        '            f"Kept for a while{retention_days!r:.0}, then this link dies. The beat table above "',
+        '        f"The link dies after **{retention_days} days**. Re-run the workflow "',
+        '        f"The link dies after a while{retention_days!r:.0}. Re-run the workflow "',
         ["Render.test_the_retention_is_stated_in_the_comment"],
+    ),
+    (
+        # The video link dropped from the section. #337's third read is what
+        # put it there: the video is the reason the comment exists, and it
+        # was buried under the tables that describe it.
+        "the demo section loses its video link",
+        "demo-comment",
+        "    lines += video\n",
+        "",
+        [
+            "Coverage.test_the_video_link_is_met_before_the_clauses",
+            "Render.test_the_artifact_deep_link_is_present_with_its_size",
+        ],
+    ),
+    (
+        # The fold undone: the caption table back in the open, which is the
+        # forty lines the third read of #337 called convoluted.
+        "the caption table renders unfolded",
+        "demo-comment",
+        '            f"<details><summary>Every caption, in order ({len(rows)})</summary>"',
+        '            f"Every caption, in order ({len(rows)}):"',
+        ["Render.test_the_caption_table_is_folded_and_the_captions_still_arrive"],
     ),
     (
         "--demo-root is ignored, so the comment reads the working tree",
@@ -3120,9 +3210,9 @@ INJECTIONS = [
         # can notice — which is the same shape the per-word injections use.
         "the limit sentence promotes the clauses it disclaims",
         "demo-comment",
-        '    "demo, and is still the diff\'s to answer."',
-        "    \"demo, and is still the diff's to answer. "
-        + 'The clauses below were demonstrated."',
+        '    "or a new dependency is invisible to a demo. The diff still answers those."',
+        '    "or a new dependency is invisible to a demo. The diff still answers '
+        + 'those. The clauses below were demonstrated."',
         ["Coverage.test_no_sentence_promotes_a_claim_to_a_verdict"],
     ),
     # -- demo-grade pr-block: the verdict in the pull-request description ---
@@ -3159,12 +3249,55 @@ INJECTIONS = [
         # line.
         "the agreement row loses its still",
         "scripts/demo-grade",
-        "        agreed_lines, embedded = _still_lines(row, stills, url_for)",
+        "        agreed_lines, embedded = _still_lines(row, stills, captions, url_for)",
         "        agreed_lines, embedded = [], False",
         [
             "PrBlock.test_an_agreement_shows_its_clause_and_its_still",
             "PrBlock.test_a_take_where_everything_agrees_leads_with_the_summary",
         ],
+    ),
+    (
+        # #337's third read undone the other way: the agreement row grows the
+        # beat-bookkeeping line back. A beat number is a coordinate only the
+        # recorder can use, and the summary line above the rows already
+        # carries the reader's conclusion.
+        "the agreement row prints the reader's beat again",
+        "scripts/demo-grade",
+        "            f\"**{row.get('criterion')} — {row.get('text')}**\",\n"
+        '            "",\n'
+        "        ]",
+        "            f\"**{row.get('criterion')} — {row.get('text')}**\",\n"
+        '            "",\n'
+        "            f\"Reader placed it at beat {(row.get('reading') or {}).get('beat')}.\",\n"
+        '            "",\n'
+        "        ]",
+        [
+            "PrBlock.test_an_agreement_shows_its_clause_and_its_still",
+            "PrBlock.test_a_take_where_everything_agrees_leads_with_the_summary",
+        ],
+    ),
+    (
+        # The caption lookup dead: every still is labelled with the beat
+        # number a reviewer cannot map to anything, which is the exact
+        # sentence the third read of #337 asked the point of.
+        "every still keeps the beat-number line even where a caption exists",
+        "scripts/demo-grade",
+        "        if caption:",
+        "        if False:",
+        [
+            "PrBlock.test_an_agreement_shows_its_clause_and_its_still",
+            "PrBlock.test_the_picture_is_the_committed_still_raw_at_head",
+            "PrBlock.test_a_clause_with_two_claimed_stills_shows_both_in_beat_order",
+        ],
+    ),
+    (
+        # And the fallback dead: a beat with no caption gets an empty italic
+        # line, which reads as a rendering bug under the one still it labels.
+        "a beat with no caption prints an empty label instead of the honest line",
+        "scripts/demo-grade",
+        "        if caption:",
+        "        if True:",
+        ["PrBlock.test_a_beat_with_no_caption_keeps_the_bookkeeping_line"],
     ),
     (
         # HEAD does not hold what is on disk, and the block quotes it anyway:
@@ -3250,12 +3383,12 @@ INJECTIONS = [
         ["PrBlock.test_no_rendered_sentence_reads_as_a_verdict"],
     ),
     (
-        # The honest line softened: the block then reads as though the picture
-        # is the frame the reader judged, which it never is.
+        # The honest line inverted: the block then says the pictures are the
+        # frames the reader graded, which they never are.
         "the block stops saying the picture is not the reader's frame",
         "scripts/demo-grade",
-        '            "under it, not the frame the reader read. That frame lives in the "',
-        '            "under it. That frame lives in the "',
+        '            "These pictures are the storyboard\'s own stills; "',
+        '            "These pictures are the frames the reader graded; "',
         ["PrBlock.test_the_block_says_the_picture_is_not_the_frame_the_reader_read"],
     ),
 ]

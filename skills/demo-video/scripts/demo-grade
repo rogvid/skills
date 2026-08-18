@@ -1169,6 +1169,24 @@ def beat_stills(timeline: dict) -> dict[int, str]:
     return out
 
 
+def beat_captions(timeline: dict) -> dict[int, str]:
+    """Each beat's storyboard caption, by beat index, from the beat log.
+
+    The caption is the one sentence about a beat written for a viewer rather
+    than for the recorder, so it is what a still is labelled with in the
+    block. A beat index is recorder bookkeeping: the third live read of #337
+    asked what "beat 20" was even for, and there was no answer a reviewer
+    could use.
+    """
+    out: dict[int, str] = {}
+    for beat in timeline.get("beats") or []:
+        index = beat.get("index")
+        caption = beat.get("caption")
+        if isinstance(index, int) and isinstance(caption, str) and caption.strip():
+            out[index] = caption.strip()
+    return out
+
+
 def _take_relative(still: str) -> str | None:
     """`still` as a plain path inside the take, or None.
 
@@ -1232,26 +1250,25 @@ def _placement(row: dict) -> str:
     return f"{placed} {claims}"
 
 
-def _agrees_sentence(row: dict) -> str:
-    reading = row.get("reading") or {}
-    early = (
-        ", before the first claimed beat"
-        if (row.get("agreement") or {}).get("position") == BEFORE_SPAN
-        else ""
-    )
-    return f"Reader placed it at beat {reading.get('beat')}{early}."
-
-
-def _still_lines(row: dict, stills: dict[int, str], url_for) -> tuple[list[str], bool]:
+def _still_lines(
+    row: dict, stills: dict[int, str], captions: dict[int, str], url_for
+) -> tuple[list[str], bool]:
     """The row's picture lines, and whether a picture was embedded.
 
-    Every committed still among the cited beats renders, in beat order,
-    each with its own label line. PR #337 measured the first-match rule:
-    it picked one half of a two-sided clause and withheld the other, and
-    the reviewer said DON'T MERGE to evidence that existed. Dedup is by
-    image path, labelled with the first beat that wrote it. A cited beat
-    that wrote no committed still gets the honest line instead. A
-    plausible picture from another beat is worse evidence than none.
+    Every committed still among the cited beats renders, in beat order.
+    PR #337 measured the first-match rule: it picked one half of a two-sided
+    clause and withheld the other, and the reviewer said DON'T MERGE to
+    evidence that existed. Dedup is by image path, labelled with the first
+    beat that wrote it. A cited beat that wrote no committed still gets the
+    honest line instead. A plausible picture from another beat is worse
+    evidence than none.
+
+    Under each picture goes the beat's own storyboard caption, in italics.
+    #337's third read measured the alternative: "The still is beat 16's."
+    is recorder bookkeeping a reviewer can map to nothing, while the caption
+    is the sentence the viewer heard over that picture, and it says which
+    app state the still shows. A beat with no caption keeps the bookkeeping
+    line — a wrong label is worse than a dull one.
     """
     cited = cited_beats(row)
     if not cited:
@@ -1266,10 +1283,15 @@ def _still_lines(row: dict, stills: dict[int, str], url_for) -> tuple[list[str],
         if still is None or still in shown:
             continue
         shown.add(still)
+        caption = captions.get(beat, "")
+        if caption:
+            label = f"*{caption}*"
+        else:
+            label = f"The still is beat {beat}'s."
         lines += [
             f"![{row.get('criterion')}]({url_for(still)})",
             "",
-            f"The still is beat {beat}'s.",
+            label,
             "",
         ]
     if not lines:
@@ -1282,17 +1304,23 @@ def _row_class(row: dict) -> str:
     return str(agreement.get("class")) if isinstance(agreement, dict) else NO_READING
 
 
-def render_pr_block(doc: dict, stills: dict[int, str], url_for) -> str:
+def render_pr_block(
+    doc: dict, stills: dict[int, str], captions: dict[int, str], url_for
+) -> str:
     """The verdict as markdown for a pull-request description.
 
     Findings and `cannot tell` rows first, each with the clause text, the
     reader's placement, their one sentence, and every cited beat's committed
-    still. Agreements follow with the same clause text and stills, minus the
-    quoted sentence. PR #337 measured the bare-line form on a reviewer, who
-    read the quiet lines and then went digging in the diff for the pictures.
-    When everything agrees, the summary line leads: it is the decision, and
-    the rows below it are the evidence. `url_for(still)` turns a
-    take-relative still path into the URL a picture is embedded at.
+    still. Agreements follow with the clause text and captioned stills and
+    nothing else: the summary line above the rows already carries the blind
+    reader's conclusion, and #337's third read asked what the per-row
+    "Reader placed it at beat 20" was for — beat numbers mean nothing to a
+    reviewer, so the agreement rows no longer print them. PR #337 also
+    measured the bare-line form on a reviewer, who read the quiet lines and
+    then went digging in the diff for the pictures. When everything agrees,
+    the summary line leads: it is the decision, and the rows below it are
+    the evidence. `url_for(still)` turns a take-relative still path into the
+    URL a picture is embedded at.
     """
     rows = [row for row in doc.get("clauses") or [] if isinstance(row, dict)]
     findings = [row for row in rows if _row_class(row) != AGREEMENT]
@@ -1323,24 +1351,21 @@ def render_pr_block(doc: dict, stills: dict[int, str], url_for) -> str:
         why = (row.get("reading") or {}).get("why")
         if isinstance(why, str) and why.strip():
             out += [f"> {why.strip()}", "", "<sub>— the reader.</sub>", ""]
-        finding_lines, embedded = _still_lines(row, stills, url_for)
+        finding_lines, embedded = _still_lines(row, stills, captions, url_for)
         out += finding_lines
         pictured += embedded
     for row in agreed:
         out += [
             f"**{row.get('criterion')} — {row.get('text')}**",
             "",
-            _agrees_sentence(row),
-            "",
         ]
-        agreed_lines, embedded = _still_lines(row, stills, url_for)
+        agreed_lines, embedded = _still_lines(row, stills, captions, url_for)
         out += agreed_lines
         pictured += embedded
     if pictured:
         out += [
-            "Each picture above is the committed still of the beat named "
-            "under it, not the frame the reader read. That frame lives in the "
-            "demo's local `review/frames/`, which is not committed.",
+            "These pictures are the storyboard's own stills; "
+            "the reader graded the video frames, which are not committed.",
         ]
     return "\n".join(out).rstrip() + "\n"
 
@@ -1395,7 +1420,7 @@ def cmd_pr_block(demo: Path) -> int:
             )
         return f"https://raw.githubusercontent.com/{repo}/{sha}/{quote(path)}"
 
-    block = render_pr_block(doc, stills, url_for)
+    block = render_pr_block(doc, stills, beat_captions(timeline), url_for)
     print(block, end="")
     if "raw.githubusercontent.com" in block:
         print(
