@@ -85,7 +85,7 @@ of the working `frames/` sheet under the names the reader used, one sha256
 each. All of it stays local and gitignored, like the brief and the sheet.
 `pr-block` is what carries the result to a reviewer: it reads
 `review/verdict.json` and prints a markdown block for the pull-request
-description, with each finding pointed at a beat's *committed* still — the
+description, with every clause pointed at a beat's *committed* still — the
 `images/*.png` a take already commits — linked raw at the head commit. The
 exact frame the reader read stays in the local `review/frames/`, and the block
 says so. `basis_digest` is how `pr-block` tells a verdict that still describes
@@ -1242,16 +1242,38 @@ def _placement(row: dict) -> str:
     return f"{placed} {claims}"
 
 
-def _agrees_line(row: dict) -> str:
+def _agrees_sentence(row: dict) -> str:
     reading = row.get("reading") or {}
     early = (
         ", before the first claimed beat"
         if (row.get("agreement") or {}).get("position") == BEFORE_SPAN
         else ""
     )
+    return f"Reader placed it at beat {reading.get('beat')}{early}."
+
+
+def _still_lines(row: dict, stills: dict[int, str], url_for) -> tuple[list[str], bool]:
+    """The row's picture lines, and whether a picture was embedded.
+
+    A cited beat that wrote no committed still gets the honest line instead.
+    A plausible picture from another beat is worse evidence than none.
+    """
+    beat, still = cited_beat_still(row, stills)
+    if beat is None:
+        return (
+            ["No beat cites this clause, so there is no still to look at.", ""],
+            False,
+        )
+    if still is None:
+        return [f"No still exists for beat {beat}.", ""], False
     return (
-        f"{row.get('criterion')} — reader placed it at beat "
-        f"{reading.get('beat')}{early} (agrees)."
+        [
+            f"![{row.get('criterion')}]({url_for(still)})",
+            "",
+            f"The still is beat {beat}'s.",
+            "",
+        ],
+        True,
     )
 
 
@@ -1265,19 +1287,30 @@ def render_pr_block(doc: dict, stills: dict[int, str], url_for) -> str:
 
     Findings and `cannot tell` rows first, each with the clause text, the
     reader's placement, their one sentence, and the cited beat's committed
-    still. Agreements collapse to a line each. `url_for(still)` turns a
+    still. Agreements follow with the same clause text and still, minus the
+    quoted sentence. PR #337 measured the bare-line form on a reviewer, who
+    read the quiet lines and then went digging in the diff for the pictures.
+    When everything agrees, the summary line leads: it is the decision, and
+    the rows below it are the evidence. `url_for(still)` turns a
     take-relative still path into the URL a picture is embedded at.
     """
     rows = [row for row in doc.get("clauses") or [] if isinstance(row, dict)]
     findings = [row for row in rows if _row_class(row) != AGREEMENT]
     agreed = [row for row in rows if _row_class(row) == AGREEMENT]
     pictured = 0
+    total = len(rows)
     out = ["## Where a blind reader found each clause", ""]
     if findings:
-        n, total = len(findings), len(rows)
+        n = len(findings)
         out += [
             f"**{n} of {total} clause{'s' if total != 1 else ''} "
             f"need{'s' if n == 1 else ''} a person to look.**",
+            "",
+        ]
+    else:
+        out += [
+            f"The reader and the storyboard agree on all {total} "
+            f"clause{'s' if total != 1 else ''}.",
             "",
         ]
     for row in findings:
@@ -1290,30 +1323,19 @@ def render_pr_block(doc: dict, stills: dict[int, str], url_for) -> str:
         why = (row.get("reading") or {}).get("why")
         if isinstance(why, str) and why.strip():
             out += [f"> {why.strip()}", "", "<sub>— the reader.</sub>", ""]
-        beat, still = cited_beat_still(row, stills)
-        if beat is None:
-            out += ["No beat cites this clause, so there is no still to look at.", ""]
-        elif still is None:
-            out += [f"No still exists for beat {beat}.", ""]
-        else:
-            pictured += 1
-            out += [
-                f"![{row.get('criterion')}]({url_for(still)})",
-                "",
-                f"The still is beat {beat}'s.",
-                "",
-            ]
+        finding_lines, embedded = _still_lines(row, stills, url_for)
+        out += finding_lines
+        pictured += embedded
     for row in agreed:
-        out.append(_agrees_line(row))
-    if agreed:
-        out.append("")
-    if not findings:
-        total = len(rows)
         out += [
-            f"The reader and the storyboard agree on all {total} "
-            f"clause{'s' if total != 1 else ''}.",
+            f"**{row.get('criterion')} — {row.get('text')}**",
+            "",
+            _agrees_sentence(row),
             "",
         ]
+        agreed_lines, embedded = _still_lines(row, stills, url_for)
+        out += agreed_lines
+        pictured += embedded
     if pictured:
         out += [
             "Each picture above is the committed still of the beat named "

@@ -485,8 +485,10 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    the pass. Save the reply verbatim as `reading.json`; `verdict` writes
    `review/verdict.md`, the reading against the `ac=` tags the storyboard author
    typed. The result reaches the pull request in step 8, via `pr-block`:
-   disagreements and every `cannot tell` first, agreements collapsed to a
-   line — the first two classes are what a human is being pulled in for.
+   disagreements and every `cannot tell` first, agreements after them, every
+   clause with its text and its committed still — the first two classes are
+   what a human is being pulled in for, and the agreement rows are what lets
+   them confirm the rest without opening the diff.
 
    The reader is asked for one clause, one frame, and not for a verdict on the
    demo: that aggregate was measured unstable here
