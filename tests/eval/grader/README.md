@@ -1,17 +1,17 @@
 # The grader's eval corpus
 
-Four takes recorded against `examples/ticket-queue`, each clause carrying a
+Five takes recorded against `examples/ticket-queue`, each clause carrying a
 written-down expectation, scored by `tests/eval-grader`.
 
 ```sh
-tests/eval-grader record                  # ~2 min for all four, cached
+tests/eval-grader record                  # ~2.5 min for all five, cached
 tests/eval-grader brief                   # one brief per take
 #   … hand each brief + frames/ to a reader that has seen nothing else …
 tests/eval-grader score --readings DIR    # seconds
 ```
 
 `readings/` holds the answers the published numbers were scored from, so
-`tests/eval-grader score --readings tests/eval/grader/readings/2026-08-14-run-2`
+`tests/eval-grader score --readings tests/eval/grader/readings/2026-08-18-run-3`
 reproduces them without dispatching a reader.
 
 ## Why this exists
@@ -30,9 +30,13 @@ reader's answer — a corpus of such mutations would measure `demo-grade`'s
 arithmetic, which `tests/unit` already covers, while reporting a number about
 the reader.
 
-Every defect here is therefore in the **pixels**.
+Every defect here is therefore in the **pixels** — with one deliberate
+exception. `clause-is-the-misreading` plants its defect in the declared clause
+*text*, which the reader **is** handed: that take exists to show that when the
+clause text itself misreads the ticket, the reader's agreement is correct and
+useless, because nothing compares that text with the ticket's own words.
 
-## The four takes
+## The five takes
 
 | Take | Clauses | Planted | Expected |
 |---|---|---|---|
@@ -40,6 +44,7 @@ Every defect here is therefore in the **pixels**.
 | `clean-search` | AC-1, AC-2 | nothing | both located, both agree |
 | `never-demonstrated` | AC-1, AC-2 | AC-2 claimed, never shown | AC-2 `not seen` → disagreement |
 | `caption-overclaims` | AC-1, AC-3 | AC-3's caption overclaims | AC-3 **missed** |
+| `clause-is-the-misreading` | AC-1, AC-2 | AC-2's clause text misreads the ticket | AC-2 **missed**, structurally |
 
 **Two clean takes, not one.** A single clean take cannot tell a reader that
 reads from a reader that agrees with whatever it is shown. They are
@@ -59,10 +64,10 @@ genuinely narrows; the caption genuinely overclaims.
 > If a run scores that clause as **caught**, that is a finding about the
 > reader. Report it. Do not edit `expected.json` to match the result.
 
-### The corpus's own stated limit: the negative control is not an instance of the blind spot
+### Why there are two expected misses, and why only one of them stays missed
 
-That clause has now been caught **twice**, by independent readers, and the
-expectation has not been edited. Both readings are committed, in
+That clause has now been caught **three times**, by independent readers, and
+the expectation has not been edited. All three readings are committed, in
 [`readings/`](readings/), so that sentence can be checked from a clean checkout
 rather than believed; that directory's README says when each was produced and
 what its reader was given. The finding it produced is about the limit
@@ -85,17 +90,26 @@ the storyboard agrees, and the ticket is still unmet — every input the reader
 has is downstream of the paraphrase. Issue **#276** is what closes it, by
 comparing the declared clause with the ticket's own words.
 
-**So this corpus currently has no expected miss that is an instance of the
-blind spot it claims to hold.** `caption-overclaims` stays an `expected-miss`
-and stays reported as an `UNEXPECTED CATCH`, because the score has to keep
-saying out loud that the negative control does not do its job. Rebuilding it to
-plant a wrong paraphrase the demo faithfully satisfies is #276's work, not this
-corpus's. Until then, read the score as: honest about what the reader catches,
-and untested about what it cannot.
+**`clause-is-the-misreading` is that instance**, and it is the corpus half of
+#276. Its `record.py` docstring and `expected.json` carry the ticket's own
+words — search matches the **requester** — and the storyboard declares a clause
+that says **title** instead. The demo then faithfully shows title matching:
+nothing on screen overclaims, nothing claimed is absent, and the reader's
+agreement is the correct output of a blind read, because the paraphrase is the
+only clause text it is ever handed. The run-3 reading shows exactly that:
+agreement, high confidence, and a `why` sentence that cites the title match as
+the evidence. What would catch it is a quotation check of the declared clause
+against the ticket's own words — the other half of #276, which this take is the
+fixture for.
 
-Two runs on one take is also not a proof that a caption overclaim is *always*
-caught. It is two observations, and the corrected limit in `demo-grade` says so
-in those words.
+`caption-overclaims` stays an `expected-miss` and stays reported as an
+`UNEXPECTED CATCH`, because the score has to keep saying out loud that the
+original negative control does not do its job.
+
+Three runs on one take is also not a proof that a caption overclaim is *always*
+caught. It is three observations; the corrected limit in `demo-grade` counts
+the two it was rewritten from, and calls them a measurement rather than a
+guarantee.
 
 ## What "caught" means
 
@@ -118,14 +132,16 @@ committed for the reason the rest of this section argues the frames are not:
 they are what a claim in a shipped document rests on, they are small, and
 nothing regenerates them.
 
-Also committed, on `caption-overclaims` and `clean-search`: `review/` —
+Also committed, on `caption-overclaims`, `clean-search` and
+`clause-is-the-misreading`: `review/` —
 `verdict.json`, `verdict.md`, and the two or three frames those readings cited,
 which `demo-grade verdict` copies out of the sheet into `review/frames/`. Same
 argument as `readings/`, one step downstream, plus one this corpus does not
 otherwise have a use for: a verdict is a **committed** file precisely so that
 `.github/scripts/demo-comment` can render it into a pull-request comment, and
-these two takes are what that rendering was checked against. Roughly 500 kB for
-both, against the 16 MB `frames/` would cost.
+`caption-overclaims` and `clean-search` are what that rendering was checked
+against. Roughly 700 kB across the three, against the 16 MB `frames/` would
+cost.
 
 Their `basis` digest survives a re-recording, which is the property the
 renderer leans on and is worth stating where somebody will re-record: both
@@ -163,7 +179,7 @@ becomes the thing in dispute, committing `frames/` is the fix.
 Also in `tests/eval-grader`'s docstring, which is where a reader of the score
 will be:
 
-- **Eight clauses — six clean, one planted, one expected miss**, over four
+- **Ten clauses — seven clean, one planted, two expected misses**, over five
   takes. `tests/eval-grader score` prints that shape on the line above its
   table, counted off the corpus, so this sentence has a printed counterpart to
   be checked against rather than being the only place the number lives. Enough

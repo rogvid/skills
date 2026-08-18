@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "With the Open pill now selected, the list has narrowed from seven tickets to four, every remaining row carries an 'open' badge, and the heading count drops to (4).",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": "beat-14.png",
+      "status": "seen",
+      "why": "With the All pill selected the list is back to all seven tickets of mixed statuses, and the highlighted heading 'Support queue (7)' names the queue being listed.",
+      "confidence": "high"
+    }
+  ]
+}

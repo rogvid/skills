@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "readings": [
+    {
+      "criterion": "AC-1",
+      "frame": "beat-04.png",
+      "status": "seen",
+      "why": "With 'invoice' typed in the search box above the queue and no search button anywhere in the UI, the list has narrowed from 7 tickets to just TQ-101, and later frames (beat-08 clearing back to 7, beat-10 'export' narrowing to TQ-102) show the same live narrowing repeat, though no frame captures a partial-keystroke intermediate state.",
+      "confidence": "high"
+    },
+    {
+      "criterion": "AC-2",
+      "frame": "beat-16.png",
+      "status": "seen",
+      "why": "With 'refund' typed the queue count reads (0) and the list area shows the literal line 'No tickets match this filter.' rendered in the page itself rather than a blank queue.",
+      "confidence": "high"
+    }
+  ]
+}
