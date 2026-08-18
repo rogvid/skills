@@ -94,6 +94,29 @@ h1 {
   outline-offset: 1px;
 }
 
+/* The × beside the box is the queue's only clear control. WebKit paints its
+   own inside type=search fields once they hold text, and two clear controls
+   read as two features. */
+.queue-search input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+.clear-search {
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.clear-search:hover {
+  border-color: #cdd2dc;
+}
+
 .status-filter {
   display: flex;
   gap: 6px;

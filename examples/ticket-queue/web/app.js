@@ -9,6 +9,7 @@ const listEl = document.getElementById("ticket-list");
 const headingEl = document.getElementById("queue-heading");
 const filterEl = document.getElementById("status-filter");
 const searchEl = document.getElementById("queue-search");
+const clearEl = document.getElementById("clear-search");
 const detailEl = document.getElementById("detail");
 const liveEl = document.getElementById("live-status");
 const modalEl = document.getElementById("assign-modal");
@@ -109,6 +110,14 @@ filterEl.addEventListener("click", (ev) => {
 // keystroke would replay its aria-live region for a panel that did not change.
 searchEl.addEventListener("input", () => {
   searchTerm = searchEl.value;
+  clearEl.hidden = searchEl.value === "";
+  renderList();
+});
+
+clearEl.addEventListener("click", () => {
+  searchEl.value = "";
+  searchTerm = "";
+  clearEl.hidden = true;
   renderList();
 });
 
