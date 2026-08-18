@@ -1184,15 +1184,10 @@ def _take_relative(still: str) -> str | None:
     return "/".join(parts)
 
 
-def cited_beat_still(
-    row: dict, stills: dict[int, str]
-) -> tuple[int | None, str | None]:
-    """The beat this row's picture is of, and that beat's still, if any.
+def cited_beats(row: dict) -> list[int]:
+    """The beats this row cites: the reader's beat, then the claimed beats.
 
-    The reader's beat first — it is where they say the clause is — then the
-    storyboard's claimed beats, in order. The first cited beat that wrote a
-    still wins. When no cited beat wrote one, the first cited beat comes back
-    with no still, and the row says so instead of borrowing a picture.
+    The reader's beat leads because it is where they say the clause is.
     """
     reading = row.get("reading") or {}
     cited: list[int] = []
@@ -1202,12 +1197,7 @@ def cited_beat_still(
     for beat in board.get("claimed_beats") or []:
         if isinstance(beat, int) and beat not in cited:
             cited.append(beat)
-    if not cited:
-        return None, None
-    for beat in cited:
-        if beat in stills:
-            return beat, stills[beat]
-    return cited[0], None
+    return cited
 
 
 def _beats_phrase(beats: list[int]) -> str:
@@ -1255,26 +1245,36 @@ def _agrees_sentence(row: dict) -> str:
 def _still_lines(row: dict, stills: dict[int, str], url_for) -> tuple[list[str], bool]:
     """The row's picture lines, and whether a picture was embedded.
 
-    A cited beat that wrote no committed still gets the honest line instead.
-    A plausible picture from another beat is worse evidence than none.
+    Every committed still among the cited beats renders, in beat order,
+    each with its own label line. PR #337 measured the first-match rule:
+    it picked one half of a two-sided clause and withheld the other, and
+    the reviewer said DON'T MERGE to evidence that existed. Dedup is by
+    image path, labelled with the first beat that wrote it. A cited beat
+    that wrote no committed still gets the honest line instead. A
+    plausible picture from another beat is worse evidence than none.
     """
-    beat, still = cited_beat_still(row, stills)
-    if beat is None:
+    cited = cited_beats(row)
+    if not cited:
         return (
             ["No beat cites this clause, so there is no still to look at.", ""],
             False,
         )
-    if still is None:
-        return [f"No still exists for beat {beat}.", ""], False
-    return (
-        [
+    lines: list[str] = []
+    shown: set[str] = set()
+    for beat in sorted(set(cited)):
+        still = stills.get(beat)
+        if still is None or still in shown:
+            continue
+        shown.add(still)
+        lines += [
             f"![{row.get('criterion')}]({url_for(still)})",
             "",
             f"The still is beat {beat}'s.",
             "",
-        ],
-        True,
-    )
+        ]
+    if not lines:
+        return [f"No still exists for beat {cited[0]}.", ""], False
+    return lines, True
 
 
 def _row_class(row: dict) -> str:
@@ -1286,8 +1286,8 @@ def render_pr_block(doc: dict, stills: dict[int, str], url_for) -> str:
     """The verdict as markdown for a pull-request description.
 
     Findings and `cannot tell` rows first, each with the clause text, the
-    reader's placement, their one sentence, and the cited beat's committed
-    still. Agreements follow with the same clause text and still, minus the
+    reader's placement, their one sentence, and every cited beat's committed
+    still. Agreements follow with the same clause text and stills, minus the
     quoted sentence. PR #337 measured the bare-line form on a reviewer, who
     read the quiet lines and then went digging in the diff for the pictures.
     When everything agrees, the summary line leads: it is the decision, and
