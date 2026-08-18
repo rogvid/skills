@@ -1,0 +1,221 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Say whether each clause a storyboard quotes still occurs in its ticket.
+
+    demo-ticket-check --demo demos/x --demo-root stage/
+
+Once a take names its ticket and quotes its clauses, the two can drift: the
+issue gets reworded, the storyboard does not, and the demo goes on recording a
+sentence nobody is asking for any more (issue #276). The take itself never
+fetches the ticket — reproducibility is the storyboard's job (#275) — so this
+step, which runs in CI after the recording and outside the take, is the one
+place that may. For each demo it reads `ticket` and `coverage.criteria` out of
+the staged `timeline.json`, fetches the issue body with the token in
+`GH_TOKEN` or `GITHUB_TOKEN`, and writes `<demo>/review/ticket-check.json` —
+a gitignored working file of one review, which `demo-comment` renders.
+
+Three states per clause, never two:
+
+    matched        the declared text occurs verbatim in the issue body
+    not verbatim   it does not
+    not checked    the body was never read — no token, an unrecognised
+                   reference, an unreadable issue — with the reason
+
+**The match rule, exactly** (written into the sidecar as `rule` too): every
+run of whitespace in the clause text and in the issue body is collapsed to
+one space, and the clause must then occur in the body as a **case-sensitive
+substring**. No markdown stripping, no case folding, no fuzzy anything —
+verbatim or nothing. A fuzzy match would produce a number nobody can act on,
+and would invite exactly the "close enough" reading the three states exist to
+prevent.
+
+**Never fatal.** A reworded issue is not a broken demo, and a check that
+reddens because somebody fixed a typo in the ticket teaches people to ignore
+the check. This script exits 0 on every path; what it could not do it reports
+as `not checked`, in the sidecar, with the reason.
+
+Only `owner/repo#N` references are fetched, from the API host every Actions
+step is given (`GITHUB_API_URL`). Anything else — a bare `#129`, a private
+tracker's id, a URL — is `not checked`, which is the correct and complete
+answer for a tracker this repository does not use.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+#: The rule, stated in the sidecar so a reader of the file does not have to
+#: guess which normalisation produced the states in it.
+MATCH_RULE = (
+    "every run of whitespace in the clause text and in the issue body is "
+    "collapsed to one space, then the clause must occur in the body as a "
+    "case-sensitive substring — verbatim or nothing"
+)
+
+#: What the states are and are not evidence of, in the artifact itself rather
+#: than in a comment nobody reads. `demo-comment` prints its own copy of this
+#: limit beside the rendered states; this one is for whoever opens the file.
+LIMIT = (
+    "This grades quotation, not meaning: a storyboard can quote a clause "
+    "word for word and record something else entirely. Nothing here reads "
+    "the frames."
+)
+
+#: `owner/repo#N` — the same shape `demo-comment` links, and the one ticket
+#: spelling that can be turned into an API call without guessing a host.
+_TICKET_REF = re.compile(r"^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#([0-9]+)$")
+
+
+def flat(text: object) -> str:
+    """Every run of whitespace collapsed to one space. Half of MATCH_RULE."""
+    return " ".join(str(text).split())
+
+
+def clause_states(criteria: dict, body: str) -> dict:
+    """matched / not verbatim per clause, by MATCH_RULE and nothing else."""
+    haystack = flat(body)
+    states = {}
+    for key, text in criteria.items():
+        needle = flat(text)
+        # `needle and` is load-bearing: an empty declared text occurs in every
+        # body, and reporting it `matched` would be a state about nothing.
+        state = "matched" if needle and needle in haystack else "not verbatim"
+        states[key] = {"state": state}
+    return states
+
+
+def unchecked(criteria: dict, reason: str) -> tuple[dict, str]:
+    """Every clause `not checked`, with the one reason they share."""
+    return {key: {"state": "not checked"} for key in criteria}, reason
+
+
+def fetch_issue_body(ref: re.Match, token: str) -> str:
+    """The issue's current body, off the API host this runner was given.
+
+    `GITHUB_API_URL` rather than a hardcoded api.github.com, for the same
+    reason `demo-comment` reads `GITHUB_SERVER_URL`: a GitHub Enterprise
+    caller's tickets live on its own host.
+    """
+    api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    request = urllib.request.Request(
+        f"{api}/repos/{ref.group(1)}/issues/{ref.group(2)}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "demo-ticket-check",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        doc = json.load(response)
+    # `body` is null on an issue opened with an empty description; that is a
+    # body containing no clause, not a fetch that failed.
+    return doc.get("body") or ""
+
+
+def check_demo(directory: Path, token: str, fetch, cache: dict) -> dict | None:
+    """One demo's sidecar document, or None when there is nothing to check.
+
+    None only when the take declared no clauses — then there is no text to
+    look for and a sidecar would be a file about nothing. Every other path,
+    including a take that names no ticket at all, produces a document: a
+    reader who finds no states assumes the check came back clean, which is
+    the confidently-wrong artifact this repo does not ship.
+    """
+    timeline = json.loads((directory / "timeline.json").read_text(encoding="utf-8"))
+    coverage = timeline.get("coverage") or {}
+    criteria = coverage.get("criteria")
+    if not isinstance(criteria, dict) or not criteria:
+        print(f"{directory}: no declared clauses, nothing to check")
+        return None
+    ticket = flat(timeline.get("ticket") or "")
+    doc: dict = {"ticket": ticket or None, "rule": MATCH_RULE, "limit": LIMIT}
+    reason = None
+    ref = _TICKET_REF.match(ticket) if ticket else None
+    if not ticket:
+        states, reason = unchecked(
+            criteria, "the take names no ticket, so there is nothing to read"
+        )
+    elif ref is None:
+        # A URL, a bare `#129`, a private tracker's id. Not guessed at: a
+        # fetch against an invented host would grade the clauses against
+        # somebody else's requirement.
+        states, reason = unchecked(
+            criteria,
+            f"{ticket} is not an owner/repo#N reference, the one form this "
+            f"step reads — other trackers stay unchecked by design",
+        )
+    elif not token:
+        states, reason = unchecked(
+            criteria,
+            "no token in GH_TOKEN or GITHUB_TOKEN, so the ticket was never read",
+        )
+    else:
+        try:
+            if ticket not in cache:
+                cache[ticket] = fetch(ref, token)
+            states = clause_states(criteria, cache[ticket])
+        except urllib.error.HTTPError as error:
+            states, reason = unchecked(
+                criteria, f"reading {ticket} answered HTTP {error.code}"
+            )
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            states, reason = unchecked(criteria, f"reading {ticket} raised {error}")
+    doc["clauses"] = states
+    if reason:
+        doc["reason"] = reason
+    return doc
+
+
+def main(argv: list[str] | None = None, fetch=fetch_issue_body) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--demo",
+        action="append",
+        default=[],
+        help="a demo directory holding timeline.json, relative to --demo-root",
+    )
+    ap.add_argument(
+        "--demo-root",
+        default="",
+        help=(
+            "directory the --demo paths are read from — in CI the staging "
+            "area, where the freshness filter has already been applied. The "
+            "sidecar is written beside the timeline it was read from."
+        ),
+    )
+    args = ap.parse_args(argv)
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    cache: dict = {}
+    for raw in args.demo:
+        name = raw.rstrip("/")
+        directory = Path(args.demo_root) / name if args.demo_root else Path(name)
+        try:
+            doc = check_demo(directory, token, fetch, cache)
+        except Exception as error:  # never fatal, by design (#276)
+            print(f"{name}: not checked — {error}", file=sys.stderr)
+            continue
+        if doc is None:
+            continue
+        out = directory / "review" / "ticket-check.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        summary = ", ".join(
+            f"{key} {row['state']}" for key, row in doc["clauses"].items()
+        )
+        print(f"{name}: {summary}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
