@@ -13,14 +13,17 @@
 
 The comment carries two tiers, decided in issue #2:
 
-1. **The beat table, as text.** Every caption in order, read straight out of
-   `timeline.json`. It needs no hosting, never expires, needs no access to the
-   Actions tab, and renders on GitLab and Bitbucket as readily as here. A
-   reviewer who reads twenty lines knows whether they need to watch anything.
+1. **The caption table, as text.** Every caption in order, read straight out
+   of `timeline.json`. It needs no hosting, never expires, needs no access to
+   the Actions tab, and renders on GitLab and Bitbucket as readily as here.
 2. **A deep link to the artifact**, so watching is one click and an unzip.
 
 Tier 1 is what survives artifact retention. Tier 2 is what a reviewer clicks
-today. Neither substitutes for the other.
+today. Neither substitutes for the other. The *order* they render in is the
+third live read of #337: each demo's section opens with its name, one line of
+facts, and the video link, then the ticket's clauses — and the caption table
+and the recorder's diagnostics fold into `<details>` blocks below, present
+but out of the first read.
 
 A take recorded against a ticket carries a third thing above the beat table:
 the ticket's clauses, the ones no beat claimed named first (issue #273), each
@@ -65,10 +68,9 @@ MARKER = "<!-- demo-video-ci: one comment per pull request, rewritten on every p
 #: exempted from that sweep — it is a sentence this script writes, so the sweep
 #: reads it like every other.
 DIFF_LIMIT = (
-    "**Watching this replaces reading the diff for one question only: whether "
-    "the take shows the clauses below.** Anything else the change touches — a "
-    "widened permission, a deleted check, a new dependency — is invisible to a "
-    "demo, and is still the diff's to answer."
+    "**Watching this answers one question: does the take show the clauses "
+    "below?** It answers nothing else. A widened permission, a deleted check "
+    "or a new dependency is invisible to a demo. The diff still answers those."
 )
 
 
@@ -305,7 +307,7 @@ def _failure_lead(failure: dict, criteria: dict, claimed: dict) -> list[str]:
     would say never ran.
     """
     beat = failure.get("beat")
-    where = f"beat {beat} (`{_cell(str(failure.get('verb') or '?'))}`)"
+    where = f"at beat {beat} (`{_cell(str(failure.get('verb') or '?'))}`)"
     if beat is None:
         where = "between beats"
     unreached = [
@@ -316,9 +318,8 @@ def _failure_lead(failure: dict, criteria: dict, claimed: dict) -> list[str]:
         )
     ]
     out = [
-        f"**This take did not finish**, so what is below is the part of the "
-        f"ticket it got through and not the whole of it. It came out of the "
-        f"`with` block at {where}.",
+        f"**This take did not finish.** It died {where}. What is below is "
+        f"the part of the ticket it got through, not the whole of it.",
         "",
     ]
     if unreached:
@@ -326,9 +327,9 @@ def _failure_lead(failure: dict, criteria: dict, claimed: dict) -> list[str]:
         out += [
             f"**{len(unreached)} of the {len(criteria)} clauses "
             f"{_plural(len(unreached), 'has', 'have')} no claim from a beat "
-            f"that returned: {ids}.** Each was either never tagged by this "
-            f"storyboard or sits after the beat the take died on, and this "
-            f"comment cannot tell those apart.",
+            f"that returned: {ids}.** Each was either never tagged or sits "
+            f"after the beat the take died on. This comment cannot tell "
+            f"those apart.",
             "",
         ]
     return out
@@ -422,7 +423,7 @@ def render_coverage(
         gap += [
             f"**{ids} {_plural(len(unillustrated), 'is', 'are')} claimed, but "
             f"no still was published for "
-            f"{_plural(len(unillustrated), 'it', 'them')}, so there is nothing "
+            f"{_plural(len(unillustrated), 'it', 'them')}. There is nothing "
             f"here to open.**",
             "",
         ]
@@ -430,7 +431,7 @@ def render_coverage(
         gap.append(
             f"{total} {_plural(total, 'clause', 'clauses')}. "
             f"{covered} {_plural(covered, 'has', 'have')} a beat that claims "
-            f"{_plural(covered, 'it', 'them')}; whether the frames show what "
+            f"{_plural(covered, 'it', 'them')}. Whether the frames show what "
             f"{_plural(covered, 'it claims', 'they claim')} is the reviewer's "
             f"call. Nothing in this comment graded a claim."
         )
@@ -458,14 +459,13 @@ def render_coverage(
     table.append("")
 
     note = [
-        "<sub>A claim points at a beat, not at a moment to seek to: the "
-        "coverage timestamps are on the recorder's monotonic clock and the "
-        "video is on the host's wall clock, so a seek printed from them would "
-        "be [#229](https://github.com/rogvid/skills/issues/229) in a new "
-        "artifact ([#277](https://github.com/rogvid/skills/issues/277)). A "
-        "picture is the still that beat wrote, linked in this repository at "
-        "the commit this take was recorded from; what it is a picture of is "
-        "the reviewer's call.</sub>",
+        "<sub>A claim names a beat, not a moment to seek to: the coverage "
+        "timestamps and the video run on different clocks, so a printed seek "
+        "would be [#229](https://github.com/rogvid/skills/issues/229) in a "
+        "new artifact ([#277](https://github.com/rogvid/skills/issues/277)). "
+        "A picture is the still that beat wrote, linked at the commit this "
+        "take was recorded from. What it is a picture of is the reviewer's "
+        "call.</sub>",
         "",
     ]
     # The gap first, and the order is the whole point rather than a layout
@@ -514,16 +514,42 @@ def repo_path(prefix: str, name: str) -> str:
     return "/".join(parts)
 
 
+def _video_lines(
+    artifact_url: str | None, artifact_bytes: int | None, retention_days: int
+) -> list[str]:
+    """The link to the recording, or the honest line that there is none.
+
+    Printed inside each demo's section, right under its own line of facts:
+    the video is the reason the comment exists, and the third live read of
+    #337 found it buried under the tables that describe it.
+    """
+    if not artifact_url:
+        return ["_No recording was uploaded._", ""]
+    size = _human_size(artifact_bytes)
+    return [
+        f"**[⬇ Download the recording ({size})]({artifact_url})**. GitHub "
+        f"zips every artifact. Unzip it and play `demo.mp4`.",
+        "",
+        f"The link dies after **{retention_days} days**. Re-run the workflow "
+        f"to get the video back. The captions and the storyboard on this "
+        f"branch are the durable record.",
+        "",
+    ]
+
+
 def render_demo(
     name: str,
     timeline: dict,
     *,
+    video: list[str],
     demo_root: str,
     path_prefix: str,
     repo_url: str | None,
     sha: str | None,
 ) -> str:
-    """One demo's section: the heading, the beat table, and what went wrong."""
+    """One demo's section, in the order a reviewer uses it (#337, third read):
+    the name, one line of facts, the video, the ticket's clauses, and the
+    diagnostics folded under `<details>` below them."""
     beats = timeline.get("beats") or []
     rows = story_beats(beats)
     failure = timeline.get("failure")
@@ -547,10 +573,11 @@ def render_demo(
         meta += f" · **its segments name different tickets**: {_and_list(refs)}"
     lines.append(meta)
     lines.append("")
+    lines += video
 
-    # Above the beat table, because on a take recorded against a ticket it is
-    # the reason somebody opened the comment — and a reviewer who scrolls past
-    # twenty captions first has already formed the impression the coverage
+    # Above the caption table, because on a take recorded against a ticket it
+    # is the reason somebody opened the comment — and a reviewer who scrolls
+    # past twenty captions first has already formed the impression the coverage
     # report exists to test (issue #273, the same ordering `timeline.md` uses).
     lines += render_coverage(
         timeline.get("coverage"),
@@ -564,18 +591,6 @@ def render_demo(
         failure=failure,
     )
 
-    if rows:
-        lines.append("| # | at | Caption |")
-        lines.append("|---:|---:|---|")
-        for i, (t, caption) in enumerate(rows, start=1):
-            lines.append(f"| {i} | {t:.0f}s | {_cell(caption)} |")
-    else:
-        lines.append(
-            "_No captioned beats — this storyboard narrates nothing, "
-            "which makes the recording unreviewable on its own._"
-        )
-    lines.append("")
-
     if failure:
         beat = failure.get("beat")
         where = (
@@ -588,10 +603,34 @@ def render_demo(
         )
         lines.append(">")
         lines.append(
-            "> The beats above are the ones it got through. `failure/` in the artifacts "
-            "below has the last frame, the page text and the failing beat in full."
+            "> The caption table below lists the beats it got through. "
+            "`failure/` in the artifacts has the last frame, the page text "
+            "and the failing beat in full."
         )
         lines.append("")
+
+    # Folded, not dropped: the caption table is the durable record and the
+    # only text that survives artifact retention, but it is not the first
+    # read, and forty lines of it are what the third read of #337 called
+    # convoluted. A take with no captions keeps its warning in the open —
+    # that is a finding, not a record.
+    if rows:
+        lines.append(
+            f"<details><summary>Every caption, in order ({len(rows)})</summary>"
+        )
+        lines.append("")
+        lines.append("| # | at | Caption |")
+        lines.append("|---:|---:|---|")
+        for i, (t, caption) in enumerate(rows, start=1):
+            lines.append(f"| {i} | {t:.0f}s | {_cell(caption)} |")
+        lines.append("")
+        lines.append("</details>")
+    else:
+        lines.append(
+            "_No captioned beats. This storyboard narrates nothing, so the "
+            "recording cannot be reviewed on its own._"
+        )
+    lines.append("")
 
     issues = timeline.get("issues") or []
     count = timeline.get("issue_count", len(issues))
@@ -633,33 +672,22 @@ def render(
         lines.append("No storyboard on this branch needed re-recording.")
         return "\n".join(lines) + "\n"
 
+    # One artifact holds every demo this run recorded, so the same link
+    # renders in each section — under the facts line, where the third read
+    # of #337 went looking for it.
+    video = _video_lines(artifact_url, artifact_bytes, retention_days)
     for name, timeline in demos:
         lines.append(
             render_demo(
                 name,
                 timeline,
+                video=video,
                 demo_root=demo_root,
                 path_prefix=path_prefix,
                 repo_url=repo_url,
                 sha=sha,
             )
         )
-
-    if artifact_url:
-        size = _human_size(artifact_bytes)
-        lines.append(
-            f"**[⬇ Download the recording ({size})]({artifact_url})** — GitHub zips every "
-            f"artifact, so unzip it and play `demo.mp4`."
-        )
-        lines.append("")
-        lines.append(
-            f"Kept for **{retention_days} days**, then this link dies. The beat table above "
-            "and the storyboard on this branch are the durable record; re-run the workflow "
-            "to get the video back."
-        )
-    else:
-        lines.append("_No recording was uploaded._")
-    lines.append("")
 
     if failure_artifact_url:
         lines.append(f"Diagnostics: **[failure dump]({failure_artifact_url})**.")
