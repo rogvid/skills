@@ -2059,6 +2059,10 @@ DOC_SYMBOL_ALLOWED = {
     "random": "the browser's Math.random()",
     "randomUUID": "the browser's crypto.randomUUID()",
     "showModal": "the DOM's <dialog>.showModal()",
+    "wait_for_selector": (
+        "Playwright's page.wait_for_selector — SKILL.md names it to warn "
+        "authors off it and toward rec.wait_for (#344)"
+    ),
     # GitHub Actions vocabulary.
     "pull_request": "a GitHub Actions workflow trigger",
     "pull_request_target": "a GitHub Actions workflow trigger",
@@ -4938,6 +4942,119 @@ class VerbTarget(unittest.TestCase):
         rec.pause(0)
         rec.hold(min_s=0)
         self.assertEqual([b["selector"] for b in rec._beats], [None, None])
+
+
+class EvidencePage(FakePage):
+    """A page just readable enough for `Recorder._capture_page`.
+
+    `FakePage` has no `locator` and no `title`, so evidence capture on it
+    lands in `_capture_evidence`'s error path — a file that says the capture
+    failed. That file would satisfy "an evidence entry exists" while proving
+    nothing about the capture running, so this page answers the three reads
+    `_capture_page` makes and nothing more.
+    """
+
+    ARIA = "- main [ref=unit-act]"
+
+    def locator(self, selector: str):
+        loc = types.SimpleNamespace()
+        loc.aria_snapshot = lambda: self.ARIA
+        loc.first = loc
+        return loc
+
+    def title(self) -> str:
+        return "Order queue"
+
+
+class ActBeat(unittest.TestCase):
+    """`rec.act(label)` stamps one beat around raw `rec.page` work (#344).
+
+    The field failure this guards against: a storyboard drove a filter with
+    `rec.page.select_option(...)`. The server log proved the request fired,
+    and the take's verb census showed zero beats for it — no frame was aimed
+    at the filter, no evidence was written, and the blind reviewer correctly
+    reported the filtering was never exercised. The caption claimed a thing
+    the frames could not show.
+
+    Everything here is read off the beat record — the row that becomes
+    `timeline.json` — which is what the review consumes.
+    """
+
+    LABEL = "apply the machinery filter"
+
+    def test_the_block_is_one_beat_named_act_carrying_the_label(self):
+        rec = recorder(self)
+        with rec.act(self.LABEL):
+            rec.page.evaluate("0")
+        self.assertEqual(
+            [(b["verb"], b["selector"]) for b in rec._beats],
+            [("act", self.LABEL)],
+        )
+
+    def test_the_beat_spans_the_block(self):
+        rec = recorder(self)
+        with rec.act(self.LABEL):
+            # Long enough to survive the record's 3-decimal rounding: an act
+            # that opened its beat after the block, or closed it before, would
+            # collapse this span to zero.
+            time.sleep(0.02)
+            inside = round(time.monotonic() - rec._t0, 3)
+        beat = rec._beats[-1]
+        self.assertLess(beat["t_start"], beat["t_end"])
+        self.assertLessEqual(beat["t_start"], inside)
+        self.assertLessEqual(inside, beat["t_end"])
+
+    def test_the_act_beat_is_captured_for_evidence_like_any_verb(self):
+        # recorder() pins evidence=False for the rest of the suite, so this
+        # one is built by hand with it on. Writing the file is `__exit__`'s
+        # and needs no browser here — what is graded is that the beat carries
+        # the pointer and that the capture really read the page during the
+        # act beat, not that bytes reached disk (that is tests/smoke's).
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with target_env(), contextlib.redirect_stderr(io.StringIO()):
+            rec = WebRec(tmp.name, speech=False, evidence=True)
+        rec.page = EvidencePage()
+        rec._t0 = time.monotonic()
+        with rec.act(self.LABEL):
+            rec.page.evaluate("0")
+        beat = rec._beats[-1]
+        self.assertEqual(beat["evidence"], "evidence/beat-00.json")
+        self.assertEqual(len(rec._evidence), 1)
+        captured, payload = rec._evidence[-1]
+        self.assertIs(captured, beat)
+        self.assertEqual(payload.get("aria"), EvidencePage.ARIA)
+
+    def test_an_empty_label_is_refused_before_any_beat_opens(self):
+        # The whole point of the verb is that the timeline names what
+        # happened, so a label that names nothing is refused — and refused
+        # without a beat, because a beat carrying an empty name is the
+        # invisibility this verb exists to end, now wearing a timestamp.
+        rec = recorder(self)
+        for label in ("", "   "):
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError) as refused:
+                    with rec.act(label):
+                        self.fail("the block ran under a label naming nothing")
+                self.assertIn("label", str(refused.exception))
+        self.assertEqual(rec._beats, [])
+
+    def test_an_exception_in_the_block_still_closes_the_beat_and_propagates(self):
+        rec = recorder(self)
+        with self.assertRaises(RuntimeError):
+            with rec.act(self.LABEL):
+                raise RuntimeError("select_option blew up")
+        beat = rec._beats[-1]
+        self.assertEqual(beat["verb"], "act")
+        self.assertIsNotNone(beat["t_end"], "the beat never closed")
+        self.assertEqual(
+            beat["error"],
+            {"type": "RuntimeError", "message": "select_option blew up"},
+        )
+        # Closed for real, not just stamped: a beat left open would fold the
+        # next verb's beat into this one (`_beat` is re-entrant), so the take
+        # that catches and carries on would misattribute everything after.
+        self.assertFalse(rec._in_beat)
 
 
 # --------------------------------------------------------------------------
@@ -14640,6 +14757,72 @@ INJECTIONS = [
         '    _clear_review(demo, ("brief.md", "brief.json"))',
         "    _clear_review(demo, ())",
         ["VerdictOutput.test_a_refused_brief_leaves_no_brief_from_the_run_before_it"],
+    ),
+    # -- the escape hatch's beat (issue #344) --------------------------------
+    #
+    # `rec.act(label)` exists because bare `rec.page` work is invisible to the
+    # review — the field failure was a `select_option` that fired and never
+    # happened as far as the frames were concerned. Every break below is a way
+    # for `act` to keep that invisibility while looking like it removed it.
+    (
+        # The whole verb hollowed out: the block runs, nothing is recorded.
+        # Exactly the state before #344, behind an API that promises otherwise.
+        "work inside rec.act stamps no beat",
+        "web.py",
+        '        with self._beat("act", selector=label):\n            yield',
+        "        yield",
+        [
+            "ActBeat.test_the_block_is_one_beat_named_act_carrying_the_label",
+            "ActBeat.test_the_beat_spans_the_block",
+            "ActBeat.test_the_act_beat_is_captured_for_evidence_like_any_verb",
+            "ActBeat."
+            "test_an_exception_in_the_block_still_closes_the_beat_and_propagates",
+        ],
+    ),
+    (
+        # The beat exists and the label is gone — `selector: null` on a verb
+        # whose only payload is its name for what happened (#177's artifact,
+        # on the one verb where the target is the whole point).
+        "the act beat forgets its label",
+        "web.py",
+        '        with self._beat("act", selector=label):',
+        '        with self._beat("act", selector=None):',
+        ["ActBeat.test_the_block_is_one_beat_named_act_carrying_the_label"],
+    ),
+    (
+        # A zero-width beat stamped after the block: the census entry, the
+        # label and the evidence capture all exist, and the span covers none
+        # of the work — so the mid-point frame photographs the moment after,
+        # not the action. Only the span test can tell this from the real thing.
+        "the act beat is stamped after the block instead of around it",
+        "web.py",
+        '        with self._beat("act", selector=label):\n            yield',
+        '        yield\n        with self._beat("act", selector=label):\n'
+        "            pass",
+        ["ActBeat.test_the_beat_spans_the_block"],
+    ),
+    (
+        # The guard gone: a beat carrying an empty name is the invisibility
+        # this verb exists to end, wearing a timestamp.
+        "an empty label is accepted and stamps a nameless beat",
+        "web.py",
+        "        if not label or not label.strip():",
+        "        if False:",
+        ["ActBeat.test_an_empty_label_is_refused_before_any_beat_opens"],
+    ),
+    (
+        # The block's exception swallowed: the storyboard reads as having
+        # returned, the take's failure path never runs, and the demo records
+        # over the top of whatever just broke.
+        "an exception inside the block is swallowed instead of propagated",
+        "web.py",
+        '        with self._beat("act", selector=label):\n            yield',
+        "        try:\n"
+        '            with self._beat("act", selector=label):\n'
+        "                yield\n"
+        "        except Exception:\n"
+        "            pass",
+        ["ActBeat.test_an_exception_in_the_block_still_closes_the_beat_and_propagates"],
     ),
 ]
 
