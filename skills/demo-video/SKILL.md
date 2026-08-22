@@ -285,12 +285,10 @@ A demo is watched by a human, and human vision has fixed limits. Pace to
 those limits, not to how fast the machine can drive the app. The defaults
 below are encoded in the recorder; the point is to *not fight them*.
 
-- **A change needs ~1.5 s to register.** After something appears (a spotlight,
-  a new panel), the eye takes a saccade (~200 ms) plus a fixation to notice and
-  recognise it. Anything shown for under a second reads as a flicker — the
-  viewer sees *that* something flashed, not *what*. So emphasis has a floor of
-  ~1.5 s (`hold()`'s `min_s`). A spotlight you clear a moment after setting it
-  is the classic mistake.
+- **A change needs ~1.5 s to register.** Anything shown for under a second
+  reads as a flicker — the viewer sees *that* something flashed, not *what*.
+  So emphasis has a floor of ~1.5 s (`hold()`'s `min_s`). A spotlight you
+  clear a moment after setting it is the classic mistake.
 - **Reading takes time too.** People read burned-in captions at roughly
   3–4 words per second, plus ~0.5 s to start. A caption must stay up long
   enough to read *and* watch at once — with narration off, captions hold for
@@ -312,6 +310,10 @@ below are encoded in the recorder; the point is to *not fight them*.
 - **One salient change at a time.** The eye can track one moving/appearing
   thing. Don't navigate, spotlight, and type in the same instant; sequence
   them, caption first (it tells the eye where to look), then the visual.
+- **Photograph the settled state.** After a multi-step interaction (three
+  checkbox clicks), `pause()` before the caption so the aggregate gets a
+  frame. One run shipped frames reading "1 row selected" beside a toast
+  saying "Excluded 3 rows"; both reviewers flagged the jump.
 
 ## Terminal demos (CLI / TUI)
 
@@ -366,17 +368,22 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    parts are.** Prefer flows the app completes on its own in seconds. Seed
    needed state *before* recording starts. The recorder pins the browser's
    timezone and locale for you, and will freeze its clock if you ask
-   ([reference/determinism.md](reference/determinism.md) — read it before you
-   do); the app's own randomness and its server data are yours to
-   pin down. If the story includes minutes
-   of real background work, don't record the wait — record **segments**:
-   `Recorder(out_dir, segment="part1")`, poll between segments until the
-   work is done, open the next segment with `rec.interlude("…a few minutes
-   later…")` on `about:blank` before navigating, and
-   `from demo_recording import stitch` to concatenate them into demo.mp4. A
-   **terminal** segment takes its opening card as
+   ([reference/determinism.md](reference/determinism.md) — read it first);
+   the app's own randomness and its server data are yours to pin down. If
+   the story includes minutes of real background work, don't record the
+   wait — record **segments**: `Recorder(out_dir, segment="part1")`, poll
+   between segments until the work is done, open the next segment with
+   `rec.interlude("…a few minutes later…")` on `about:blank` before
+   navigating, and `from demo_recording import stitch` to concatenate them
+   into demo.mp4. A **terminal** segment takes its opening card as
    `TerminalRecorder(interlude="…")` instead — see
    [reference/terminal.md](reference/terminal.md).
+
+   **1.5. Smoke each state transition the storyboard will wait on** —
+   outside the browser (`curl` the API path), before writing any beat. In
+   the run that earned this step, the check would have surfaced a real app
+   bug in 20 seconds; instead it surfaced as a 25 s Playwright timeout four
+   minutes into a take.
 2. **Write `record.py`** in the demo folder as a short storyboard. Capture
    a still (`rec.shot("NN-name")`) at each moment a written guide would
    narrate. Make retakes idempotent — clean up state earlier takes created,
@@ -396,7 +403,13 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    after, in both cases. Rules (each earned in a fresh-eyes review round):
    - A caption may only claim what is visible in the frame. Don't promise
      an action the demo never performs — scope the words to what's shown,
-     or show it.
+     or show it. The prohibition alone does not hold — captions get written
+     from what the author knows, not from what the frame shows, and it
+     failed twice in one storyboard that way — so audit: before step 6,
+     re-read every caption against its own still from a dry take.
+   - When the beat is an absence, caption only the absence ("no flag
+     appears") — let a later positive case supply the threshold and the
+     arithmetic. Numbers on a negative beat rest on a claim, not a frame.
    - Don't hardcode values the app computes (percentages, counts) — they
      change between takes.
    - Text you put on screen must match the UI's own wording verbatim, or
@@ -554,9 +567,10 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
   on *which* internal path produced the result — wait on stable outcomes:
   the row exists, the link appears, "done".
 - **Recording against a cold page.** `goto` waits for networkidle (and
-  gives up after 10 s on apps that poll), so `wait_for` a concrete
-  element and `pause` before the first shot, or the video opens on a
-  loading flash.
+  gives up after 10 s on apps that poll), so `wait_for` the *content*
+  element, not the page chrome — `wait_for("h1")` passes while the data is
+  still on its way — and hold the opening longer than feels necessary, or
+  the video opens on a featureless loading flash.
 - **The caption bar covers the bottom third.** Scroll the element being
   narrated to the *center* of the viewport (`scroll_to` does this) and
   never narrate something sitting at the bottom edge.
@@ -566,28 +580,33 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 - **Layout shifts strand the cursor.** Elements the app inserts mid-recording
   move, the cursor does not — re-`move_to` after any wait that can reflow.
   The dot stays undrawn until the pointer first moves, and after each `goto()`.
+- **A blind click to dismiss an overlay.** A `mouse.click(400, 400)` landed
+  on a file row, opened a dialog, and its backdrop swallowed every later
+  click — dead take. Dismiss via a named neutral element, never coordinates.
+- **Positional selectors.** Demos sort and filter constantly.
+  `input[aria-label='Select row 5']` keeps selecting the same data row
+  after a sort; anything nth-child-based silently ticks whatever moved
+  into that position, and the demo lies.
 - **Recording real data and planning to blur it later.** There is no later,
   and there is no blur: the frame is captured the moment it paints, nothing
   here hides anything, and a published video leaks forever. Decide what must
   not appear *before* the first `goto()` — see the top of this file.
 - **Reading the beat table as proof the demo showed something.** It is proof
   the storyboard *ran*. A card left up, a modal that never closed or an app
-  that stopped painting produces a complete, correct, entirely successful
-  timeline over a recording nobody can watch. Check `content` in the same file
-  — that is the field that describes the frames
-  ([reference/timeline.md](reference/timeline.md)).
+  that stopped painting produces a complete, successful timeline over a
+  recording nobody can watch. Check `content` in the same file — the field
+  that describes the frames ([reference/timeline.md](reference/timeline.md)).
 - **Reading `content.score` or `content.static_for` as "the app was visible".**
-  Neither is a verdict. The score is luma variance over the app rect, so a
-  translucent overlay left over the app *raises* it, and a healthy demo
-  narrating one screen holds as still as a covering card does — both measured,
-  both in [reference/limits.md](reference/limits.md). `warnings` is the field
-  that answers the question: an interlude *this recorder* raised and you did
-  not clear is named there by element id, an app's own modal by nothing.
-- **Embedding video in markdown.** Repo-relative mp4s don't play inline in
-  rendered markdown, and `demo.mp4` isn't committed anyway — open the guide
-  with a still and point at the re-record command instead. GitHub plays only
-  video it hosts itself, so an mp4 linked from anywhere else renders as a
-  bare link, not a player.
+  Neither is a verdict: a translucent overlay left over the app *raises* the
+  score, and a healthy demo narrating one screen holds as still as a covering
+  card does — both measured, in [reference/limits.md](reference/limits.md).
+  `warnings` is the field that answers the question: an interlude *this
+  recorder* raised and you did not clear is named there by element id, an
+  app's own modal by nothing.
+- **Embedding video in markdown.** GitHub plays only video it hosts itself,
+  and `demo.mp4` isn't committed anyway — an mp4 linked from the repo or
+  anywhere else renders as a bare link, not a player. Open the guide with a
+  still and point at the re-record command instead.
 
 ## Sharing this skill
 
