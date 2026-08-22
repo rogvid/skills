@@ -12988,8 +12988,8 @@ INJECTIONS = [
         # seven sites `SkillDocs`'s link check structurally cannot see.
         "a shipped document names a reference file that is not there",
         "README.md",
-        "than exactly — `reference/review.md` says how far and why.",
-        "than exactly — `reference/reviews.md` says how far and why.",
+        "exactly — `reference/review.md` says how far and why.",
+        "exactly — `reference/reviews.md` says how far and why.",
         ["DocPointers.test_every_reference_document_the_skill_names_exists"],
     ),
     (
