@@ -67,7 +67,8 @@ and not the product.
   Arbitrating a value across screenshots, or comparing two hex codes by eye, is
   the harness's job, and a human doing it is a bug in the harness. **Asking one
   whether the result reads right is not that.** The harness answers what the
-  value *is*; only a person answers whether it *works* — #291 was a card the
+  value *is* (`tests/pixel`, for the recorder's chrome, warm in seconds); only
+  a person answers whether it *works* — #291 was a card the
   harness measured correctly, 1.3 luma levels of separation with every
   assertion green, that a viewer watching read as a terminal window
   (`skills/demo-video/reference/review.md`). Do not route that question away

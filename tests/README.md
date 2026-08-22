@@ -101,6 +101,12 @@ caption timing are time-measuring and belong to smoke's lock; whether a
 viewer *recognises* the card as a card is graded nowhere (Known gaps); and
 `frames.md` ordering is manifest arithmetic, owned by
 [#300](https://github.com/rogvid/skills/issues/300).
+The contract: a change to anything that draws a frame - the chrome in
+`skills/demo-video/helpers/demo_recording/` - runs this loop before its PR
+opens and pastes its lines and `--dump` frames there (`AGENTS.md`, "A change
+to a rendered frame runs `tests/pixel` first"). And it never replaces `smoke`
+as the gate: CI merges on `smoke`'s verdict, and the time-measuring bars stay
+under `smoke`'s lock.
 Its cache arithmetic - digest, staleness, marker - is graded browser-free in
 `unit` (`PixelCache`), and the checks' pure arithmetic - the opening
 classifier, the card-stretch locator, the accent predicate and centroid, the
