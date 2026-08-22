@@ -22,7 +22,7 @@ app itself and writes what it saw into `timeline.json` as `issues`:
 | `request_failed` | a request that never got a response | no |
 | `http_error` | a response with status ≥ 400 (3xx redirects are normal) | no |
 | `nonzero_exit` | a `TerminalRecorder` `run()` whose command failed | yes |
-| `caption_lost` | a page load took the caption bar off the screen; the beat log clears with it and the issue names the line and the new URL | no |
+| `caption_lost` | a page load took the caption bar off the screen; the beat log clears with it and the issue names the line and the new URL. Composite takes only: a wrapper take's caption lives in the recorder's own document, which no app navigation can destroy, so this can never fire there — the recorder does not even subscribe the signal (#360) | no |
 
 Each issue is **attributed to the beat that was running when it fired** —
 `beat` (an index into `beats`), plus the beat's `verb` and `caption` copied

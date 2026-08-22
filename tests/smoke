@@ -127,6 +127,7 @@ _HERE = str(Path(__file__).resolve().parent)
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from _pixels import (  # noqa: E402
+    FRAME_BAND,
     Rect,
     caption_band,
     card_strip,
@@ -9336,19 +9337,30 @@ def run_strict_terminal(out_root: Path) -> list[str]:
     return check_strict_failure("terminal-strict", out_dir, raised, ["nonzero_exit"])
 
 
-# -- the wrapper take (issue #358) --------------------------------------------
+# -- the wrapper take (issues #358, #360) --------------------------------------
 #
 # The opt-in wrapper path: chrome in the recorded page, the app in an iframe
 # at true pixel size, the caption in a reserved band BELOW the app rect. Two
-# takes: one healthy — every locator verb driven through the frame, the band
-# graded out of the pixels — and one against a fixture served with
-# X-Frame-Options: DENY, which the recorder must refuse by name rather than
-# record as a silently blank window.
+# takes: one healthy — every locator verb driven through the frame, the band,
+# the opening hold, the criterion card and a caption surviving a real
+# mid-take goto all graded out of the pixels — and one against a fixture
+# served with X-Frame-Options: DENY, which the recorder must refuse by name
+# rather than record as a silently blank window.
 
 # The line the wrapper take captions with, and the line the refusal take must
 # never reach.
 WRAPPER_CAPTION = "The caption sits in its own band below the app."
 WRAPPER_UNREACHED = "this caption must never be recorded"
+
+# The clause the wrapper take's criterion card shows (#360): declared as the
+# take's one acceptance criterion and put on screen by `rec.criterion`.
+WRAPPER_CLAUSE = "The caption band survives a full page navigation."
+
+# The line that has to outlive a document (#360): captioned, then the app
+# frame is sent to a second fixture page, and the band must still be lit
+# after the load — the wrapper document holds the caption and never
+# navigates, so the #134 caption_lost class cannot exist here.
+WRAPPER_SURVIVES = "This line must outlive the document below it."
 
 # A caption the band cannot hold: 174 characters, three rendered lines
 # against the band's two. The wrapper take says it with a caption_clipped
@@ -9380,6 +9392,50 @@ WRAPPER_APP_MAX_DELTA = 3.0
 # the two instants.
 WRAPPER_APP_CONTROL_S = 0.3
 WRAPPER_APP_SAMPLE_S = 0.5
+
+# The opening hold's bars (#360), the terminal opening card's discipline over
+# the wrapper's own strip: the hold is the window body (`#181825`, ~24 mean
+# luma as encoded) and the bare fixture app's top band is near-white (~226).
+# The deliberately empty stretch between them is a frame that is neither —
+# the slot's white canvas showing before the app painted would read ~255,
+# and a mid-fade frame lands between.
+WRAPPER_HOLD_MAX_LUMA = 60.0
+WRAPPER_BARE_MIN_LUMA = 150.0
+# How much of the take is decoded for its first frame: read with `-t` and no
+# `fps` filter, so what comes back is frame zero exactly (the filter answers
+# with whichever frame lands nearest its first slot's middle — the defect
+# content.py's `_content_frames` docstring records).
+WRAPPER_FIRST_FRAME_S = 0.05
+
+# The card-vs-window bar (#360): on the wrapper path the criterion card and
+# the window body declare ONE colour and ride ONE encoder, so as encoded
+# they sit within this, worst channel — measured 1.0 on a healthy take.
+# There is no compensated pair here to compare declarations of, and the
+# check deliberately reads pixels rather than declarations either way
+# (#297's two recorded anti-patterns).
+WRAPPER_CARD_WINDOW_TOLERANCE = 2.0
+# Where inside the criterion beat the card is sampled, and how far past its
+# end the no-card control is read. Fractions well inside the beat because
+# the beat log's clock and the video's sit ~130 ms apart (#245); the control
+# lands in the storyboard's deliberate pause after `interlude("")`.
+WRAPPER_CARD_FRACTIONS = (0.3, 0.6)
+WRAPPER_CARD_CONTROL_AFTER_S = 1.2
+# Under this separation between the no-card control and the window body, the
+# app cannot be told from the card and the readings above prove nothing.
+WRAPPER_CARD_CONTROL_MIN_GAP = 12.0
+
+# The second fixture page's band in the app rect (#360): `second.html` is a
+# deliberate mid-luma page (~100 as encoded) so the mid-take goto is located
+# in the pixels — nothing like the dashboard (~226), the window body (~24)
+# or the slot's white canvas (255). A frame counts only as part of a run
+# (WRAPPER_SECOND_MIN_FRAMES at WRAPPER_BAND_SWEEP_FPS), because a fade
+# passes through any single band.
+WRAPPER_SECOND_MIN_LUMA = 75.0
+WRAPPER_SECOND_MAX_LUMA = 140.0
+WRAPPER_SECOND_MIN_FRAMES = 4
+# Instants after the second document's arrival at which the caption band
+# must still be lit — the pixel form of "the caption survived the load".
+WRAPPER_SURVIVES_SAMPLES_S = (0.2, 0.5, 0.8)
 
 
 @contextmanager
@@ -9461,9 +9517,15 @@ def record_wrapper(out_dir: Path, base_url: str) -> dict:
         strict=True,
         deterministic=True,
         wrapper=True,
+        criteria={"AC-1": WRAPPER_CLAUSE},
     ) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
+        # Distance between the opening hold's reveal (the end of the goto,
+        # #360) and the first caption: check_wrapper_band reads an app-rect
+        # control frame 0.3s before the band lights, and that frame must
+        # show the settled app, not the tail of the reveal.
+        rec.pause(1.0)
         rec.caption(WRAPPER_CAPTION)
         rec.spotlight("#kpi-rev")
         rec.hold()
@@ -9489,6 +9551,21 @@ def record_wrapper(out_dir: Path, base_url: str) -> dict:
         # (check_wrapper_clipped), and the band must still end dark for the
         # band sweep's last-frame claim.
         rec.caption(WRAPPER_LONG_CAPTION)
+        rec.caption("")
+        # The criterion card (#360): over the app rect only, the window
+        # frame and the caption band still on screen while it is up, the
+        # card and the window one declared colour on one encoder
+        # (check_wrapper_card). The pause after the clear is the check's
+        # no-card control window.
+        rec.criterion("AC-1")
+        rec.interlude("")
+        rec.pause(1.5)
+        # The caption survives a real mid-take goto (#360): the wrapper
+        # document holds the line and outlives the app document
+        # (check_wrapper_caption_survives).
+        rec.caption(WRAPPER_SURVIVES)
+        rec.goto("/second.html")
+        rec.pause(1.0)
         rec.caption("")
         rec.pause(0.6)
         geom = dict(rec._geom)
@@ -9604,6 +9681,276 @@ def longest_true_run(flags: list[bool]) -> tuple[int, int] | None:
                 best = (start, i - start)
             start = None
     return best
+
+
+def wrapper_pad_band(geom: dict) -> Rect:
+    """The strip of flat window body a wrapper card is compared against.
+
+    The window's **bottom pad** — between the caption band's end and the
+    window's bottom edge — because it is the one stretch of bare window body
+    a wrapper frame always shows: the pad `frame_band` reads on a composite
+    take is the caption band here, which carries a bubble whenever a line is
+    up. Inset from the pad's own edges for `frame_band`'s reasons — the
+    outermost rows blend into the drop shadow and the band above.
+    """
+    pad_top = geom["bandy"] + geom["bandh"]
+    pad_bottom = geom["winy"] + geom["winh"]
+    fx, fw = FRAME_BAND
+    return (
+        geom["bandx"] + int(geom["bandw"] * fx),
+        pad_top + 2,
+        max(8, int(geom["bandw"] * fw)),
+        max(2, pad_bottom - pad_top - 4),
+    )
+
+
+def check_wrapper_opening(out_dir: Path, info: dict) -> list[str]:
+    """The wrapper take's first frame is the opening hold (#360).
+
+    The wrapper path has no exit-time composite, so the legacy ffmpeg
+    `enable='lt(t,held)'` overlay cannot cover a blank opening — the hold is
+    in the page instead, opaque from frame 0 (chrome.OPENING_HOLD_JS), and
+    this reads it the way `check_opening_card` reads the terminal's: a strip
+    of the frame, frame zero **exactly** (`-t`, no fps filter — the filter
+    hands back a frame from mid-slot, the defect content.py records), bars
+    an order of magnitude apart.
+
+    The strip is inside the app rect, where the hold is told apart from the
+    slot's white canvas (~255) and from the bare app (~226) by the window
+    body's ~24. Two claims: frame zero reads the hold, and the strip later
+    reads the bare app — without the second, a hold never cleared (the #91
+    shape) satisfies the first forever.
+    """
+    mp4 = out_dir / "demo.mp4"
+    geom = info["geom"]
+    app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+    strip = card_strip(app)
+    failures: list[str] = []
+    first = gray_frames(mp4, rect=strip, duration=WRAPPER_FIRST_FRAME_S)
+    if not first:
+        return [
+            f"wrapper-opening: nothing decoded from the first "
+            f"{WRAPPER_FIRST_FRAME_S}s of demo.mp4 over {strip}, so what the "
+            f"take opened on cannot be read"
+        ]
+    luma0 = sum(first[0]) / len(first[0])
+    if luma0 > WRAPPER_HOLD_MAX_LUMA:
+        failures.append(
+            f"wrapper-opening: the wrapper take's first frame reads {luma0:.1f} "
+            f"mean luma over {strip}, over the {WRAPPER_HOLD_MAX_LUMA} bar for "
+            f"the opening hold — the card layer was not opaque in frame 0, so "
+            f"the take opens on the slot's canvas or the loading app instead "
+            f"of the hold (#360)"
+        )
+    sweep = gray_frames(mp4, rect=strip, sample_fps=WRAPPER_BAND_SWEEP_FPS)
+    bare = [
+        i
+        for i, frame in enumerate(sweep)
+        if sum(frame) / len(frame) >= WRAPPER_BARE_MIN_LUMA
+    ]
+    if not bare:
+        failures.append(
+            f"wrapper-opening: no frame of {len(sweep)} at "
+            f"{WRAPPER_BAND_SWEEP_FPS} fps ever reads {WRAPPER_BARE_MIN_LUMA} "
+            f"mean luma over {strip} — the hold (or a card) covers the app "
+            f"for the whole take, so the first-frame reading above would be "
+            f"satisfied by a recorder that painted a rectangle and stopped"
+        )
+    if not failures:
+        print(
+            f"wrapper-opening: frame 0 reads {luma0:.1f} over {strip} (hold "
+            f"<= {WRAPPER_HOLD_MAX_LUMA}), and the app shows from "
+            f"{bare[0] / WRAPPER_BAND_SWEEP_FPS:.1f}s (bare >= "
+            f"{WRAPPER_BARE_MIN_LUMA})"
+        )
+    return failures
+
+
+def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
+    """The wrapper card is the window's colour on screen, uncompensated (#360).
+
+    `check_criterion_card`'s question asked of the single-encoder path: the
+    card and the window body declare **one** colour (`core.WEB_WINDOW_BODY`)
+    and reach demo.mp4 through one encoder, so as encoded they must sit
+    within WRAPPER_CARD_WINDOW_TOLERANCE, worst channel. Read out of the
+    pixels on both sides — #297 recorded both declaration-shaped
+    alternatives (pinned equal, pinned apart) as anti-patterns, and neither
+    is asserted here or anywhere.
+
+    The premise the readings need: after the card is down, the strip must
+    read as something *other* than the window body, or an app the colour of
+    the card would pass with no card in the recording at all.
+    """
+    mp4 = out_dir / "demo.mp4"
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    cards = [b for b in doc.get("beats") or [] if b.get("verb") == "criterion"]
+    if len(cards) != 1:
+        return [
+            f"wrapper-card: the take logged {len(cards)} criterion beats, "
+            f"expected 1 — there is no card span to read"
+        ]
+    start, end = float(cards[0]["t_start"]), float(cards[0]["t_end"])
+    geom = info["geom"]
+    app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+    strip = card_strip(app)
+    pad = wrapper_pad_band(geom)
+
+    control_at = end + WRAPPER_CARD_CONTROL_AFTER_S
+    control = strip_rgb(mp4, control_at, strip)
+    control_pad = strip_rgb(mp4, control_at, pad)
+    if control is None or control_pad is None:
+        return [
+            f"wrapper-card: demo.mp4 decodes no frame at {control_at:.2f}s, "
+            f"so there is no no-card control to compare with"
+        ]
+    control_gap = channels_apart(control, control_pad)
+    if control_gap <= WRAPPER_CARD_CONTROL_MIN_GAP:
+        return [
+            f"wrapper-card: with the card down since {end:.2f}s the strip "
+            f"{strip} reads {tuple(round(v) for v in control)} at "
+            f"{control_at:.2f}s, only {control_gap:.0f} levels off the window "
+            f"body {tuple(round(v) for v in control_pad)} (premise bar "
+            f"{WRAPPER_CARD_CONTROL_MIN_GAP}) — either the app cannot be told "
+            f"from the card, or the card was never taken down"
+        ]
+
+    failures: list[str] = []
+    gaps: list[float] = []
+    for fraction in WRAPPER_CARD_FRACTIONS:
+        at = start + (end - start) * fraction
+        card = strip_rgb(mp4, at, strip)
+        body = strip_rgb(mp4, at, pad)
+        if card is None or body is None:
+            failures.append(
+                f"wrapper-card: demo.mp4 decodes no frame at {at:.2f}s over "
+                f"{strip} or {pad}"
+            )
+            continue
+        gap = channels_apart(card, body)
+        gaps.append(gap)
+        if gap > WRAPPER_CARD_WINDOW_TOLERANCE:
+            failures.append(
+                f"wrapper-card: {(fraction * 100):.0f}% through the criterion "
+                f"beat the card reads {tuple(round(v) for v in card)} over "
+                f"{strip} and the window body "
+                f"{tuple(round(v) for v in body)} over {pad}, {gap:.1f} levels "
+                f"apart, worst channel (bar {WRAPPER_CARD_WINDOW_TOLERANCE}). "
+                f"On the wrapper path the two declare one colour and ride one "
+                f"encoder (#360), so this gap means the card's field was "
+                f"repainted away from core.WEB_WINDOW_BODY — the #291 mismatch "
+                f"a human once had to spot by eye"
+            )
+    if not failures:
+        print(
+            f"wrapper-card: card and window body sit {max(gaps):.1f} apart, "
+            f"worst channel over {len(gaps)} samples (bar "
+            f"{WRAPPER_CARD_WINDOW_TOLERANCE}); the no-card control reads "
+            f"{control_gap:.0f} off the body (premise bar "
+            f"{WRAPPER_CARD_CONTROL_MIN_GAP}) — one declared colour, one "
+            f"encoder, uncompensated"
+        )
+    return failures
+
+
+def check_wrapper_caption_survives(out_dir: Path, info: dict) -> list[str]:
+    """The caption outlives the app's document, in the pixels (#360).
+
+    The wrapper document holds the caption and never navigates, so a
+    mid-take `goto()` — a full document replacement in the app iframe —
+    cannot take the line off the screen, which is where the #134
+    `caption_lost` class ends. Graded from the frames: the second document's
+    arrival is located by its own luma band in the app rect (a run, not a
+    single frame — any fade passes through any band), and the caption band
+    must be lit before it and stay lit after it. The beat log must agree:
+    no `caption_lost` issue anywhere (the wrapper recorder does not even
+    listen for it), and the goto's own beat still reporting the line.
+    """
+    mp4 = out_dir / "demo.mp4"
+    geom = info["geom"]
+    app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+    band: Rect = (geom["bandx"], geom["bandy"], geom["bandw"], geom["bandh"])
+    sweep = gray_frames(mp4, rect=app, sample_fps=WRAPPER_BAND_SWEEP_FPS)
+    means = [sum(f) / len(f) for f in sweep]
+    in_band = [
+        WRAPPER_SECOND_MIN_LUMA <= value <= WRAPPER_SECOND_MAX_LUMA for value in means
+    ]
+    arrival: int | None = None
+    for i in range(len(in_band) - WRAPPER_SECOND_MIN_FRAMES + 1):
+        if all(in_band[i : i + WRAPPER_SECOND_MIN_FRAMES]):
+            arrival = i
+            break
+    failures: list[str] = []
+    if arrival is None:
+        return [
+            f"wrapper-survives: no {WRAPPER_SECOND_MIN_FRAMES}-frame run of "
+            f"the app rect ever reads inside {WRAPPER_SECOND_MIN_LUMA}.."
+            f"{WRAPPER_SECOND_MAX_LUMA} mean luma — second.html never arrived "
+            f"on screen, so nothing survived anything"
+        ]
+    arrived_s = arrival / WRAPPER_BAND_SWEEP_FPS
+    before = gray_frames(
+        mp4,
+        rect=band,
+        start=max(0.0, arrived_s - WRAPPER_APP_CONTROL_S),
+        duration=0.05,
+    )
+    if not before or contrast(before[0]) < WRAPPER_BAND_LIT:
+        failures.append(
+            f"wrapper-survives: the caption band was not lit just before the "
+            f"second document arrived at {arrived_s:.1f}s (contrast "
+            f"{contrast(before[0]) if before else 'unreadable'} vs bar "
+            f"{WRAPPER_BAND_LIT}) — with no line up across the load, nothing "
+            f"here can claim one survived it"
+        )
+    for offset in WRAPPER_SURVIVES_SAMPLES_S:
+        at = arrived_s + offset
+        frames = gray_frames(mp4, rect=band, start=at, duration=0.05)
+        if not frames:
+            failures.append(
+                f"wrapper-survives: the band {band} decoded no frame at {at:.2f}s"
+            )
+            continue
+        lit = contrast(frames[0])
+        if lit < WRAPPER_BAND_LIT:
+            failures.append(
+                f"wrapper-survives: {offset:.1f}s after the second document "
+                f"arrived the caption band reads {lit:.1f} contrast, under "
+                f"the {WRAPPER_BAND_LIT} lit bar — the caption band went dark "
+                f"across the load, which is the #134 loss the wrapper "
+                f"document exists to end (#360)"
+            )
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    lost = [
+        issue
+        for issue in doc.get("issues") or []
+        if issue.get("kind") == "caption_lost"
+    ]
+    if lost:
+        failures.append(
+            f"wrapper-survives: the take recorded {len(lost)} caption_lost "
+            f"issue(s) — on the wrapper path the caption cannot be destroyed "
+            f"by navigation, so this record claims a loss that cannot happen"
+        )
+    gotos = [b for b in doc.get("beats") or [] if b.get("verb") == "goto"]
+    second = [b for b in gotos if "second.html" in str(b.get("selector"))]
+    if len(second) != 1:
+        failures.append(
+            f"wrapper-survives: {len(second)} goto beats name second.html, "
+            f"expected 1 — the beat-log half of the claim has no beat to read"
+        )
+    elif second[0].get("caption") != WRAPPER_SURVIVES:
+        failures.append(
+            f"wrapper-survives: the goto beat to second.html reports caption "
+            f"{second[0].get('caption')!r}, not {WRAPPER_SURVIVES!r} — the "
+            f"beat log dropped a line that is still on screen"
+        )
+    if not failures:
+        print(
+            f"wrapper-survives: second.html arrives at {arrived_s:.1f}s, band "
+            f"lit before and at +{WRAPPER_SURVIVES_SAMPLES_S}s after; no "
+            f"caption_lost recorded, goto beat still reports the line"
+        )
+    return failures
 
 
 def check_wrapper_evidence(out_dir: Path) -> list[str]:
@@ -9736,6 +10083,9 @@ def run_wrapper(out_root: Path) -> list[str]:
     except Exception as exc:  # noqa: BLE001 - a raising take is the failure
         return [f"wrapper: recording raised {type(exc).__name__}: {exc}"]
     failures += check_wrapper_band(out_dir, info)
+    failures += check_wrapper_opening(out_dir, info)
+    failures += check_wrapper_card(out_dir, info)
+    failures += check_wrapper_caption_survives(out_dir, info)
     failures += check_wrapper_evidence(out_dir)
     failures += check_wrapper_clipped(out_dir)
 
