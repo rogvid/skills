@@ -1823,7 +1823,17 @@ _EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
 # ratchet that only goes up is not a budget either. The next increase should
 # have to argue that something already in the file earns its place less than
 # the thing being added.
-SKILL_LINE_BUDGET = 610
+#
+# Raised 610 → 630 on 2026-08-22, for the first run of the skill outside its
+# home repo (#345): seven rules, each of which cost that run measured time or
+# shipped a caption fault to a blind reviewer. The argument the paragraph
+# above demands was made in kind, not just claimed: four existing bullets were
+# compressed first — the saccade mechanism, the beat-table and content.score
+# wordings, the video-embedding bullet — because an explanation of *why* the
+# 1.5 s floor exists earns its place less than a rule whose absence killed a
+# take. What was left over is this raise. The reviewer reading protocol went
+# to reference/review.md, not here, per the first paragraph's preference.
+SKILL_LINE_BUDGET = 630
 
 # `reference/` holding fewer than this is `reference/` being emptied, which
 # would make both assertions below hold trivially. Not a count of the files
