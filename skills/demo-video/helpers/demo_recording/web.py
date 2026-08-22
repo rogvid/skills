@@ -25,6 +25,8 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -1072,3 +1074,44 @@ class Recorder(_DemoBase):
     def wait_for(self, selector: str, timeout_s: float = 60) -> None:
         """Wait for something the app does on its own (a job, a run)."""
         self.page.locator(selector).first.wait_for(timeout=timeout_s * 1000)
+
+    @contextmanager
+    def act(self, label: str) -> Iterator[None]:
+        """Stamp one beat around raw `rec.page` work, named by `label`.
+
+            with rec.act("apply the machinery filter"):
+                rec.page.select_option("#type-filter", "machinery")
+
+        `rec.page` is the escape hatch, and anything done through it bare is
+        invisible: no beat, so no frame is aimed at it, no evidence file is
+        written, and the blind review cannot see it happened (issue #344). The
+        failure that motivated this was exactly that shape — a storyboard
+        drove a filter with `rec.page.select_option(...)`, the server log
+        proved the request fired, and the take's beat log had nothing: the
+        reviewer correctly reported the filtering was never exercised, while
+        the caption claimed it. `clear()`'s docstring records the same class
+        of hole for `rec.page.keyboard`; this is the wrapper that closes it
+        for whatever the verbs don't cover.
+
+        The block gets what a verb gets: a span in the beat log (verb `act`,
+        the label as its target), a mid-point review frame, and an evidence
+        file. The label is required and must name what the block does —
+        an empty or blank one is refused before any beat opens, because a
+        nameless beat is the invisibility this verb exists to end.
+
+        **An exception inside the block behaves as it does in a failing
+        verb:** the beat still closes with its `t_end` stamped, the error's
+        type and message are recorded on it verbatim, and the exception
+        propagates — so the take's failure path (the `failure/` dump, the
+        marker) runs exactly as if a verb had raised. A beat-stamping verb
+        called inside the block folds into this beat, like the verbs a
+        composite verb is built from.
+        """
+        if not label or not label.strip():
+            raise ValueError(
+                "act() needs a non-empty label naming what the block does — "
+                "the label is the only thing that puts this work in the "
+                "timeline (issue #344)"
+            )
+        with self._beat("act", selector=label):
+            yield
