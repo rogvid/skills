@@ -1459,6 +1459,8 @@ def stage(tmp: Path) -> Path:
     smoke = root / "tests" / "smoke"
     shutil.copy2(SMOKE, smoke)
     smoke.chmod(0o755)
+    # The pixel toolkit `tests/smoke` imports from beside itself (#349).
+    shutil.copy2(REPO / "tests" / "_pixels.py", root / "tests" / "_pixels.py")
     return root
 
 
