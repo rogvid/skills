@@ -3549,6 +3549,110 @@ class PixelCache(unittest.TestCase):
         self.assertIn("lock", self.px.HEADER, "the header stopped saying why")
 
 
+class PixelChecks(unittest.TestCase):
+    """The pure arithmetic under tests/pixel's golden-property checks (#351).
+
+    Everything a frame reading is *compared through* — the opening-card
+    classifier, the card-stretch locator, the accent predicate and centroid,
+    the beat-span lookup, the dump naming — is a function of values, graded
+    here browser-free. The readings themselves are graded by running
+    `tests/pixel`, and each check was seen red under a planted recorder
+    defect in #351's pull request.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.px = _pixel_module()
+
+    def test_opening_kind_grades_both_bars_at_the_boundary(self):
+        px = self.px
+        # At the bars exactly, not comfortably inside them: the constants are
+        # policy, and an off-by-one comparison is the cheapest way to move one.
+        self.assertEqual(px.opening_kind(px.OPENING_CARD_MAX_LUMA), "card")
+        self.assertEqual(px.opening_kind(px.OPENING_CARD_MAX_LUMA + 0.1), "between")
+        self.assertEqual(px.opening_kind(px.OPENING_BARE_MIN_LUMA - 0.1), "between")
+        self.assertEqual(px.opening_kind(px.OPENING_BARE_MIN_LUMA), "bare")
+
+    def test_card_prefix_ends_at_the_first_frame_that_is_not_card(self):
+        px = self.px
+        self.assertEqual(px.card_prefix([10.0, 20.0, 30.0]), 3)
+        # A mid-fade frame (`between`) ends the prefix — it is not "before the
+        # card" by any reading, which is #128's flake made a rule.
+        self.assertEqual(px.card_prefix([10.0, 80.0, 10.0]), 1)
+        self.assertEqual(px.card_prefix([226.0, 10.0]), 0)
+        self.assertEqual(px.card_prefix([]), 0)
+
+    def test_beat_spans_returns_wellformed_beats_of_that_verb_only(self):
+        doc = {
+            "beats": [
+                {"verb": "goto", "t_start": 0.0, "t_end": 1.0},
+                {"verb": "criterion", "t_start": 1.0, "t_end": 3.9},
+                {"verb": "criterion", "t_start": "x", "t_end": 4.0},
+                {"verb": "criterion", "t_start": 5.0},
+                {"verb": "hold", "t_start": 4.0, "t_end": 5.0},
+            ]
+        }
+        self.assertEqual(self.px.beat_spans(doc, "criterion"), [(1.0, 3.9)])
+        self.assertEqual(self.px.beat_spans({}, "criterion"), [])
+
+    def test_longest_run_finds_the_longest_stretch_not_the_first(self):
+        px = self.px
+        self.assertEqual(px.longest_run([True, False, True, True, True]), (2, 3))
+        self.assertEqual(px.longest_run([False, False]), None)
+        self.assertEqual(px.longest_run([]), None)
+        self.assertEqual(px.longest_run([True]), (0, 1))
+        # A tie goes to the earliest, so the answer is deterministic.
+        self.assertEqual(px.longest_run([True, False, True]), (0, 1))
+
+    def test_accent_like_matches_the_dot_blends_and_not_the_chrome(self):
+        px = self.px
+        # The dot's own colours: full accent, the .45 fill over white and
+        # over a dark ground — the range the policy comment states.
+        for dot in [(235, 110, 20), (246, 175, 149), (122, 66, 25)]:
+            self.assertTrue(px.accent_like(*dot), f"{dot} is the dot")
+        # What the probes actually sweep past: the fixture's paper, both
+        # cards, white — and a pale yellow that is red-over-blue but not
+        # red-over-green, which a predicate reduced to one gap would take.
+        for ground in [
+            (245, 246, 249),
+            (24, 23, 38),
+            (28, 26, 23),
+            (255, 255, 255),
+            (230, 220, 120),
+        ]:
+            self.assertFalse(px.accent_like(*ground), f"{ground} is not the dot")
+
+    def test_accent_centroid_is_the_planted_disc_centre(self):
+        px = self.px
+        w, h = 20, 10
+        raw = bytearray(w * h * 3)
+        for i in range(0, len(raw), 3):
+            raw[i : i + 3] = (245, 246, 249)  # the fixture's paper
+        for y in range(4, 7):  # a 3x3 accent block centred on (5, 5)
+            for x in range(4, 7):
+                raw[(y * w + x) * 3 : (y * w + x) * 3 + 3] = (235, 110, 20)
+        found = px.accent_centroid(w, h, bytes(raw))
+        self.assertIsNotNone(found)
+        cx, cy, count = found
+        self.assertEqual((cx, cy), (5.5, 5.5))  # pixel-centre coordinates
+        self.assertEqual(count, 9)
+        blank = bytes(w * h * 3)
+        self.assertIsNone(px.accent_centroid(w, h, blank))
+
+    def test_dump_name_names_the_check_and_the_instant(self):
+        px = self.px
+        self.assertEqual(
+            px.dump_name("card-vs-window", "card-up-t1.93s"),
+            "card-vs-window--card-up-t1.93s.png",
+        )
+        # Two instants of one check land in two files, or a dump overwrites
+        # the frame an agent meant to attach.
+        self.assertNotEqual(
+            px.dump_name("opening-card", "frame-0"),
+            px.dump_name("opening-card", "bare-from-2.95s"),
+        )
+
+
 # --------------------------------------------------------------------------
 # What a recorder refuses to be pointed at (target.py)
 # --------------------------------------------------------------------------
@@ -11093,6 +11197,54 @@ INJECTIONS = [
         "    if not pngs:",
         "    if pngs is None:",
         ["PixelCache.test_check_complete_names_each_missing_artifact"],
+    ),
+    # -- the pixel loop's golden-property arithmetic (tests/pixel, #351) ------
+    (
+        # An off-by-one on the card bar: a frame at exactly the threshold
+        # stops counting as card, so a healthy take's classification depends
+        # on which side of a rounding a luma mean lands.
+        "the opening-card classifier excludes its own boundary",
+        "tests/pixel",
+        "    if value <= OPENING_CARD_MAX_LUMA:",
+        "    if value < OPENING_CARD_MAX_LUMA:",
+        ["PixelChecks.test_opening_kind_grades_both_bars_at_the_boundary"],
+    ),
+    (
+        # The prefix counter calls a mid-fade frame 'still the card' — #128's
+        # flake reinstated: a card that fades in reads as up from frame 0.
+        "the opening-card prefix counts a mid-fade frame as card",
+        "tests/pixel",
+        '    while prefix < len(luma) and opening_kind(luma[prefix]) == "card":',
+        '    while prefix < len(luma) and opening_kind(luma[prefix]) != "bare":',
+        ["PixelChecks.test_card_prefix_ends_at_the_first_frame_that_is_not_card"],
+    ),
+    (
+        # The card locator returns the first dark stretch instead of the
+        # longest, so a dark flash before the card would be graded as it.
+        "the card-stretch locator stops preferring the longest run",
+        "tests/pixel",
+        "            if best is None or i - start > best[1]:",
+        "            if best is None:",
+        ["PixelChecks.test_longest_run_finds_the_longest_stretch_not_the_first"],
+    ),
+    (
+        # The accent predicate drops its red-over-green gap, so any warm
+        # surface reads as the cursor dot and both cursor checks grade the
+        # page instead of the pointer.
+        "the accent predicate takes any red-over-blue surface as the dot",
+        "tests/pixel",
+        "    return (r - b) >= ACCENT_R_MINUS_B and (r - g) >= ACCENT_R_MINUS_G",
+        "    return (r - b) >= ACCENT_R_MINUS_B",
+        ["PixelChecks.test_accent_like_matches_the_dot_blends_and_not_the_chrome"],
+    ),
+    (
+        # Dump files lose the instant: every frame a check reads lands on one
+        # name, and the before/after an agent attaches is one picture.
+        "a dumped frame's name drops the instant it was read at",
+        "tests/pixel",
+        '    return f"{check}--{slug}.png"',
+        '    return f"{check}.png"',
+        ["PixelChecks.test_dump_name_names_the_check_and_the_instant"],
     ),
     (
         # **The defect issue #226 is about**, restored exactly: each clip mixed

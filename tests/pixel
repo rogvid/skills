@@ -9,7 +9,7 @@
     tests/pixel record     # only refresh the cache (--force re-records all)
     tests/pixel check      # grade the cache as it is, recording nothing
 
-Slice 2 of #324. `tests/smoke` gives an agent a verdict on the recorder in ten
+Slices 2 and 3 of #324. `tests/smoke` gives an agent a verdict on the recorder in ten
 minutes behind a machine-wide lock; this gives it the *take* to read pixels off
 in seconds, because the take is cached and only re-recorded when something that
 decides its frames has changed.
@@ -40,10 +40,26 @@ geometry off frames that are already on disk, none of it contention
 sensitive, so it has no claim to that lock and must not create one of its
 own. This file never opens the lock path.
 
-**What `check` grades today** is only completeness: the take has a demo.mp4,
-a timeline.json, and at least one review frame. The golden properties -
-opening-card prefix, card-vs-window colour, cursor disc, the absence probe -
-are #351, and they land in the CHECKS registry below.
+**What `check` grades** (#351): completeness first (the floor - a property
+check over a take with no frames would fail for a reason it does not name),
+then the four golden chrome properties, the defects humans caught by eye:
+
+- **opening-card** (terminal): frame 0 is the card, the card holds an
+  unbroken prefix, and the corner later reads bare as the control (#110).
+- **card-vs-window** (web): the criterion card and the window pad around the
+  app are one colour in the composited demo.mp4, worst channel, and the app
+  strip is NOT the card's colour once the card is down (#291).
+- **cursor-parked** (web): the accent disc's measured centre sits at the
+  coordinate the storyboard parked it at, read out of pixels (#202).
+- **cursor-absence** (web): no frame before the take's first pointer verb
+  carries an accent pixel in the page-origin crop - #186's signature, the
+  take #193 said no suite records.
+
+Each check prints one line with the numbers it measured, pass or fail.
+`--dump <dir>` writes the frames the checks read (and the offending frame,
+on failure) as PNGs named by check and instant, for a PR's before/after.
+Thresholds are duplicated from `tests/smoke` on purpose, each naming its
+counterpart - the loop supplements the gate and must not import it.
 """
 
 from __future__ import annotations
@@ -53,8 +69,10 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -63,6 +81,24 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+# The pixel toolkit both loops grade with (#349). The path is this file's own
+# parent, not the repo root: tests/unit's fault-injection driver runs a copy
+# of this script from a temp directory with `_pixels.py` copied in beside it,
+# exactly as it does for tests/smoke.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from _pixels import (  # noqa: E402
+    Rect,
+    card_strip,
+    channels_apart,
+    frame_band,
+    gray_frames,
+    off_card,
+    strip_rgb,
+    to_video_rect,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 HELPERS = REPO / "skills" / "demo-video" / "helpers"
@@ -86,6 +122,102 @@ MIN_RECORDER_MODULES = 8
 MIN_POINTERLESS_BEATS = 3
 
 SERVER_START_TIMEOUT_S = 10.0
+
+# -- golden-property policy (#351) ---------------------------------------------
+#
+# Every threshold below is duplicated from `tests/smoke` rather than imported:
+# the loop must never load the 12k-line suite, and policy belongs to the suite
+# that applies it. Each constant names its smoke counterpart so a retuning
+# there is a prompt to retune here — and a divergence is a decision, not drift.
+
+# tests/smoke's OPENING_* family. Card and bare are deliberately far apart with
+# a deliberately empty gap: a frame between the two is the card mid-fade, and
+# nothing here calls that either one.
+OPENING_SAMPLE_FPS = 20  # tests/smoke OPENING_SAMPLE_FPS
+OPENING_CARD_MAX_LUMA = 60.0  # tests/smoke OPENING_CARD_MAX_LUMA
+OPENING_BARE_MIN_LUMA = 150.0  # tests/smoke OPENING_BARE_MIN_LUMA
+# The value of tests/smoke's MIN_OPENING_CARD_S: the take holds its card 2.5 s,
+# the bar is 1.0 s — room for a stalled screencast (#18), none for a card that
+# arrives after the terminal does (#110).
+MIN_OPENING_CARD_S = 1.0
+MIN_OPENING_FRAMES = 40  # tests/smoke MIN_OPENING_FRAMES: the sweep floor
+
+# tests/smoke's WEB_CARD_RGB (= core.WEB_CARD_BODY, the compensated colour a
+# web card is dispatched in so it lands on the window through the app's own
+# encoder, #291/#301), with the same two bars: CARD_RGB_TOLERANCE for "the
+# card painted, in the colour dispatched" and CARD_WINDOW_TOLERANCE for "the
+# card and the window pad are one colour on screen". Neither claim reads a
+# declaration — #297's two recorded anti-patterns (pinning the declarations
+# equal, and pinning them ≥ 12 apart) were both green on builds a human
+# rejected, so both sides here are measured out of demo.mp4.
+WEB_CARD_RGB = (0x18, 0x17, 0x26)
+CARD_RGB_TOLERANCE = 6  # tests/smoke CARD_RGB_TOLERANCE
+CARD_WINDOW_TOLERANCE = 2  # tests/smoke CARD_WINDOW_TOLERANCE
+# Two instants inside the card beat (the issue's floor); smoke reads three.
+CARD_SAMPLE_FRACTIONS = (0.3, 0.7)
+
+# The card is *located in the video* before its colour is graded: a luma
+# sweep of the app strip finds the one dark stretch, and the RGB claims are
+# read inside it. Not read at beat-log fractions, because this host's wall
+# clock steps ~0.8s mid-take about one recording in five, a backward step
+# deletes that much video, and capture_clock's step position is an aliased
+# sample (#245, #250) — a beat-log fraction mapped through it was measured
+# landing on the interlude fade, 24 levels off, on a healthy build. The
+# locator is luma and the claims are colour, so nothing is circular: the
+# terminal card on a web take (#291 itself) is exactly as dark and still
+# fails the RGB reading.
+CARD_SWEEP_FPS = 10
+# Same family as OPENING_CARD_MAX_LUMA: the card strip reads ~24, the app
+# ~236, and the fade between them (~80-150) is deliberately outside, so the
+# located stretch's edges are full card, not fade.
+CARD_LOCATE_MAX_LUMA = 60.0
+# Shorter than this and there is no room to sample two instants clear of the
+# edges — and a card a viewer met for under a second is its own defect.
+MIN_CARD_STRETCH_S = 1.0
+# The card-down control needs this much video after the stretch to read the
+# app out of; less means the card never came down (#91's web sibling).
+MIN_CARD_DOWN_S = 1.0
+
+# The recorder's default accent — core.py's DEMO_VIDEO_ACCENT_RGB fallback,
+# "235,110,20". scrub_env() strips the knob before recording, so the default
+# is what painted every cached frame.
+ACCENT_RGB = (235, 110, 20)
+
+# What counts as a pixel of the cursor dot. Channel *gaps* rather than a
+# distance to ACCENT_RGB, because the dot is drawn at two alphas (.45 fill,
+# .95 border, web.py's _CURSOR_JS) over whatever the page has there: the
+# blends range (122,66,25)–(246,175,149) across dark and white grounds, all
+# of them ≥ 95 red-over-blue and ≥ 56 red-over-green, while the fixture's
+# paper (245,246,249), the web card (24,23,38) and the terminal card
+# (28,26,23) are all ≤ 5 on at least one gap.
+ACCENT_R_MINUS_B = 60
+ACCENT_R_MINUS_G = 40
+
+# How far the disc's measured centre may sit from the park, in video pixels.
+# The healthy reading is ~1 px (centroid over a review frame downscaled 0.8,
+# plus to_video_rect's integer truncation); the defect this exists to catch —
+# a pointer placed by something other than the storyboard (#202, #186's
+# synthetic mousemove) — is tens to hundreds of pixels away. 3 px keeps an
+# order of magnitude to the defect without ever forgiving a real drift.
+CURSOR_PARK_TOLERANCE_PX = 3.0
+# The half-width of the window scanned around the expected centre. Wide
+# enough that a dot a few pixels off is measured rather than missed, narrow
+# enough that nothing else accent-coloured on the fixture page is in it.
+CURSOR_SEARCH_RADIUS_PX = 40
+# Fewer accent pixels than this is not a disc: the parked dot reads ~250
+# pixels in a review frame. A recorder that stopped drawing a cursor fails
+# here, deliberately — smoke's check_parked_pointer has the same clause, and
+# a check that cannot fail on a missing dot is the thing the review
+# discipline exists to catch.
+CURSOR_MIN_ACCENT_PX = 40
+
+# The #186 signature: the synthetic-mousemove dot differs in x 0-8, y 0-8 of
+# the page, 69 pixels of it. The probe reads that page crop mapped into each
+# review frame.
+ORIGIN_CROP_PAGE_PX = 8
+# The absence claim needs frames to be absent from: below this many kept
+# review frames before the first pointer beat, the probe is the vacuous sweep.
+MIN_ABSENCE_FRAMES = 2
 
 HEADER = (
     "pixel: no suite lock - this loop reads colour and geometry off cached "
@@ -187,15 +319,23 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         rec.spotlight()
         rec.caption("The pointer has not moved yet.")
         # -- first pointer verb of the take: the park ------------------------
-        rec.move_to("#refresh")
+        # Parked on #search, and the choice is load-bearing: the dot is drawn
+        # in the accent colour at .45/.95 alpha, and #refresh IS the accent
+        # colour (the fixture themes itself to the recorder's default), so a
+        # dot parked there is pixel-invisible — measured on a real take, the
+        # "accent disc" a probe finds over #refresh is the button itself,
+        # 1306 pixels whose centroid agrees with the park whether or not any
+        # dot was drawn. Over #search's white field the only accent pixels
+        # near the park are the dot's own.
+        rec.move_to("#search")
         rec.hold()
         rec.caption("")
 
         geom = dict(rec._geom)
         size = (rec._size["width"], rec._size["height"])
-        park = rec.page.locator("#refresh").bounding_box()
+        park = rec.page.locator("#search").bounding_box()
         if park is None:
-            raise PixelFailure("web: #refresh has no box - the page never rendered")
+            raise PixelFailure("web: #search has no box - the page never rendered")
 
     doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
     beats = doc.get("beats") or []
@@ -330,7 +470,9 @@ def stale(
 # -- the checks ----------------------------------------------------------------
 
 
-def check_complete(take: Path, info: dict | None) -> list[str]:
+def check_complete(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
     """The slice-2 placeholder: the take exists and has something to read.
 
     #351 replaces the weight of this with the golden properties; this stays
@@ -353,12 +495,595 @@ def recorded(take: Path) -> bool:
     return not check_complete(take, None)
 
 
-# The seam #351 fills: one entry per take, each check a function of the take
-# directory and the marker's `info` (the geometry only the recorder knew).
-# Append golden-property checks here; do not fold them into check_complete.
-CHECKS: dict[str, list[Callable[[Path, dict | None], list[str]]]] = {
-    "terminal": [check_complete],
-    "web": [check_complete],
+# -- pure pieces of the checks, graded browser-free in tests/unit --------------
+
+
+def opening_kind(value: float) -> str:
+    """card / bare / between, tests/smoke's classifier with the same bars.
+
+    `between` is the card mid-fade; it is deliberately neither, and a prefix
+    counter that treated it as card would call #128's half-faded frame 'the
+    card was still up'.
+    """
+    if value <= OPENING_CARD_MAX_LUMA:
+        return "card"
+    if value >= OPENING_BARE_MIN_LUMA:
+        return "bare"
+    return "between"
+
+
+def card_prefix(luma: list[float]) -> int:
+    """How many leading frames read card — ends at the first that does not."""
+    prefix = 0
+    while prefix < len(luma) and opening_kind(luma[prefix]) == "card":
+        prefix += 1
+    return prefix
+
+
+def beat_spans(doc: dict, verb: str) -> list[tuple[float, float]]:
+    """(t_start, t_end) of every beat logging `verb`, skipping malformed ones."""
+    spans = []
+    for beat in doc.get("beats") or []:
+        if beat.get("verb") != verb:
+            continue
+        start, end = beat.get("t_start"), beat.get("t_end")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            spans.append((float(start), float(end)))
+    return spans
+
+
+def longest_run(flags: list[bool]) -> tuple[int, int] | None:
+    """(start, length) of the longest contiguous True stretch, or None.
+
+    Ties go to the earliest stretch. This is how the card is found in the
+    sweep: the one long dark run of the app strip.
+    """
+    best: tuple[int, int] | None = None
+    start: int | None = None
+    for i, flag in enumerate([*flags, False]):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            if best is None or i - start > best[1]:
+                best = (start, i - start)
+            start = None
+    return best
+
+
+def accent_like(r: int, g: int, b: int) -> bool:
+    """Whether one pixel could be the cursor dot. See ACCENT_R_MINUS_B."""
+    return (r - b) >= ACCENT_R_MINUS_B and (r - g) >= ACCENT_R_MINUS_G
+
+
+def accent_centroid(w: int, h: int, raw: bytes) -> tuple[float, float, int] | None:
+    """(cx, cy, count) over the accent-like pixels of a w*h rgb24 buffer.
+
+    Pixel-centre coordinates (index + 0.5), so a symmetric disc's centroid is
+    its centre exactly. None when nothing in the buffer is accent-like.
+    """
+    sx = sy = 0.0
+    count = 0
+    for i in range(0, min(len(raw), w * h * 3) - 2, 3):
+        if accent_like(raw[i], raw[i + 1], raw[i + 2]):
+            idx = i // 3
+            sx += idx % w
+            sy += idx // w
+            count += 1
+    if not count:
+        return None
+    return (sx / count + 0.5, sy / count + 0.5, count)
+
+
+def dump_name(check: str, label: str) -> str:
+    """The file a dumped frame lands under: the check, then the instant."""
+    slug = re.sub(r"[^A-Za-z0-9.]+", "-", label).strip("-")
+    return f"{check}--{slug}.png"
+
+
+# -- frame IO for the checks ----------------------------------------------------
+
+
+def rgb_crop(path: Path, rect: Rect) -> tuple[int, int, bytes] | None:
+    """`rect` of a PNG (or of an mp4's first frame) as raw rgb24 bytes."""
+    x, y, w, h = rect
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-vf",
+            f"crop={w}:{h}:{x}:{y}",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0 or len(proc.stdout) < w * h * 3:
+        return None
+    return (w, h, proc.stdout)
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """Width and height straight out of a PNG's IHDR."""
+    head = path.read_bytes()[:24]
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    w, h = struct.unpack(">II", head[16:24])
+    return (int(w), int(h))
+
+
+def dump_frame(
+    dump: Path | None,
+    check: str,
+    label: str,
+    src: Path,
+    at: float | None = None,
+    frame_index: int | None = None,
+) -> None:
+    """One frame a check read, written where an agent can attach it.
+
+    A PNG source is copied whole; an mp4 source has the named instant (or the
+    exact frame index — the same access path the check used, so the dump shows
+    the frame that was graded, not a neighbour) extracted as a full frame.
+    """
+    if dump is None:
+        return
+    dump.mkdir(parents=True, exist_ok=True)
+    out = dump / dump_name(check, label)
+    if at is None and frame_index is None:
+        shutil.copyfile(src, out)
+        return
+    args = ["ffmpeg", "-v", "error", "-y"]
+    filters = []
+    if frame_index is not None:
+        filters = ["-vf", f"select=eq(n\\,{frame_index})", "-vsync", "0"]
+    else:
+        args += ["-ss", f"{at:.3f}"]
+    subprocess.run(
+        [*args, "-i", str(src), *filters, "-frames:v", "1", str(out)],
+        capture_output=True,
+    )
+
+
+# -- the golden-property checks (#351) ------------------------------------------
+
+
+def _verdict(name: str, take: Path, problems: list[str], detail: str) -> None:
+    state = "ok" if not problems else "FAIL"
+    print(f"{take.name}/{name}: {state} - {detail}")
+
+
+def check_opening_card(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
+    """The terminal take opens on its card, holds it, then clears it (#110).
+
+    tests/smoke's check_opening_card, on the cached take: one sweep of the
+    background strip beside the terminal window, three statements each broken
+    by a different mistake. Frame 0 is read by frame index out of the same
+    decode — never by seeking a timestamp, which is how #128 caught a fade
+    mid-way and called it neither.
+    """
+    name = "opening-card"
+    mp4 = take / "demo.mp4"
+    if not info or "win" not in info or "size" not in info:
+        return [
+            f"{take.name}/{name}: the marker carries no window geometry - "
+            f"re-record (tests/pixel record --force)"
+        ]
+    win, size = info["win"], info["size"]
+    # The strip of background to the right of the terminal window — outside
+    # it on purpose, same as tests/smoke: inside, the card and the terminal
+    # are both dark and are told apart by their text.
+    right = int(win[0]) + int(win[2])
+    corner: Rect = (right + 8, 0, max(8, int(size[0]) - right - 16), 50)
+    frames = gray_frames(mp4, rect=corner, sample_fps=OPENING_SAMPLE_FPS)
+    luma = [sum(f) / len(f) for f in frames]
+    if len(luma) < MIN_OPENING_FRAMES:
+        return [
+            f"{take.name}/{name}: the corner sweep decoded {len(luma)} frames "
+            f"at {OPENING_SAMPLE_FPS} fps over {corner}, under the "
+            f"{MIN_OPENING_FRAMES} floor - every statement below would be "
+            f"satisfied by a video too short to hold the card at all"
+        ]
+
+    problems: list[str] = []
+    if opening_kind(luma[0]) != "card":
+        problems.append(
+            f"{take.name}/{name}: frame 0 reads {luma[0]:.1f} mean luma in the "
+            f"corner at {corner} ({opening_kind(luma[0])!r}, card <= "
+            f"{OPENING_CARD_MAX_LUMA:.0f}) - the take opens on the terminal "
+            f"and the card arrives afterwards, issue #110"
+        )
+        dump_frame(dump, name, "frame-0-FAIL", mp4, frame_index=0)
+    prefix = card_prefix(luma)
+    prefix_s = prefix / OPENING_SAMPLE_FPS
+    if prefix_s < MIN_OPENING_CARD_S:
+        problems.append(
+            f"{take.name}/{name}: the card covers only the first "
+            f"{prefix_s:.2f}s ({prefix} frames at {OPENING_SAMPLE_FPS} fps), "
+            f"under the {MIN_OPENING_CARD_S}s bar - frame {prefix} reads "
+            f"{luma[min(prefix, len(luma) - 1)]:.1f}, the viewer sees the "
+            f"terminal before the card that should be covering it"
+        )
+        dump_frame(
+            dump, name, f"prefix-end-frame-{prefix}-FAIL", mp4, frame_index=prefix
+        )
+    bare = next(
+        (i for i, value in enumerate(luma) if opening_kind(value) == "bare"), None
+    )
+    if bare is None:
+        problems.append(
+            f"{take.name}/{name}: the corner never reaches "
+            f"{OPENING_BARE_MIN_LUMA:.0f} mean luma in "
+            f"{len(luma) / OPENING_SAMPLE_FPS:.1f}s (range "
+            f"{min(luma):.1f}..{max(luma):.1f}) - without a bare control the "
+            f"first two statements are equally true of a recorder that "
+            f"painted a black rectangle and stopped (#91)"
+        )
+        dump_frame(
+            dump, name, "last-frame-no-bare-FAIL", mp4, frame_index=len(luma) - 1
+        )
+    dump_frame(dump, name, "frame-0", mp4, frame_index=0)
+    if bare is not None:
+        dump_frame(
+            dump,
+            name,
+            f"bare-from-{bare / OPENING_SAMPLE_FPS:.2f}s",
+            mp4,
+            frame_index=bare,
+        )
+    bare_s = f"{bare / OPENING_SAMPLE_FPS:.2f}s" if bare is not None else "never"
+    _verdict(
+        name,
+        take,
+        problems,
+        f"frame 0 luma {luma[0]:.1f} (card <= {OPENING_CARD_MAX_LUMA:.0f}), "
+        f"card prefix {prefix_s:.2f}s (bar {MIN_OPENING_CARD_S:.1f}s), bare "
+        f">= {OPENING_BARE_MIN_LUMA:.0f} from {bare_s}",
+    )
+    return problems
+
+
+def check_card_vs_window(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
+    """The web card is the window's own colour, read out of demo.mp4 (#291).
+
+    Never a still: `shot()` photographs the page, the layer *before* the
+    composite, and the card and the window pad reach demo.mp4 through two
+    different encoders (#301) — a still can only ever show one of them.
+
+    The instants are found in the video (see CARD_SWEEP_FPS), then tied to
+    the cached timeline's one criterion beat: the located stretch must
+    overlap the logged span and be at least half its length, so a dark
+    stretch that is not the logged card cannot stand in for it.
+    """
+    name = "card-vs-window"
+    mp4 = take / "demo.mp4"
+    if not info or "geom" not in info or "size" not in info:
+        return [
+            f"{take.name}/{name}: the marker carries no frame geometry - "
+            f"re-record (tests/pixel record --force)"
+        ]
+    geom = info["geom"]
+    doc = json.loads((take / "timeline.json").read_text(encoding="utf-8"))
+    spans = beat_spans(doc, "criterion")
+    if len(spans) != 1:
+        return [
+            f"{take.name}/{name}: the take logged {len(spans)} criterion "
+            f"beats, expected 1 - there is no card span to read the colour "
+            f"out of"
+        ]
+    start, end = spans[0]
+    app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+    win: Rect = (geom["winx"], geom["winy"], geom["winw"], geom["winh"])
+    strip = card_strip(app)
+    band = frame_band(app, win)
+    if band is None:
+        return [
+            f"{take.name}/{name}: the window {win} leaves no pad around the "
+            f"app rect {app} wide enough to read - nothing can say whether "
+            f"the card is the window's own colour on screen, which is #291"
+        ]
+
+    # Where the card actually is in the file: the longest dark stretch of the
+    # app strip. The beat log says one exists and roughly where; the video
+    # says exactly where. See CARD_SWEEP_FPS for why the log's clock is not
+    # trusted to sub-second precision here.
+    sweep = gray_frames(mp4, rect=strip, sample_fps=CARD_SWEEP_FPS)
+    dark = [sum(f) / len(f) <= CARD_LOCATE_MAX_LUMA for f in sweep]
+    media_s = len(sweep) / CARD_SWEEP_FPS
+    run = longest_run(dark)
+    if run is None:
+        return [
+            f"{take.name}/{name}: no frame of the app strip {strip} ever "
+            f"reads <= {CARD_LOCATE_MAX_LUMA:.0f} luma across {media_s:.1f}s "
+            f"- the criterion card the timeline logs at {start:.2f}-{end:.2f}s "
+            f"never painted"
+        ]
+    run_start, run_len = run
+    rs, re_ = run_start / CARD_SWEEP_FPS, (run_start + run_len) / CARD_SWEEP_FPS
+    if run_len / CARD_SWEEP_FPS < max(MIN_CARD_STRETCH_S, 0.5 * (end - start)):
+        return [
+            f"{take.name}/{name}: the card stretch in the video is only "
+            f"{run_len / CARD_SWEEP_FPS:.1f}s ({rs:.2f}-{re_:.2f}s) against a "
+            f"criterion beat logged {end - start:.1f}s long - the card "
+            f"flashed rather than held"
+        ]
+    if re_ < start - 2.0 or rs > end:
+        return [
+            f"{take.name}/{name}: the dark stretch at {rs:.2f}-{re_:.2f}s "
+            f"does not overlap the criterion beat logged at "
+            f"{start:.2f}-{end:.2f}s - whatever it is, it is not the card "
+            f"this take dispatched"
+        ]
+    if media_s - re_ < MIN_CARD_DOWN_S:
+        return [
+            f"{take.name}/{name}: the card stretch runs to {re_:.2f}s of a "
+            f"{media_s:.1f}s video - the card is never taken down (#91), and "
+            f"there is no app stretch to tell it apart from"
+        ]
+
+    # The control: after the card stretch, the strip must NOT be the card's
+    # colour — without this a fixture app that happened to be this dark blue
+    # would pass with no card in the recording at all.
+    control_at = re_ + (media_s - re_) * 0.5
+    before = strip_rgb(mp4, control_at, strip)
+    if before is None:
+        return [
+            f"{take.name}/{name}: demo.mp4 decodes no frame at "
+            f"{control_at:.2f}s over {strip} - there is no card-down reading "
+            f"to compare with"
+        ]
+    dump_frame(dump, name, f"card-down-control-t{control_at:.2f}s", mp4, at=control_at)
+    problems: list[str] = []
+    control_off = off_card(before, WEB_CARD_RGB)
+    if control_off <= CARD_RGB_TOLERANCE:
+        return [
+            f"{take.name}/{name}: at {control_at:.2f}s, with the card down "
+            f"since {re_:.2f}s, the strip reads "
+            f"{tuple(round(v) for v in before)} - the card's own colour "
+            f"{WEB_CARD_RGB}. Either the app cannot be told from the card, or "
+            f"the card was never taken down"
+        ]
+
+    drifts: list[float] = []
+    gaps: list[float] = []
+    for fraction in CARD_SAMPLE_FRACTIONS:
+        at = rs + (re_ - rs) * fraction
+        got = strip_rgb(mp4, at, strip)
+        chrome = strip_rgb(mp4, at, band)
+        if got is None or chrome is None:
+            problems.append(
+                f"{take.name}/{name}: demo.mp4 decodes no frame at {at:.2f}s "
+                f"over {strip if got is None else band}"
+            )
+            continue
+        dump_frame(dump, name, f"card-up-t{at:.2f}s", mp4, at=at)
+        drift = off_card(got, WEB_CARD_RGB)
+        drifts.append(drift)
+        if drift > CARD_RGB_TOLERANCE:
+            problems.append(
+                f"{take.name}/{name}: {fraction * 100:.0f}% through the "
+                f"criterion beat the card reads "
+                f"{tuple(round(v) for v in got)} over {strip}, {drift:.0f} "
+                f"levels off the web card's {WEB_CARD_RGB} (bar "
+                f"{CARD_RGB_TOLERANCE}) - a web take painting the terminal "
+                f"palette here is issue #291 itself"
+            )
+            dump_frame(dump, name, f"card-up-t{at:.2f}s-FAIL", mp4, at=at)
+        gap = channels_apart(chrome, got)
+        gaps.append(gap)
+        if gap > CARD_WINDOW_TOLERANCE:
+            problems.append(
+                f"{take.name}/{name}: {fraction * 100:.0f}% through the "
+                f"criterion beat the card reads "
+                f"{tuple(round(v) for v in got)} and the window pad "
+                f"{tuple(round(v) for v in chrome)}, {gap:.0f} levels apart "
+                f"worst channel (bar {CARD_WINDOW_TOLERANCE}) - a viewer can "
+                f"tell the card from the window it sits in (#291): the "
+                f"encoder compensation is gone, one layer was repainted, or "
+                f"the encoder moved under it (#301)"
+            )
+            dump_frame(dump, name, f"card-up-t{at:.2f}s-FAIL", mp4, at=at)
+    detail = (
+        f"card {max(drifts):.0f} off {WEB_CARD_RGB} (bar {CARD_RGB_TOLERANCE}) "
+        f"and {max(gaps):.0f} off the window pad (bar {CARD_WINDOW_TOLERANCE}) "
+        f"over {len(drifts)} instants; card-down control {control_off:.0f} off"
+        if drifts and gaps
+        else "no instant inside the card beat could be read"
+    )
+    _verdict(name, take, problems, detail)
+    return problems
+
+
+def check_cursor_parked(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
+    """The accent disc sits where the storyboard parked it, read from pixels.
+
+    tests/smoke's check_parked_pointer asks the DOM; this reads the shipped
+    frame, which is what a viewer meets and what a compositor bug would move.
+    The parked coordinate is the marker's page-space park rect mapped through
+    to_video_rect — the recorder's own geometry, not a hardcoded scale.
+    """
+    name = "cursor-parked"
+    if not info or not all(k in info for k in ("geom", "size", "park")):
+        return [
+            f"{take.name}/{name}: the marker carries no park geometry - "
+            f"re-record (tests/pixel record --force)"
+        ]
+    geom, size, park = info["geom"], info["size"], info["park"]
+    first_pointer = int(info.get("no_pointer_until_beat", 0))
+    pngs = sorted((take / "frames").glob("beat-*.png"))
+    frame = pngs[-1]  # the last review frame is always kept by the dedupe
+    beat_index = int(re.search(r"beat-(\d+)", frame.stem).group(1))
+    if beat_index <= first_pointer:
+        return [
+            f"{take.name}/{name}: the last review frame is beat "
+            f"{beat_index:02d}, not after the first pointer beat "
+            f"{first_pointer} - there is no parked frame to read"
+        ]
+    dims = png_size(frame)
+    if dims is None:
+        return [f"{take.name}/{name}: {frame.name} is not a PNG"]
+    scale = dims[0] / size[0]  # review frames are downscaled (#343)
+    vx, vy, vw, vh = to_video_rect(tuple(park), geom, (size[0], size[1]))
+    expect = (vx + vw / 2, vy + vh / 2)
+    radius = CURSOR_SEARCH_RADIUS_PX
+    window = (
+        max(0, int((expect[0] - radius) * scale)),
+        max(0, int((expect[1] - radius) * scale)),
+        int(2 * radius * scale),
+        int(2 * radius * scale),
+    )
+    got = rgb_crop(frame, window)
+    if got is None:
+        return [
+            f"{take.name}/{name}: {frame.name} decodes no {window} crop - "
+            f"the park maps outside the frame, which is its own defect"
+        ]
+    dump_frame(dump, name, f"beat-{beat_index:02d}", frame)
+    w, h, raw = got
+    found = accent_centroid(w, h, raw)
+    if found is None or found[2] < CURSOR_MIN_ACCENT_PX:
+        count = 0 if found is None else found[2]
+        problems = [
+            f"{take.name}/{name}: {count} accent pixels within {radius}px of "
+            f"the park in {frame.name} (floor {CURSOR_MIN_ACCENT_PX}) - the "
+            f"recorder drew no cursor dot there. A take that stopped drawing "
+            f"the disc cannot tell a parked pointer from a synthetic "
+            f"mousemove, which is the difference issue #185 turned out to be"
+        ]
+        _verdict(name, take, problems, f"{count} accent pixels at the park")
+        return problems
+    cx = (window[0] + found[0]) / scale
+    cy = (window[1] + found[1]) / scale
+    dx, dy = cx - expect[0], cy - expect[1]
+    problems = []
+    if abs(dx) > CURSOR_PARK_TOLERANCE_PX or abs(dy) > CURSOR_PARK_TOLERANCE_PX:
+        problems.append(
+            f"{take.name}/{name}: the disc's centre reads ({cx:.1f}, {cy:.1f}) "
+            f"in video pixels, ({dx:+.1f}, {dy:+.1f}) from the park at "
+            f"({expect[0]:.1f}, {expect[1]:.1f}) (bar "
+            f"{CURSOR_PARK_TOLERANCE_PX}px per axis) - the pointer's position "
+            f"is being set by something other than the storyboard (#202), and "
+            f"whatever that is decides whether two takes produce the same "
+            f"pixels"
+        )
+    _verdict(
+        name,
+        take,
+        problems,
+        f"disc centre ({cx:.1f}, {cy:.1f}) vs park ({expect[0]:.1f}, "
+        f"{expect[1]:.1f}), off ({dx:+.1f}, {dy:+.1f})px (bar "
+        f"{CURSOR_PARK_TOLERANCE_PX}), {found[2]} accent px",
+    )
+    return problems
+
+
+def check_cursor_absence(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
+    """No dot before the first pointer verb — #186's signature, #193's gap.
+
+    Every kept review frame of a beat before the marker's
+    no_pointer_until_beat is probed for accent pixels in the page-origin crop
+    (x 0-8, y 0-8 — where the synthetic-mousemove dot of #186 landed, 69
+    pixels, all inside it). The take's whole front runs pointer-free by the
+    storyboard's contract, so one accent pixel there is the dot drawn at load.
+    """
+    name = "cursor-absence"
+    if not info or not all(
+        k in info for k in ("geom", "size", "no_pointer_until_beat")
+    ):
+        return [
+            f"{take.name}/{name}: the marker carries no pointer-free contract "
+            f"- re-record (tests/pixel record --force)"
+        ]
+    geom, size = info["geom"], info["size"]
+    first_pointer = int(info["no_pointer_until_beat"])
+    crop = to_video_rect(
+        (0, 0, ORIGIN_CROP_PAGE_PX, ORIGIN_CROP_PAGE_PX), geom, (size[0], size[1])
+    )
+    probed = 0
+    worst = 0
+    problems: list[str] = []
+    for frame in sorted((take / "frames").glob("beat-*.png")):
+        beat_index = int(re.search(r"beat-(\d+)", frame.stem).group(1))
+        if beat_index >= first_pointer:
+            continue
+        dims = png_size(frame)
+        if dims is None:
+            problems.append(f"{take.name}/{name}: {frame.name} is not a PNG")
+            continue
+        scale = dims[0] / size[0]
+        window = (
+            int(crop[0] * scale),
+            int(crop[1] * scale),
+            max(2, int(crop[2] * scale)),
+            max(2, int(crop[3] * scale)),
+        )
+        got = rgb_crop(frame, window)
+        if got is None:
+            problems.append(
+                f"{take.name}/{name}: {frame.name} decodes no {window} crop"
+            )
+            continue
+        probed += 1
+        dump_frame(dump, name, f"beat-{beat_index:02d}", frame)
+        w, h, raw = got
+        count = sum(
+            1
+            for i in range(0, w * h * 3, 3)
+            if accent_like(raw[i], raw[i + 1], raw[i + 2])
+        )
+        worst = max(worst, count)
+        if count:
+            problems.append(
+                f"{take.name}/{name}: beat {beat_index:02d}'s frame carries "
+                f"{count} accent pixels in the page-origin crop {crop}, "
+                f"before any pointer verb ran - the dot was drawn at load, "
+                f"which is #186's race shipped again"
+            )
+            dump_frame(dump, name, f"beat-{beat_index:02d}-FAIL", frame)
+    if probed < MIN_ABSENCE_FRAMES:
+        problems.append(
+            f"{take.name}/{name}: only {probed} review frames exist before "
+            f"the first pointer beat ({first_pointer}), under the "
+            f"{MIN_ABSENCE_FRAMES} floor - an absence over almost no frames "
+            f"is the vacuous sweep"
+        )
+    _verdict(
+        name,
+        take,
+        problems,
+        f"{probed} frames before beat {first_pointer} probed, worst frame "
+        f"{worst} accent px in the {crop[2]}x{crop[3]}px origin crop (bar 0)",
+    )
+    return problems
+
+
+# One entry per take: completeness first (the floor - when it fails the golden
+# checks are skipped, so they never fail for a reason they do not name), then
+# the golden properties over the cached frames. A check reads the take and the
+# marker's `info`; it never records.
+CHECKS: dict[str, list[Callable]] = {
+    "terminal": [check_complete, check_opening_card],
+    "web": [
+        check_complete,
+        check_card_vs_window,
+        check_cursor_parked,
+        check_cursor_absence,
+    ],
 }
 
 
@@ -501,9 +1226,10 @@ def cmd_record(force: bool) -> list[str]:
     return problems
 
 
-def cmd_check() -> list[str]:
+def cmd_check(dump: Path | None = None) -> list[str]:
     """Grade whatever is cached, recording nothing. Staleness is a note."""
     problems: list[str] = []
+    ran = failed = 0
     for name in TAKES:
         take = CACHE / name
         if not recorded(take):
@@ -511,6 +1237,7 @@ def cmd_check() -> list[str]:
                 f"{name}: nothing cached at {take} - run tests/pixel (or "
                 f"tests/pixel record) first"
             )
+            failed += 1
             continue
         if stale(take, name):
             print(
@@ -520,7 +1247,16 @@ def cmd_check() -> list[str]:
         doc = marker(take)
         info = doc.get("info") if doc else None
         for check in CHECKS[name]:
-            problems += check(take, info)
+            found = check(take, info, dump)
+            problems += found
+            ran += 1
+            failed += bool(found)
+            if found and check is check_complete:
+                # The floor: a golden property over a take with no frames
+                # would fail for a reason it does not name.
+                print(f"{name}: incomplete - skipping its golden properties")
+                break
+    print(f"pixel: {ran} checks, {failed} failing")
     return problems
 
 
@@ -535,19 +1271,28 @@ def main() -> int:
         help="default: record what is stale, then check",
     )
     parser.add_argument("--force", action="store_true", help="re-record even if cached")
+    parser.add_argument(
+        "--dump",
+        metavar="DIR",
+        type=Path,
+        help="write every frame the checks read (and any offending frame) "
+        "here, named by check and instant",
+    )
     args = parser.parse_args()
     if args.force and args.command == "check":
         parser.error("--force records; it has no meaning with `check`")
+    if args.dump and args.command == "record":
+        parser.error("--dump writes what the checks read; `record` runs none")
 
     print(HEADER)
     try:
         if args.command == "record":
             problems = cmd_record(args.force)
         elif args.command == "check":
-            problems = cmd_check()
+            problems = cmd_check(args.dump)
         else:
             problems = cmd_record(args.force)
-            problems += cmd_check()
+            problems += cmd_check(args.dump)
     except PixelFailure as exc:
         problems = [str(exc)]
 
