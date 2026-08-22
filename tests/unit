@@ -3335,6 +3335,221 @@ class VendoredAssets(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# The pixel loop's cache arithmetic (tests/pixel, #350)
+# --------------------------------------------------------------------------
+#
+# `tests/pixel` serves cached reference takes off an inputs digest, so the
+# failure worth money here is the catalogue's stale-input pass: a digest that
+# quietly stops covering an input serves yesterday's frames as today's, and
+# every check downstream grades pictures of an older recorder. The digest,
+# staleness and marker arithmetic are functions of paths and bytes, so they
+# are graded here, browser-free, against private copies the tests may edit.
+# The takes themselves, and the checks that read them, are graded by running
+# `tests/pixel`.
+
+PIXEL = Path(os.environ.get("UNIT_PIXEL", REPO / "tests" / "pixel"))
+
+
+def _pixel_module():
+    """`tests/pixel` imported as a module, so its cache arithmetic can be called.
+
+    Importing it runs nothing: main() is behind __main__, the recorders are
+    imported inside the record functions, and everything at module level is a
+    constant. No browser, no playwright import.
+    """
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    loader = SourceFileLoader("_pixel_under_test", str(PIXEL))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class PixelCache(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.px = _pixel_module()
+
+    def _tmp(self) -> Path:
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        return Path(holder.name)
+
+    def editable_inputs(self) -> tuple[Path, Path]:
+        """A private copy of the helpers tree, and a minimal fixture page.
+
+        Copies, because half these tests prove a digest by *editing* an input,
+        and the working tree is not theirs to edit.
+        """
+        tmp = self._tmp()
+        helpers = tmp / "helpers"
+        shutil.copytree(_PKG_PARENT, helpers)
+        fixture = tmp / "fixture"
+        fixture.mkdir()
+        (fixture / "index.html").write_bytes(b"<!doctype html><p>pixel</p>")
+        return helpers, fixture
+
+    def digests(self, helpers: Path, fixture: Path) -> dict:
+        return {
+            name: self.px.inputs_digest(name, helpers=helpers, fixture=fixture)
+            for name in self.px.TAKES
+        }
+
+    def test_every_recorder_module_is_an_input_of_every_take(self):
+        helpers, fixture = self.editable_inputs()
+        modules = {
+            f"demo_recording/{p.name}"
+            for p in (helpers / "demo_recording").glob("*.py")
+        }
+        # The haystack, before anything is claimed about it.
+        self.assertGreaterEqual(
+            len(modules),
+            self.px.MIN_RECORDER_MODULES,
+            "the recorder package was not read; every claim below would hold "
+            "over an empty set",
+        )
+        for name in self.px.TAKES:
+            labels = {
+                label
+                for label, _ in self.px.digest_inputs(
+                    name, helpers=helpers, fixture=fixture
+                )
+            }
+            self.assertEqual(
+                sorted(modules - labels),
+                [],
+                f"{name}: recorder modules missing from its cache key - an "
+                f"edit to any of these would be served stale frames as cached",
+            )
+            self.assertIn(
+                f"storyboard/{name}",
+                labels,
+                f"{name}: its own storyboard source is not a cache input",
+            )
+
+    def test_a_one_byte_helpers_change_changes_both_digests(self):
+        helpers, fixture = self.editable_inputs()
+        before = self.digests(helpers, fixture)
+        core = helpers / "demo_recording" / "core.py"
+        core.write_bytes(core.read_bytes() + b"#")
+        after = self.digests(helpers, fixture)
+        for name in self.px.TAKES:
+            self.assertNotEqual(
+                before[name],
+                after[name],
+                f"{name}: one byte appended to core.py left its digest "
+                f"unchanged - the recorder's bytes are not in the key, which "
+                f"is the stale-input pass",
+            )
+
+    def test_the_fixture_page_is_a_web_only_input(self):
+        helpers, fixture = self.editable_inputs()
+        before = self.digests(helpers, fixture)
+        page = fixture / "index.html"
+        page.write_bytes(page.read_bytes() + b"<!-- x -->")
+        after = self.digests(helpers, fixture)
+        self.assertNotEqual(before["web"], after["web"])
+        self.assertEqual(
+            before["terminal"],
+            after["terminal"],
+            "a fixture edit invalidated the terminal take, which never loads "
+            "the fixture - the whole point of per-take digests is re-recording "
+            "only what the change can reach",
+        )
+
+    def test_the_vendored_terminal_stack_is_a_terminal_only_input(self):
+        helpers, fixture = self.editable_inputs()
+        labels = {
+            label
+            for label, _ in self.px.digest_inputs(
+                "terminal", helpers=helpers, fixture=fixture
+            )
+        }
+        for wanted in ("assets/xterm/xterm.js", "assets/xterm/VERSIONS.txt"):
+            self.assertIn(wanted, labels)
+        before = self.digests(helpers, fixture)
+        xterm = helpers / "assets" / "xterm" / "xterm.js"
+        xterm.write_bytes(xterm.read_bytes() + b"\n// x")
+        after = self.digests(helpers, fixture)
+        self.assertNotEqual(before["terminal"], after["terminal"])
+        self.assertEqual(before["web"], after["web"])
+
+    def test_a_take_with_no_marker_or_a_garbage_one_is_stale(self):
+        helpers, fixture = self.editable_inputs()
+        take = self._tmp() / "web"
+        take.mkdir()
+
+        def is_stale() -> bool:
+            return self.px.stale(take, "web", helpers=helpers, fixture=fixture)
+
+        self.assertTrue(is_stale(), "a take with no marker read as cached")
+        (take / self.px.MARKER).write_text("not json")
+        self.assertTrue(is_stale(), "an unreadable marker read as cached")
+        (take / self.px.MARKER).write_text("[]")
+        self.assertTrue(is_stale(), "a non-object marker read as cached")
+
+    def test_freshness_is_the_digest_and_nothing_else(self):
+        helpers, fixture = self.editable_inputs()
+        take = self._tmp() / "web"
+        take.mkdir()
+        good = self.px.inputs_digest("web", helpers=helpers, fixture=fixture)
+        self.px.write_marker(take, good, 1.0, {})
+        self.assertFalse(self.px.stale(take, "web", helpers=helpers, fixture=fixture))
+        self.px.write_marker(take, "0" * 64, 1.0, {})
+        self.assertTrue(self.px.stale(take, "web", helpers=helpers, fixture=fixture))
+
+    def test_the_marker_round_trips_what_slice_3_will_read(self):
+        take = self._tmp() / "web"
+        take.mkdir()
+        self.px.write_marker(take, "d" * 64, 2.5, {"no_pointer_until_beat": 10})
+        doc = self.px.marker(take)
+        self.assertEqual(doc["schema"], self.px.MARKER_SCHEMA)
+        self.assertEqual(doc["inputs"], "d" * 64)
+        self.assertEqual(doc["info"]["no_pointer_until_beat"], 10)
+
+    def test_check_complete_names_each_missing_artifact(self):
+        take = self._tmp() / "terminal"
+        take.mkdir()
+        problems = self.px.check_complete(take, None)
+        for artifact in ("demo.mp4", "timeline.json", "review frames"):
+            self.assertTrue(
+                any(artifact in problem for problem in problems),
+                f"an empty take dir raised no problem naming {artifact}",
+            )
+        self.assertFalse(self.px.recorded(take))
+        (take / "demo.mp4").write_bytes(b"x")
+        (take / "timeline.json").write_text("{}")
+        (take / "frames").mkdir()
+        (take / "frames" / "beat-00.png").write_bytes(b"x")
+        self.assertEqual(self.px.check_complete(take, None), [])
+        self.assertTrue(self.px.recorded(take))
+
+    def test_the_loop_never_touches_the_smoke_lock(self):
+        """The no-lock contract, held as an absence in the source itself.
+
+        Scoped to the code: the module docstring names the lock path in order
+        to say why this loop has no claim to it, so the sweep reads the source
+        with that docstring taken out. The haystack floor keeps a truncated
+        read from making the absence trivial.
+        """
+        source = PIXEL.read_text(encoding="utf-8")
+        docstring = ast.get_docstring(ast.parse(source)) or ""
+        self.assertGreater(len(docstring), 100, f"{PIXEL} has no docstring")
+        body = source.replace(docstring, "")
+        self.assertGreater(len(body), 5000, f"{PIXEL} was not read")
+        for needle in ("fcntl", "flock", "demo-video-smoke"):
+            self.assertNotIn(
+                needle,
+                body,
+                f"tests/pixel's code mentions {needle!r} - the loop's "
+                f"contract is that it never takes or creates a suite lock",
+            )
+        self.assertIn("lock", self.px.HEADER, "the header stopped saying why")
+
+
+# --------------------------------------------------------------------------
 # What a recorder refuses to be pointed at (target.py)
 # --------------------------------------------------------------------------
 #
@@ -10846,6 +11061,39 @@ _CURSOR_LISTENS_AT_DOMCONTENTLOADED = """\
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    # -- the pixel loop's cache key (tests/pixel, #350) -----------------------
+    (
+        # The stale-input pass, exactly: the digest still names every recorder
+        # module but hashes none of their bytes, so a helpers edit is served
+        # yesterday's frames as "cached" and every downstream check grades
+        # pictures of an older recorder. Shown live in #350's pull request;
+        # this keeps it caught after that PR is forgotten.
+        "the pixel cache digest stops reading the recorder's bytes",
+        "tests/pixel",
+        '    pairs = [("demo_recording/" + p.name, p.read_bytes()) for p in modules]',
+        '    pairs = [("demo_recording/" + p.name, b"") for p in modules]',
+        ["PixelCache.test_a_one_byte_helpers_change_changes_both_digests"],
+    ),
+    (
+        # A take that was never recorded, or whose marker did not survive,
+        # served as warm. `record` then never re-records it and `check` grades
+        # whatever is lying in the directory.
+        "a pixel take with no marker is served as cached",
+        "tests/pixel",
+        '    return not doc or doc.get("inputs") != inputs_digest(',
+        '    return bool(doc) and doc.get("inputs") != inputs_digest(',
+        ["PixelCache.test_a_take_with_no_marker_or_a_garbage_one_is_stale"],
+    ),
+    (
+        # The completeness floor under the future golden properties: a take
+        # with no review frames passes, so a crash that wrote demo.mp4 and
+        # timeline.json but died before the frames still reads as complete.
+        "the pixel completeness check passes a take with no review frames",
+        "tests/pixel",
+        "    if not pngs:",
+        "    if pngs is None:",
+        ["PixelCache.test_check_complete_names_each_missing_artifact"],
+    ),
     (
         # **The defect issue #226 is about**, restored exactly: each clip mixed
         # at the offset the beat log recorded, on a video that is not on that
@@ -15269,6 +15517,11 @@ def fault_inject() -> int:
             # decision nobody has watched go the wrong way is a claim.
             smoke_inject = Path(tmp) / "smoke-inject"
             shutil.copy(REPO / "tests" / "smoke-inject", smoke_inject)
+            # ...and the pixel loop, whose cache arithmetic three injections
+            # above break. `PixelCache` resolves it through UNIT_PIXEL for the
+            # same reason everything else here is an environment variable.
+            pixel = Path(tmp) / "pixel"
+            shutil.copy(REPO / "tests" / "pixel", pixel)
             # ...and this suite's own README, which used to be read straight
             # out of the working tree. It carries prose that assertions here
             # grade — a stated figure, and the explanation of a positive skew
@@ -15294,6 +15547,9 @@ def fault_inject() -> int:
                 # Before the `"/" in module` branch below, which would send it
                 # into the skill directory and fail on a file that is not there.
                 target = smoke_inject
+            elif module == "tests/pixel":
+                # Same reason: a path with a "/" that is not under the skill.
+                target = pixel
             elif module == "tests/README.md":
                 # Before the `.md` branch below, which would look for it under
                 # the skill directory.
@@ -15331,6 +15587,7 @@ def fault_inject() -> int:
                     "UNIT_SKILL_DIR": str(skill),
                     "UNIT_SMOKE": str(smoke),
                     "UNIT_SMOKE_INJECT": str(smoke_inject),
+                    "UNIT_PIXEL": str(pixel),
                     "UNIT_README": str(readme),
                     "UNIT_EXAMPLES": str(examples),
                 },

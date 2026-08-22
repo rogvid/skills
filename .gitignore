@@ -77,6 +77,10 @@ demo-video-FAILED.md
 # covers pointing it back into the repo (tests/smoke --out-dir tests/out).
 tests/out/
 
+# The pixel loop's cached reference takes (tests/pixel, #350). Regenerated
+# whenever their inputs digest changes; nothing here is history.
+tests/.pixel-cache/
+
 # Best practice
 .env
 

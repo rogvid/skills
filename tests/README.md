@@ -18,7 +18,7 @@ takes an exclusive lock.
 `unit` answers everything that never needed a browser: the coverage report, the
 timeline's two renderings, the content and opening warnings, the merge a stitch
 performs, and whether `SKILL.md`'s reference links still resolve. It costs about
-3 s for its 499 tests and has no dependencies at all.
+5 s for its 521 tests and has no dependencies at all.
 
 **That split is the point, not tidiness.** [#136] measured the asymmetry it
 exists to remove: the fault-injection rule was *executed* for `ci-unit` and
@@ -46,14 +46,38 @@ and `score` phases, so it is run deliberately rather than on a push. `AGENTS.md`
 ("Where an eval replaces the injections") is why code graded this way does not
 also owe an injection manifest; `tests/eval/grader/README.md` is the corpus.
 
+`pixel` is not a gate either - it is the iteration loop, slice 2 of
+[#324](https://github.com/rogvid/skills/issues/324).
+It records two short chrome reference takes into the gitignored
+`tests/.pixel-cache/` - a terminal opening on its title card, and the web
+chrome (criterion card, interlude, caption, spotlight, cursor park) against
+`tests/fixture` on an ephemeral port - keyed by a digest over every
+`helpers/demo_recording/*.py`, each take's own storyboard source, the vendored
+xterm assets and the fixture page.
+Cold (a stale or missing take) costs ~20-25 s per take, one Chromium launch
+each; warm costs ~0.1 s, prints `cached <take>`, and launches nothing.
+**It takes no lock and must never create one**: the smoke lock exists for
+smoke's time-measuring bars under encoder contention
+([#78](https://github.com/rogvid/skills/issues/78)), and every reading this
+loop makes is colour or geometry off frames already on disk.
+What it grades today is only completeness - demo.mp4, timeline.json, at least
+one review frame per take; the golden properties (opening-card prefix,
+card-vs-window colour, the cursor disc and the pointer-absence probe) are
+[#351](https://github.com/rogvid/skills/issues/351) and land in its `CHECKS`
+registry.
+Its cache arithmetic - digest, staleness, marker - is graded browser-free in
+`unit` (`PixelCache`), with three entries in the `INJECTIONS` table.
+
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
 ├── smoke-inject       # proves smoke's assertions can still fail (~47 min, nightly)
-├── unit               # the browser-free half (~3 s, 499 tests, no dependencies)
+├── unit               # the browser-free half (~5 s, 521 tests, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
 │                      #   sees, plus the docs' python fences (~0.3 s)
+├── pixel              # the iteration loop: two cached chrome reference takes,
+│                      #   digest-keyed, no lock (cold ~45 s, warm ~0.1 s)
 ├── eval-grader        # scores the blind reader against a known-answer corpus
 │                      #   (record ~2 min and cached; score ~0.3 s)
 ├── eval/grader/takes/ # the five corpus takes and their expectations

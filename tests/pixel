@@ -1,0 +1,564 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright>=1.49"]
+# ///
+"""The pixel loop: two cached reference takes to assert chrome properties on.
+
+    tests/pixel            # re-record whatever is stale, then run the checks
+    tests/pixel record     # only refresh the cache (--force re-records all)
+    tests/pixel check      # grade the cache as it is, recording nothing
+
+Slice 2 of #324. `tests/smoke` gives an agent a verdict on the recorder in ten
+minutes behind a machine-wide lock; this gives it the *take* to read pixels off
+in seconds, because the take is cached and only re-recorded when something that
+decides its frames has changed.
+
+Two takes land in `tests/.pixel-cache/` (gitignored):
+
+- `terminal` - a terminal segment opened on a title card, two commands, no
+  server. The shape issue #110 was measured on.
+- `web` - the recorder's web chrome against `tests/fixture/index.html` on an
+  ephemeral port: criterion card, interlude, caption, spotlight, and a cursor
+  park. Its storyboard keeps every pointer verb until late in the take, and
+  the marker says at which beat the pointer first moves, so #351 can probe
+  cursor *absence* over the front stretch without a third take.
+
+**Caching.** Each take carries a `.pixel-recording.json` marker naming the
+digest of everything whose bytes decide what its frames look like: every
+module in `helpers/demo_recording/`, the take's own storyboard function
+source, and per take the vendored xterm assets or the fixture page. A warm
+run prints `cached <take>` and never launches a browser; a stale or missing
+take is re-recorded alone. Staleness is never fatal: `check` grades whatever
+is cached and says so when the frames predate today's inputs. The pattern is
+`tests/eval-grader`'s, marker and all.
+
+**No lock, on purpose.** `tests/smoke` serialises suites through
+/tmp/demo-video-smoke.lock because its time-measuring bars fail under encoder
+contention (#78). Every reading this loop will ever make is colour or
+geometry off frames that are already on disk, none of it contention
+sensitive, so it has no claim to that lock and must not create one of its
+own. This file never opens the lock path.
+
+**What `check` grades today** is only completeness: the take has a demo.mp4,
+a timeline.json, and at least one review frame. The golden properties -
+opening-card prefix, card-vs-window colour, cursor disc, the absence probe -
+are #351, and they land in the CHECKS registry below.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import inspect
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+HELPERS = REPO / "skills" / "demo-video" / "helpers"
+FIXTURE = REPO / "tests" / "fixture"
+CACHE = REPO / "tests" / ".pixel-cache"
+
+MARKER = ".pixel-recording.json"
+MARKER_SCHEMA = 1
+
+TAKES = ("terminal", "web")
+
+# Below this, the recorder package was not hashed: an empty or misresolved
+# helpers directory would give every take a digest over nothing, and a cache
+# keyed on nothing is warm forever. 13 modules today; the floor is a refusal,
+# not a policy.
+MIN_RECORDER_MODULES = 8
+
+# The web storyboard's contract with #351: at least this many beats run before
+# the first pointer verb. Below it the pointer-free stretch is too thin for an
+# absence probe to mean anything, and the take is refused rather than cached.
+MIN_POINTERLESS_BEATS = 3
+
+SERVER_START_TIMEOUT_S = 10.0
+
+HEADER = (
+    "pixel: no suite lock - this loop reads colour and geometry off cached "
+    "frames, none of it sensitive to encoder contention, which is all the "
+    "smoke lock exists for (tests/smoke, #78)."
+)
+
+
+class PixelFailure(Exception):
+    """A named refusal; main() prints it and exits 1."""
+
+
+# -- the storyboards -----------------------------------------------------------
+#
+# Constants a storyboard uses are defined *inside* its function on purpose:
+# the cache digest hashes each record function's own source, so a constant
+# defined out here could change what the frames look like without changing
+# any digest.
+
+
+def record_terminal(out_dir: Path) -> dict:
+    """The terminal reference take: opened on a card, two commands, no server.
+
+    `tests/smoke`'s record_terminal_opening shape (#110): the card comes from
+    the constructor, not the storyboard, so its first frame is the recorder's
+    own behaviour. Returns what only the live recorder knows - where the
+    window and the app sit in the frame (issue #17).
+    """
+    from demo_recording import TerminalRecorder
+
+    card = "The reference terminal take."
+    with TerminalRecorder(
+        out_dir,
+        speech=False,
+        strict=True,
+        deterministic=True,
+        interlude=card,
+        interlude_hold=2.5,
+    ) as rec:
+        rec.caption("Two quick commands.")
+        rec.run("echo reference")
+        rec.wait_for_prompt(timeout_s=15)
+        rec.caption("And a second, so the screen moves.")
+        rec.run("printf 'a\\nb\\n'")
+        rec.wait_for_prompt(timeout_s=15)
+        rec.pause(0.4)
+        rec.caption("")
+
+        win = rec.page.locator("#__term_win").bounding_box()
+        host = rec.page.locator("#__term_host").bounding_box()
+        if win is None or host is None:
+            raise PixelFailure(
+                "terminal: #__term_win/#__term_host has no box - the terminal "
+                "window never rendered"
+            )
+        size = (rec._size["width"], rec._size["height"])
+    return {
+        "card": card,
+        "app": [
+            int(host["x"]),
+            int(host["y"]),
+            int(host["width"]),
+            int(host["height"]),
+        ],
+        "win": [int(win["x"]), int(win["y"]), int(win["width"]), int(win["height"])],
+        "size": list(size),
+    }
+
+
+def record_web(out_dir: Path, base_url: str) -> dict:
+    """The web chrome take: criterion card, interlude, caption, spotlight, park.
+
+    Every pointer verb is held back until the end: the whole front of the take
+    runs with a cursor that has never moved, which is the stretch #351's
+    absence probe needs. The marker records the beat index where that stretch
+    ends, read back off the take's own timeline rather than counted by hand.
+    """
+    from demo_recording import Recorder
+
+    criteria = {"AC-1": "The dashboard shows the current figures."}
+    with Recorder(
+        out_dir,
+        base_url=base_url,
+        speech=False,
+        strict=True,
+        deterministic=True,
+        criteria=criteria,
+    ) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        # -- the pointer-free stretch: nothing above or below this comment
+        # moves the cursor until the move_to further down -------------------
+        rec.criterion("AC-1")
+        rec.interlude("")
+        rec.caption("A small dashboard.", ac="AC-1")
+        rec.hold()
+        rec.spotlight("#kpi-rev")
+        rec.hold()
+        rec.spotlight()
+        rec.caption("The pointer has not moved yet.")
+        # -- first pointer verb of the take: the park ------------------------
+        rec.move_to("#refresh")
+        rec.hold()
+        rec.caption("")
+
+        geom = dict(rec._geom)
+        size = (rec._size["width"], rec._size["height"])
+        park = rec.page.locator("#refresh").bounding_box()
+        if park is None:
+            raise PixelFailure("web: #refresh has no box - the page never rendered")
+
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    beats = doc.get("beats") or []
+    first_pointer = next(
+        (i for i, beat in enumerate(beats) if beat.get("verb") == "move_to"), None
+    )
+    if first_pointer is None:
+        raise PixelFailure(
+            "web: the take logged no move_to beat - the storyboard must keep "
+            "its cursor park, it is what #351 reads the parked disc at"
+        )
+    if first_pointer < MIN_POINTERLESS_BEATS:
+        raise PixelFailure(
+            f"web: the first pointer verb is beat {first_pointer}, under the "
+            f"{MIN_POINTERLESS_BEATS} floor - the pointer-free stretch is too "
+            f"thin for an absence probe to mean anything"
+        )
+    return {
+        "geom": geom,
+        "size": list(size),
+        # The page-space box of the parked element; to_video_rect + geom maps
+        # it into the composite.
+        "park": [
+            int(park["x"]),
+            int(park["y"]),
+            int(park["width"]),
+            int(park["height"]),
+        ],
+        # Beats [0, this) ran with a pointer that had never moved.
+        "no_pointer_until_beat": first_pointer,
+    }
+
+
+RECORD: dict[str, Callable] = {"terminal": record_terminal, "web": record_web}
+
+
+# -- the digest, and the marker beside each take -------------------------------
+
+
+def _digest(pairs: list[tuple[str, bytes]]) -> str:
+    """A hash over (label, bytes), order-independent.
+
+    The label is hashed alongside the bytes, so a rename that leaves the same
+    bytes under a different name is still a different input.
+    """
+    sha = hashlib.sha256()
+    for label, data in sorted(pairs):
+        sha.update(label.encode("utf-8"))
+        sha.update(b"\0")
+        sha.update(data)
+        sha.update(b"\0")
+    return sha.hexdigest()
+
+
+def digest_inputs(
+    name: str, helpers: Path = HELPERS, fixture: Path = FIXTURE
+) -> list[tuple[str, bytes]]:
+    """Everything whose bytes decide what this take's frames look like.
+
+    The recorder, the storyboard, and what the storyboard is recorded against
+    - all three, for the same reason `tests/eval-grader` hashes all three: a
+    key that named only the storyboard would serve pictures of an older
+    recorder while the checks report on today's.
+    """
+    pkg = helpers / "demo_recording"
+    modules = sorted(pkg.glob("*.py"))
+    if len(modules) < MIN_RECORDER_MODULES:
+        raise PixelFailure(
+            f"digest: {pkg} holds {len(modules)} modules, under the "
+            f"{MIN_RECORDER_MODULES} floor - hashing it would key the cache "
+            f"on nothing, and a cache keyed on nothing is warm forever"
+        )
+    pairs = [("demo_recording/" + p.name, p.read_bytes()) for p in modules]
+    pairs.append(("storyboard/" + name, inspect.getsource(RECORD[name]).encode()))
+    if name == "terminal":
+        # The vendored terminal stack, manifest included: the take's screen is
+        # xterm.js's rendering, so its bytes are frame inputs.
+        assets = helpers / "assets" / "xterm"
+        pairs += [
+            ("assets/xterm/" + p.name, p.read_bytes())
+            for p in sorted(assets.iterdir())
+            if p.is_file()
+        ]
+    else:
+        pairs.append(("fixture/index.html", (fixture / "index.html").read_bytes()))
+    return pairs
+
+
+def inputs_digest(name: str, helpers: Path = HELPERS, fixture: Path = FIXTURE) -> str:
+    return _digest(digest_inputs(name, helpers=helpers, fixture=fixture))
+
+
+def marker(take: Path) -> dict | None:
+    """What the last recording of this take was made from, if it said."""
+    try:
+        doc = json.loads((take / MARKER).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def write_marker(take: Path, inputs: str, seconds: float, info: dict) -> None:
+    (take / MARKER).write_text(
+        json.dumps(
+            {
+                "schema": MARKER_SCHEMA,
+                "inputs": inputs,
+                "seconds": seconds,
+                "info": info,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def stale(
+    take: Path, name: str, helpers: Path = HELPERS, fixture: Path = FIXTURE
+) -> bool:
+    """Whether the frames on disk are of a different recorder or storyboard.
+
+    Never fatal anywhere: a stale cache still checks - it is simply checking
+    older pictures, and `check` says so instead of refusing.
+    """
+    doc = marker(take)
+    return not doc or doc.get("inputs") != inputs_digest(
+        name, helpers=helpers, fixture=fixture
+    )
+
+
+# -- the checks ----------------------------------------------------------------
+
+
+def check_complete(take: Path, info: dict | None) -> list[str]:
+    """The slice-2 placeholder: the take exists and has something to read.
+
+    #351 replaces the weight of this with the golden properties; this stays
+    as the floor under them - a property check over a take with no frames
+    would fail for a reason it does not name.
+    """
+    problems = []
+    if not (take / "demo.mp4").is_file():
+        problems.append(f"{take.name}: demo.mp4 is missing")
+    if not (take / "timeline.json").is_file():
+        problems.append(f"{take.name}: timeline.json is missing")
+    pngs = sorted((take / "frames").glob("beat-*.png"))
+    if not pngs:
+        problems.append(f"{take.name}: no review frames under frames/")
+    return problems
+
+
+def recorded(take: Path) -> bool:
+    """Whether there is a complete recording here to check or serve as cached."""
+    return not check_complete(take, None)
+
+
+# The seam #351 fills: one entry per take, each check a function of the take
+# directory and the marker's `info` (the geometry only the recorder knew).
+# Append golden-property checks here; do not fold them into check_complete.
+CHECKS: dict[str, list[Callable[[Path, dict | None], list[str]]]] = {
+    "terminal": [check_complete],
+    "web": [check_complete],
+}
+
+
+# -- recording machinery -------------------------------------------------------
+#
+# `free_port`, `fixture_server` and `scrub_env` are small local copies of
+# tests/smoke's helpers. Deliberately not imported: tests/smoke is a 12k-line
+# executable whose import would drag suite state (and a playwright import)
+# into a loop whose warm path must load neither.
+
+
+def scrub_env() -> None:
+    """Strip every recorder knob out of the environment.
+
+    Same reason as tests/smoke's: a sourced project .env would otherwise
+    record the reference takes at someone's viewport, and the cached frames
+    would mean something different per machine.
+    """
+    for key in [k for k in os.environ if k.startswith("DEMO_VIDEO_")]:
+        del os.environ[key]
+    os.environ.pop("ELEVENLABS_API_KEY", None)
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextmanager
+def fixture_server() -> Iterator[str]:
+    """Serve tests/fixture on an ephemeral port; always shut it down."""
+    if not (FIXTURE / "index.html").is_file():
+        raise PixelFailure(f"fixture app missing: {FIXTURE / 'index.html'}")
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            str(FIXTURE),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + SERVER_START_TIMEOUT_S
+        while True:
+            if proc.poll() is not None:
+                raise PixelFailure(
+                    f"fixture server exited immediately (code {proc.returncode})"
+                )
+            try:
+                with urllib.request.urlopen(base_url + "/", timeout=1):
+                    break
+            except (urllib.error.URLError, OSError):
+                if time.monotonic() > deadline:
+                    raise PixelFailure(
+                        f"fixture server not answering on port {port} after "
+                        f"{SERVER_START_TIMEOUT_S:.0f}s"
+                    ) from None
+                time.sleep(0.1)
+        yield base_url
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a wedged server
+            proc.kill()
+
+
+def fresh_take_dir(name: str) -> Path:
+    """An empty directory for one take, deleted only inside the cache.
+
+    No marker dance like tests/smoke's fresh_take_dir: the cache directory is
+    wholly this tool's (gitignored, created here, never a source tree), and a
+    crashed take must be re-recordable without a human deleting anything. The
+    resolve() guard is what keeps a bad TAKES entry from reaping outside it.
+    """
+    take = CACHE / name
+    if CACHE.resolve() not in take.resolve().parents:
+        raise PixelFailure(f"refusing to touch {take}: it is not under {CACHE}")
+    if take.exists():
+        shutil.rmtree(take)
+    take.mkdir(parents=True)
+    return take
+
+
+def cmd_record(force: bool) -> list[str]:
+    """Re-record what is stale or missing; leave the rest alone."""
+    CACHE.mkdir(exist_ok=True)
+    wanted = [
+        n for n in TAKES if force or not recorded(CACHE / n) or stale(CACHE / n, n)
+    ]
+    for name in TAKES:
+        if name not in wanted:
+            print(f"cached {name}")
+    if not wanted:
+        return []
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        raise PixelFailure(
+            "ffmpeg and ffprobe must be on PATH - the recorders shell out to both"
+        )
+    if not (HELPERS / "demo_recording").is_dir():
+        raise PixelFailure(f"helpers not found at {HELPERS}")
+    if str(HELPERS) not in sys.path:
+        sys.path.insert(0, str(HELPERS))
+    scrub_env()
+
+    problems: list[str] = []
+    for name in wanted:
+        take = fresh_take_dir(name)
+        started = time.monotonic()
+        print(f"recording {name} ...", flush=True)
+        try:
+            if name == "web":
+                with fixture_server() as base_url:
+                    info = RECORD[name](take, base_url)
+            else:
+                info = RECORD[name](take)
+        except Exception as exc:  # noqa: BLE001 - a raising take is a failure
+            problems.append(f"{name}: recording raised {type(exc).__name__}: {exc}")
+            continue
+        missing = check_complete(take, None)
+        if missing:
+            # No marker: a hollow take must read as never recorded, not as
+            # cached - the marker written after success is what keeps a crash
+            # out of the cache (same rule as tests/eval-grader's).
+            problems += missing
+            continue
+        seconds = round(time.monotonic() - started, 1)
+        write_marker(take, inputs_digest(name), seconds, info)
+        print(f"recorded {name} in {seconds:.0f}s")
+    return problems
+
+
+def cmd_check() -> list[str]:
+    """Grade whatever is cached, recording nothing. Staleness is a note."""
+    problems: list[str] = []
+    for name in TAKES:
+        take = CACHE / name
+        if not recorded(take):
+            problems.append(
+                f"{name}: nothing cached at {take} - run tests/pixel (or "
+                f"tests/pixel record) first"
+            )
+            continue
+        if stale(take, name):
+            print(
+                f"note: {name} is stale - its frames predate today's recorder "
+                f"or storyboard; a bare tests/pixel re-records it"
+            )
+        doc = marker(take)
+        info = doc.get("info") if doc else None
+        for check in CHECKS[name]:
+            problems += check(take, info)
+    return problems
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Record and check the cached chrome reference takes."
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("record", "check"),
+        help="default: record what is stale, then check",
+    )
+    parser.add_argument("--force", action="store_true", help="re-record even if cached")
+    args = parser.parse_args()
+    if args.force and args.command == "check":
+        parser.error("--force records; it has no meaning with `check`")
+
+    print(HEADER)
+    try:
+        if args.command == "record":
+            problems = cmd_record(args.force)
+        elif args.command == "check":
+            problems = cmd_check()
+        else:
+            problems = cmd_record(args.force)
+            problems += cmd_check()
+    except PixelFailure as exc:
+        problems = [str(exc)]
+
+    if problems:
+        print("\npixel: FAILED", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    print("pixel: OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
