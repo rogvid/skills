@@ -9336,6 +9336,430 @@ def run_strict_terminal(out_root: Path) -> list[str]:
     return check_strict_failure("terminal-strict", out_dir, raised, ["nonzero_exit"])
 
 
+# -- the wrapper take (issue #358) --------------------------------------------
+#
+# The opt-in wrapper path: chrome in the recorded page, the app in an iframe
+# at true pixel size, the caption in a reserved band BELOW the app rect. Two
+# takes: one healthy — every locator verb driven through the frame, the band
+# graded out of the pixels — and one against a fixture served with
+# X-Frame-Options: DENY, which the recorder must refuse by name rather than
+# record as a silently blank window.
+
+# The line the wrapper take captions with, and the line the refusal take must
+# never reach.
+WRAPPER_CAPTION = "The caption sits in its own band below the app."
+WRAPPER_UNREACHED = "this caption must never be recorded"
+
+# A caption the band cannot hold: 174 characters, three rendered lines
+# against the band's two. The wrapper take says it with a caption_clipped
+# issue rather than reflowing the text — PR #366's review measured ~17 px
+# shaved off the first and last lines of exactly this length with nothing
+# anywhere saying so.
+WRAPPER_LONG_CAPTION = (
+    "This caption is deliberately far too long for the reserved caption "
+    "band below the app rect, so the band's edges shave its first and its "
+    "last line instead of covering the app."
+)
+
+# The band sweep's bars. Measured on a real wrapper take: the empty band
+# reads 0.4-1.4 contrast (3.5 mid-fade), the caption bubble 29-30. The gap
+# between the bars is deliberate — a mid-fade frame is neither.
+WRAPPER_BAND_SWEEP_FPS = 10
+WRAPPER_BAND_LIT = 12.0
+WRAPPER_BAND_UNLIT = 6.0
+# The caption must hold the band at least this long — under it the band lit
+# for a flicker, not for the caption beat the timeline logs.
+WRAPPER_BAND_MIN_S = 1.0
+
+# App-rect stillness across the caption's appearance. Measured 0.65 on a
+# healthy take (encoder noise over a static fixture); a caption rendered
+# over the app instead of in the band moves this by an order of magnitude.
+WRAPPER_APP_MAX_DELTA = 3.0
+# How far around the band's first lit frame the app is compared: far enough
+# back to predate the fade, close enough that nothing else happened between
+# the two instants.
+WRAPPER_APP_CONTROL_S = 0.3
+WRAPPER_APP_SAMPLE_S = 0.5
+
+
+@contextmanager
+def refusing_fixture_server() -> Iterator[str]:
+    """Serve tests/fixture with X-Frame-Options: DENY on every response.
+
+    `python -m http.server` cannot add a header, so this is the same server
+    run through `-c` with `end_headers` overridden — the smallest honest way
+    to stand up an app that refuses framing.
+    """
+    handler_code = (
+        "import functools, http.server, sys\n"
+        "class Handler(http.server.SimpleHTTPRequestHandler):\n"
+        "    def end_headers(self):\n"
+        "        self.send_header('X-Frame-Options', 'DENY')\n"
+        "        super().end_headers()\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "http.server.ThreadingHTTPServer(\n"
+        "    ('127.0.0.1', int(sys.argv[1])),\n"
+        "    functools.partial(Handler, directory=sys.argv[2]),\n"
+        ").serve_forever()\n"
+    )
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", handler_code, str(port), str(FIXTURE_DIR)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + SERVER_START_TIMEOUT_S
+        while True:
+            if proc.poll() is not None:
+                raise SmokeFailure(
+                    f"refusing fixture server exited immediately "
+                    f"(code {proc.returncode})"
+                )
+            try:
+                with urllib.request.urlopen(base_url, timeout=1) as resp:
+                    if resp.headers.get("X-Frame-Options") != "DENY":
+                        raise SmokeFailure(
+                            "the refusing fixture server is not sending "
+                            "X-Frame-Options: DENY — the refusal take would "
+                            "grade a server that refuses nothing"
+                        )
+                    break
+            except (urllib.error.URLError, OSError):
+                pass
+            if time.time() > deadline:
+                raise SmokeFailure(
+                    f"refusing fixture server did not answer on {base_url} "
+                    f"within {SERVER_START_TIMEOUT_S:.0f}s"
+                )
+            time.sleep(0.1)
+        yield base_url
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def record_wrapper(out_dir: Path, base_url: str) -> dict:
+    """One wrapper take driving every locator verb through the app frame.
+
+    The storyboard asserts each verb's observable post-condition against
+    `rec.app` as it goes — a click that lands in the wrapper chrome instead
+    of the iframe advances nothing, and this is where that surfaces.
+    """
+    from demo_recording import Recorder
+
+    with Recorder(
+        out_dir,
+        base_url=base_url,
+        speech=False,
+        strict=True,
+        deterministic=True,
+        wrapper=True,
+    ) as rec:
+        rec.goto("/")
+        rec.wait_for("#kpi-rev")
+        rec.caption(WRAPPER_CAPTION)
+        rec.spotlight("#kpi-rev")
+        rec.hold()
+        rec.spotlight()
+        rec.click("#refresh")
+        status = rec.app.locator("#status").inner_text()
+        if status != "snapshot 2 of 3":
+            raise _StoryboardFailed(
+                f"click('#refresh') through the app frame did not advance "
+                f"the fixture: #status reads {status!r}"
+            )
+        rec.type_into("#search", "harbor")
+        rows = rec.app.locator("#rows tr").count()
+        if rows != 1:
+            raise _StoryboardFailed(
+                f"type_into('#search') through the app frame did not filter: "
+                f"{rows} rows visible, expected 1"
+            )
+        rec.scroll_to("#rows")
+        rec.caption("")
+        # A caption the band cannot hold, then the clear again: the take
+        # must record caption_clipped for this line and only this line
+        # (check_wrapper_clipped), and the band must still end dark for the
+        # band sweep's last-frame claim.
+        rec.caption(WRAPPER_LONG_CAPTION)
+        rec.caption("")
+        rec.pause(0.6)
+        geom = dict(rec._geom)
+        size = (rec._size["width"], rec._size["height"])
+    return {"geom": geom, "size": size}
+
+
+def check_wrapper_band(out_dir: Path, info: dict) -> list[str]:
+    """The caption lit its band and left the app rect's pixels alone (#358).
+
+    The geometry half of "the band and the app share no pixels" is
+    `tests/unit`'s (`WrapperChrome`); this is the pixel half, read out of
+    demo.mp4 the way a viewer meets it. The band is located by sweeping its
+    own rect for contrast — the empty band is flat window body — rather than
+    by trusting a beat timestamp through a steppable wall clock (#245).
+    """
+    failures = []
+    mp4 = out_dir / "demo.mp4"
+    geom = info["geom"]
+    band: Rect = (geom["bandx"], geom["bandy"], geom["bandw"], geom["bandh"])
+    app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+    sweep = gray_frames(mp4, rect=band, sample_fps=WRAPPER_BAND_SWEEP_FPS)
+    if len(sweep) < WRAPPER_BAND_SWEEP_FPS * 3:
+        return [
+            f"wrapper: the band sweep decoded {len(sweep)} frames — too few "
+            f"to hold a caption at all, so nothing below could fail honestly"
+        ]
+    lit = [contrast(f) >= WRAPPER_BAND_LIT for f in sweep]
+    run = longest_true_run(lit)
+    if run is None:
+        return [
+            f"wrapper: no frame of the caption band {band} ever reaches "
+            f"{WRAPPER_BAND_LIT} contrast across "
+            f"{len(sweep) / WRAPPER_BAND_SWEEP_FPS:.1f}s — the caption "
+            f"{WRAPPER_CAPTION!r} never painted in its band"
+        ]
+    start, length = run
+    if length / WRAPPER_BAND_SWEEP_FPS < WRAPPER_BAND_MIN_S:
+        failures.append(
+            f"wrapper: the band was lit for only "
+            f"{length / WRAPPER_BAND_SWEEP_FPS:.1f}s — a flicker, not the "
+            f"caption beat the timeline logs"
+        )
+    if start == 0:
+        failures.append(
+            "wrapper: the band is lit from frame 0, so there is no unlit "
+            "control — nothing separates a caption in its band from a band "
+            "that is simply always painted"
+        )
+    else:
+        unlit_before = contrast(sweep[start - 1])
+        # One frame back can be mid-fade; the claim is about the stretch
+        # before the caption, so read the quietest frame in it.
+        quietest = min(contrast(f) for f in sweep[:start])
+        if quietest > WRAPPER_BAND_UNLIT:
+            failures.append(
+                f"wrapper: before the caption the band never drops under "
+                f"{WRAPPER_BAND_UNLIT} contrast (quietest {quietest:.1f}, "
+                f"frame before the stretch {unlit_before:.1f}) — the unlit "
+                f"control is missing"
+            )
+    if lit[-1]:
+        failures.append(
+            "wrapper: the band is still lit in the last sampled frame — "
+            "caption('') did not clear it"
+        )
+    # The app rect across the caption's appearance: the two instants bracket
+    # the fade and nothing else, so any movement is the caption painting
+    # where it must not.
+    control_at = max(0.0, start / WRAPPER_BAND_SWEEP_FPS - WRAPPER_APP_CONTROL_S)
+    sample_at = start / WRAPPER_BAND_SWEEP_FPS + WRAPPER_APP_SAMPLE_S
+    before = gray_frames(mp4, rect=app, start=control_at, duration=0.05)
+    during = gray_frames(mp4, rect=app, start=sample_at, duration=0.05)
+    if not before or not during:
+        failures.append(
+            f"wrapper: the app rect {app} decoded no frame at "
+            f"{control_at:.2f}s/{sample_at:.2f}s — the stillness claim has "
+            f"nothing to read"
+        )
+    else:
+        moved = frame_difference(before[0], during[0])
+        if moved > WRAPPER_APP_MAX_DELTA:
+            failures.append(
+                f"wrapper: the app rect moved {moved:.2f} mean luma between "
+                f"{control_at:.2f}s and {sample_at:.2f}s, over the "
+                f"{WRAPPER_APP_MAX_DELTA} bar — the caption's appearance "
+                f"changed pixels inside the app rect, which is the overlap "
+                f"the band exists to remove (#355)"
+            )
+        else:
+            print(
+                f"wrapper: band lit {length / WRAPPER_BAND_SWEEP_FPS:.1f}s "
+                f"from {start / WRAPPER_BAND_SWEEP_FPS:.1f}s, app rect moved "
+                f"{moved:.2f} (bar {WRAPPER_APP_MAX_DELTA}) across the "
+                f"caption's appearance"
+            )
+    return failures
+
+
+def longest_true_run(flags: list[bool]) -> tuple[int, int] | None:
+    """(start, length) of the longest contiguous True stretch, or None.
+
+    tests/pixel's `longest_run`, duplicated for the same reason its
+    thresholds are: the loop and the suite must not import each other.
+    """
+    best: tuple[int, int] | None = None
+    start: int | None = None
+    for i, flag in enumerate([*flags, False]):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            if best is None or i - start > best[1]:
+                best = (start, i - start)
+            start = None
+    return best
+
+
+def check_wrapper_evidence(out_dir: Path) -> list[str]:
+    """Evidence on a wrapper take describes the app, not the recorder.
+
+    The wrapper page's own body is chrome and one opaque iframe node, so an
+    evidence capture that stayed on `rec.page` would still write plausible
+    files — url, title, a well-formed aria tree — describing the recorder.
+    The fixture's own heading is what tells the two apart.
+    """
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    caption_beats = [
+        b
+        for b in doc.get("beats") or []
+        if b.get("verb") == "caption" and b.get("caption") == WRAPPER_CAPTION
+    ]
+    if len(caption_beats) != 1:
+        return [
+            f"wrapper: {len(caption_beats)} beats caption {WRAPPER_CAPTION!r},"
+            f" expected 1 — there is no beat to read evidence for"
+        ]
+    evidence_rel = caption_beats[0].get("evidence")
+    if not evidence_rel:
+        return ["wrapper: the caption beat carries no evidence pointer"]
+    evidence = json.loads((out_dir / evidence_rel).read_text(encoding="utf-8"))
+    aria = evidence.get("aria") or ""
+    if "Northwind Ops" not in aria:
+        return [
+            f"wrapper: the caption beat's evidence aria never mentions the "
+            f"fixture's own heading — evidence reads the wrapper chrome, not "
+            f"the app ({out_dir / evidence_rel})"
+        ]
+    return []
+
+
+def check_wrapper_clipped(out_dir: Path) -> list[str]:
+    """The band says so when it cannot show a caption (#366's review).
+
+    The take captions one line the band holds and one it cannot; the second
+    must leave a `caption_clipped` issue naming the line and the overflow,
+    and the first must leave none — over-reporting would file an issue on
+    every caption of every wrapper take. The text is deliberately not capped
+    or reflowed by the recorder; the record is the whole fix.
+    """
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    issues = [
+        issue
+        for issue in doc.get("issues") or []
+        if issue.get("kind") == "caption_clipped"
+    ]
+    failures = []
+    named = [i for i in issues if i.get("caption") == WRAPPER_LONG_CAPTION]
+    if not named:
+        failures.append(
+            f"wrapper: the {len(WRAPPER_LONG_CAPTION)}-char caption left no "
+            f"caption_clipped issue — the band shaved its first and last "
+            f"lines and no artifact says so, which is timeline.json claiming "
+            f"a line the pixels do not show"
+        )
+    else:
+        clipped_px = named[0].get("clipped_px")
+        if not isinstance(clipped_px, (int, float)) or clipped_px <= 0:
+            failures.append(
+                f"wrapper: the caption_clipped issue carries clipped_px="
+                f"{clipped_px!r} — without a positive reading nobody can say "
+                f"how much of the line the band shaved"
+            )
+    fitting = [i for i in issues if i.get("caption") != WRAPPER_LONG_CAPTION]
+    if fitting:
+        failures.append(
+            f"wrapper: caption_clipped was recorded for {len(fitting)} "
+            f"caption(s) that fit their band — an issue filed on every "
+            f"caption is the artifact crying wolf"
+        )
+    return failures
+
+
+def check_wrapper_refusal(out_dir: Path, raised: BaseException | None) -> list[str]:
+    """An app that refuses framing is refused by name, before any beat shows
+    it (#358): a blocked iframe recorded as a demo is the artifact-lie
+    outcome this arm exists to keep out.
+
+    The take this grades records with `strict=False`, deliberately: the
+    blocked navigation also logs a console error, so under strict a
+    swallowed refusal would still surface as `StrictTakeFailed` and the
+    completed-without-raising claim below could never fail for the reason it
+    names. The refusal has to stand on its own, not lean on strict's net.
+    """
+    failures = []
+    if raised is None:
+        failures.append(
+            "wrapper-refused: recording against X-Frame-Options: DENY "
+            "completed without raising — the take recorded a silently blank "
+            "window as a demo"
+        )
+    else:
+        message = str(raised)
+        if "X-Frame-Options" not in message or "DENY" not in message:
+            failures.append(
+                f"wrapper-refused: the refusal does not name the header that "
+                f"caused it — a storyboard author cannot act on "
+                f"{type(raised).__name__}: {message[:200]!r}"
+            )
+    doc_path = out_dir / "timeline.json"
+    if doc_path.is_file():
+        doc = json.loads(doc_path.read_text(encoding="utf-8"))
+        reached = [
+            b for b in doc.get("beats") or [] if b.get("caption") == WRAPPER_UNREACHED
+        ]
+        if reached:
+            failures.append(
+                "wrapper-refused: the storyboard line after the refused goto "
+                "still recorded a beat — the take went on recording after "
+                "the app refused to be framed"
+            )
+    return failures
+
+
+def run_wrapper(out_root: Path) -> list[str]:
+    """The wrapper pair (#358): the healthy take, then the refused one."""
+    from demo_recording import Recorder
+
+    failures: list[str] = []
+    out_dir = fresh_take_dir(out_root, "wrapper")
+    try:
+        with fixture_server() as base_url:
+            info = record_wrapper(out_dir, base_url)
+    except _StoryboardFailed as exc:
+        return [f"wrapper: {exc}"]
+    except Exception as exc:  # noqa: BLE001 - a raising take is the failure
+        return [f"wrapper: recording raised {type(exc).__name__}: {exc}"]
+    failures += check_wrapper_band(out_dir, info)
+    failures += check_wrapper_evidence(out_dir)
+    failures += check_wrapper_clipped(out_dir)
+
+    refused_dir = fresh_take_dir(out_root, "wrapper-refused")
+    raised: BaseException | None = None
+    with refusing_fixture_server() as base_url:
+        try:
+            # strict=False on purpose — see check_wrapper_refusal: the
+            # refusal must not need strict's console-error net to surface.
+            with Recorder(
+                refused_dir,
+                base_url=base_url,
+                speech=False,
+                strict=False,
+                wrapper=True,
+            ) as rec:
+                rec.goto("/")
+                rec.caption(WRAPPER_UNREACHED)
+        except Exception as exc:  # noqa: BLE001 - the raise is the assertion
+            raised = exc
+    failures += check_wrapper_refusal(refused_dir, raised)
+    return failures
+
+
 def last_frame(mp4: Path, rect: Rect) -> bytes | None:
     """The final second of a recording, reduced over `rect`, last frame first
     available. Both takes end on the same static page, so this is the frame
@@ -12185,6 +12609,13 @@ def main() -> int:
         help="record only the two short takes that strict=True must refuse (issue #3)",
     )
     parser.add_argument(
+        "--wrapper-only",
+        action="store_true",
+        help="record only the wrapper pair: verbs through the app iframe with "
+        "the caption in its own band, and the take that must refuse an app "
+        "sending X-Frame-Options (issue #358)",
+    )
+    parser.add_argument(
         "--issues-only",
         action="store_true",
         help="record only the broken-page and failing-command takes, which is "
@@ -12240,6 +12671,7 @@ def main() -> int:
             ("--overlay-only", args.overlay_only),
             ("--coverage-only", args.coverage_only),
             ("--strict-only", args.strict_only),
+            ("--wrapper-only", args.wrapper_only),
             ("--issues-only", args.issues_only),
             ("--lock-only", args.lock_only),
             ("--cheap", args.cheap),
@@ -12467,6 +12899,12 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # as its cheapest arm.
     if selects(only, ("--web-only", "--strict-only")):
         failures += run_strict_web(out_root)
+    # The wrapper pair (#358). Reachable from --web-only as well as its own
+    # flag: it is a web take, and whoever is changing the web recorder is
+    # running --web-only. Its own flag is what keeps its assertions gradeable
+    # — the arm records in well under a minute against --web-only's 123 s.
+    if selects(only, ("--web-only", "--wrapper-only")):
+        failures += run_wrapper(out_root)
     if selects(only, ("--web-only", "--evidence-only")):
         failures += run_evidence(out_root)
     # Speech end to end (issue #157). A web take, so it is reachable from

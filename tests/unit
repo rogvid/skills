@@ -163,6 +163,7 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 import demo_recording.core as core_module  # noqa: E402
 import demo_recording.frames as frames_module  # noqa: E402
+from demo_recording.chrome import chrome_geometry, chrome_html  # noqa: E402
 from demo_recording.core import (  # noqa: E402
     CRITERION_HOLD_MAX_S,
     CRITERION_HOLD_MIN_S,
@@ -5198,6 +5199,149 @@ class OpeningCardOnATake(unittest.TestCase):
         self.assertIsNone(opening["card"]["luma"])
         self.assertIn(
             "does not know where its window sits", opening["card"]["note"] or ""
+        )
+
+
+class WrapperChrome(unittest.TestCase):
+    """The wrapper take's chrome geometry and wiring (issue #358).
+
+    The load-bearing claim is the band: the caption band and the app rect
+    share no pixels, **by construction**, at any viewport. `tests/smoke
+    --wrapper-only` reads the same claim out of a recorded take's frames;
+    this is the arithmetic half, so a geometry change that reintroduces the
+    overlap the wrapper exists to remove is red without a browser.
+    """
+
+    VIEWPORTS = ((1280, 720), (1920, 1080), (1000, 620), (1366, 768))
+
+    def test_the_caption_band_and_the_app_rect_share_no_pixels(self):
+        for width, height in self.VIEWPORTS:
+            geom = chrome_geometry(width, height)
+            app_bottom = geom["appy"] + geom["apph"]
+            self.assertGreaterEqual(
+                geom["bandy"],
+                app_bottom,
+                f"{width}x{height}: the band starts at y={geom['bandy']}, "
+                f"inside the app rect that runs to y={app_bottom} — the app "
+                f"and the caption share pixels, which is the overlap #355 "
+                f"exists to remove",
+            )
+
+    def test_the_band_sits_directly_below_the_slot_inside_the_window(self):
+        # Adjacent, not merely disjoint: a gap between the two would be a
+        # strip of bare window body the caption was supposed to own.
+        for width, height in self.VIEWPORTS:
+            geom = chrome_geometry(width, height)
+            self.assertEqual(geom["bandy"], geom["appy"] + geom["apph"])
+            self.assertEqual(geom["bandx"], geom["appx"])
+            self.assertEqual(geom["bandw"], geom["appw"])
+            self.assertLessEqual(
+                geom["bandy"] + geom["bandh"] + geom["pad"],
+                geom["winy"] + geom["winh"],
+                f"{width}x{height}: the band runs past the window's bottom pad",
+            )
+            self.assertGreaterEqual(geom["winx"], 0)
+            self.assertGreaterEqual(geom["winy"], 0)
+            self.assertLessEqual(geom["winx"] + geom["winw"], width)
+            self.assertLessEqual(geom["winy"] + geom["winh"], height)
+
+    def test_a_viewport_too_small_for_the_chrome_is_refused_with_the_floor(self):
+        with self.assertRaises(ValueError) as caught:
+            chrome_geometry(1280, 300)
+        self.assertIn("viewport of at least", str(caught.exception))
+
+    def test_the_chrome_document_carries_the_slot_the_band_and_the_card_layer(self):
+        # The slot is #362's mount point and the card layer is #360's; a
+        # rename here silently strands both. Every substitution token must be
+        # consumed, or the page ships with a literal __TOKEN__ on screen.
+        html = chrome_html(
+            chrome_geometry(1280, 720),
+            title="localhost:9",
+            window_body="#181825",
+            accent="235,110,20",
+        )
+        for element_id in (
+            "__chrome_slot",
+            "__chrome_band",
+            "__chrome_card",
+            "__demo_caption",
+            "__demo_cursor",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        leftover = re.findall(r"__[A-Z][A-Z0-9]*__", html)
+        self.assertEqual(
+            leftover,
+            [],
+            f"unsubstituted chrome tokens reached the page: {sorted(set(leftover))}",
+        )
+
+    def test_a_wrapper_take_keeps_the_base_caption_font(self):
+        # The 34px compensation exists because the composite scales the page
+        # by ~0.8; the wrapper page is recorded at true size, so inheriting
+        # it would put visibly oversized captions in the band.
+        self.assertEqual(recorder(self, wrapper=True)._caption_font_px, 26)
+        self.assertEqual(recorder(self)._caption_font_px, 34)
+
+    def test_rec_app_is_the_main_frame_until_a_wrapper_take_mounts_its_iframe(self):
+        legacy = recorder(self)
+        legacy.page = types.SimpleNamespace(main_frame="the main frame")
+        self.assertEqual(legacy.app, "the main frame")
+        wrapped = recorder(self, wrapper=True)
+        with self.assertRaises(RuntimeError) as caught:
+            wrapped.app  # noqa: B018 - the property's refusal is the claim
+        self.assertIn("no app frame yet", str(caught.exception))
+        wrapped._app_frame = "the app frame"
+        self.assertEqual(wrapped.app, "the app frame")
+
+    class CaptionSurface(FakePage):
+        """A page whose `__demoCaption` reports what the band could not show.
+
+        The wrapper chrome's caption renderer (chrome.py) returns the pixels
+        the band's `overflow: hidden` shaved off the bubble; the in-page
+        overlay version returns nothing. Scripted here, because the recorder
+        half under test is what `caption()` does with the answer.
+        """
+
+        def __init__(self, clipped) -> None:
+            super().__init__()
+            self.clipped = clipped
+
+        def evaluate(self, script, *args):
+            if "__demoCaption" in script:
+                return self.clipped
+            return None
+
+    def test_a_caption_the_band_cannot_hold_is_recorded_with_its_overflow(self):
+        # The PR #366 review's blocking finding: a 174-char caption lost
+        # ~17 px off its first and last lines to the band's edges while
+        # timeline.json recorded the full sentence, warnings stayed empty and
+        # a strict take stayed green — the artifact claiming a line the
+        # pixels do not show. The text is deliberately not capped or
+        # reflowed; the record is the fix.
+        rec = recorder(self, wrapper=True, page=self.CaptionSurface(34))
+        rec.caption("a caption far too tall for the band")
+        clipped = [i for i in rec._issues if i["kind"] == "caption_clipped"]
+        self.assertEqual(len(clipped), 1, rec._issues)
+        self.assertEqual(clipped[0]["clipped_px"], 34)
+        self.assertIn("a caption far too tall for the band", clipped[0]["message"])
+        # Attributed to the caption beat that painted it, not to null.
+        self.assertEqual(clipped[0]["beat"], rec._beats[-1]["index"])
+        self.assertEqual(clipped[0]["verb"], "caption")
+        # The storyboard's mistake, not the app's: never fatal under strict.
+        self.assertEqual(rec._fatal_count, 0)
+
+    def test_a_caption_that_fits_its_band_records_nothing(self):
+        # Both quiet answers: the wrapper surface measuring zero overflow,
+        # and the legacy overlay returning nothing at all.
+        fits = recorder(self, wrapper=True, page=self.CaptionSurface(0))
+        fits.caption("short")
+        legacy = recorder(self)  # FakePage.evaluate returns None
+        legacy.caption("short")
+        self.assertEqual(
+            [i for i in fits._issues if i["kind"] == "caption_clipped"], []
+        )
+        self.assertEqual(
+            [i for i in legacy._issues if i["kind"] == "caption_clipped"], []
         )
 
 
@@ -14845,13 +14989,21 @@ INJECTIONS = [
         # the assertions it names.
         "a web take is given the terminal's card",
         "web.py",
-        "from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, _beat_verb, _DemoBase, _env",
+        "from .core import (\n"
+        "    INTERLUDE_CSS_WEB,\n"
+        "    WEB_WINDOW_BODY,\n"
+        "    _beat_verb,\n"
+        "    _DemoBase,\n"
+        "    _env,\n"
+        "    _env_flag,\n"
+        ")",
         "from .core import (  # noqa: I001\n"
         "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
         "    WEB_WINDOW_BODY,\n"
         "    _beat_verb,\n"
         "    _DemoBase,\n"
         "    _env,\n"
+        "    _env_flag,\n"
         ")",
         [
             "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
@@ -15582,6 +15734,59 @@ INJECTIONS = [
         '            "-vf",\n            "scale=\'min(1024,iw)\':-1",\n',
         "",
         ["FrameDedupe.test_extract_asks_ffmpeg_for_at_most_1024_wide_never_upscaled"],
+    ),
+    # -- the wrapper take's chrome (issue #358) -----------------------------
+    (
+        # The overlap the wrapper exists to remove, reintroduced by geometry:
+        # the band raised half its height into the app rect. The pixel half
+        # of the same claim lives in `tests/smoke --wrapper-only`; this is
+        # what keeps the arithmetic half honest without a browser.
+        "the caption band is raised into the app rect it must sit below",
+        "chrome.py",
+        '        "bandy": winy + bar + pad + apph,',
+        '        "bandy": winy + bar + pad + apph - band // 2,',
+        [
+            "WrapperChrome.test_the_caption_band_and_the_app_rect_share_no_pixels",
+            "WrapperChrome.test_the_band_sits_directly_below_the_slot_inside_the_window",
+        ],
+    ),
+    (
+        # The composite's caption compensation inherited by the path that has
+        # no composite: a wrapper take is recorded at true pixel size, so
+        # 34px in the band is visibly oversized, and nothing else pins it.
+        "a wrapper take inherits the composite's 34px caption compensation",
+        "web.py",
+        "        if not self._wrapper:\n"
+        "            # The recording is composited into a window and scaled down\n",
+        "        if True:\n"
+        "            # The recording is composited into a window and scaled down\n",
+        ["WrapperChrome.test_a_wrapper_take_keeps_the_base_caption_font"],
+    ),
+    (
+        # The PR #366 review's blocking finding, restored: the band shaves a
+        # too-tall caption at both edges and no artifact says so — the beat
+        # log records the full sentence over pixels that do not show it.
+        "a caption the band cannot hold is recorded nowhere",
+        "core.py",
+        "        if not isinstance(clipped, (int, float)) or clipped <= 0:\n"
+        "            return\n",
+        "        if True:\n            return\n",
+        [
+            "WrapperChrome."
+            "test_a_caption_the_band_cannot_hold_is_recorded_with_its_overflow"
+        ],
+    ),
+    (
+        # The over-reporting direction, which the entry above cannot see: a
+        # zero-overflow reading treated as a clip files an issue on every
+        # caption of every wrapper take, and the artifact cries wolf.
+        "a caption that exactly fits its band is recorded as clipped",
+        "core.py",
+        "        if not isinstance(clipped, (int, float)) or clipped <= 0:\n"
+        "            return\n",
+        "        if not isinstance(clipped, (int, float)) or clipped < 0:\n"
+        "            return\n",
+        ["WrapperChrome.test_a_caption_that_fits_its_band_records_nothing"],
     ),
 ]
 

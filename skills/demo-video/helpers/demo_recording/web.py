@@ -22,6 +22,7 @@ actual CLI or TUI, use `TerminalRecorder` instead (see terminal.py).
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -30,8 +31,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .chrome import chrome_geometry, chrome_html
 from .content import OPENING_HOLD_LIMIT_S, content_rect, opening_gap
-from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, _beat_verb, _DemoBase, _env
+from .core import (
+    INTERLUDE_CSS_WEB,
+    WEB_WINDOW_BODY,
+    _beat_verb,
+    _DemoBase,
+    _env,
+    _env_flag,
+)
 from .target import guard_target
 
 # Pastel gradient behind the window — matches the terminal recorder's
@@ -496,6 +505,7 @@ class Recorder(_DemoBase):
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
         allow_private: bool | None = None,
+        wrapper: bool | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
@@ -517,9 +527,27 @@ class Recorder(_DemoBase):
             self._allow_private,
             source="this take's base_url",
         )
-        # The recording is composited into a window and scaled down (~0.8),
-        # so captions are rendered larger to stay readable in the final mp4.
-        self._caption_font_px = 34
+        # Opt-in wrapper path (issue #358, design record #355): the take
+        # records a recorder-owned wrapper page — window chrome, a caption
+        # band below the app rect — with the app in an iframe at true pixel
+        # size, and the exit-time composite does not run. Transitional: #361
+        # makes it the only path and removes the flag.
+        if wrapper is None:
+            wrapper = _env_flag("WRAPPER")
+        self._wrapper = bool(wrapper)
+        # The app iframe's Frame, once `_start` has mounted it (wrapper only).
+        self._app_frame: object | None = None
+        # Where the wrapper take last commanded the pointer, in wrapper-page
+        # coordinates. Seeded at the origin, where a fresh page's pointer
+        # actually sits; `_glide` is the only writer.
+        self._cursor_at: tuple[float, float] = (0.0, 0.0)
+        if not self._wrapper:
+            # The recording is composited into a window and scaled down
+            # (~0.8), so captions are rendered larger to stay readable in the
+            # final mp4. A wrapper take is recorded at true pixel size and
+            # keeps the base 26px — the terminal recorder's effective size —
+            # because there is no scale to compensate for.
+            self._caption_font_px = 34
         # And the same composite is why the interlude card is not the default
         # one: the terminal palette is the colour of a *terminal*, and inside
         # this window frame a full-bleed field of it reads as one — the whole
@@ -568,8 +596,45 @@ class Recorder(_DemoBase):
             (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
         )
 
+    @property
+    def app(self):
+        """The app's document — where the verbs point.
+
+        On a wrapper take this is the app iframe's Playwright `Frame`; the
+        wrapper document around it is the recorder's own chrome, so
+        `rec.app.locator(...)` is the escape hatch that reaches the app the
+        way the verbs do. `rec.page` stays the wrapper `Page` — the whole
+        browser surface, chrome included — so nothing an escape hatch could
+        reach before is out of reach now.
+
+        Off the wrapper path it is the page's main frame, so a storyboard
+        written against `rec.app` records identically on both paths.
+        """
+        if self._wrapper:
+            if self._app_frame is None:
+                raise RuntimeError(
+                    "this wrapper take has no app frame yet — rec.app exists "
+                    "once the recorder has entered (`with Recorder(...) as "
+                    "rec:`), which is what mounts the iframe"
+                )
+            return self._app_frame
+        return self.page.main_frame
+
+    def _target(self):
+        """What locator-driving verbs run against: the app frame on a wrapper
+        take, the page otherwise. `Frame` and `Page` share the whole surface
+        used here (locator/evaluate/url/title), so one call site serves both.
+        """
+        return self._app_frame if self._wrapper else self.page
+
     def _init_context(self, context) -> None:
-        context.add_init_script(_CURSOR_JS.replace("__ACCENT__", self._accent))
+        # The wrapper take's cursor lives in the wrapper document (see
+        # chrome.py) and is driven explicitly by the recorder, so the
+        # event-following dot is not injected there: context init scripts run
+        # in every frame, and the app iframe would otherwise draw a second
+        # dot on top of the chrome's.
+        if not self._wrapper:
+            context.add_init_script(_CURSOR_JS.replace("__ACCENT__", self._accent))
         context.add_init_script(
             _TERMINAL_JS.replace("__TERM_TITLE__", self._terminal_title)
             .replace("__TERM_PROMPT__", self._terminal_prompt)
@@ -621,9 +686,20 @@ class Recorder(_DemoBase):
         # SPA route changes and an iframe load, identical on Chromium 136, 147
         # and 151, and the suite replays each one through this subscription
         # (issue #179).
+        #
+        # On a **wrapper** take (#358) that main-frame-only property is what
+        # ends the #134 class: the caption lives in the wrapper document,
+        # `goto()` navigates the app *iframe*, and the wrapper document is
+        # never replaced — so this never fires mid-take, no `caption_lost`
+        # issue is recorded, and both are the truth rather than a suppression:
+        # the line really is still on screen after the app navigates, and the
+        # beats that keep reporting it are right.
         page.on("domcontentloaded", self._note_document_replaced)
 
     def _start(self) -> None:
+        if self._wrapper:
+            self._start_wrapper()
+            return
         # Render the window+background frame once (on a throwaway page, so the
         # app page stays clean for goto). ffmpeg composites the recording into
         # it in _postprocess.
@@ -644,6 +720,50 @@ class Recorder(_DemoBase):
         p.wait_for_timeout(150)
         p.screenshot(path=str(self._frame_png))
         p.close()
+
+    def _start_wrapper(self) -> None:
+        """Build the wrapper page on the recorded page itself (issue #358).
+
+        The chrome is the recording, not a still ffmpeg composites later: the
+        recorded page carries the window, the caption band and the cursor
+        overlay, and the app loads into an iframe sized to the app rect at
+        true pixel size. `self._geom` keeps `_frame_geometry`'s key names, so
+        `_content_rect` and every other geometry consumer reads one shape.
+        """
+        self._geom = chrome_geometry(self._size["width"], self._size["height"])
+        title = urlparse(self.base_url).netloc or "app"
+        self.page.set_content(
+            chrome_html(
+                self._geom,
+                title=title,
+                window_body=WEB_WINDOW_BODY,
+                accent=self._accent,
+                caption_font_px=self._caption_font_px,
+            )
+        )
+        # Mounted here rather than shipped in the chrome document because the
+        # iframe is the *web* medium's content — #362 mounts xterm.js in the
+        # same slot. Size comes from the slot's CSS (chrome.py), which is the
+        # app rect exactly.
+        self.page.evaluate(
+            "() => {"
+            " const frame = document.createElement('iframe');"
+            " frame.id = '__chrome_app';"
+            " frame.name = '__chrome_app';"
+            " frame.src = 'about:blank';"
+            " document.getElementById('__chrome_slot').appendChild(frame);"
+            " }"
+        )
+        handle = self.page.wait_for_selector(
+            "#__chrome_app", state="attached", timeout=10_000
+        )
+        frame = handle.content_frame()
+        if frame is None:
+            raise RuntimeError(
+                "the wrapper page mounted the app iframe but Playwright "
+                "returned no frame for it — the take cannot drive the app"
+            )
+        self._app_frame = frame
 
     def _opening_hold(self, mp4: Path) -> Path | None:
         """Cover this take's blank opening with the app's first painted frame.
@@ -686,6 +806,13 @@ class Recorder(_DemoBase):
         return still
 
     def _postprocess(self, mp4: Path) -> None:
+        if self._wrapper:
+            # The recorded page already is the framed picture — one encoder,
+            # no composite, no opening-hold overlay (the wrapper's opening is
+            # #360's). `_opening_held` stays None: this path never claims to
+            # cover a gap, which is the same honest answer the terminal
+            # recorder gives.
+            return
         # Composite the recorded video into the window body on the background.
         g = self._geom
         hold = self._opening_hold(mp4)
@@ -748,11 +875,17 @@ class Recorder(_DemoBase):
         return self._failure_page_text()
 
     def _failure_page_text(self) -> str:
-        """The ARIA tree, the URL and the title, as one document."""
-        aria, aria_format = self._aria(self.page.locator("body"))
-        head = [f"url: {self.page.url}"]
+        """The ARIA tree, the URL and the title, as one document.
+
+        Read off `_target()`: on a wrapper take the page is the recorder's
+        own chrome and the crash happened in the app, so the app frame is
+        what a failure dump has to show.
+        """
+        target = self._target()
+        aria, aria_format = self._aria(target.locator("body"))
+        head = [f"url: {target.url}"]
         try:
-            head.append(f"title: {self.page.title()}")
+            head.append(f"title: {target.title()}")
         except Exception:  # noqa: BLE001 - a dying page still has a URL
             head.append("title: (unreadable)")
         head.append(f"aria_format: {aria_format}")
@@ -835,19 +968,25 @@ class Recorder(_DemoBase):
         return locator.aria_snapshot(), "aria-yaml"
 
     def _capture_page(self) -> dict:
-        """One pass: the ARIA snapshot, the URL, and the spotlight target."""
-        aria, aria_format = self._aria(self.page.locator("body"))
+        """One pass: the ARIA snapshot, the URL, and the spotlight target.
+
+        Captured from `_target()`: on a wrapper take (#358) the page's own
+        body is the recorder's chrome and one opaque iframe node, so evidence
+        read there would describe the recorder instead of the app.
+        """
+        doc = self._target()
+        aria, aria_format = self._aria(doc.locator("body"))
         payload: dict = {
             "scope": self._spotlit,
-            "url": self.page.url,
-            "title": self.page.title(),
+            "url": doc.url,
+            "title": doc.title(),
             "aria_format": aria_format,
             "aria": aria,
             "scope_aria": None,
             "html": None,
         }
         if self._spotlit:
-            target = self.page.locator(self._spotlit).first
+            target = doc.locator(self._spotlit).first
             payload["scope_aria"] = self._aria(target)[0]
             payload["html"] = target.evaluate(_EVIDENCE_HTML_JS)
         return payload
@@ -878,40 +1017,93 @@ class Recorder(_DemoBase):
     @_beat_verb("goto")
     def goto(self, path: str = "") -> None:
         url = path if path.startswith("http") else self.base_url + path
+        # On a wrapper take the *iframe* navigates; the wrapper document —
+        # which holds the caption, the cursor and the chrome — never does,
+        # so a mid-take goto cannot take the caption off the screen (see
+        # `_watch_extra`).
+        target = self._target()
         # Asset fetches hang occasionally on a busy dev box — a reload
         # recovers, so retry rather than dying mid-recording.
         for attempt in range(3):
             try:
-                self.page.goto(url, timeout=45_000)
+                target.goto(url, timeout=45_000)
                 break
-            except Exception:
+            except Exception as exc:
+                # An app that refuses framing is not a flake: Chromium
+                # cancels the iframe navigation over X-Frame-Options or CSP
+                # frame-ancestors with exactly this error, and what a retry
+                # would buy is the artifact-lie this slice must not ship — a
+                # silently blank window recorded as a demo. Refuse instead,
+                # naming the header (issue #358).
+                if self._wrapper and "ERR_BLOCKED_BY_RESPONSE" in str(exc):
+                    raise RuntimeError(self._frame_refusal(url)) from exc
                 if attempt == 2:
                     raise
         try:
-            self.page.wait_for_load_state("networkidle", timeout=10_000)
+            target.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
             pass  # apps that poll never go network-idle; the page is up
+
+    def _frame_refusal(self, url: str) -> str:
+        """Why this app cannot be recorded through the wrapper's iframe.
+
+        Chromium's `ERR_BLOCKED_BY_RESPONSE` says a response header blocked
+        the frame but not which, so the recorder asks once more —
+        `context.request` reuses the browser's own network stack — and reads
+        the header out of the answer. Named, because "the iframe stayed
+        blank" is not something a storyboard author can act on and the header
+        is.
+        """
+        header = None
+        try:
+            answer = self._context.request.get(url)
+            xfo = answer.headers.get("x-frame-options")
+            if xfo:
+                header = f"X-Frame-Options: {xfo}"
+            else:
+                csp = answer.headers.get("content-security-policy", "")
+                found = re.search(r"frame-ancestors[^;]*", csp)
+                if found:
+                    header = f"Content-Security-Policy: {found.group(0).strip()}"
+        except Exception:  # noqa: BLE001 - the refusal stands without a name
+            pass
+        named = header or (
+            "a frame-blocking response header (the follow-up request could "
+            "not read which)"
+        )
+        return (
+            f"this app refuses to be framed: {url} answered with {named}, so "
+            f"Chromium blocked the wrapper take's iframe. Recording on would "
+            f"produce a silently blank window presented as a demo, so the "
+            f"take refuses instead. Record without wrapper=True, or serve "
+            f"the demo target without that header."
+        )
 
     @_beat_verb("terminal")
     def terminal(self, command: str) -> None:
         """Type a command in an on-screen terminal card, then perform the
-        real action it describes right after this returns."""
-        self.page.evaluate("cmd => window.__demoTerminal(cmd)", command)
+        real action it describes right after this returns.
+
+        The card is raised in the app's document (`_target()`), so on a
+        wrapper take it appears over the app inside the window — the same
+        place it lands on a composite take — rather than over the chrome.
+        """
+        self._target().evaluate("cmd => window.__demoTerminal(cmd)", command)
 
     @_beat_verb("terminal_output")
     def terminal_output(self, text: str) -> None:
         """Reveal real command output inside the terminal card, line by
         line — run the command first, pass its actual (trimmed) output."""
-        self.page.evaluate("t => window.__demoTerminalOutput(t)", text)
+        self._target().evaluate("t => window.__demoTerminalOutput(t)", text)
 
     @_beat_verb("terminal_close")
     def terminal_close(self, stamp: str | None = None) -> None:
         """Stamp a closing line ('✓ delivered' by default, "" for none)
         on the terminal card and fade it out."""
         if stamp != "":
-            self.page.evaluate("s => window.__demoTerminalDone(s)", stamp)
+            self._target().evaluate("s => window.__demoTerminalDone(s)", stamp)
             self.pause(1.2)
-        self.page.evaluate("() => window.__demoTerminalHide()")
+        self._target().evaluate("() => window.__demoTerminalHide()")
         self.pause(0.5)
 
     @_beat_verb("spotlight")
@@ -942,9 +1134,14 @@ class Recorder(_DemoBase):
         # not come back until the exit transition has run to its end and the
         # style attribute has been put back. That is the whole of the paragraph
         # above, and it is one word: `evaluate`.
-        self.page.evaluate("() => window.__demoSpotlightClear()")
+        #
+        # Both calls run in the app's document (`_target()`): the spotlight
+        # functions are context init scripts, which Playwright evaluates in
+        # every frame, so they exist in the wrapper take's iframe too — and
+        # the element being lit lives there.
+        self._target().evaluate("() => window.__demoSpotlightClear()")
         if selector:
-            self.page.locator(selector).first.evaluate(
+            self._target().locator(selector).first.evaluate(
                 "el => window.__demoSpotlight(el)"
             )
         # Set after the highlight actually landed, so a selector that matched
@@ -954,13 +1151,51 @@ class Recorder(_DemoBase):
         self._spotlit = selector or None
         self.pause(0.3)
 
+    def _glide(self, x: float, y: float, steps: int) -> None:
+        """Move the pointer to page coordinates `(x, y)`, dot included.
+
+        The legacy path is one Playwright call: the injected dot follows the
+        `mousemove` events. On a wrapper take the dot lives in the wrapper
+        document, and no wrapper listener can hear a move whose target is
+        inside the iframe — the browser delivers it to the iframe's document
+        — so the recorder drives the dot itself, one explicit update per
+        pointer step. The dot is exactly where the pointer was commanded to
+        be, by construction, which is also what makes the #186/#202 class
+        (a dot placed by an event the storyboard never sent) unreachable
+        here: nothing listens, so nothing synthetic can move it.
+
+        Coordinates are wrapper-page coordinates either way — Playwright's
+        `bounding_box()` answers relative to the main frame's viewport even
+        for elements inside an iframe, so the app-rect offset is already in
+        every box the verbs read.
+        """
+        if not self._wrapper:
+            self.page.mouse.move(x, y, steps=steps)
+            return
+        sx, sy = self._cursor_at
+        for i in range(1, steps + 1):
+            xi = sx + (x - sx) * i / steps
+            yi = sy + (y - sy) * i / steps
+            self.page.mouse.move(xi, yi)
+            self.page.evaluate(
+                "([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi]
+            )
+        self._cursor_at = (x, y)
+
+    def _cursor_pressed(self, down: bool) -> None:
+        """Squeeze (or release) the wrapper document's cursor dot."""
+        if not self._wrapper:
+            return
+        fn = "__demoChromeCursorDown" if down else "__demoChromeCursorUp"
+        self.page.evaluate(f"() => window.{fn}()")
+
     @_beat_verb("move_to")
     def move_to(self, selector: str) -> None:
         """Glide the cursor onto an element (smooth, watchable motion)."""
-        box = self.page.locator(selector).first.bounding_box()
+        box = self._target().locator(selector).first.bounding_box()
         if box is None:
             raise RuntimeError(f"no visible element for {selector!r}")
-        self.page.mouse.move(
+        self._glide(
             box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=30
         )
 
@@ -968,7 +1203,11 @@ class Recorder(_DemoBase):
     def click(self, selector: str) -> None:
         self.move_to(selector)
         self.pause(0.4)
-        self.page.locator(selector).first.click()
+        self._cursor_pressed(True)
+        try:
+            self._target().locator(selector).first.click()
+        finally:
+            self._cursor_pressed(False)
 
     @_beat_verb("click_fast")
     def click_fast(self, selector: str) -> None:
@@ -979,15 +1218,19 @@ class Recorder(_DemoBase):
         deadline = time.monotonic() + 10
         box = None
         while box is None:
-            box = self.page.locator(selector).first.bounding_box()
+            box = self._target().locator(selector).first.bounding_box()
             if box is None:
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"no visible element for {selector!r}")
                 time.sleep(0.1)
         x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-        self.page.mouse.move(x, y, steps=15)
+        self._glide(x, y, steps=15)
         self.pause(0.3)
-        self.page.mouse.click(x, y)
+        self._cursor_pressed(True)
+        try:
+            self.page.mouse.click(x, y)
+        finally:
+            self._cursor_pressed(False)
 
     @_beat_verb("type_into")
     def type_into(self, selector: str, text: str, delay_ms: int = 40) -> None:
@@ -1033,7 +1276,7 @@ class Recorder(_DemoBase):
         `fill("")` sends no key events at all.
         """
         self.click(selector)
-        self.page.locator(selector).first.select_text()
+        self._target().locator(selector).first.select_text()
         self.pause(CLEAR_SELECT_HOLD_S)
         self.page.keyboard.press("Backspace")
         self.pause(0.3)
@@ -1065,7 +1308,7 @@ class Recorder(_DemoBase):
 
     @_beat_verb("scroll_to")
     def scroll_to(self, selector: str) -> None:
-        self.page.locator(selector).first.evaluate(
+        self._target().locator(selector).first.evaluate(
             "el => el.scrollIntoView({behavior: 'smooth', block: 'center'})"
         )
         self.pause(1.2)
@@ -1073,7 +1316,7 @@ class Recorder(_DemoBase):
     @_beat_verb("wait_for")
     def wait_for(self, selector: str, timeout_s: float = 60) -> None:
         """Wait for something the app does on its own (a job, a run)."""
-        self.page.locator(selector).first.wait_for(timeout=timeout_s * 1000)
+        self._target().locator(selector).first.wait_for(timeout=timeout_s * 1000)
 
     @contextmanager
     def act(self, label: str) -> Iterator[None]:
