@@ -978,7 +978,9 @@ MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0, "segments": 6.0}
 
 # -- review frames (frames/, issue #8) ---------------------------------------
 #
-# The recorder extracts one frame per beat and writes `frames/frames.md` for a
+# The recorder extracts one frame per beat — at most 1024 px wide, and minus
+# the frames whose picture repeats the last kept one, each of those named in
+# the manifest's `deduped` list (#343) — and writes `frames/frames.md` for a
 # reviewer to read in order. It makes **no claim about what is in a frame** —
 # no caption, no verb, no selector — and the two things worth grading follow
 # from that:
@@ -7200,6 +7202,11 @@ def _same_frame(mp4: Path, at: float, png: Path) -> bool:
     argue about. What it does *not* grade is whether `at` is the right second —
     that is the midpoint check above, and the two are only worth anything
     together.
+
+    The scale filter is the recorder's own (#343: review frames are at most
+    1024 px wide, never upscaled), written out by hand here rather than
+    imported — the comparison is byte-exact, so an unasked-for change to the
+    recorder's filter fails this check instead of being absorbed by it.
     """
     with tempfile.TemporaryDirectory() as tmp:
         reference = Path(tmp) / "reference.png"
@@ -7215,6 +7222,8 @@ def _same_frame(mp4: Path, at: float, png: Path) -> bool:
                 str(mp4),
                 "-frames:v",
                 "1",
+                "-vf",
+                "scale='min(1024,iw)':-1",
                 "-update",
                 "1",
                 str(reference),
@@ -7422,13 +7431,16 @@ def check_beat_frames(
     expected_interludes: list[str] = [],  # noqa: B006 - read-only, never mutated
     clock: HostClock | None = None,
 ) -> list[str]:
-    """`frames/` — one frame per beat, at the beat's midpoint, showing it.
+    """`frames/` — every beat a kept frame or a named drop, at its midpoint.
 
     Four claims, and the last one is the acceptance criterion of issue #8:
 
-      * **one frame per beat**, named for the beat, counted against the
-        hand-written beat list rather than against the recorder's own idea of
-        how many beats there were;
+      * **every beat is accounted for**: a kept frame named for the beat, or
+        a `deduped` entry naming which kept picture it repeats (#343) — both
+        counted against the hand-written beat list rather than against the
+        recorder's own idea of how many beats there were, and a dropped
+        frame must be named in frames.md, matched to a kept frame under the
+        threshold, and off disk;
       * **each frame is the moment it says it is** — its timestamp is the
         beat's midpoint computed here from `timeline.json`, moved onto the
         video's clock by *this harness's own* wall-clock watcher (issue #229),
@@ -7479,17 +7491,23 @@ def check_beat_frames(
             f"{label}: the recorder wrote no review frames — {manifest['skipped']}"
         ]
 
-    # -- one frame per beat, named for the beat it came from -----------------
+    # -- every beat: a kept frame or a named drop, named for its beat --------
+    #
+    # Kept and deduplicated together must cover the hand-written beat list
+    # exactly (#343). Counting only the kept frames would let a beat vanish
+    # without a record; counting kept plus deduped and nothing else is what
+    # makes "no beat disappears silently" a checkable sentence.
     listed = [f for f in manifest.get("frames") or [] if f.get("kind") == "beat"]
+    dropped = [f for f in manifest.get("deduped") or [] if f.get("kind") == "beat"]
     wanted = [f"beat-{i:02d}.png" for i in range(len(expected_beats))]
-    named = [str(f.get("file")) for f in listed]
+    named = sorted(str(f.get("file")) for f in [*listed, *dropped])
     if named != wanted:
         failures.append(
-            f"{label}: frames/ holds {named!r} for the {len(expected_beats)} "
-            f"beats the storyboard performs — first difference at index "
-            f"{_first_difference(named, wanted)}"
+            f"{label}: frames/ accounts for {named!r} (kept plus deduped) for "
+            f"the {len(expected_beats)} beats the storyboard performs — first "
+            f"difference at index {_first_difference(named, wanted)}"
         )
-    for frame in listed:
+    for frame in [*listed, *dropped]:
         if frame.get("file") != f"beat-{frame.get('beat'):02d}.png":
             failures.append(
                 f"{label}: frame {frame.get('file')!r} claims to be beat "
@@ -7497,6 +7515,39 @@ def check_beat_frames(
                 f"disagree about which beat a reviewer is looking at"
             )
             break
+
+    # -- a dropped frame is named on the sheet, matched, and off disk --------
+    #
+    # The threshold is written out by hand (3.0 RMSE, so mse 9.0): a bound
+    # imported from the recorder would agree with whatever the recorder says.
+    kept_files = {str(f.get("file")) for f in manifest.get("frames") or []}
+    sheet_text = md_path.read_text() if md_path.is_file() else ""
+    for drop in manifest.get("deduped") or []:
+        name = str(drop.get("file"))
+        if (frames_dir / name).exists():
+            failures.append(
+                f"{label}: {name} was deduplicated off the sheet but its PNG "
+                f"is still on disk — the directory the skill hands over whole "
+                f"carries a picture the manifest disowned"
+            )
+        if str(drop.get("matches")) not in kept_files:
+            failures.append(
+                f"{label}: frames.json says {name} repeats "
+                f"{drop.get('matches')!r}, which is not a kept frame — the "
+                f"reader is pointed at a picture that is not on the sheet"
+            )
+        rmse = drop.get("rmse")
+        if not isinstance(rmse, (int, float)) or rmse >= 3.0:
+            failures.append(
+                f"{label}: {name} was dropped with rmse {rmse!r}, at or over "
+                f"the 3.0 the recorder promises — the sheet withheld a frame "
+                f"whose picture is not a repeat"
+            )
+        if f"`{name}` is not on this sheet" not in sheet_text:
+            failures.append(
+                f"{label}: frames.md never says {name} was left off the sheet "
+                f"— the beat disappears without a printed line saying so"
+            )
 
     on_disk = sorted(p.name for p in frames_dir.glob("*.png"))
     claimed = sorted(str(f.get("file")) for f in manifest.get("frames") or [])
@@ -7656,7 +7707,9 @@ def check_beat_frames(
         label,
         out_dir,
         frame_size,
-        listed,
+        # Kept frames plus the deduplicated beats, which are graded through
+        # the kept picture each one matched — see the loop's own comment.
+        [*listed, *dropped],
         beats,
         _expected_context(expected_beats, expected_captions, expected_interludes),
         clock,
@@ -7674,7 +7727,8 @@ def check_beat_frames(
             else "on a wall clock that was watched and held still"
         )
         print(
-            f"smoke: {label} frames/ ok ({len(listed)} beat frames, each "
+            f"smoke: {label} frames/ ok ({len(listed)} beat frames kept, "
+            f"{len(dropped)} deduplicated and named, each kept frame "
             f"byte-identical to the demo.mp4 frame it claims to be; cut {cut}"
             + (
                 f", {ungraded} not placement-graded within "
@@ -7730,27 +7784,46 @@ def _check_frame_captions(
     recorder's own account of the same thing and is graded against those same
     lists in `check_timeline()`.
     """
-    if context is None or len(context) != len(listed):
+    if context is None or any(
+        not isinstance(f.get("beat"), int) or not 0 <= f["beat"] < len(context)
+        for f in listed
+    ):
         # The count and the caption list are graded above and in
         # check_timeline(); saying so a third time adds nothing, and grading a
-        # misaligned pairing would report the wrong beat.
+        # misaligned pairing would report the wrong beat. Indexed by the
+        # frame's own beat rather than by position, because dedupe (#343)
+        # means the kept frames are a subset of the beats.
         return []
 
     # A change is where the expected context stops being what it was. The
     # *times* have to come from the log — it is the only record of when a beat
-    # ran — but which beats are boundaries does not.
+    # ran — but which beats are boundaries does not. Over every expected
+    # beat, not only the kept frames: a boundary whose frame was deduplicated
+    # away still moved the caption under its neighbours.
     changes = [
-        float(beats[frame["beat"]]["t_start"])
-        for i, frame in enumerate(listed)
-        if frame.get("beat") in beats and context[i] != (context[i - 1] if i else "")
+        float(beats[i]["t_start"])
+        for i in range(len(context))
+        if i in beats and context[i] != (context[i - 1] if i else "")
     ]
 
-    band = caption_band(frame_size)
+    # The band, at the size the PNGs actually are: review frames are scaled
+    # to at most 1024 px wide (#343), and a band computed for the recording's
+    # native size would crop a region the smaller picture does not have.
+    width, height = frame_size
+    factor = min(1024, width) / width
+    band = caption_band((round(width * factor), round(height * factor)))
     stepped = clock.before if clock is not None else (lambda _t: 0.0)
     reference: bytes | None = None
     graded: list[tuple[int, str, bytes]] = []
-    for i, frame in enumerate(listed):
-        png = out_dir / "frames" / str(frame.get("file"))
+    for frame in listed:
+        # A deduplicated beat is graded through the kept frame it matched:
+        # the manifest asserts the two pictures are the same, so the twin's
+        # pixels stand in at the dropped beat's own timestamp and against the
+        # dropped beat's own expected caption. That is not a concession — it
+        # is the check on the dedupe itself: a drop that merged across a
+        # caption change puts a picture of the wrong caption state under this
+        # beat's expectation, and the margin collapses.
+        png = out_dir / "frames" / str(frame.get("matches") or frame.get("file"))
         if not png.is_file():
             continue
         # Where the frame was cut, and where it actually sits in the story.
@@ -7778,8 +7851,9 @@ def _check_frame_captions(
             return [f"{label}: {exc}"]
         if not reduced:
             return [f"{label}: {png.name} decoded to no frames"]
-        graded.append((int(frame["beat"]), context[i], reduced[0]))
-        if reference is None and not context[i]:
+        expected = context[int(frame["beat"])]
+        graded.append((int(frame["beat"]), expected, reduced[0]))
+        if reference is None and not expected:
             reference = reduced[0]
 
     captioned = [(b, c, g) for b, c, g in graded if c]

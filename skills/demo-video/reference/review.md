@@ -15,6 +15,17 @@ beat under `frames/`, named `beat-NN.png` for the beat's index in
 embeds them in order — and `frames/frames.json` for anything reading them by
 machine.
 
+Two things keep the sheet readable by an agent at all
+([#343](https://github.com/rogvid/skills/issues/343): 80 native-res frames of
+a 122 s demo were ~98k image tokens, and 44% were a picture already shown).
+Frames are extracted at most 1024 px wide, never upscaled. And a frame whose
+picture is within RMSE 3.0 of the last kept frame's is dropped — off the sheet
+and off disk — with a named line in `frames.md` saying which kept frame holds
+its picture, and a `deduped` entry in `frames.json` carrying the beat, the
+match and the measured rmse. The first and last frame are always kept, and the
+threshold is mechanical on purpose: a hand-picked subset can launder a finding
+out of a review; a threshold cannot.
+
 They are aligned to **beats, not to a clock**. The old advice was
 `ffmpeg -vf fps=1/3`, which misses a short beat entirely and photographs a long
 static one twice. Each frame is taken at its beat's **midpoint**, moved onto

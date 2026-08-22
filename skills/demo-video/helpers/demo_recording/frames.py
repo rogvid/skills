@@ -1,8 +1,10 @@
-"""Review frames: one PNG per beat, pulled out of the finished mp4.
+"""Review frames: one PNG per beat, deduplicated, pulled out of the finished mp4.
 
 Nobody reviewing a demo through this skill can watch a video, so every review
 is a review of frames. They are aligned to beats rather than to a clock — a
 clock misses a short beat entirely and photographs a long static one twice.
+A beat whose picture repeats the last kept frame's is dropped and named on
+the sheet rather than reprinted (see the dedupe section below).
 
 `beat_frames(out_dir)` regenerates the whole sheet from demo.mp4 and
 timeline.json without re-recording.
@@ -11,6 +13,7 @@ timeline.json without re-recording.
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import sys
@@ -90,7 +93,21 @@ from .timeline import capture_clock_correction, timeline_paths
 # early, in content that predates the step, and it was found by eye:
 # `seg-run1`'s `beat-05.png` was cut at 4.58 s and shows the previous caption.
 FRAMES_DIRNAME = "frames"
-FRAMES_SCHEMA = 1
+FRAMES_SCHEMA = 2
+
+# The sheet is read by agents, not played back, and image tokens are what
+# killed the first field run (#343): a 122 s demo produced 80 native-res
+# frames — ~98k image tokens — and three reviewer agents died on session
+# limits before one review finished. 44% of those frames were a picture
+# already shown. Two mechanical fixes, no judgement in either: `_extract`
+# scales every frame to at most 1024 px wide (never up), and a frame whose
+# picture is within DEDUPE_RMSE of the **last kept** frame's is dropped —
+# named in the manifest's `deduped` list and on the sheet, never silently.
+# The threshold is mechanical on purpose: a hand-picked subset can launder a
+# finding out of a review; a threshold cannot. The first and last frame of a
+# sheet are always kept, and a comparison that fails keeps its frame — a
+# broken comparator must fatten the sheet, never thin it.
+DEDUPE_RMSE = 3.0
 
 # Scene-change detection, the fallback for what the storyboard did not script.
 # A beat that holds the frame for seconds can still contain a transition
@@ -171,7 +188,15 @@ def scene_times(
 
 
 def _extract(mp4: Path, at: float, path: Path) -> bool:
-    """One frame of `mp4` at `at` seconds, written to `path`."""
+    """One frame of `mp4` at `at` seconds, written to `path`.
+
+    Scaled to at most 1024 px wide — `min(1024,iw)` so a smaller video is
+    never upscaled — because these frames are read by agents, in image
+    tokens, and 1024 was verified legible on the field app of #343:
+    burned-in captions, toast text, table digits, dropdown labels. Every
+    frame of one sheet comes out of one mp4 through this one filter, so the
+    kept frames stay mutually comparable.
+    """
     proc = subprocess.run(
         [
             "ffmpeg",
@@ -184,6 +209,8 @@ def _extract(mp4: Path, at: float, path: Path) -> bool:
             str(mp4),
             "-frames:v",
             "1",
+            "-vf",
+            "scale='min(1024,iw)':-1",
             "-update",
             "1",
             str(path),
@@ -193,8 +220,54 @@ def _extract(mp4: Path, at: float, path: Path) -> bool:
     return proc.returncode == 0 and path.is_file()
 
 
+def _frame_mse(kept: Path, candidate: Path) -> float | None:
+    """Mean squared error between two extracted frames, or None.
+
+    ffmpeg's `psnr` filter, because ffmpeg is already the hard dependency
+    that wrote both files — a Python imaging library would be a new import
+    for every storyboard that imports these helpers. Parsed from `mse_avg`
+    rather than from the psnr number itself: identical frames report an
+    `inf` psnr, and `inf` is a value to special-case where an mse of `0.0`
+    is just a number under the threshold. `metadata=print:file=-` for the
+    reason `scene_times` gives: the filter's default logging goes through
+    ffmpeg's logger at INFO level, which `-v error` throws away.
+
+    None means the comparison itself failed. The caller must keep the frame
+    then — a broken comparator must fatten the sheet, never thin it.
+    """
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(kept),
+            "-i",
+            str(candidate),
+            "-filter_complex",
+            "psnr,metadata=print:file=-",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"lavfi\.psnr\.mse_avg=([0-9.]+)", proc.stdout)
+    return float(match.group(1)) if match else None
+
+
 def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
-    """Write one review frame per beat, and an index to read them in order.
+    """Write a review frame per beat, deduplicated, and an index to read them.
+
+    A frame whose picture is within DEDUPE_RMSE of the last kept frame's is
+    taken off the sheet and off disk, and recorded in the manifest's
+    `deduped` list — file, beat, kind, t, the kept file it matched and the
+    measured rmse — with a named line on the sheet. The first and last frame
+    are always kept, and a frame the comparator could not measure is kept
+    with a warning.
 
     Reads the timeline the take just wrote (or `doc`), extracts
     `frames/beat-NN.png` at each beat's midpoint **on the video's clock** — the
@@ -234,6 +307,11 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         "duration": doc.get("duration"),
         "recorder": doc.get("recorder"),
         "frames": [],
+        # The frames dropped because their picture repeats the last kept
+        # frame's. Named, never counted: file, beat, kind, t, which kept file
+        # they matched and the measured rmse, so no beat leaves the sheet
+        # without a record a reader can check.
+        "deduped": [],
         # Filled in below, once there is a sheet for it to describe: whether
         # these frames were cut on the video's clock or on the beat log's, and
         # why not when they were not. Null on a manifest that wrote no frames.
@@ -368,7 +446,62 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
                 f"{record['t']}s for beat {record['beat']}",
                 file=sys.stderr,
             )
-    manifest["frames"] = written
+
+    # Drop the frames that repeat a picture already kept, in sheet order and
+    # against the **last kept** frame — never against a fixed neighbour, or a
+    # slow fade would survive as a chain of pairwise near-duplicates. Scene
+    # frames participate exactly like beat frames: a "transition" that left
+    # the picture where it was is the same non-information either way. See
+    # the note over DEDUPE_RMSE for why the threshold is mechanical.
+    kept: list[dict] = []
+    deduped: list[dict] = []
+    for n, record in enumerate(written):
+        # The sheet's anchors: where the demo started and where it ended stay
+        # visible even when nothing on screen ever moved.
+        if n == 0 or n == len(written) - 1:
+            kept.append(record)
+            continue
+        mse = _frame_mse(
+            frames_dir / str(kept[-1]["file"]), frames_dir / str(record["file"])
+        )
+        if mse is None:
+            print(
+                f"demo-video: WARNING — could not compare {record['file']} "
+                f"with {kept[-1]['file']}; keeping the frame. A broken "
+                f"comparator must fatten the sheet, never thin it.",
+                file=sys.stderr,
+            )
+            kept.append(record)
+            continue
+        if mse >= DEDUPE_RMSE * DEDUPE_RMSE:
+            kept.append(record)
+            continue
+        png = frames_dir / str(record["file"])
+        try:
+            png.unlink()
+        except OSError:
+            # A picture on disk that the manifest disowned is worse than a
+            # duplicate: it is a frame nobody indexed in a directory the
+            # skill says to hand over whole. Keep it listed instead.
+            print(
+                f"demo-video: WARNING — could not remove the duplicate "
+                f"{record['file']}, so it stays on the sheet",
+                file=sys.stderr,
+            )
+            kept.append(record)
+            continue
+        deduped.append(
+            {
+                "file": record["file"],
+                "beat": record["beat"],
+                "kind": record["kind"],
+                "t": record["t"],
+                "matches": kept[-1]["file"],
+                "rmse": round(math.sqrt(mse), 2),
+            }
+        )
+    manifest["frames"] = kept
+    manifest["deduped"] = deduped
     manifest["scene_search_skipped"] = skipped_scenes
     # How far the video is *known* to have slid under the beat log, as a floor
     # rather than a correction: a beat that ends after the video does is wall
@@ -414,7 +547,12 @@ def write_beat_frames(out_dir: Path | str, doc: dict, where: str) -> dict | None
             file=sys.stderr,
         )
         return manifest
-    print(f"wrote {frames_paths(out_dir)[0]} ({len(manifest['frames'])} review frames)")
+    dropped = len(manifest.get("deduped") or [])
+    print(
+        f"wrote {frames_paths(out_dir)[0]} ({len(manifest['frames'])} review frames"
+        + (f", {dropped} dropped as repeats and named in frames.md" if dropped else "")
+        + ")"
+    )
     return manifest
 
 
@@ -543,8 +681,9 @@ def render_frames_md(manifest: dict) -> str:
         " · ".join(head),
         "",
         "One frame per beat of the demo — per thing the storyboard did — rather "
-        "than one every N seconds, so nothing the demo does is missed and a "
-        "held frame is photographed once. Read them in order. Written by the "
+        "than one every N seconds, so nothing the demo does is missed. A beat "
+        "whose picture repeats an earlier frame's is named below instead of "
+        "reprinted. Read them in order. Written by the "
         "demo-video recorder whenever it encodes an mp4 — which now includes a "
         "take that crashed, whose recording stops where the storyboard gave up "
         "(see `failure/`); re-record rather than editing it.",
@@ -577,6 +716,17 @@ def render_frames_md(manifest: dict) -> str:
             f"frames were looked for**. The sheet is that much thinner than it "
             f"would be on a steady host; nothing is missing from the beat's "
             f"own frame above.",
+            "",
+        ]
+    # One line per dropped frame, named like everything else this sheet
+    # withholds — `scene_search_skipped` above set the rule. The reader's
+    # question is which beat is not pictured and where its picture is, and a
+    # count answers neither.
+    for drop in manifest.get("deduped") or []:
+        out += [
+            f"`{_md_cell(drop.get('file'))}` is not on this sheet: its "
+            f"picture is `{_md_cell(drop.get('matches'))}`'s "
+            f"(RMSE {drop.get('rmse')} < {DEDUPE_RMSE}).",
             "",
         ]
     loss = manifest.get("capture_loss_at_least") or 0.0

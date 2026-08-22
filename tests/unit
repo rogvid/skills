@@ -7294,12 +7294,24 @@ class FrameClockCorrection(unittest.TestCase):
         out_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
         (out_dir / "demo.mp4").write_bytes(b"a stand-in for a recording")
-        was = frames_module._extract, frames_module.scene_times
+        was = (
+            frames_module._extract,
+            frames_module.scene_times,
+            frames_module._frame_mse,
+        )
         frames_module._extract, frames_module.scene_times = extract, scenes
+        # Every frame this stub writes has the same bytes, so the real
+        # comparator would drop all of them. Dedupe is FrameDedupe's subject;
+        # here every picture reads as distinct so every planned cut is kept.
+        frames_module._frame_mse = lambda kept, candidate: 1e6
         try:
             manifest = beat_frames(out_dir, doc)
         finally:
-            frames_module._extract, frames_module.scene_times = was
+            (
+                frames_module._extract,
+                frames_module.scene_times,
+                frames_module._frame_mse,
+            ) = was
         return manifest, cuts, windows
 
     def take(self, clock: object, *starts: float, span: float = 0.1) -> dict:
@@ -7738,6 +7750,248 @@ class FrameClockCorrection(unittest.TestCase):
         manifest, cuts, _windows = self.sheet(doc)
         self.assertEqual(cuts, [])
         self.assertIsNone(manifest["clock_correction"])
+
+
+class FrameDedupe(unittest.TestCase):
+    """Which frames the sheet withholds as repeats, and how it says so (#343).
+
+    The measured problem: 80 native-res frames of a 122 s demo cost ~98k
+    image tokens and killed three reviewer agents, and 44% of them were a
+    picture already shown. The fix is mechanical — RMSE against the last
+    kept frame, threshold DEDUPE_RMSE — because a hand-picked subset can
+    launder a finding out of a review and a threshold cannot. What these
+    tests hold: a drop is never silent (manifest `deduped` entry plus a
+    named line on the sheet, PNG off disk), the first and last frame are
+    kept unconditionally, and a comparator that fails keeps its frame — a
+    broken comparator must fatten the sheet, never thin it.
+
+    The comparator itself is a stub, like `_extract` and `scene_times` one
+    class up: what ffmpeg's psnr filter reports about two PNGs is not a
+    claim this suite can grade without ffmpeg, and `tests/smoke` re-runs
+    the whole dedupe against real extractions on every take.
+    """
+
+    def sheet(
+        self, doc: dict, mse: dict[tuple[str, str], object]
+    ) -> tuple[dict, Path, list[tuple[str, str]]]:
+        """(manifest, out_dir, the pairs the comparator was shown).
+
+        `mse` maps (kept file, candidate file) to what the stub comparator
+        answers; a pair it does not name reads as plainly different (1e6).
+        The pairs are captured so a test can assert *which* frame a
+        candidate was compared against — the last kept one, not a fixed
+        neighbour.
+        """
+        compared: list[tuple[str, str]] = []
+
+        def extract(mp4: Path, at: float, path: Path) -> bool:
+            path.write_bytes(path.name.encode())
+            return True
+
+        def fake_mse(kept: Path, candidate: Path) -> object:
+            compared.append((kept.name, candidate.name))
+            return mse.get((kept.name, candidate.name), 1e6)
+
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        (out_dir / "demo.mp4").write_bytes(b"a stand-in for a recording")
+        was = (
+            frames_module._extract,
+            frames_module.scene_times,
+            frames_module._frame_mse,
+        )
+        frames_module._extract = extract
+        frames_module.scene_times = lambda *a, **k: []
+        frames_module._frame_mse = fake_mse
+        try:
+            manifest = beat_frames(out_dir, doc)
+        finally:
+            (
+                frames_module._extract,
+                frames_module.scene_times,
+                frames_module._frame_mse,
+            ) = was
+        return manifest, out_dir, compared
+
+    def take(self, *starts: float) -> dict:
+        beats = [beat(n, "caption", t) for n, t in enumerate(starts)]
+        return envelope(duration=20.0, capture_clock=clock_record(), beats=beats)
+
+    # 0.16 is an rmse of 0.4 — the number the issue's own example uses.
+    DUP_01 = {("beat-00.png", "beat-01.png"): 0.16}
+
+    def test_a_middle_frame_that_repeats_the_last_kept_is_dropped(self):
+        manifest, out_dir, _pairs = self.sheet(
+            self.take(1.0, 2.0, 3.0, 4.0), self.DUP_01
+        )
+        self.assertEqual(
+            [f["file"] for f in manifest["frames"]],
+            ["beat-00.png", "beat-02.png", "beat-03.png"],
+        )
+        # Off disk as well as off the index: the directory is handed over
+        # whole, and a picture the manifest disowned is a frame nobody
+        # indexed sitting in it.
+        self.assertFalse((out_dir / "frames" / "beat-01.png").exists())
+        for name in ("beat-00.png", "beat-02.png", "beat-03.png"):
+            self.assertTrue((out_dir / "frames" / name).exists())
+
+    def test_the_manifest_names_the_drop_its_match_and_the_measured_rmse(self):
+        manifest, _out_dir, _pairs = self.sheet(
+            self.take(1.0, 2.0, 3.0, 4.0), self.DUP_01
+        )
+        self.assertEqual(
+            manifest["deduped"],
+            [
+                {
+                    "file": "beat-01.png",
+                    "beat": 1,
+                    "kind": "beat",
+                    "t": 2.05,
+                    "matches": "beat-00.png",
+                    "rmse": 0.4,
+                }
+            ],
+        )
+
+    def test_the_sheet_names_every_dropped_frame_and_stops_embedding_it(self):
+        manifest, _out_dir, _pairs = self.sheet(
+            self.take(1.0, 2.0, 3.0, 4.0), self.DUP_01
+        )
+        sheet = render_frames_md(manifest)
+        self.assertIn(
+            "`beat-01.png` is not on this sheet: its picture is "
+            "`beat-00.png`'s (RMSE 0.4 < 3.0).",
+            sheet,
+        )
+        self.assertNotIn("](beat-01.png)", sheet)
+        self.assertNotIn("| `beat-01.png` |", sheet)
+
+    def test_a_candidate_is_compared_against_the_last_kept_frame(self):
+        # beat-01 is dropped, so beat-02's comparison partner must be
+        # beat-00 — comparing against the dropped neighbour instead would
+        # let a slow fade survive as a chain of pairwise near-duplicates.
+        _manifest, _out_dir, pairs = self.sheet(
+            self.take(1.0, 2.0, 3.0, 4.0), self.DUP_01
+        )
+        self.assertEqual(
+            pairs,
+            [("beat-00.png", "beat-01.png"), ("beat-00.png", "beat-02.png")],
+        )
+
+    def test_the_first_and_last_frames_are_kept_even_when_identical(self):
+        # Identical frames report mse 0 (ffmpeg calls that inf psnr), which
+        # is under any threshold — so everything here is a candidate, and
+        # only the anchors survive. The last frame is also never compared:
+        # it is kept by position, not by luck of the pictures.
+        everything = {
+            (kept, cand): 0.0
+            for kept in ("beat-00.png", "beat-01.png", "beat-02.png")
+            for cand in ("beat-01.png", "beat-02.png", "beat-03.png")
+        }
+        manifest, _out_dir, _pairs = self.sheet(
+            self.take(1.0, 2.0, 3.0, 4.0), everything
+        )
+        self.assertEqual(
+            [f["file"] for f in manifest["frames"]],
+            ["beat-00.png", "beat-03.png"],
+        )
+        self.assertEqual(
+            [(d["file"], d["matches"], d["rmse"]) for d in manifest["deduped"]],
+            [
+                ("beat-01.png", "beat-00.png", 0.0),
+                ("beat-02.png", "beat-00.png", 0.0),
+            ],
+        )
+
+    def test_a_failed_comparison_keeps_the_frame_and_warns(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            manifest, out_dir, _pairs = self.sheet(
+                self.take(1.0, 2.0, 3.0), {("beat-00.png", "beat-01.png"): None}
+            )
+        self.assertEqual(
+            [f["file"] for f in manifest["frames"]],
+            ["beat-00.png", "beat-01.png", "beat-02.png"],
+        )
+        self.assertEqual(manifest["deduped"], [])
+        self.assertTrue((out_dir / "frames" / "beat-01.png").exists())
+        self.assertIn("could not compare beat-01.png", stderr.getvalue())
+
+    def test_a_scene_frame_that_repeats_its_beats_frame_is_dropped_like_one(self):
+        # One long beat so the scene search runs, plus a short one so the
+        # scene frame is not the last frame of the sheet.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record(),
+            beats=[beat(0, "hold", 1.0, t_end=5.0), beat(1, "caption", 6.0)],
+        )
+        compared: list[tuple[str, str]] = []
+
+        def extract(mp4: Path, at: float, path: Path) -> bool:
+            path.write_bytes(path.name.encode())
+            return True
+
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        (out_dir / "demo.mp4").write_bytes(b"a stand-in for a recording")
+        was = (
+            frames_module._extract,
+            frames_module.scene_times,
+            frames_module._frame_mse,
+        )
+        frames_module._extract = extract
+        frames_module.scene_times = lambda *a, **k: [4.5]
+        frames_module._frame_mse = lambda kept, candidate: (
+            compared.append((kept.name, candidate.name)) or 0.0
+        )
+        try:
+            manifest = beat_frames(out_dir, doc)
+        finally:
+            (
+                frames_module._extract,
+                frames_module.scene_times,
+                frames_module._frame_mse,
+            ) = was
+        self.assertEqual(
+            [f["file"] for f in manifest["frames"]],
+            ["beat-00.png", "beat-01.png"],
+        )
+        self.assertEqual(
+            [(d["file"], d["kind"], d["matches"]) for d in manifest["deduped"]],
+            [("beat-00-scene-1.png", "scene", "beat-00.png")],
+        )
+        self.assertFalse((out_dir / "frames" / "beat-00-scene-1.png").exists())
+
+    def test_extract_asks_ffmpeg_for_at_most_1024_wide_never_upscaled(self):
+        """The downscale is in the extraction, not a second pass.
+
+        Asserted on the argv `_extract` hands ffmpeg, with subprocess
+        stubbed: whether ffmpeg honours `scale` is ffmpeg's contract, but
+        whether the recorder asks for it is this file's. `min(1024,iw)` is
+        the half that keeps a video already smaller than 1024 px at its own
+        size — an upscale would spend more tokens to show fewer pixels.
+        """
+        argv: list[list[str]] = []
+
+        def run(cmd: list[str], **kwargs: object) -> object:
+            argv.append(cmd)
+            Path(cmd[-1]).write_bytes(b"a stand-in for a frame")
+            return types.SimpleNamespace(returncode=0)
+
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        was = frames_module.subprocess
+        frames_module.subprocess = types.SimpleNamespace(run=run)  # type: ignore[assignment]
+        try:
+            ok = frames_module._extract(
+                out_dir / "demo.mp4", 1.0, out_dir / "beat-00.png"
+            )
+        finally:
+            frames_module.subprocess = was
+        self.assertTrue(ok)
+        self.assertEqual(len(argv), 1)
+        self.assertIn("scale='min(1024,iw)':-1", argv[0])
+        self.assertEqual(argv[0][argv[0].index("scale='min(1024,iw)':-1") - 1], "-vf")
 
 
 class TimelineClockNote(unittest.TestCase):
@@ -14833,6 +15087,101 @@ INJECTIONS = [
         "        except Exception:\n"
         "            pass",
         ["ActBeat.test_an_exception_in_the_block_still_closes_the_beat_and_propagates"],
+    ),
+    # -- the sheet's dedupe (issue #343) -------------------------------------
+    (
+        # Dedupe switched off whole (#343): every repeated picture is back on
+        # the sheet and the manifest's `deduped` list is empty. This is the
+        # as-shipped behaviour the issue measured at 44% duplicate frames and
+        # ~98k image tokens, restored exactly.
+        "a repeated picture is reprinted on the sheet instead of deduplicated",
+        "frames.py",
+        "        if mse >= DEDUPE_RMSE * DEDUPE_RMSE:",
+        "        if True:",
+        [
+            "FrameDedupe.test_a_middle_frame_that_repeats_the_last_kept_is_dropped",
+            "FrameDedupe.test_the_first_and_last_frames_are_kept_even_when_identical",
+        ],
+    ),
+    (
+        # The drop happens but nothing records it: the PNG is gone, the
+        # manifest lists nothing under `deduped`, and the sheet prints no
+        # line — the beat disappears silently, which is the one outcome the
+        # issue forbids outright.
+        "a dropped frame leaves no record in the manifest or on the sheet",
+        "frames.py",
+        "        deduped.append(",
+        "        _unrecorded = (",
+        [
+            "FrameDedupe.test_the_manifest_names_the_drop_its_match_and_the_measured_rmse",
+            "FrameDedupe."
+            "test_the_sheet_names_every_dropped_frame_and_stops_embedding_it",
+        ],
+    ),
+    (
+        # The renderer stops naming the drops while the manifest still
+        # carries them — the sheet a human reads is the one that goes silent,
+        # which is worse than the manifest doing so: nobody opens frames.json
+        # unless frames.md gives a reason to.
+        "frames.md stops naming the frames it withholds",
+        "frames.py",
+        '    for drop in manifest.get("deduped") or []:',
+        "    for drop in []:",
+        ["FrameDedupe.test_the_sheet_names_every_dropped_frame_and_stops_embedding_it"],
+    ),
+    (
+        # The sheet's anchors join the dedupe: a demo that ends where it
+        # started loses its final frame, and a reviewer can no longer see
+        # where the demo stopped.
+        "the last frame of the sheet is deduplicated away like any other",
+        "frames.py",
+        "        if n == 0 or n == len(written) - 1:",
+        "        if n == 0:",
+        ["FrameDedupe.test_the_first_and_last_frames_are_kept_even_when_identical"],
+    ),
+    (
+        # A comparator failure read as "identical": every frame ffmpeg cannot
+        # compare is silently dropped, so the breakage that should fatten the
+        # sheet thins it instead — on a box with a broken ffmpeg that is the
+        # whole sheet reduced to its two anchors.
+        "a failed comparison drops the frame instead of keeping it",
+        "frames.py",
+        "        if mse is None:",
+        "        if (mse := 0.0 if mse is None else mse) is None:",
+        ["FrameDedupe.test_a_failed_comparison_keeps_the_frame_and_warns"],
+    ),
+    (
+        # The comparison anchored to the written neighbour instead of the
+        # last kept frame: a slow fade survives as a chain of pairwise
+        # near-duplicates, each within threshold of the one before it.
+        "a candidate is compared against its neighbour, not the last kept frame",
+        "frames.py",
+        '            frames_dir / str(kept[-1]["file"]), frames_dir / str(record["file"])',
+        '            frames_dir / str(written[n - 1]["file"]),\n'
+        '            frames_dir / str(record["file"]),',
+        ["FrameDedupe.test_a_candidate_is_compared_against_the_last_kept_frame"],
+    ),
+    (
+        # The duplicate is off the index but still on disk: the directory the
+        # skill says to hand over whole carries a picture the manifest
+        # disowned, and `frames.json names X but frames/ holds Y` is exactly
+        # the smoke failure this shape produces on a real take.
+        "a deduplicated frame's PNG stays on disk",
+        "frames.py",
+        "            png.unlink()",
+        "            pass",
+        ["FrameDedupe.test_a_middle_frame_that_repeats_the_last_kept_is_dropped"],
+    ),
+    (
+        # The downscale removed: frames go back to native resolution, which
+        # is the ~98k-token sheet of #343 with the dedupe still running. The
+        # assertion is on the argv the recorder hands ffmpeg, so this is the
+        # one injection that can prove it watches anything.
+        "review frames are extracted at native resolution again",
+        "frames.py",
+        '            "-vf",\n            "scale=\'min(1024,iw)\':-1",\n',
+        "",
+        ["FrameDedupe.test_extract_asks_ffmpeg_for_at_most_1024_wide_never_upscaled"],
     ),
 ]
 

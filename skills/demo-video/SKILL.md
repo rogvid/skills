@@ -438,9 +438,10 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    [reference/timeline.md](reference/timeline.md).
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you. The
-   recorder has already written what they need: `frames/`, one PNG per
-   beat, and `frames/frames.md`, which embeds them in order. **Hand them
-   `frames/frames.md`.** Read
+   recorder has already written what they need: `frames/`, a PNG per beat
+   minus the repeats (a beat whose picture repeats an earlier frame's is
+   named in the sheet instead of reprinted), and `frames/frames.md`, which
+   embeds them in order. **Hand them `frames/frames.md`.** Read
    [reference/review.md](reference/review.md) first — it says how accurately a
    frame is aimed at its beat, which is what decides how much weight a
    reviewer's reading of one can carry.
