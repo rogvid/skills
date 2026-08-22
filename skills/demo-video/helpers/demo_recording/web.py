@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .chrome import chrome_geometry, chrome_html
+from .chrome import chrome_geometry, chrome_html, opening_hold_script
 from .content import OPENING_HOLD_LIMIT_S, content_rect, opening_gap
 from .core import (
     INTERLUDE_CSS_WEB,
@@ -537,6 +537,11 @@ class Recorder(_DemoBase):
         self._wrapper = bool(wrapper)
         # The app iframe's Frame, once `_start` has mounted it (wrapper only).
         self._app_frame: object | None = None
+        # Whether the wrapper take's opening hold has been cleared (#360).
+        # The hold is up from frame 0 (see chrome.OPENING_HOLD_JS) and the
+        # first goto() that lands is what clears it — the storyboard's first
+        # content beat, the moment there is an app to reveal.
+        self._hold_cleared = False
         # Where the wrapper take last commanded the pointer, in wrapper-page
         # coordinates. Seeded at the origin, where a fresh page's pointer
         # actually sits; `_glide` is the only writer.
@@ -552,7 +557,11 @@ class Recorder(_DemoBase):
         # one: the terminal palette is the colour of a *terminal*, and inside
         # this window frame a full-bleed field of it reads as one — the whole
         # of issue #291. The web card is the window's own body colour instead,
-        # as it lands in demo.mp4. See core.INTERLUDE_CSS_WEB.
+        # as it lands in demo.mp4. See core.INTERLUDE_CSS_WEB. On a wrapper
+        # take this dispatch is moot: the wrapper document defines its own
+        # `__demoInterlude` in the card layer (chrome.py, #360), declaring
+        # `WEB_WINDOW_BODY` uncompensated, and the init script this CSS rides
+        # never paints there.
         self._interlude_css = INTERLUDE_CSS_WEB
         # What spotlight() is currently pointing at, which is what a beat's
         # evidence is scoped to. Held here rather than read back out of the
@@ -635,6 +644,20 @@ class Recorder(_DemoBase):
         # dot on top of the chrome's.
         if not self._wrapper:
             context.add_init_script(_CURSOR_JS.replace("__ACCENT__", self._accent))
+        else:
+            # The opening hold (#360): frame 0 is the window's own colour
+            # over the app rect, not a white iframe waiting for the first
+            # goto. An init script for _OPENING_CARD_JS's reasons — see
+            # chrome.OPENING_HOLD_JS — and the geometry is recomputed here
+            # because init scripts are registered before the page (and
+            # therefore before `_start_wrapper` runs); `chrome_geometry` is
+            # pure, so the two calls cannot disagree.
+            context.add_init_script(
+                opening_hold_script(
+                    chrome_geometry(self._size["width"], self._size["height"]),
+                    window_body=WEB_WINDOW_BODY,
+                )
+            )
         context.add_init_script(
             _TERMINAL_JS.replace("__TERM_TITLE__", self._terminal_title)
             .replace("__TERM_PROMPT__", self._terminal_prompt)
@@ -687,14 +710,20 @@ class Recorder(_DemoBase):
         # and 151, and the suite replays each one through this subscription
         # (issue #179).
         #
-        # On a **wrapper** take (#358) that main-frame-only property is what
-        # ends the #134 class: the caption lives in the wrapper document,
-        # `goto()` navigates the app *iframe*, and the wrapper document is
-        # never replaced — so this never fires mid-take, no `caption_lost`
-        # issue is recorded, and both are the truth rather than a suppression:
-        # the line really is still on screen after the app navigates, and the
-        # beats that keep reporting it are right.
-        page.on("domcontentloaded", self._note_document_replaced)
+        # On a **wrapper** take (#358, #360) the subscription itself is what
+        # goes: the caption lives in the wrapper document, `goto()` navigates
+        # the app *iframe*, and the wrapper document is never replaced — a
+        # caption structurally cannot be destroyed by navigation there, so
+        # `caption_lost` can never fire and the recorder does not listen for
+        # it. Not listening rather than listening-and-never-firing is the
+        # honest shape: it makes "this issue cannot exist on a wrapper take"
+        # a property of the code instead of an observation about one
+        # Playwright's event routing, and the beats that keep reporting the
+        # caption across a mid-take goto are right — the line really is
+        # still on screen (tests/smoke --wrapper-only reads it out of the
+        # band's pixels across a full document load).
+        if not self._wrapper:
+            page.on("domcontentloaded", self._note_document_replaced)
 
     def _start(self) -> None:
         if self._wrapper:
@@ -808,10 +837,13 @@ class Recorder(_DemoBase):
     def _postprocess(self, mp4: Path) -> None:
         if self._wrapper:
             # The recorded page already is the framed picture — one encoder,
-            # no composite, no opening-hold overlay (the wrapper's opening is
-            # #360's). `_opening_held` stays None: this path never claims to
-            # cover a gap, which is the same honest answer the terminal
-            # recorder gives.
+            # no composite, and no ffmpeg opening-hold overlay: the wrapper's
+            # opening is held in-page instead, by the frame-0 hold in
+            # chrome.OPENING_HOLD_JS (#360). `_opening_held` stays None: this
+            # path never claims the *encode* covered a gap, which is the same
+            # honest answer the terminal recorder gives about its own opening
+            # card, and `content.opening.gap` then describes the hold as the
+            # featureless stretch it really is, warning-free.
             return
         # Composite the recorded video into the window body on the background.
         g = self._geom
@@ -1043,6 +1075,13 @@ class Recorder(_DemoBase):
             target.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
             pass  # apps that poll never go network-idle; the page is up
+        if self._wrapper and not self._hold_cleared:
+            # The storyboard's first content beat landed: there is an app in
+            # the slot now, so the opening hold (up since frame 0 — see
+            # chrome.OPENING_HOLD_JS) fades out. Inside this beat on purpose:
+            # the beat log's account of when the app appeared is the goto.
+            self.page.evaluate("() => window.__demoChromeHoldClear()")
+            self._hold_cleared = True
 
     def _frame_refusal(self, url: str) -> str:
         """Why this app cannot be recorded through the wrapper's iframe.

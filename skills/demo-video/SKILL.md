@@ -264,7 +264,7 @@ exception, or a non-zero exit. Both are
 |---|---|
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
-| `caption(text)` | Narrator line at the bottom; `""` clears; dies on full page loads — the beat log clears with it and records a `caption_lost` issue naming the line — survives SPA routing; re-caption after a load |
+| `caption(text)` | Narrator line at the bottom; `""` clears. On the composite path it dies on full page loads — the beat log clears with it, records a `caption_lost` issue naming the line, survives SPA routing; re-caption after a load. A wrapper take's caption lives in the recorder's own band, survives navigation, and `caption_lost` can never fire there |
 | `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See [reference/review.md](reference/review.md). |
 | `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped — so the viewer meets the clause and then watches it happen. The beat claims AC-3 and nothing else; the beats after it are untagged. Held to reading speed, and cleared by `interlude("")` like any card. |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |

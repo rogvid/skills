@@ -4,19 +4,38 @@ Issue #358 (design record: #355). A wrapper take records a recorder-owned
 page carrying the window chrome: the pastel background, the dark rounded
 window with its title bar and traffic lights, a **content slot** the medium
 fills (the web recorder mounts the app iframe in it; #362 mounts xterm.js in
-the same slot), a **caption band** reserved BELOW the slot, and an empty card
-layer #360 will use. By construction the slot and the band share no pixels —
-`chrome_geometry` is the arithmetic behind that sentence. This repository's
-`tests/unit` (not shipped with the installed skill) grades it, and this
-repository's `tests/smoke --wrapper-only` reads the same claim out of a
-recorded take's frames.
+the same slot), a **caption band** reserved BELOW the slot, and a **card
+layer** over the slot (#360). By construction the slot and the band share no
+pixels — `chrome_geometry` is the arithmetic behind that sentence. This
+repository's `tests/unit` (not shipped with the installed skill) grades it,
+and this repository's `tests/smoke --wrapper-only` reads the same claim out
+of a recorded take's frames.
 
-Every visual constant here is ported from `web._FRAME_HTML` and
+**The card layer covers the app rect — not the chrome, not the caption
+band.** `interlude()`, `criterion()` and the `light` bridge scrim render in
+it, so a card replaces the *app's* content and nothing else: the window
+frame and the narration line are the recorder's own furniture, and taking
+them down to show a recorder-authored card would be the chrome hiding from
+itself. The legacy composite path cannot make that distinction — its card is
+an element inside the app page, so full-bleed there means the whole page —
+which is why its card sits above the caption bar and this one sits beside
+it. The decorative terminal prop (`Recorder.terminal()`) is deliberately
+**not** here: it is content, a styled element inside the demo's story that
+rides over the app the way an app dialog would, and the card layer stays
+reserved for the recorder's own furniture — #362 mounts a *real* terminal in
+the slot, and a prop living on the chrome layer would blur exactly that line.
+
+**The wrapper card declares the window's own colour — no compensation.** The
+card and the window body reach `demo.mp4` through one encoder on this path,
+so both paint the `window_body` the document was built with
+(`core.WEB_WINDOW_BODY` for the web recorder). The compensated
+`core.WEB_CARD_BODY` (#291/#301) exists because the legacy composite sends
+the card and the window through two different encoders; it stays legacy-only
+until #361 deletes it, and nothing here reads it.
+
+Every other visual constant here is ported from `web._FRAME_HTML` and
 `terminal._TERM_HOST_JS`, which stay untouched while the legacy composite
-path exists; #361 and #362 retire those copies. The window body colour is
-**not** declared here — it stays `core.WEB_WINDOW_BODY`, because the interlude
-card's compensated colour (`core.WEB_CARD_BODY`, #291/#301) is documented
-against it and the two must be read together.
+path exists; #361 and #362 retire those copies.
 """
 
 from __future__ import annotations
@@ -52,15 +71,26 @@ CAPTION_BAND_PX = 96
 CAPTION_FONT_PX = 26
 
 # Element ids. The slot is what a medium fills; the band holds the caption
-# element; the card layer is #360's mount point and ships empty this slice.
-# The caption element deliberately keeps the id `core._CAPTION_JS` uses, so
-# "the caption element" is one selector whichever path drew it. The cursor
-# dot keeps `web._CURSOR_JS`'s id for the same reason.
+# element; the card layer holds the interlude/criterion card and the bridge
+# scrim (#360). The caption element deliberately keeps the id
+# `core._CAPTION_JS` uses, so "the caption element" is one selector whichever
+# path drew it. The cursor dot keeps `web._CURSOR_JS`'s id, and the card and
+# scrim keep `core.INTERLUDE_ID`/`core.BRIDGE_ID` — that is what lets
+# `interlude("")` and core's end-of-take overlay probe (`_OVERLAY_PROBE_JS`,
+# issue #163) find them with no wrapper-specific dispatch.
 SLOT_ID = "__chrome_slot"
 BAND_ID = "__chrome_band"
 CARD_ID = "__chrome_card"
+HOLD_ID = "__chrome_hold"
 CAPTION_ID = "__demo_caption"
 CURSOR_ID = "__demo_cursor"
+
+# The card layer's stacking, against the opening hold below it and the cursor
+# dot above it. Root-context values: `#__chrome_win` is position:fixed with no
+# z-index of its own, so it opens no stacking context and its children's
+# z-indexes rank directly against the fixed-position hold's.
+HOLD_Z = 2147483644
+CARD_LAYER_Z = 2147483645
 
 
 def chrome_geometry(
@@ -141,9 +171,16 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     font: 13px/1 ui-monospace, monospace; color: __BARFG__; }
   .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
   #__chrome_ttl { flex: 1; text-align: center; letter-spacing: .02em; }
+  /* The slot's underlay is the browser's own white canvas, not the window
+     body: an app document that paints no background of its own sits on
+     white in any real browser, and a transparent about:blank iframe
+     borrowing the recorder's window colour would make the opening hold
+     unfalsifiable — with or without the hold, the app rect would read the
+     same dark field. White underneath is what the hold exists to cover
+     (#360), and what lets a frame-0 reading tell the two apart. */
   #__chrome_slot { position: absolute; left: __PAD__px;
     top: __SLOTTOP__px; width: __APPW__px; height: __APPH__px;
-    overflow: hidden; }
+    overflow: hidden; background: #fff; }
   #__chrome_slot iframe { display: block; border: 0;
     width: __APPW__px; height: __APPH__px; }
   #__chrome_band { position: absolute; left: __PAD__px; top: __BANDTOP__px;
@@ -155,7 +192,40 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     font: 600 __CAPFONT__px/1.36 system-ui, sans-serif; letter-spacing: .01em;
     pointer-events: none; opacity: 0;
     transition: opacity .3s ease; box-shadow: 0 6px 24px rgba(0,0,0,.28); }
-  #__chrome_card { position: absolute; inset: 0; display: none; }
+  /* The card layer sits exactly on the content slot — the app rect and
+     nothing else. See the module docstring for why a card covers the app
+     and never the chrome or the caption band. */
+  #__chrome_card { position: absolute; left: __PAD__px; top: __SLOTTOP__px;
+    width: __APPW__px; height: __APPH__px; overflow: hidden;
+    pointer-events: none; z-index: __CARDZ__; }
+  /* The full card: the window's own colour, one flat field with the sentence
+     on it — no compensation, one encoder (see the module docstring). Above
+     the scrim and the opening hold, so a clause is legible over either. */
+  #__demo_interlude { position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    font: 500 30px/1.5 system-ui, sans-serif; text-align: center;
+    padding: 0 12%; opacity: 0; transition: opacity .45s ease;
+    background: __WINBG__; color: #f2f0ec; z-index: 3; }
+  /* The light bridge: a soft scrim with the app still visible behind it. */
+  #__demo_bridge { position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center; opacity: 0;
+    transition: opacity .4s ease;
+    background: radial-gradient(ellipse at center,
+      rgba(18,15,28,.58) 0%, rgba(18,15,28,.16) 70%, rgba(18,15,28,0) 100%);
+    z-index: 2; }
+  #__demo_bridge_t { color: #fff; font: 600 34px/1.4 system-ui, sans-serif;
+    text-align: center; max-width: 72%;
+    text-shadow: 0 2px 22px rgba(0,0,0,.65); }
+  /* The opening hold, in this document's own markup and **already opaque**
+     (_OPENING_CARD_JS's construction): `set_content` replaces the initial
+     document without re-running the context init scripts, measured — a
+     hold that relied on the init script alone left frame 0 reading the
+     slot's white canvas at 255 mean luma. The init script (OPENING_HOLD_JS)
+     covers the documents before this one; whichever builds first owns the
+     id. Below the cards: a storyboard that interludes before its first
+     goto must show the clause over the hold. */
+  #__chrome_hold { position: absolute; inset: 0; background: __WINBG__;
+    opacity: 1; transition: opacity .45s ease; z-index: 1; }
   #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;
     height: 18px; border-radius: 50%; background: rgba(__ACCENT__,.45);
     border: 2px solid rgba(__ACCENT__,.95); pointer-events: none;
@@ -173,7 +243,11 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
   </div>
   <div id="__chrome_slot"></div>
   <div id="__chrome_band"><div id="__demo_caption"></div></div>
-  <div id="__chrome_card"></div>
+  <div id="__chrome_card">
+    <div id="__chrome_hold"></div>
+    <div id="__demo_bridge"><div id="__demo_bridge_t"></div></div>
+    <div id="__demo_interlude"></div>
+  </div>
 </div>
 <div id="__demo_cursor"></div>
 <script>
@@ -190,6 +264,28 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     if (!text) return 0;
     const band = document.getElementById('__chrome_band');
     return Math.max(0, el.scrollHeight - band.clientHeight);
+  };
+  // The card and the scrim, band-aware for the same reason __demoCaption
+  // above is: this document's versions render in the card layer over the app
+  // rect, so the init-script versions (core's, which cover the *viewport*
+  // they run in) never paint here. Same ids, same contract — text raises,
+  // '' fades — so core's interlude(''), criterion() and end-of-take overlay
+  // probe need no wrapper dispatch.
+  window.__demoInterlude = (text) => {
+    const card = document.getElementById('__demo_interlude');
+    card.textContent = text;
+    card.style.opacity = text ? '1' : '0';
+  };
+  window.__demoBridge = (text) => {
+    document.getElementById('__demo_bridge_t').textContent = text;
+    document.getElementById('__demo_bridge').style.opacity = text ? '1' : '0';
+  };
+  // Defined here as well as in OPENING_HOLD_JS: this document carries its
+  // own hold element, and the reveal must not depend on when (or whether)
+  // the context init script re-ran for it.
+  window.__demoChromeHoldClear = () => {
+    const el = document.getElementById('__chrome_hold');
+    if (el) el.style.opacity = '0';
   };
   window.__demoChromeCursor = (x, y) => {
     const dot = document.getElementById('__demo_cursor');
@@ -217,11 +313,15 @@ def chrome_html(
 ) -> str:
     """The wrapper document, ready for `page.set_content`.
 
-    `geom` is `chrome_geometry`'s dict. `window_body` is the window's fill —
-    `core.WEB_WINDOW_BODY` for the web path (see this module's docstring for
-    why it is not declared here). `accent` is the recorder's `R,G,B` string,
-    used only by the cursor dot. The slot ships empty: the medium mounts its
-    content (an iframe, or #362's xterm host) into `#__chrome_slot`.
+    `geom` is `chrome_geometry`'s dict. `window_body` is the window's fill
+    **and the card's** — `core.WEB_WINDOW_BODY` for the web path. One
+    parameter for both on purpose: the two ride one encoder here, so "the
+    card is the window's own colour" is a single substitution rather than a
+    compensated pair (see the module docstring, and #291/#301 for the pair
+    the legacy composite still needs). `accent` is the recorder's `R,G,B`
+    string, used only by the cursor dot. The slot ships empty: the medium
+    mounts its content (an iframe, or #362's xterm host) into
+    `#__chrome_slot`.
     """
     slot_top = geom["bar"] + geom["pad"]
     band_top = slot_top + geom["apph"]
@@ -247,8 +347,91 @@ def chrome_html(
         "__BAND__": str(geom["band"]),
         "__CAPFONT__": str(caption_font_px),
         "__ACCENT__": accent,
+        "__CARDZ__": str(CARD_LAYER_Z),
     }
     html = _CHROME_HTML
     for token, value in replacements.items():
         html = html.replace(token, value)
     return html
+
+
+# The opening hold: an opaque field in the window's own colour over the app
+# rect, up in **frame 0** and cleared by the storyboard's first content beat
+# (the web recorder clears it when its first `goto()` lands). It is what
+# replaces the legacy composite's ffmpeg `enable='lt(t,held)'` second overlay
+# (issue #360): with one encoder there is no exit-time compositing to hide a
+# blank opening behind, so the blank opening is never on screen instead.
+#
+# An **init script**, and appended **already opaque** — both halves are
+# `terminal._OPENING_CARD_JS`'s pattern, kept for its reasons: an init script
+# runs on the wrapper page's *initial empty document*, which is earlier than
+# any Python statement or `set_content` can reach; and an element whose
+# computed opacity has been 1 since it entered the tree has no fade-in to run
+# over the recorder's own setup. The chrome document then carries its own
+# copy of the hold **in its markup** (`_CHROME_HTML`'s card layer) rather
+# than relying on this script re-running for it: measured, the init script's
+# re-run on the `set_content` document lands only at that document's
+# DOMContentLoaded, after its first paint — frame 0 read the slot's white
+# canvas at 255 mean luma. One id, and whichever document builds first owns
+# it, so the two sources can never stack. The clear is a fade, because by
+# then the app has painted underneath.
+#
+# Top-window guarded: context init scripts run in every frame, and the app
+# iframe painting a copy of the hold over its own content would be the hold
+# covering the thing it exists to reveal.
+#
+# The pastel paint on the document element is `terminal._init_context`'s
+# issue-#25 guard, for the same white flash: the initial document is up
+# before the chrome document replaces it, and an unpainted document is white.
+OPENING_HOLD_JS = """
+(() => {
+  if (window !== window.top) return;
+  const paint = (el) => { if (el) el.style.background = '__BG__'; };
+  paint(document.documentElement);
+  const build = () => {
+    paint(document.documentElement);
+    if (!document.body || document.getElementById('__chrome_hold')) return;
+    const el = document.createElement('div');
+    el.id = '__chrome_hold';
+    el.style.cssText = 'position: fixed; left: __APPX__px; top: __APPY__px;'
+      + ' width: __APPW__px; height: __APPH__px; background: __WINBG__;'
+      + ' z-index: __HOLDZ__; pointer-events: none;'
+      + ' transition: opacity .45s ease;';
+    el.style.opacity = '1';
+    document.body.appendChild(el);
+  };
+  if (document.body) build();
+  else addEventListener('DOMContentLoaded', build);
+  window.__demoChromeHoldClear = () => {
+    const el = document.getElementById('__chrome_hold');
+    if (el) el.style.opacity = '0';
+  };
+})();
+"""
+
+
+def opening_hold_script(
+    geom: dict,
+    *,
+    window_body: str,
+    background: str = CHROME_BG,
+) -> str:
+    """`OPENING_HOLD_JS` with this take's geometry and colours in it.
+
+    `window_body` is the same fill `chrome_html` paints the window and the
+    card with, so the hold, the card and the window are one declared colour
+    on this path — the single-encoder point the module docstring makes.
+    """
+    replacements = {
+        "__BG__": background,
+        "__WINBG__": window_body,
+        "__APPX__": str(geom["appx"]),
+        "__APPY__": str(geom["appy"]),
+        "__APPW__": str(geom["appw"]),
+        "__APPH__": str(geom["apph"]),
+        "__HOLDZ__": str(HOLD_Z),
+    }
+    script = OPENING_HOLD_JS
+    for token, value in replacements.items():
+        script = script.replace(token, value)
+    return script

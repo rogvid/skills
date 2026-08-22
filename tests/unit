@@ -163,7 +163,11 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 import demo_recording.core as core_module  # noqa: E402
 import demo_recording.frames as frames_module  # noqa: E402
-from demo_recording.chrome import chrome_geometry, chrome_html  # noqa: E402
+from demo_recording.chrome import (  # noqa: E402
+    chrome_geometry,
+    chrome_html,
+    opening_hold_script,
+)
 from demo_recording.core import (  # noqa: E402
     CRITERION_HOLD_MAX_S,
     CRITERION_HOLD_MIN_S,
@@ -5343,6 +5347,156 @@ class WrapperChrome(unittest.TestCase):
         self.assertEqual(
             [i for i in legacy._issues if i["kind"] == "caption_clipped"], []
         )
+
+    def test_the_card_layer_sits_on_the_slot_and_carries_card_and_scrim(self):
+        # #360: interlude(), criterion() and the bridge scrim render in the
+        # card layer, which covers the app rect — not the chrome, not the
+        # caption band. The elements keep core's ids (`INTERLUDE_ID`,
+        # `BRIDGE_ID`) so `interlude("")` and the end-of-take overlay probe
+        # (#163) find them with no wrapper dispatch.
+        geom = chrome_geometry(1280, 720)
+        html = chrome_html(geom, title="t", window_body="#0b0c1d", accent="1,2,3")
+        for element_id in ("__demo_interlude", "__demo_bridge"):
+            self.assertIn(f'id="{element_id}"', html)
+        found = re.search(r"#__chrome_card \{([^}]*)\}", html)
+        self.assertIsNotNone(found, "the card layer has no stylesheet rule")
+        rule = found.group(1)
+        slot_top = geom["bar"] + geom["pad"]
+        for declaration in (
+            f"left: {geom['pad']}px",
+            f"top: {slot_top}px",
+            f"width: {geom['appw']}px",
+            f"height: {geom['apph']}px",
+        ):
+            self.assertIn(
+                declaration,
+                rule,
+                f"the card layer does not sit on the slot: {rule!r} lacks "
+                f"{declaration!r}, so a card would cover chrome or band "
+                f"instead of the app rect",
+            )
+
+    def test_the_wrapper_card_paints_from_the_window_body_it_was_built_with(self):
+        # Single-encoder colour (#360): the card's field is the `window_body`
+        # argument itself — one substitution serves the window and the card,
+        # so there is no second declaration to compensate and none to drift.
+        # What grades the *result* is pixels (`tests/smoke --wrapper-only`'s
+        # check_wrapper_card), deliberately never a comparison between two
+        # declared colours — #297 recorded both shapes of that assertion as
+        # anti-patterns. This asserts only the wiring: the parameter reaches
+        # the card's rule.
+        html = chrome_html(
+            chrome_geometry(1280, 720),
+            title="t",
+            window_body="#0b0c1d",
+            accent="1,2,3",
+        )
+        found = re.search(r"#__demo_interlude \{([^}]*)\}", html)
+        self.assertIsNotNone(found, "the wrapper card has no stylesheet rule")
+        self.assertIn("background: #0b0c1d", found.group(1))
+
+    def test_the_opening_hold_script_carries_the_app_rect(self):
+        geom = chrome_geometry(1280, 720)
+        js = opening_hold_script(geom, window_body="#0b0c1d")
+        for declaration in (
+            f"left: {geom['appx']}px",
+            f"top: {geom['appy']}px",
+            f"width: {geom['appw']}px",
+            f"height: {geom['apph']}px",
+            "background: #0b0c1d",
+        ):
+            self.assertIn(declaration, js)
+        leftover = re.findall(r"__[A-Z][A-Z0-9]*__", js)
+        self.assertEqual(
+            leftover,
+            [],
+            f"unsubstituted hold tokens would reach the page: {sorted(set(leftover))}",
+        )
+
+    def test_a_wrapper_take_registers_the_hold_script_and_a_legacy_take_none(self):
+        # The hold is an init script for _OPENING_CARD_JS's reasons — it has
+        # to exist on the wrapper page's initial document, before set_content
+        # — and the legacy composite path must not gain one: its opening is
+        # covered by the ffmpeg overlay, byte-untouched until #361.
+        wrapped = recorder(self, wrapper=True)
+        context = _RecordingContext()
+        wrapped._init_context(context)
+        holds = [s for s in context.scripts if "__chrome_hold" in s]
+        self.assertEqual(len(holds), 1, "the wrapper take registers no opening hold")
+        legacy = recorder(self)
+        legacy_context = _RecordingContext()
+        legacy._init_context(legacy_context)
+        self.assertEqual(
+            [s for s in legacy_context.scripts if "__chrome_hold" in s],
+            [],
+            "the legacy path gained an opening-hold init script",
+        )
+
+    class HoldPage(FakePage):
+        """A page that remembers every script `evaluate` was handed."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.evaluated: list[str] = []
+
+        def evaluate(self, script, *args):
+            self.evaluated.append(str(script))
+            return None
+
+    @staticmethod
+    def app_frame():
+        return types.SimpleNamespace(
+            goto=lambda url, timeout=None: None,
+            wait_for_load_state=lambda *args, **kwargs: None,
+        )
+
+    def clears(self, page) -> list[str]:
+        return [s for s in page.evaluated if "__demoChromeHoldClear" in s]
+
+    def test_the_first_goto_clears_the_opening_hold_and_only_the_first(self):
+        # "Cleared by the storyboard's first content beat" (#360): the first
+        # goto that lands is when there is an app to reveal. Once — a second
+        # navigation must not re-run the clear, because the hold it would
+        # clear is already down and a re-clear on every goto would be the
+        # verb quietly depending on chrome state it does not own.
+        page = self.HoldPage()
+        rec = recorder(self, wrapper=True, page=page)
+        rec._app_frame = self.app_frame()
+        rec.goto("/")
+        self.assertEqual(
+            len(self.clears(page)),
+            1,
+            f"the first goto did not clear the opening hold "
+            f"(scripts: {page.evaluated!r})",
+        )
+        rec.goto("/second.html")
+        self.assertEqual(len(self.clears(page)), 1, "a later goto re-cleared the hold")
+
+    def test_a_legacy_goto_never_touches_the_hold(self):
+        page = self.HoldPage()
+        page.goto = lambda url, timeout=None: None
+        page.wait_for_load_state = lambda *args, **kwargs: None
+        legacy = recorder(self, page=page)
+        legacy.goto("/")
+        self.assertEqual(self.clears(page), [])
+
+    def test_a_wrapper_take_does_not_listen_for_a_replaced_document(self):
+        # #360's beat-log honesty: the wrapper document holds the caption and
+        # never navigates, so `caption_lost` cannot happen there — and the
+        # recorder must not even subscribe the signal. Not listening is the
+        # structural form of "this issue can never fire"; a listener that
+        # merely happens never to fire would be an observation about one
+        # Chromium's event routing, one engine bump away from a false loss.
+        wrapped = recorder(self, wrapper=True)
+        page = FakePage()
+        wrapped._watch_extra(page)
+        self.assertNotIn("domcontentloaded", page.subscribed)
+        # #142's kept listener stays on both paths.
+        self.assertIn("framenavigated", page.subscribed)
+        legacy = recorder(self)
+        legacy_page = FakePage()
+        legacy._watch_extra(legacy_page)
+        self.assertIn("domcontentloaded", legacy_page.subscribed)
 
 
 class VerbTarget(unittest.TestCase):
@@ -15787,6 +15941,103 @@ INJECTIONS = [
         "        if not isinstance(clipped, (int, float)) or clipped < 0:\n"
         "            return\n",
         ["WrapperChrome.test_a_caption_that_fits_its_band_records_nothing"],
+    ),
+    # -- the wrapper take's cards and opening hold (issue #360) ---------------
+    (
+        # The card layer slides off the slot: a card raised in it would cover
+        # chrome instead of the app rect. The pixel half of the same claim is
+        # `tests/smoke --wrapper-only`'s check_wrapper_card reading the pad.
+        "the card layer stops sitting on the content slot",
+        "chrome.py",
+        "  #__chrome_card { position: absolute; left: __PAD__px; top: __SLOTTOP__px;",
+        "  #__chrome_card { position: absolute; inset: 0;",
+        [
+            "WrapperChrome.test_the_card_layer_sits_on_the_slot_and_carries_card_and_scrim"
+        ],
+    ),
+    (
+        # The single-source colour rewired to a literal: the card would keep
+        # passing today's pixels while losing the one property that makes the
+        # wrapper path uncompensated — repaint the window and the card stays.
+        "the wrapper card's field is painted from a literal, not window_body",
+        "chrome.py",
+        "    background: __WINBG__; color: #f2f0ec; z-index: 3; }",
+        "    background: #181825; color: #f2f0ec; z-index: 3; }",
+        [
+            "WrapperChrome."
+            "test_the_wrapper_card_paints_from_the_window_body_it_was_built_with"
+        ],
+    ),
+    (
+        # A hold token survives substitution, so the page is handed a style
+        # with a literal __APPX__ in it — a hold parked at left: __APPX__px
+        # is a hold that covers nothing.
+        "the opening hold ships with an unsubstituted geometry token",
+        "chrome.py",
+        '        "__APPX__": str(geom["appx"]),',
+        '        # "__APPX__" left unsubstituted',
+        ["WrapperChrome.test_the_opening_hold_script_carries_the_app_rect"],
+    ),
+    (
+        # The hold never registered: the wrapper take opens on the slot's
+        # white canvas. The pixel form is smoke's check_wrapper_opening; this
+        # is the browser-free half of the same seam.
+        "the wrapper take registers no opening-hold init script",
+        "web.py",
+        "            context.add_init_script(\n                opening_hold_script(",
+        "            _unused = (\n                opening_hold_script(",
+        [
+            "WrapperChrome."
+            "test_a_wrapper_take_registers_the_hold_script_and_a_legacy_take_none"
+        ],
+    ),
+    (
+        # The reveal never runs: the first content beat lands and the viewer
+        # keeps looking at the hold — #91's card-left-up shape, on the
+        # opening cover.
+        "no goto ever clears the opening hold",
+        "web.py",
+        "        if self._wrapper and not self._hold_cleared:",
+        "        if self._wrapper and False:",
+        [
+            "WrapperChrome."
+            "test_the_first_goto_clears_the_opening_hold_and_only_the_first"
+        ],
+    ),
+    (
+        # The once-guard dropped: every wrapper goto re-clears chrome state
+        # it does not own, and a legacy-shaped reading of the same line —
+        # `if not self._hold_cleared:` alone — would clear it on the
+        # composite path too.
+        "every goto re-clears the opening hold",
+        "web.py",
+        "        if self._wrapper and not self._hold_cleared:",
+        "        if self._wrapper:",
+        [
+            "WrapperChrome."
+            "test_the_first_goto_clears_the_opening_hold_and_only_the_first"
+        ],
+    ),
+    (
+        # ...and the other half of the same line: the wrapper guard dropped,
+        # so a legacy goto evaluates wrapper chrome that is not in its page.
+        "a legacy goto clears a hold its page never had",
+        "web.py",
+        "        if self._wrapper and not self._hold_cleared:",
+        "        if not self._hold_cleared:",
+        ["WrapperChrome.test_a_legacy_goto_never_touches_the_hold"],
+    ),
+    (
+        # The #134 listener re-subscribed on the wrapper path: one engine
+        # bump in event routing away from recording a caption_lost that
+        # cannot happen — the timeline claiming a loss the band's pixels
+        # disprove (#360).
+        "the wrapper take listens for a document replacement again",
+        "web.py",
+        "        if not self._wrapper:\n"
+        '            page.on("domcontentloaded", self._note_document_replaced)',
+        '        page.on("domcontentloaded", self._note_document_replaced)',
+        ["WrapperChrome.test_a_wrapper_take_does_not_listen_for_a_replaced_document"],
     ),
 ]
 

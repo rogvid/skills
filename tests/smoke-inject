@@ -118,7 +118,7 @@ ARM_SECONDS = {
     "--polish-only": 26,
     "--segments-only": 29,
     "--overlay-only": 31,
-    "--wrapper-only": 36,
+    "--wrapper-only": 48,
     "--failure-only": 48,
     "--web-only": 123,
     "--content-only": 148,
@@ -1151,6 +1151,60 @@ INJECTIONS = [
         arm="--wrapper-only",
         sites=("check_wrapper_clipped",),
         must_contain=("left no caption_clipped issue",),
+    ),
+    Injection(
+        # #360's frame-0 claim: the chrome document's hold ships transparent,
+        # so the wrapper take opens on the slot's white canvas instead of the
+        # opening hold — the blank opening the legacy ffmpeg overlay used to
+        # cover, back on screen. Only the encoded first frame can see it: the
+        # element is present, the beat log is perfect, the take is green.
+        name="the card layer ships transparent at frame 0",
+        module="chrome.py",
+        old=(
+            "  #__chrome_hold { position: absolute; inset: 0; "
+            "background: __WINBG__;\n"
+            "    opacity: 1; transition: opacity .45s ease; z-index: 1; }"
+        ),
+        new=(
+            "  #__chrome_hold { position: absolute; inset: 0; "
+            "background: __WINBG__;\n"
+            "    opacity: 0; transition: opacity .45s ease; z-index: 1; }"
+        ),
+        arm="--wrapper-only",
+        sites=("check_wrapper_opening",),
+        must_contain=("was not opaque in frame 0",),
+    ),
+    Injection(
+        # #360's colour claim: the wrapper card's field nudged four levels off
+        # the window body it must equal — the single declared colour replaced
+        # by a second, slightly different one, which is the #291 mismatch a
+        # human once had to spot by eye in a shipped frame. Read out of the
+        # encoded mp4, card strip against window pad, never out of the
+        # declarations (#297's anti-patterns).
+        name="the wrapper card's palette is nudged four levels off the window",
+        module="chrome.py",
+        old="    background: __WINBG__; color: #f2f0ec; z-index: 3; }",
+        new="    background: #1c1c29; color: #f2f0ec; z-index: 3; }",
+        arm="--wrapper-only",
+        sites=("check_wrapper_card",),
+        must_contain=("the card's field was repainted away from core.WEB_WINDOW_BODY",),
+    ),
+    Injection(
+        # #360's survival claim: a mid-take goto empties the caption band the
+        # way a document replacement used to (#134). The beat log still
+        # reports the line — the recorder's Python state is untouched — so
+        # only the band's pixels across the load can say it left the screen.
+        name="a mid-take goto kills the caption band",
+        module="web.py",
+        old="        if self._wrapper and not self._hold_cleared:",
+        new=(
+            "        if self._wrapper:\n"
+            "            self.page.evaluate(\"() => window.__demoCaption('')\")\n"
+            "        if self._wrapper and not self._hold_cleared:"
+        ),
+        arm="--wrapper-only",
+        sites=("check_wrapper_caption_survives",),
+        must_contain=("went dark across the load",),
     ),
     Injection(
         # The artifact-lie direction, the one #358 names outright: the block
