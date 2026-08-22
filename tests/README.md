@@ -702,13 +702,16 @@ or a run-up that was not quiet. They look identical from inside the window, and
 only the first is the recorder losing a caption.
 
 **Review frames** — the `frames/` a reviewer is actually handed: one PNG per
-beat, and `frames.md` embedding them in order. What is graded is what the
-recorder claims, and it deliberately claims very little:
+beat, at most 1024 px wide and minus the deduplicated repeats (#343), and
+`frames.md` embedding them in order. What is graded is what the recorder
+claims, and it deliberately claims very little:
 
-- **One frame per beat, named for it.** Counted against the hand-written
-  `WEB_BEATS`/`TERMINAL_BEATS`, so a dropped frame, a doubled one or an
-  off-by-one name fails without a pixel being read. Every file on disk is named
-  by the manifest and vice versa.
+- **Every beat is a kept frame or a named drop.** Kept plus `deduped` are
+  counted together against the hand-written `WEB_BEATS`/`TERMINAL_BEATS`, so a
+  dropped frame, a doubled one or an off-by-one name fails without a pixel
+  being read. Every file on disk is named by the manifest and vice versa; a
+  deduplicated frame must be off disk, named in `frames.md`, and matched to a
+  kept frame under the hand-written 3.0 RMSE bound.
 - **Each frame is the moment it says it is.** Two halves, and only together.
   Its timestamp must be its beat's midpoint **moved onto the video's clock by
   this harness's own wall-clock watcher, read at the midpoint**
@@ -721,9 +724,11 @@ recorder claims, and it deliberately claims very little:
   placement-graded and is counted in the arm's output: two samplers on their
   own 20 ms grids do not both know which side of a step a beat fell on.
   And the PNG must be that frame: the harness **cuts the same second
-  out of `demo.mp4` again and compares the bytes**. 56 of 56 identical across
-  the three graded takes — 23 web, 18 terminal, and 15 off the stitched
-  `segments/` demo; one frame away (40 ms) is already a different file.
+  out of `demo.mp4` again, through the recorder's own hand-copied scale
+  filter, and compares the bytes**. 37 of 37 identical across the three
+  graded takes — 18 kept web frames, 10 terminal, and 9 off the stitched
+  `segments/` demo (a deduplicated beat has no PNG to compare); one frame
+  away (40 ms) is already a different file.
 
   Exact rather than approximate, because approximate does not work here. A PNG
   and a decoded video frame reach a luma reduction through different colour
