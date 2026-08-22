@@ -96,6 +96,16 @@ frame so extraction reads it rather than infers it.
 6 tells you to give the reviewer nothing else: it is the document a
 context-free reviewer reads before answering what story the pictures tell.
 
+**Budget the reading, or the reviewer dies mid-sheet.** A native-resolution
+1280×720 frame costs a reader roughly 1.2k image tokens, so a long take is
+tens of thousands of tokens of pictures before the first thought — a measured
+122 s take produced 80 frames, ~98k tokens, and three reviewer agents died on
+session limits mid-read. Over ~40 frames, review in segments rather than in
+one pass: read about six frames per call, and on an empty result retry the
+files one at a time — every reviewer in that run hit blank returns on large
+batched image reads. Smaller frames lower the per-frame cost; the segmented
+protocol is what keeps a long demo reviewable either way.
+
 Inside a beat long enough to hide something the storyboard never scripted (3 s
 and up) the recorder also runs scene-change detection and adds
 `beat-NN-scene-1.png` for each transition it finds. Beat alignment sees what
