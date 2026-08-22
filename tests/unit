@@ -15260,6 +15260,10 @@ def fault_inject() -> int:
             root = skill / "helpers"
             smoke = Path(tmp) / "smoke"
             shutil.copy(REPO / "tests" / "smoke", smoke)
+            # `tests/smoke` imports its pixel toolkit from the module beside
+            # it (#349), resolved off its own path — so the copy needs the
+            # module beside it too.
+            shutil.copy(REPO / "tests" / "_pixels.py", Path(tmp) / "_pixels.py")
             # And the injection manifest, for the same reason as `smoke`: the
             # baseline retry #258 added is a decision this suite grades, and a
             # decision nobody has watched go the wrong way is a claim.
