@@ -5293,6 +5293,57 @@ class WrapperChrome(unittest.TestCase):
         wrapped._app_frame = "the app frame"
         self.assertEqual(wrapped.app, "the app frame")
 
+    class CaptionSurface(FakePage):
+        """A page whose `__demoCaption` reports what the band could not show.
+
+        The wrapper chrome's caption renderer (chrome.py) returns the pixels
+        the band's `overflow: hidden` shaved off the bubble; the in-page
+        overlay version returns nothing. Scripted here, because the recorder
+        half under test is what `caption()` does with the answer.
+        """
+
+        def __init__(self, clipped) -> None:
+            super().__init__()
+            self.clipped = clipped
+
+        def evaluate(self, script, *args):
+            if "__demoCaption" in script:
+                return self.clipped
+            return None
+
+    def test_a_caption_the_band_cannot_hold_is_recorded_with_its_overflow(self):
+        # The PR #366 review's blocking finding: a 174-char caption lost
+        # ~17 px off its first and last lines to the band's edges while
+        # timeline.json recorded the full sentence, warnings stayed empty and
+        # a strict take stayed green — the artifact claiming a line the
+        # pixels do not show. The text is deliberately not capped or
+        # reflowed; the record is the fix.
+        rec = recorder(self, wrapper=True, page=self.CaptionSurface(34))
+        rec.caption("a caption far too tall for the band")
+        clipped = [i for i in rec._issues if i["kind"] == "caption_clipped"]
+        self.assertEqual(len(clipped), 1, rec._issues)
+        self.assertEqual(clipped[0]["clipped_px"], 34)
+        self.assertIn("a caption far too tall for the band", clipped[0]["message"])
+        # Attributed to the caption beat that painted it, not to null.
+        self.assertEqual(clipped[0]["beat"], rec._beats[-1]["index"])
+        self.assertEqual(clipped[0]["verb"], "caption")
+        # The storyboard's mistake, not the app's: never fatal under strict.
+        self.assertEqual(rec._fatal_count, 0)
+
+    def test_a_caption_that_fits_its_band_records_nothing(self):
+        # Both quiet answers: the wrapper surface measuring zero overflow,
+        # and the legacy overlay returning nothing at all.
+        fits = recorder(self, wrapper=True, page=self.CaptionSurface(0))
+        fits.caption("short")
+        legacy = recorder(self)  # FakePage.evaluate returns None
+        legacy.caption("short")
+        self.assertEqual(
+            [i for i in fits._issues if i["kind"] == "caption_clipped"], []
+        )
+        self.assertEqual(
+            [i for i in legacy._issues if i["kind"] == "caption_clipped"], []
+        )
+
 
 class VerbTarget(unittest.TestCase):
     """Which target a verb's beat names, by position and by keyword (#177).
@@ -15710,6 +15761,32 @@ INJECTIONS = [
         "        if True:\n"
         "            # The recording is composited into a window and scaled down\n",
         ["WrapperChrome.test_a_wrapper_take_keeps_the_base_caption_font"],
+    ),
+    (
+        # The PR #366 review's blocking finding, restored: the band shaves a
+        # too-tall caption at both edges and no artifact says so — the beat
+        # log records the full sentence over pixels that do not show it.
+        "a caption the band cannot hold is recorded nowhere",
+        "core.py",
+        "        if not isinstance(clipped, (int, float)) or clipped <= 0:\n"
+        "            return\n",
+        "        if True:\n            return\n",
+        [
+            "WrapperChrome."
+            "test_a_caption_the_band_cannot_hold_is_recorded_with_its_overflow"
+        ],
+    ),
+    (
+        # The over-reporting direction, which the entry above cannot see: a
+        # zero-overflow reading treated as a clip files an issue on every
+        # caption of every wrapper take, and the artifact cries wolf.
+        "a caption that exactly fits its band is recorded as clipped",
+        "core.py",
+        "        if not isinstance(clipped, (int, float)) or clipped <= 0:\n"
+        "            return\n",
+        "        if not isinstance(clipped, (int, float)) or clipped < 0:\n"
+        "            return\n",
+        ["WrapperChrome.test_a_caption_that_fits_its_band_records_nothing"],
     ),
 ]
 

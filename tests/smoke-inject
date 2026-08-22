@@ -1135,6 +1135,24 @@ INJECTIONS = [
         must_contain=("the refusal does not name the header",),
     ),
     Injection(
+        # The band's honesty half (#366's review): a caption too tall for the
+        # band is shaved at both edges, and the measurement that turns that
+        # into a caption_clipped issue goes quiet. The Python half is graded
+        # browser-free in tests/unit; this breaks the JS reading itself,
+        # which only a recorded take can see.
+        name="the band shaves a too-tall caption and no artifact says so",
+        module="chrome.py",
+        old=(
+            "    if (!text) return 0;\n"
+            "    const band = document.getElementById('__chrome_band');\n"
+            "    return Math.max(0, el.scrollHeight - band.clientHeight);"
+        ),
+        new="    return 0;",
+        arm="--wrapper-only",
+        sites=("check_wrapper_clipped",),
+        must_contain=("left no caption_clipped issue",),
+    ),
+    Injection(
         # The artifact-lie direction, the one #358 names outright: the block
         # is swallowed, the take records a blank window to the end, and every
         # artifact reads like a demo of an app that was never on screen.

@@ -9350,6 +9350,17 @@ def run_strict_terminal(out_root: Path) -> list[str]:
 WRAPPER_CAPTION = "The caption sits in its own band below the app."
 WRAPPER_UNREACHED = "this caption must never be recorded"
 
+# A caption the band cannot hold: 174 characters, three rendered lines
+# against the band's two. The wrapper take says it with a caption_clipped
+# issue rather than reflowing the text — PR #366's review measured ~17 px
+# shaved off the first and last lines of exactly this length with nothing
+# anywhere saying so.
+WRAPPER_LONG_CAPTION = (
+    "This caption is deliberately far too long for the reserved caption "
+    "band below the app rect, so the band's edges shave its first and its "
+    "last line instead of covering the app."
+)
+
 # The band sweep's bars. Measured on a real wrapper take: the empty band
 # reads 0.4-1.4 contrast (3.5 mid-fade), the caption bubble 29-30. The gap
 # between the bars is deliberate — a mid-fade frame is neither.
@@ -9472,6 +9483,12 @@ def record_wrapper(out_dir: Path, base_url: str) -> dict:
                 f"{rows} rows visible, expected 1"
             )
         rec.scroll_to("#rows")
+        rec.caption("")
+        # A caption the band cannot hold, then the clear again: the take
+        # must record caption_clipped for this line and only this line
+        # (check_wrapper_clipped), and the band must still end dark for the
+        # band sweep's last-frame claim.
+        rec.caption(WRAPPER_LONG_CAPTION)
         rec.caption("")
         rec.pause(0.6)
         geom = dict(rec._geom)
@@ -9622,6 +9639,48 @@ def check_wrapper_evidence(out_dir: Path) -> list[str]:
     return []
 
 
+def check_wrapper_clipped(out_dir: Path) -> list[str]:
+    """The band says so when it cannot show a caption (#366's review).
+
+    The take captions one line the band holds and one it cannot; the second
+    must leave a `caption_clipped` issue naming the line and the overflow,
+    and the first must leave none — over-reporting would file an issue on
+    every caption of every wrapper take. The text is deliberately not capped
+    or reflowed by the recorder; the record is the whole fix.
+    """
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    issues = [
+        issue
+        for issue in doc.get("issues") or []
+        if issue.get("kind") == "caption_clipped"
+    ]
+    failures = []
+    named = [i for i in issues if i.get("caption") == WRAPPER_LONG_CAPTION]
+    if not named:
+        failures.append(
+            f"wrapper: the {len(WRAPPER_LONG_CAPTION)}-char caption left no "
+            f"caption_clipped issue — the band shaved its first and last "
+            f"lines and no artifact says so, which is timeline.json claiming "
+            f"a line the pixels do not show"
+        )
+    else:
+        clipped_px = named[0].get("clipped_px")
+        if not isinstance(clipped_px, (int, float)) or clipped_px <= 0:
+            failures.append(
+                f"wrapper: the caption_clipped issue carries clipped_px="
+                f"{clipped_px!r} — without a positive reading nobody can say "
+                f"how much of the line the band shaved"
+            )
+    fitting = [i for i in issues if i.get("caption") != WRAPPER_LONG_CAPTION]
+    if fitting:
+        failures.append(
+            f"wrapper: caption_clipped was recorded for {len(fitting)} "
+            f"caption(s) that fit their band — an issue filed on every "
+            f"caption is the artifact crying wolf"
+        )
+    return failures
+
+
 def check_wrapper_refusal(out_dir: Path, raised: BaseException | None) -> list[str]:
     """An app that refuses framing is refused by name, before any beat shows
     it (#358): a blocked iframe recorded as a demo is the artifact-lie
@@ -9678,6 +9737,7 @@ def run_wrapper(out_root: Path) -> list[str]:
         return [f"wrapper: recording raised {type(exc).__name__}: {exc}"]
     failures += check_wrapper_band(out_dir, info)
     failures += check_wrapper_evidence(out_dir)
+    failures += check_wrapper_clipped(out_dir)
 
     refused_dir = fresh_take_dir(out_root, "wrapper-refused")
     raised: BaseException | None = None

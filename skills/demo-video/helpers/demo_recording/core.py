@@ -2599,10 +2599,44 @@ take with fewer beats than the last one would otherwise leave the
         # that timestamp expects to see.
         clip = self._prepare_line(text)
         with self._beat("caption", caption=text, **_ac_field(claims)):
-            self.page.evaluate("t => window.__demoCaption(t)", text)
+            clipped = self.page.evaluate("t => window.__demoCaption(t)", text)
+            self._note_caption_clipped(text, clipped)
             self._caption = text
             self._start_line(clip)
             self.pause(self._caption_hold(text))
+
+    def _note_caption_clipped(self, text: str, clipped: object) -> None:
+        """A caption surface that measured itself clipped gets written down.
+
+        Only the wrapper chrome's `__demoCaption` (chrome.py, #358) returns a
+        number: its caption band has a fixed height and `overflow: hidden` —
+        the construction that keeps the app rect caption-free — so a caption
+        too tall for the band is shaved at the band's edges while the beat
+        log records the full sentence. Without this, that is `timeline.json`
+        claiming a line the pixels do not show: measured on a 174-character
+        caption, the band's flex centring shaved ~17 px off the top of the
+        first line and the bottom of the third, `warnings` stayed empty and a
+        strict take stayed green. The in-page overlay `_CAPTION_JS` grows
+        with its text and returns nothing, so nothing fires off this path.
+
+        The text is deliberately **not** capped or reflowed — the honest
+        artifact is the point. An issue rather than a refusal, and not in
+        `STRICT_KINDS`: like `caption_lost` (#180), this is the storyboard's
+        mistake, not the app saying it is broken. Attributed to the caption
+        beat explicitly — it is the beat that painted the line.
+        """
+        if not isinstance(clipped, (int, float)) or clipped <= 0:
+            return
+        beat = self._beats[-1] if self._in_beat and self._beats else None
+        self._note_issue(
+            "caption_clipped",
+            f"the caption {text!r} is {round(clipped)}px taller than the "
+            f"caption band, so the band's edges shave its first and last "
+            f"lines and the frames do not show the sentence the beat log "
+            f"records — shorten the line, or split it over two captions",
+            beat=beat,
+            clipped_px=round(clipped),
+        )
 
     def _caption_hold(self, text: str) -> float:
         """Minimum time a caption stays up. With speech on, the spoken line's

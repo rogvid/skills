@@ -6,8 +6,9 @@ window with its title bar and traffic lights, a **content slot** the medium
 fills (the web recorder mounts the app iframe in it; #362 mounts xterm.js in
 the same slot), a **caption band** reserved BELOW the slot, and an empty card
 layer #360 will use. By construction the slot and the band share no pixels —
-`chrome_geometry` is the arithmetic behind that sentence, and `tests/unit`
-grades it while `tests/smoke --wrapper-only` reads the same claim out of a
+`chrome_geometry` is the arithmetic behind that sentence. This repository's
+`tests/unit` (not shipped with the installed skill) grades it, and this
+repository's `tests/smoke --wrapper-only` reads the same claim out of a
 recorded take's frames.
 
 Every visual constant here is ported from `web._FRAME_HTML` and
@@ -180,6 +181,15 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     const el = document.getElementById('__demo_caption');
     el.textContent = text;
     el.style.opacity = text ? '1' : '0';
+    // How many pixels of this caption the band cannot show. The band has a
+    // fixed height and overflow: hidden — the construction that keeps the
+    // app rect caption-free — so a line too tall for it is shaved at the
+    // band's edges. The recorder records that as a caption_clipped issue
+    // (core.caption reads this return value); the in-page overlay version
+    // of this function grows with its text and returns nothing.
+    if (!text) return 0;
+    const band = document.getElementById('__chrome_band');
+    return Math.max(0, el.scrollHeight - band.clientHeight);
   };
   window.__demoChromeCursor = (x, y) => {
     const dot = document.getElementById('__demo_cursor');

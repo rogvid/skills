@@ -237,7 +237,7 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_LOCALE` | `locale` — browser locale, always applied | `en-US` |
 | `DEMO_VIDEO_SPEECH` | `speech` — force narration on/off (`1`/`0`). **`speech=False` records silently even with a key set**; with no key it is off already, and forcing it *on* without one refuses the take | auto by API key |
 | `DEMO_VIDEO_STRICT` | `strict` — fail the take on console errors / non-zero exits (`1`/`0`) | off |
-| `DEMO_VIDEO_WRAPPER` | `wrapper` — record the web app in an iframe on a recorder-owned page: chrome in the recording, caption in its own band below the app, no exit composite. `rec.page` stays the wrapper page; `rec.app` is the app's document. Refuses apps sending `X-Frame-Options`/CSP `frame-ancestors`. Transitional (#358; #361 makes it the default) | off |
+| `DEMO_VIDEO_WRAPPER` | `wrapper` — record the web app in an iframe on a recorder-owned page: chrome in the recording, caption in its own band below the app, no exit composite. `rec.page` stays the wrapper page; `rec.app` is the app's document. The cursor dot is verb-driven, so raw `rec.page.mouse` work moves it nowhere; a caption taller than its band is clipped and recorded as a `caption_clipped` issue. Refuses apps sending `X-Frame-Options`/CSP `frame-ancestors`. Transitional (#358; #361 makes it the default) | off |
 | `DEMO_VIDEO_EVIDENCE` | `evidence` — write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | `voice_id` — ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | `speech_model` — ElevenLabs model | `eleven_multilingual_v2` |
