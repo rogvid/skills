@@ -158,6 +158,18 @@ The skill's catalogue of *measurements that grade nothing* is the reviewer's
 checklist. Every entry in it came from a change in this repo that had green CI
 and an honest author.
 
+### A change to a rendered frame runs `tests/pixel` first
+
+Some changes move what a viewer sees: the chrome in
+`skills/demo-video/helpers/demo_recording/` — captions, cards, cursor,
+spotlight, framing. Before such a change opens its pull request, run
+`tests/pixel` (#324). Put its pass/fail lines in the PR body. For anything
+that changed on purpose, attach `--dump` frames from before and after.
+
+The loop takes no lock, and a warm run measures ~2 s, so not running it is
+the odd choice. It is the iteration loop, not the gate — `tests/smoke` in CI
+stays the gate.
+
 ### Where an eval replaces the injections
 
 **Code whose correctness is measured by an eval does not also owe injections.**
