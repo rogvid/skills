@@ -117,7 +117,7 @@ seen red under a planted recorder defect in #351's pull request.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~47 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~50 min, nightly)
 ├── unit               # the browser-free half (~5 s, 528 tests, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -293,7 +293,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~225 s)
-tests/smoke-inject                # all 64 entries, ~47 min
+tests/smoke-inject                # all 69 entries, ~50 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -2148,6 +2148,7 @@ are what changed that, and they are now load-bearing rather than a convenience.
 | `--polish-only` | 26 s |
 | `--segments-only` | 29 s |
 | `--overlay-only` | 31 s |
+| `--wrapper-only` | 36 s |
 | `--failure-only` | 48 s |
 | `--web-only` | 123 s |
 | `--content-only` | 148 s |
@@ -2215,7 +2216,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-64 entries, 13 arms, ~46.8 min of takes
+69 entries, 14 arms, ~50.4 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -2252,13 +2253,14 @@ paragraph whose job is to say what this manifest does not cover.
 | `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
+| `--wrapper-only` | 5 | the wrapper take (#358) stops keeping its promises silently: a caption dispatched and never painted in its band; the caption's appearance repainting pixels inside the app rect, which is the overlap the band exists to remove; evidence captured from the wrapper chrome instead of the app frame, with url, title and aria all plausible; a frame-refused app surfacing as a bare `ERR_BLOCKED_BY_RESPONSE` naming no header; or the block swallowed entirely, so a silently blank window records to the end as a demo — the artifact-lie outcome the issue names outright |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
 | `--web-only` | 6 | the form verbs lie about what they did: `press` logging a key it never sent or returning before the page saw it, `clear` selecting without deleting or emptying the field between two frames, either of them driving the page and writing no beat |
 | `--content-only` | 3 | the recorder stops noticing a recording nobody can watch, starts warning about honest demos that hold still, or goes back to scoring the whole frame (issue #17's anti-correlated metric) |
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 44 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 47 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 

@@ -118,6 +118,7 @@ ARM_SECONDS = {
     "--polish-only": 26,
     "--segments-only": 29,
     "--overlay-only": 31,
+    "--wrapper-only": 36,
     "--failure-only": 48,
     "--web-only": 123,
     "--content-only": 148,
@@ -464,14 +465,21 @@ INJECTIONS = [
         # the entry would be graded by an exception rather than by the pixels.
         name="a web take is painted the terminal's card",
         module="web.py",
-        old="from .core import INTERLUDE_CSS_WEB, WEB_WINDOW_BODY, "
-        "_beat_verb, _DemoBase, _env",
+        old="from .core import (\n"
+        "    INTERLUDE_CSS_WEB,\n"
+        "    WEB_WINDOW_BODY,\n"
+        "    _beat_verb,\n"
+        "    _DemoBase,\n"
+        "    _env,\n"
+        "    _env_flag,\n"
+        ")",
         new="from .core import (  # noqa: I001\n"
         "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
         "    WEB_WINDOW_BODY,\n"
         "    _beat_verb,\n"
         "    _DemoBase,\n"
         "    _env,\n"
+        "    _env_flag,\n"
         ")",
         arm="--coverage-only",
         sites=("check_criterion_card",),
@@ -1056,6 +1064,98 @@ INJECTIONS = [
         arm="--overlay-only",
         sites=("check_overlay_pair",),
         must_contain=("the take that cleared its scrim never said ",),
+    ),
+    # -- the wrapper take (issue #358), 36 s an entry --------------------------
+    Injection(
+        # The band's positive half: a caption dispatched and never painted.
+        # The wrapper document's own `__demoCaption` goes quiet, the beat log
+        # stays perfect, and only the pixels can say the band held nothing.
+        name="the wrapper caption is dispatched and never painted in the band",
+        module="chrome.py",
+        old="    el.textContent = text;\n    el.style.opacity = text ? '1' : '0';",
+        new="    el.textContent = '';\n    el.style.opacity = '0';",
+        arm="--wrapper-only",
+        sites=("check_wrapper_band",),
+        must_contain=("never painted in its band",),
+    ),
+    Injection(
+        # The band's negative half — the overlap the wrapper exists to
+        # remove, reintroduced: the caption's appearance also repaints pixels
+        # inside the app rect (here, by dimming the slot). The band claim
+        # alone stays green, which is why the app-stillness claim is its own
+        # assertion.
+        name="the caption's appearance repaints pixels inside the app rect",
+        module="chrome.py",
+        old=(
+            "  window.__demoCaption = (text) => {\n"
+            "    const el = document.getElementById('__demo_caption');"
+        ),
+        new=(
+            "  window.__demoCaption = (text) => {\n"
+            "    document.getElementById('__chrome_slot').style.opacity ="
+            " text ? '0.75' : '1';\n"
+            "    const el = document.getElementById('__demo_caption');"
+        ),
+        arm="--wrapper-only",
+        sites=("check_wrapper_band",),
+        must_contain=("changed pixels inside the app rect",),
+    ),
+    Injection(
+        # Evidence capture left on the wrapper page: url, title and aria all
+        # come back well-formed and describe the recorder's own chrome. The
+        # fixture's heading is what tells the two documents apart — measured:
+        # a wrapper-page aria_snapshot does not descend into the iframe.
+        name="evidence on a wrapper take reads the chrome, not the app",
+        module="web.py",
+        old="        doc = self._target()",
+        new="        doc = self.page",
+        arm="--wrapper-only",
+        sites=("check_wrapper_evidence",),
+        must_contain=("evidence reads the wrapper chrome, not the app",),
+    ),
+    Injection(
+        # The refusal loses its name: the blocked navigation surfaces as a
+        # bare Playwright error after the retry loop, and a storyboard author
+        # is left holding ERR_BLOCKED_BY_RESPONSE with no header to act on.
+        name="a frame-refused app fails with an error naming no header",
+        module="web.py",
+        old=(
+            "                if self._wrapper and "
+            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            "                    raise RuntimeError(self._frame_refusal(url)) "
+            "from exc"
+        ),
+        new=(
+            "                if self._wrapper and "
+            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            "                    pass"
+        ),
+        arm="--wrapper-only",
+        sites=("check_wrapper_refusal",),
+        must_contain=("the refusal does not name the header",),
+    ),
+    Injection(
+        # The artifact-lie direction, the one #358 names outright: the block
+        # is swallowed, the take records a blank window to the end, and every
+        # artifact reads like a demo of an app that was never on screen.
+        name="a frame-refused app is recorded as a silently blank demo",
+        module="web.py",
+        old=(
+            "                if self._wrapper and "
+            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            "                    raise RuntimeError(self._frame_refusal(url)) "
+            "from exc\n"
+            "                if attempt == 2:"
+        ),
+        new=(
+            "                if self._wrapper and "
+            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            "                    break\n"
+            "                if attempt == 2:"
+        ),
+        arm="--wrapper-only",
+        sites=("check_wrapper_refusal",),
+        must_contain=("recorded a silently blank",),
     ),
     # -- what a take that did not finish leaves behind (#11/#20/#24/#46), 48 s -
     Injection(
