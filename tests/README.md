@@ -18,7 +18,7 @@ takes an exclusive lock.
 `unit` answers everything that never needed a browser: the coverage report, the
 timeline's two renderings, the content and opening warnings, the merge a stitch
 performs, and whether `SKILL.md`'s reference links still resolve. It costs about
-5 s for its 521 tests and has no dependencies at all.
+5 s for its 528 tests and has no dependencies at all.
 
 **That split is the point, not tidiness.** [#136] measured the asymmetry it
 exists to remove: the fault-injection rule was *executed* for `ci-unit` and
@@ -46,7 +46,7 @@ and `score` phases, so it is run deliberately rather than on a push. `AGENTS.md`
 ("Where an eval replaces the injections") is why code graded this way does not
 also owe an injection manifest; `tests/eval/grader/README.md` is the corpus.
 
-`pixel` is not a gate either - it is the iteration loop, slice 2 of
+`pixel` is not a gate either - it is the iteration loop, slices 2 and 3 of
 [#324](https://github.com/rogvid/skills/issues/324).
 It records two short chrome reference takes into the gitignored
 `tests/.pixel-cache/` - a terminal opening on its title card, and the web
@@ -55,24 +55,64 @@ chrome (criterion card, interlude, caption, spotlight, cursor park) against
 `helpers/demo_recording/*.py`, each take's own storyboard source, the vendored
 xterm assets and the fixture page.
 Cold (a stale or missing take) costs ~20-25 s per take, one Chromium launch
-each; warm costs ~0.1 s, prints `cached <take>`, and launches nothing.
+each; warm the full run - both takes graded - measured 2.2 s, prints
+`cached <take>`, and launches nothing.
 **It takes no lock and must never create one**: the smoke lock exists for
 smoke's time-measuring bars under encoder contention
 ([#78](https://github.com/rogvid/skills/issues/78)), and every reading this
 loop makes is colour or geometry off frames already on disk.
-What it grades today is only completeness - demo.mp4, timeline.json, at least
-one review frame per take; the golden properties (opening-card prefix,
-card-vs-window colour, the cursor disc and the pointer-absence probe) are
-[#351](https://github.com/rogvid/skills/issues/351) and land in its `CHECKS`
-registry.
+What it grades ([#351](https://github.com/rogvid/skills/issues/351)):
+completeness (demo.mp4, timeline.json, at least one review frame - the floor;
+when it fails, the take's golden properties are skipped rather than failing
+for a reason they do not name), then the four golden chrome properties, one
+line of measured numbers each. Thresholds are duplicated from `smoke` by
+design - the loop must not import the 12k-line suite - and each names its
+counterpart at its definition:
+
+- **opening-card** (terminal take, #110): frame 0 of the corner sweep reads
+  card (mean luma ≤ 60), the unbroken card prefix is ≥ 1.0 s (the value of
+  smoke's `MIN_OPENING_CARD_S`), and the corner later reads bare (≥ 150) as
+  the control. Frame 0 is read by index out of one full decode, never by
+  seeking a timestamp (#128).
+- **card-vs-window** (web take, #291): the criterion card and the window pad
+  read out of the composited `demo.mp4` (never a still - the two layers
+  arrive through different encoders, #301) at two instants inside the card,
+  ≤ 6 levels off the dispatched `WEB_CARD_RGB` and ≤ 2 levels apart worst
+  channel, with a card-down control that must NOT read as the card. The
+  instants are located by a luma sweep of the strip itself and tied loosely
+  to the logged beat, because this host's wall clock steps ~0.8 s mid-take
+  about one recording in five and `capture_clock`'s step position is an
+  aliased sample (#245, #250) - a beat-log fraction mapped through it landed
+  on the interlude fade on a healthy build.
+- **cursor-parked** (web take, #202): the accent disc's centre, measured as
+  the centroid of accent-like pixels in the last review frame, sits within
+  3 px per axis (video pixels) of the park rect's centre mapped through
+  `to_video_rect`. Read from pixels, where smoke's `check_parked_pointer`
+  asks the DOM. A missing disc fails, deliberately.
+- **cursor-absence** (web take, #186; closes #193's gap): every kept review
+  frame before the marker's `no_pointer_until_beat` carries zero accent
+  pixels in the page-origin crop (x 0-8, y 0-8 - the #186 signature), with a
+  floor of 2 probed frames so the sweep cannot be vacuous.
+
+`--dump <dir>` writes every frame the checks read (and any offending frame)
+as PNGs named by check and instant, for a pull request's before/after.
+What stays ungraded here, deliberately: spotlight transition shape and
+caption timing are time-measuring and belong to smoke's lock; whether a
+viewer *recognises* the card as a card is graded nowhere (Known gaps); and
+`frames.md` ordering is manifest arithmetic, owned by
+[#300](https://github.com/rogvid/skills/issues/300).
 Its cache arithmetic - digest, staleness, marker - is graded browser-free in
-`unit` (`PixelCache`), with three entries in the `INJECTIONS` table.
+`unit` (`PixelCache`), and the checks' pure arithmetic - the opening
+classifier, the card-stretch locator, the accent predicate and centroid, the
+beat-span lookup, the dump naming - in `PixelChecks`, with eight `tests/pixel`
+entries in the `INJECTIONS` table. The frame readings themselves were each
+seen red under a planted recorder defect in #351's pull request.
 
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
 ├── smoke-inject       # proves smoke's assertions can still fail (~47 min, nightly)
-├── unit               # the browser-free half (~5 s, 521 tests, no dependencies)
+├── unit               # the browser-free half (~5 s, 528 tests, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
 │                      #   sees, plus the docs' python fences (~0.3 s)
