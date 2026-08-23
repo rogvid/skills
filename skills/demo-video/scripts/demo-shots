@@ -1,0 +1,359 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""One markdown block of a take's stills, ready to paste.
+
+    <skill-dir>/scripts/demo-shots <demo-dir>
+
+`images/*.png` is already the storyboard author's own selection of key
+moments, already committed, already in the pull request. What did not exist
+until #373 is a command that turns it into something a person reads in
+seconds. This prints every `shot()` still in the order it was taken, under the
+caption that was on screen at the time, tagged with the acceptance criterion
+the beat claimed. Paste it into a session, a pull-request description, or a
+comment.
+
+## What it is not
+
+It is not `demo-grade`. That command hands a blind reader the clauses and the
+frames and compares what they found with what the storyboard claimed; it needs
+a reading, dispatched by hand, and it produces a verdict. This produces no
+verdict and makes no comparison. **Every sentence it writes is about what the
+storyboard claimed**, and `tests/ci-unit` sweeps its output for the vocabulary
+that would turn a claim into one (`demonstrated`, `verified`, `shown`,
+`passed`, `met`, a ticked box, a checkmark). Captions and clauses are quoted
+through untouched — they are the author's words and the ticket's, and only the
+sentences this file writes are swept.
+
+Whether a still shows its clause is the reader's question. This command's
+whole job is to put the picture in front of them with enough context to ask it.
+
+## Links
+
+Off a commit that is on a remote branch, the stills are embedded raw at that
+commit — the picture renders in a GitHub comment with nothing to click. When
+the commit is not pushed, when the demo directory has uncommitted changes,
+when the remote is not GitHub, or when there is no repository at all, the
+block uses relative paths instead and says on stderr which of those it was.
+Relative paths render in a pull-request *description* on GitHub and not in a
+comment, so the note matters.
+
+**A missing still is reported, never skipped and never linked.** A beat whose
+`still` names a file this take did not publish is the artifact-lie case: the
+block says the file is absent rather than quietly rendering four stills as
+three.
+
+## Exit status
+
+`0` when a block was written. `2` when the command refuses — a directory with
+no timeline, a timeline this code cannot read, or a take that took no stills
+at all, which has no block to paste.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+_DEFAULT_SKILL_DIR = Path(__file__).resolve().parent.parent
+SKILL_DIR = Path(os.environ.get("DEMO_VIDEO_SKILL_DIR") or _DEFAULT_SKILL_DIR)
+sys.path.insert(0, str(SKILL_DIR / "helpers"))
+
+from demo_recording.links import (  # noqa: E402
+    beat_captions,
+    beat_stills,
+    git,
+    git_fact,
+    github_repo,
+    raw_url,
+    take_relative,
+)
+from demo_recording.timeline import timeline_paths  # noqa: E402
+
+#: The comment that lets a tool find this block again, and lets a person
+#: reading the raw markdown see what produced it.
+MARKER = "<!-- demo-video: the storyboard's own stills; nothing here is graded -->"
+
+
+class Refused(Exception):
+    """The command cannot do its job on this input, and says why."""
+
+
+def _load_timeline(demo: Path) -> tuple[dict, Path]:
+    path = timeline_paths(demo)[0]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise Refused(
+            f"there is no timeline.json at {path}. This reads a take's own "
+            f"beat log — point it at a demo folder the recorder wrote."
+        ) from None
+    except OSError as exc:
+        raise Refused(f"cannot read {path}: {exc}") from None
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        raise Refused(f"{path} is not readable JSON: {exc}") from None
+    if not isinstance(doc, dict):
+        raise Refused(f"{path} is not a JSON object")
+    return doc, path
+
+
+class Shot:
+    """One `shot()` beat, as this block renders it."""
+
+    def __init__(self, index: int, name: str, caption: str, criteria: list[str]):
+        self.index = index
+        self.name = name
+        self.caption = caption
+        self.criteria = criteria
+        #: The still's path inside the take, or None when the beat named a
+        #: path this take may not link (see `take_relative`).
+        self.rel: str | None = None
+        #: Why there is no picture, when there is none. Rendered in place of
+        #: the image, never silently dropped.
+        self.missing: str | None = None
+
+
+def shots(timeline: dict) -> list[Shot]:
+    """The take's `shot()` beats in order, each with its caption and tags.
+
+    Read off `beats` rather than off `coverage.claimed`, and the difference
+    matters: `claimed` is indexed by criterion, so a still tagged with two
+    criteria appears twice there and an untagged still does not appear at all.
+    This block is a walk through the pictures, so the pictures are what it
+    iterates.
+    """
+    stills = beat_stills(timeline)
+    captions = beat_captions(timeline)
+    out: list[Shot] = []
+    for beat in timeline.get("beats") or []:
+        index = beat.get("index")
+        if not isinstance(index, int) or index not in stills:
+            continue
+        name = beat.get("selector")
+        tags = [t for t in (beat.get("ac") or []) if isinstance(t, str)]
+        shot = Shot(
+            index,
+            str(name) if isinstance(name, str) and name.strip() else stills[index],
+            captions.get(index, ""),
+            tags,
+        )
+        error = beat.get("error")
+        if isinstance(error, dict):
+            # Before the path check, and that order is deliberate: a beat that
+            # raised wrote no still, and a file of that name sitting in the
+            # folder is a *previous* recording's. Linking it would put last
+            # week's picture under this take's caption.
+            shot.missing = (
+                f"the beat raised {error.get('type') or 'an exception'}, "
+                f"so it took no still"
+            )
+        else:
+            shot.rel = take_relative(stills[index])
+            if shot.rel is None:
+                shot.missing = (
+                    f"`{stills[index]}` is not a path inside this take, "
+                    f"so it is not linked"
+                )
+        out.append(shot)
+    return out
+
+
+def tagged_clauses(timeline: dict, found: list[Shot]) -> list[tuple[str, str]]:
+    """`(id, text)` for each declared clause at least one still tags.
+
+    Only the tagged ones. A reader meeting a bare `AC-1` under a picture needs
+    the sentence, and that is the whole reason the clauses are here; the
+    clauses *nothing* claimed are the coverage report's subject, not this
+    block's, and printing them would make this look like one.
+    """
+    coverage = timeline.get("coverage")
+    criteria = (coverage or {}).get("criteria")
+    if not isinstance(criteria, dict):
+        return []
+    claimed = [c for shot in found for c in shot.criteria]
+    return [
+        (key, str(text))
+        for key, text in criteria.items()
+        if key in claimed and isinstance(text, str)
+    ]
+
+
+class Links:
+    """How this run turns a still into something a reader can look at."""
+
+    def __init__(self, repo: str | None, sha: str | None, prefix: str, why: str):
+        self.repo = repo
+        self.sha = sha
+        self.prefix = prefix
+        #: Why the block is using relative paths, when it is. Printed on
+        #: stderr, never into the block: a note about the tooling is not part
+        #: of what somebody pastes.
+        self.why = why
+
+    @property
+    def absolute(self) -> bool:
+        return bool(self.repo and self.sha)
+
+
+def resolve_links(demo: Path) -> Links:
+    """Whether this take's stills can be embedded at a commit, and if not why.
+
+    Four ways to end up with relative paths, and each is reported by name
+    because the fix is different for each one. The order is the order a person
+    hits them: no repository at all, then a remote that is not GitHub, then an
+    uncommitted take, then a commit nobody else can see.
+
+    The last check is `branch -r --contains`, which asks whether the commit is
+    on any remote-tracking branch. It is a local read of what the last fetch
+    saw, so it costs nothing and needs no network — and it is the difference
+    between a link and a broken image, because raw.githubusercontent.com
+    resolves a commit only once GitHub has it.
+    """
+    nowhere = Links(None, None, "", "")
+    if git_fact(demo, "rev-parse", "--is-inside-work-tree") != "true":
+        return Links(None, None, "", f"{demo} is not inside a git repository")
+    sha = git_fact(demo, "rev-parse", "HEAD")
+    if sha is None:
+        # A repository with no commits. Distinct from having no repository at
+        # all, and the fix is different — `git commit`, not `git init` — which
+        # is the whole reason these are separate sentences. Reported by a test
+        # that expected the other message and got this one.
+        return Links(None, None, "", "this repository has no commits yet")
+    repo = github_repo(git_fact(demo, "remote", "get-url", "origin"))
+    if repo is None:
+        return Links(None, None, "", "the origin remote is not a github.com URL")
+    prefix = git_fact(demo, "rev-parse", "--show-prefix")
+    if prefix is None:
+        return nowhere
+    dirty = git(demo, "status", "--porcelain", "--", ".")
+    if dirty.returncode == 0 and dirty.stdout.strip():
+        return Links(
+            None,
+            None,
+            prefix,
+            f"the demo directory has uncommitted changes, so {sha[:12]} does "
+            f"not hold what is on disk",
+        )
+    if not (git_fact(demo, "branch", "-r", "--contains", sha) or ""):
+        return Links(
+            None,
+            None,
+            prefix,
+            f"commit {sha[:12]} is not on any remote branch yet, so a "
+            f"raw.githubusercontent.com URL would resolve to nothing — push "
+            f"it and re-run for embedded pictures",
+        )
+    return Links(repo, sha, prefix, "")
+
+
+def picture(shot: Shot, demo: Path, links: Links) -> str:
+    """The markdown for one still: an image, a path, or why there is neither."""
+    if shot.missing is not None:
+        return f"*{shot.missing}*"
+    rel = shot.rel
+    assert rel is not None  # `missing` is set whenever `rel` is None
+    if not (demo / rel).exists():
+        return (
+            f"*`{rel}` is named in the beat log, and this take published no such file*"
+        )
+    if not links.absolute:
+        return f"![{shot.name}]({rel})"
+    path = f"{links.prefix}{rel}"
+    assert links.repo is not None and links.sha is not None
+    if git(demo, "cat-file", "-e", f"{links.sha}:{path}").returncode != 0:
+        # On disk but not in the commit the URL would name. Naming the file
+        # beats embedding a URL that 404s under a caption that says it shows
+        # something.
+        return f"*`{rel}` is on disk but not in commit {links.sha[:12]}*"
+    return f"![{shot.name}]({raw_url(links.repo, links.sha, path)})"
+
+
+def render(
+    timeline: dict, found: list[Shot], demo: Path, where: str, links: Links
+) -> str:
+    """The block. A pure function of the take's own documents and the links."""
+    n = len(found)
+    out = [
+        MARKER,
+        "",
+        f"## {n} still{'s' if n != 1 else ''} the storyboard took",
+        "",
+        f"From `{where}`, in the order they were taken. Each caption is the "
+        f"line that was on screen at that moment.",
+        "",
+    ]
+    ticket = timeline.get("ticket")
+    if isinstance(ticket, str) and ticket.strip():
+        out += [
+            f"The take names **{ticket.strip()}** as the ticket it was "
+            f"recorded against. Nothing here read that ticket.",
+            "",
+        ]
+    clauses = tagged_clauses(timeline, found)
+    if clauses:
+        out += [
+            "An `AC-n` under a picture is a tag the storyboard's author typed "
+            "against that beat. It says which criterion the beat was there "
+            "for, and nothing compared the picture with the words:",
+            "",
+        ]
+        out += [f"- **{key}** — {text}" for key, text in clauses]
+        out += [""]
+    if timeline.get("mode") == "stills":
+        out += [
+            "This was a stills-only run: the storyboard ran for its pictures "
+            "and recorded no video.",
+            "",
+        ]
+    for position, shot in enumerate(found, 1):
+        tags = " ".join(f"`{c}`" for c in shot.criteria)
+        head = f"**{position}.**" + (f" {tags}" if tags else "")
+        caption = shot.caption or f"*no caption was up — the still is `{shot.name}`*"
+        out += [f"{head} {caption}", "", picture(shot, demo, links), ""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="One markdown block of a take's stills.")
+    ap.add_argument("demo_dir", help="a take's output folder")
+    args = ap.parse_args(argv)
+    demo = Path(args.demo_dir)
+    try:
+        timeline, path = _load_timeline(demo)
+        found = shots(timeline)
+        if not found:
+            raise Refused(
+                f"{path} records no shot() beats, so there are no stills to "
+                f'put in a block. Add rec.shot("name") at the moments a '
+                f"written guide would show a picture, and re-record."
+            )
+        links = resolve_links(demo)
+        prefix = links.prefix or demo.as_posix()
+        where = prefix.rstrip("/") or demo.as_posix()
+        print(render(timeline, found, demo, where, links), end="")
+    except Refused as refusal:
+        print(f"demo-shots: refusing — {refusal}", file=sys.stderr)
+        return 2
+    if links.why:
+        print(
+            f"  note: the block uses relative paths because {links.why}. "
+            f"They render in a pull-request description and not in a comment.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"  note: the pictures are embedded at commit {links.sha[:12]}.",
+            file=sys.stderr,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

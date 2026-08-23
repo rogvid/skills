@@ -116,14 +116,20 @@ import hashlib
 import json
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "helpers"))
 
 from demo_recording.frames import frames_paths  # noqa: E402
+from demo_recording.links import (  # noqa: E402
+    beat_captions,
+    beat_stills,
+    git,
+    raw_url,
+    take_relative,
+)
+from demo_recording.links import github_repo as _github_repo  # noqa: E402
 from demo_recording.timeline import timeline_paths  # noqa: E402
 
 REVIEW_DIRNAME = "review"
@@ -1150,22 +1156,24 @@ def cmd_verdict(demo: Path, reading_path: Path) -> int:
 # repository to carry it.
 
 
-#: The one host this block can build an image URL for. A remote elsewhere gets
-#: a refusal rather than a guessed URL that resolves nowhere.
-_GITHUB_REMOTE = re.compile(
-    r"github\.com[:/](?P<owner>[^/\s]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$"
-)
-
-
-def _git(demo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(demo), *args], capture_output=True, text=True
-    )
+# The facts these two need are `demo_recording.links`' (#373): which beat wrote
+# which still, what caption was up, whether a path may be linked, and what the
+# remote calls the repository. `scripts/demo-shots` renders the same pictures
+# without a verdict and needs every one of them, and one copy of "is this path
+# inside the take" is the only acceptable number — it is the guard that stops
+# a pull-request-edited `timeline.json` pasting `../../elsewhere.png` into a
+# URL under this take's caption.
+#
+# What stays here is the **policy**: this command refuses where the module
+# returns None. A graded verdict whose evidence is a broken image is worse than
+# no block, so every missing fact is a refusal naming what was missing.
+# `demo-shots` spends the same facts the other way and falls back to relative
+# paths. See the module docstring.
 
 
 def _git_fact(demo: Path, *args: str) -> str:
     """One fact from git, or a refusal that names the command that failed."""
-    done = _git(demo, *args)
+    done = git(demo, *args)
     if done.returncode != 0:
         raise Refused(
             f"`git {' '.join(args)}` failed in {demo}: "
@@ -1176,58 +1184,14 @@ def _git_fact(demo: Path, *args: str) -> str:
 
 def github_repo(remote: str) -> str:
     """`owner/repo` out of the origin remote URL, or a refusal."""
-    found = _GITHUB_REMOTE.search(remote.strip())
-    if not found:
+    found = _github_repo(remote)
+    if found is None:
         raise Refused(
             f"the origin remote is {remote.strip()!r}, which is not a "
             f"github.com URL, so there is no raw.githubusercontent.com URL to "
             f"build the pictures from."
         )
-    return f"{found.group('owner')}/{found.group('repo')}"
-
-
-def beat_stills(timeline: dict) -> dict[int, str]:
-    """Which committed still each beat wrote, by beat index, from the beat log."""
-    out: dict[int, str] = {}
-    for beat in timeline.get("beats") or []:
-        index = beat.get("index")
-        still = beat.get("still")
-        if isinstance(index, int) and isinstance(still, str) and still.strip():
-            out[index] = still.strip()
-    return out
-
-
-def beat_captions(timeline: dict) -> dict[int, str]:
-    """Each beat's storyboard caption, by beat index, from the beat log.
-
-    The caption is the one sentence about a beat written for a viewer rather
-    than for the recorder, so it is what a still is labelled with in the
-    block. A beat index is recorder bookkeeping: the third live read of #337
-    asked what "beat 20" was even for, and there was no answer a reviewer
-    could use.
-    """
-    out: dict[int, str] = {}
-    for beat in timeline.get("beats") or []:
-        index = beat.get("index")
-        caption = beat.get("caption")
-        if isinstance(index, int) and isinstance(caption, str) and caption.strip():
-            out[index] = caption.strip()
-    return out
-
-
-def _take_relative(still: str) -> str | None:
-    """`still` as a plain path inside the take, or None.
-
-    `timeline.json` is committed and editable, and this value is pasted into a
-    URL and a `git cat-file` argument. `../../elsewhere.png` is the shape to
-    refuse; a normalised relative path is the whole allowance.
-    """
-    if still.startswith("/") or "\\" in still:
-        return None
-    parts = [p for p in still.split("/") if p not in ("", ".")]
-    if not parts or ".." in parts:
-        return None
-    return "/".join(parts)
+    return found
 
 
 def cited_beats(row: dict) -> list[int]:
@@ -1431,7 +1395,7 @@ def cmd_pr_block(demo: Path) -> int:
     prefix = _git_fact(demo, "rev-parse", "--show-prefix")
     stills: dict[int, str] = {}
     for index, still in beat_stills(timeline).items():
-        rel = _take_relative(still)
+        rel = take_relative(still)
         if rel is None:
             # Not a path inside the take, so it is never linked. The beat then
             # reads as one that wrote no still, which is the honest rendering.
@@ -1440,14 +1404,14 @@ def cmd_pr_block(demo: Path) -> int:
 
     def url_for(rel: str) -> str:
         path = f"{prefix}{rel}"
-        if _git(demo, "cat-file", "-e", f"{sha}:{path}").returncode != 0:
+        if git(demo, "cat-file", "-e", f"{sha}:{path}").returncode != 0:
             raise Refused(
                 f"commit {sha[:12]} does not hold {path}, which this block "
                 f"would embed. Commit the still, then re-run — and push the "
                 f"commit, because the raw.githubusercontent.com URLs resolve "
                 f"only once it is on GitHub."
             )
-        return f"https://raw.githubusercontent.com/{repo}/{sha}/{quote(path)}"
+        return raw_url(repo, sha, path)
 
     block = render_pr_block(doc, stills, beat_captions(timeline), url_for)
     print(block, end="")

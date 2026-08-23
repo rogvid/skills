@@ -85,6 +85,12 @@ GUARD_CLI = _SKILL / "scripts" / "demo-target-guard"
 # `guard` is.
 grade = load("demo-grade", _SKILL / "scripts")
 
+# The stills block (#373) — the other command whose output a person pastes,
+# and the reason `VERDICT_WORDS` below is not `demo-comment`'s private
+# business. Loaded off `_SKILL` for the same reason `grade` is.
+shots = load("demo-shots", _SKILL / "scripts")
+SHOTS_CLI = _SKILL / "scripts" / "demo-shots"
+
 
 # --------------------------------------------------------------------------
 # demo-storyboards — which storyboards a diff makes stale
@@ -2753,7 +2759,414 @@ class PrBlock(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 # (name, script, exact text to replace, replacement, tests that must then fail)
+
+# Four `shot()` beats and one that is not. Beat 6 carries two tags, so the
+# "each still once" claim has a beat that would be printed twice by a renderer
+# walking `coverage.claimed`; beat 8 carries none, so it would be dropped by
+# one. Beat 4's caption is empty on purpose.
+SHOTS_BEATS = [
+    {"index": 0, "verb": "caption", "caption": "A support queue."},
+    {
+        "index": 2,
+        "verb": "shot",
+        "selector": "01-a",
+        "still": "images/01-a.png",
+        "caption": "A support queue.",
+        "ac": ["AC-1"],
+    },
+    {
+        "index": 4,
+        "verb": "shot",
+        "selector": "02-b",
+        "still": "images/02-b.png",
+        "caption": "",
+    },
+    {
+        "index": 6,
+        "verb": "shot",
+        "selector": "03-c",
+        "still": "images/03-c.png",
+        "caption": "One click empties the box.",
+        "ac": ["AC-1", "AC-2"],
+    },
+    {
+        "index": 8,
+        "verb": "shot",
+        "selector": "04-d",
+        "still": "images/04-d.png",
+        "caption": "The heading agrees.",
+    },
+]
+
+SHOTS_ESCAPING = [
+    dict(beat, still="../../../etc/passwd.png")
+    if beat.get("selector") == "02-b"
+    else beat
+    for beat in SHOTS_BEATS
+]
+
+SHOTS_RAISED = [
+    dict(beat, error={"type": "TimeoutError", "message": "no such element"})
+    if beat.get("selector") == "02-b"
+    else beat
+    for beat in SHOTS_BEATS
+]
+
+
+# The clauses `demo-shots` renders. Four declared and two tagged, so "only the
+# tagged ones" is a statement with something to be wrong about — a renderer
+# that printed all four would pass a fixture where every clause is claimed.
+SHOTS_CRITERIA = {
+    "AC-1": "The search box narrows the list as you type.",
+    "AC-2": "A clear control empties the box in one click.",
+    "AC-3": "Search matches the requester as well as the title.",
+    "AC-4": "The heading counts what the filter lists.",
+}
+
+
+class ShotsBlock(unittest.TestCase):
+    """`demo-shots` — the take's own pictures, as one pasteable block (#373).
+
+    Everything here is graded against a real git repository rather than a
+    mock, because what the command does with git's answers *is* the feature:
+    the difference between an embedded picture and a relative path is four
+    separate facts about a working tree, and each is a different reason.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.demo = self.root / "demos" / "x"
+
+    def git(self, *args: str) -> str:
+        done = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.root),
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def take(
+        self,
+        beats=None,
+        *,
+        ticket="o/r#7",
+        mode=None,
+        unwritten=(),
+        commit=True,
+        push=True,
+        remote="git@github.com:o/r.git",
+    ):
+        """A take on disk, optionally committed and optionally pushed.
+
+        `push` is a real second repository the branch is pushed to, not a
+        flag: the command asks `git branch -r --contains`, and the only way to
+        grade that honestly is for there to be a remote branch or not.
+        """
+        beats = SHOTS_BEATS if beats is None else beats
+        timeline = {
+            "schema": 1,
+            "beats": beats,
+            "coverage": {"criteria": SHOTS_CRITERIA, "claimed": {}},
+        }
+        if ticket is not None:
+            timeline["ticket"] = ticket
+        if mode is not None:
+            timeline["mode"] = mode
+        (self.demo / "images").mkdir(parents=True)
+        for beat in beats:
+            still = beat.get("still")
+            if not still or still in unwritten or still.startswith(".."):
+                continue
+            (self.demo / still).write_bytes(b"\x89PNG")
+        (self.demo / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+        self.git("init", "-q")
+        if remote is not None:
+            self.git("remote", "add", "origin", remote)
+        if not commit:
+            return
+        self.git("add", "-A")
+        self.git("commit", "-qm", "the take")
+        self.sha = self.git("rev-parse", "HEAD")
+        if push:
+            bare = self.root.parent / f"{self.root.name}.git"
+            subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+            self.addCleanup(shutil.rmtree, bare, True)
+            self.git("remote", "set-url", "origin", str(bare))
+            self.git("push", "-q", "origin", "HEAD")
+            self.git("fetch", "-q", "origin")
+            if remote is not None:
+                # Push over a path remote, then put the GitHub URL back: the
+                # command reads the remote-tracking ref (local) and the remote
+                # *name* (for the URL), and only a real push creates the ref.
+                self.git("remote", "set-url", "origin", remote)
+
+    def run_shots(self, demo=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = shots.main([str(self.demo if demo is None else demo)])
+        return code, out.getvalue(), err.getvalue()
+
+    def block(self) -> str:
+        code, out, err = self.run_shots()
+        self.assertEqual(code, 0, err)
+        return out
+
+    # -- the walk through the pictures --------------------------------------
+
+    def test_every_still_appears_once_in_the_order_it_was_taken(self):
+        # Off `beats`, not off `coverage.claimed`: beat 6 below is tagged with
+        # two criteria, and a renderer iterating `claimed` would print it
+        # twice and drop the untagged one entirely.
+        self.take()
+        body = self.block()
+        order = [
+            body.index(name)
+            for name in ("images/01-a.png", "images/02-b.png", "images/03-c.png")
+        ]
+        self.assertEqual(order, sorted(order), body)
+        self.assertEqual(body.count("images/03-c.png"), 1, body)
+        self.assertIn("**4.**", body)
+        self.assertNotIn("**5.**", body)
+
+    def test_only_the_clauses_a_still_tags_are_printed(self):
+        # A reader meeting a bare `AC-1` needs the sentence; a reader meeting
+        # every declared clause is reading a coverage report, which this is
+        # not and must not resemble.
+        self.take()
+        body = self.block()
+        for key in ("AC-1", "AC-2"):
+            self.assertIn(f"**{key}** — {SHOTS_CRITERIA[key]}", body)
+        for key in ("AC-3", "AC-4"):
+            self.assertNotIn(SHOTS_CRITERIA[key], body)
+
+    def test_a_beat_with_no_caption_says_so_rather_than_going_blank(self):
+        self.take()
+        body = self.block()
+        self.assertIn("no caption was up", body)
+
+    def test_a_stills_only_run_is_named_as_one(self):
+        # Both ways. The sentence is a statement about this take, so a take
+        # that carries it always would be saying nothing.
+        self.take(mode="stills")
+        self.assertIn("stills-only run", self.block())
+        self.setUp()
+        self.take()
+        self.assertNotIn("stills-only run", self.block())
+
+    # -- what a picture resolves to, and the four ways it does not ----------
+
+    def test_a_pushed_commit_embeds_the_still_at_that_commit(self):
+        self.take()
+        body = self.block()
+        self.assertIn(
+            f"https://raw.githubusercontent.com/o/r/{self.sha}/demos/x/images/01-a.png",
+            body,
+        )
+
+    def test_an_unpushed_commit_falls_back_and_says_which_of_the_four(self):
+        # Not a refusal: this command is run in a session against a working
+        # tree, and refusing there would make it useless exactly when it is
+        # wanted. But a reader has to be told, or the note is the difference
+        # between a picture and a broken image nobody notices.
+        self.take(push=False)
+        code, body, err = self.run_shots()
+        self.assertEqual(code, 0, err)
+        self.assertIn("![01-a](images/01-a.png)", body)
+        self.assertNotIn("raw.githubusercontent.com", body)
+        self.assertIn("not on any remote branch", err)
+
+    def test_an_uncommitted_change_falls_back_and_says_so(self):
+        # Committed and pushed, then edited: the commit exists and does not
+        # hold what is on disk, so a URL at it would show the previous bytes
+        # under a caption describing the current ones.
+        self.take()
+        (self.demo / "images" / "01-a.png").write_bytes(b"\x89PNGdifferent")
+        code, body, err = self.run_shots()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("raw.githubusercontent.com", body)
+        self.assertIn("uncommitted changes", err)
+
+    def test_a_repository_with_no_commits_says_that_and_not_no_repository(self):
+        # Two different sentences because the fix is different: `git commit`
+        # against `git init`. The first version of this command reported one
+        # as the other, and this test is why.
+        self.take(commit=False)
+        code, body, err = self.run_shots()
+        self.assertEqual(code, 0, err)
+        self.assertIn("no commits yet", err)
+        self.assertNotIn("not inside a git repository", err)
+
+    def test_no_repository_at_all_says_that(self):
+        outside = self.root.parent / f"{self.root.name}-loose"
+        (outside / "images").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "images" / "01-a.png").write_bytes(b"\x89PNG")
+        (outside / "timeline.json").write_text(
+            json.dumps({"schema": 1, "beats": SHOTS_BEATS[:2]}), encoding="utf-8"
+        )
+        code, body, err = self.run_shots(demo=outside)
+        self.assertEqual(code, 0, err)
+        self.assertIn("not inside a git repository", err)
+
+    def test_a_remote_that_is_not_github_falls_back_and_says_so(self):
+        self.take(remote="git@gitlab.example.invalid:o/r.git", push=False)
+        code, body, err = self.run_shots()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("raw.githubusercontent.com", body)
+        self.assertIn("not a github.com URL", err)
+
+    def test_a_still_the_beat_log_names_and_nothing_wrote_is_reported(self):
+        # Never skipped and never linked. A block that quietly rendered three
+        # pictures for four beats is the artifact-lie this whole repository
+        # is about, one command down.
+        self.take(unwritten=("images/02-b.png",))
+        body = self.block()
+        self.assertIn("published no such file", body)
+        self.assertIn("`images/02-b.png`", body)
+        self.assertIn("**2.**", body)
+
+    def test_a_still_outside_the_take_is_named_and_never_linked(self):
+        # `timeline.json` is committed and editable in a pull request, and
+        # this value goes into a URL. `../` is the shape to refuse.
+        self.take(beats=SHOTS_ESCAPING)
+        body = self.block()
+        self.assertIn("not a path inside this take", body)
+        self.assertNotIn("etc/passwd", body.split("not a path")[1])
+
+    def test_a_beat_that_raised_is_reported_as_taking_no_still(self):
+        # Before the file check, and that order is the point: on a take that
+        # died, a file of that name is a *previous* recording's, and linking
+        # it would put last week's picture under this take's caption.
+        self.take(beats=SHOTS_RAISED)
+        body = self.block()
+        self.assertIn("the beat raised TimeoutError", body)
+        self.assertNotIn("![02-b]", body)
+
+    # -- it never promotes a claim to a verdict ------------------------------
+
+    def test_the_block_carries_no_verdict_word(self):
+        # The #373 requirement, and the same alphabet the CI comment is held
+        # to. Captions and clauses are quoted through untouched, so the
+        # fixture above deliberately contains none of these words: what is
+        # being graded is the sentences this renderer writes.
+        self.take()
+        self.assertEqual(_verdict_hits(self.block()), [])
+
+    def test_the_sweep_over_this_block_is_not_vacuous(self):
+        # The control. Every assertion above is satisfied by a `_verdict_hits`
+        # that stopped matching, and by a block that came back empty. One
+        # verdict sentence planted in a caption — a caption is quoted through,
+        # so this reaches the swept text by the shortest possible route.
+        planted = [dict(b) for b in SHOTS_BEATS]
+        # Into a beat the block *renders*. The first version of this test
+        # planted the sentence in beat 0, which takes no still and is never
+        # printed — the control was itself vacuous, and this is what it caught.
+        planted[1]["caption"] = "Each clause is demonstrated below."
+        self.take(beats=planted)
+        self.assertEqual(_verdict_hits(self.block()), ["demonstrat*"])
+
+    # -- refusals ------------------------------------------------------------
+
+    def test_a_folder_with_no_timeline_is_refused_by_name(self):
+        code, out, err = self.run_shots(demo=self.root / "nothing-here")
+        self.assertEqual(code, 2)
+        self.assertIn("there is no timeline.json", err)
+        self.assertEqual(out, "")
+
+    def test_a_take_that_took_no_stills_is_refused_and_told_what_to_add(self):
+        # There is no block to paste, and printing an empty one would read as
+        # a take that showed nothing rather than a storyboard that called no
+        # shot().
+        self.take(beats=[{"index": 0, "caption": "A queue.", "verb": "caption"}])
+        code, out, err = self.run_shots()
+        self.assertEqual(code, 2)
+        self.assertIn("records no shot() beats", err)
+        self.assertIn('rec.shot("name")', err)
+        self.assertEqual(out, "")
+
+
 INJECTIONS = [
+    # -- demo-shots: the take's own pictures, as a block (issue #373) --------
+    (
+        # The block walks `coverage.claimed` instead of the beat log: a still
+        # tagged with two criteria is printed twice, and an untagged one
+        # vanishes. The pictures are what the block is *for*, so a renderer
+        # indexed by criterion is describing a different document.
+        "the stills block iterates the claims instead of the pictures",
+        "scripts/demo-shots",
+        '    for beat in timeline.get("beats") or []:\n'
+        '        index = beat.get("index")\n'
+        "        if not isinstance(index, int) or index not in stills:",
+        '    for beat in timeline.get("beats") or []:\n'
+        '        index = beat.get("index")\n'
+        '        if not isinstance(index, int) or index not in stills or beat.get("ac"):',
+        ["ShotsBlock.test_every_still_appears_once_in_the_order_it_was_taken"],
+    ),
+    (
+        # A still the beat log names and nothing wrote, quietly dropped. Four
+        # beats render as three pictures and the block reads as a complete
+        # walk — the artifact-lie class, one command down.
+        "a still nothing wrote is skipped instead of reported",
+        "scripts/demo-shots",
+        '            f"*`{rel}` is named in the beat log, and this take '
+        'published no such file*"',
+        '            ""',
+        ["ShotsBlock.test_a_still_the_beat_log_names_and_nothing_wrote_is_reported"],
+    ),
+    (
+        # The guard on a pull-request-editable path, removed: `../../x.png`
+        # goes into a raw.githubusercontent.com URL, and the block publishes a
+        # picture that has nothing to do with this take under its caption.
+        "the stills block links a path that escapes the take",
+        "scripts/demo-shots",
+        "            shot.rel = take_relative(stills[index])",
+        "            shot.rel = stills[index]",
+        ["ShotsBlock.test_a_still_outside_the_take_is_named_and_never_linked"],
+    ),
+    (
+        # The order that keeps last week's picture out: check the file before
+        # the exception, and a beat that raised gets the still a *previous*
+        # recording left in the folder, under this take's caption.
+        "a beat that raised is given whatever file is lying there",
+        "scripts/demo-shots",
+        '        error = beat.get("error")\n        if isinstance(error, dict):',
+        "        error = None\n        if isinstance(error, dict):",
+        ["ShotsBlock.test_a_beat_that_raised_is_reported_as_taking_no_still"],
+    ),
+    (
+        # An unpushed commit embedded anyway. Every picture in the block is a
+        # 404 that renders as a broken image, and the note that would have
+        # said why is gone with it.
+        "the block embeds pictures at a commit nobody else has",
+        "scripts/demo-shots",
+        '    if not (git_fact(demo, "branch", "-r", "--contains", sha) or ""):',
+        "    if False:",
+        ["ShotsBlock.test_an_unpushed_commit_falls_back_and_says_which_of_the_four"],
+    ),
+    (
+        # The renderer promotes the claim. One sentence, of the sort an author
+        # would reasonably write, and the block stops being a statement about
+        # what the storyboard claimed.
+        "the stills block says the pictures show their clauses",
+        "scripts/demo-shots",
+        '            "for, and nothing compared the picture with the words:",',
+        '            "for, and each picture below is shown to meet it:",',
+        ["ShotsBlock.test_the_block_carries_no_verdict_word"],
+    ),
     (
         "app_root always returns the repository root",
         "demo-storyboards",
@@ -3655,7 +4068,10 @@ INJECTIONS = [
         # block embeds its URL regardless.
         "a still the commit does not hold is embedded anyway",
         "scripts/demo-grade",
-        '        if _git(demo, "cat-file", "-e", f"{sha}:{path}").returncode != 0:',
+        # `git`, not `_git`: the helper moved to `demo_recording.links` when
+        # `demo-shots` needed the same one (#373), and this anchor is how the
+        # driver said so — exit 3 rather than a quietly unproven claim.
+        '        if git(demo, "cat-file", "-e", f"{sha}:{path}").returncode != 0:',
         "        if False:",
         ["PrBlock.test_a_still_the_commit_does_not_hold_is_refused_with_the_path"],
     ),
@@ -3707,10 +4123,13 @@ INJECTIONS = [
     (
         # Seven characters resolve today and are ambiguous later — the
         # artifact lying slowly, in the URL a reviewer's browser fetches.
+        # In `links.py` since #373, where `demo-shots` reads it too. A short
+        # sha resolves on github.com and not on raw.githubusercontent.com, so
+        # every picture in both blocks becomes a broken image.
         "the raw URL is built at the abbreviated sha",
-        "scripts/demo-grade",
-        '        return f"https://raw.githubusercontent.com/{repo}/{sha}/{quote(path)}"',
-        '        return f"https://raw.githubusercontent.com/{repo}/{sha[:7]}/{quote(path)}"',
+        "helpers/demo_recording/links.py",
+        '    return f"https://raw.githubusercontent.com/{repo}/{quote(sha)}/{quote(path)}"',
+        '    return f"https://raw.githubusercontent.com/{repo}/{sha[:7]}/{quote(path)}"',
         ["PrBlock.test_the_picture_is_the_committed_still_raw_at_head"],
     ),
     (
@@ -3951,12 +4370,16 @@ def fault_inject() -> int:
             shutil.copy(Path(__file__).resolve(), inner)
             if script == "target.py":
                 target = skill / "helpers" / "demo_recording" / script
-            elif script in ("scripts/demo-target-guard", "scripts/demo-grade"):
-                # Both CLIs ship with the skill rather than under
-                # `.github/scripts/`. `GuardExitCode` runs the first; `grade`
-                # at the top of this file imports the second, which is how an
-                # injection into the grader reddens the couplings the comment
-                # has with it and cannot import.
+            elif script.startswith(("scripts/", "helpers/")):
+                # Anything shipped with the skill rather than under
+                # `.github/scripts/`: the three CLIs, and the package modules
+                # they import. `GuardExitCode` runs `demo-target-guard`;
+                # `grade` and `shots` at the top of this file import the other
+                # two, which is how an injection into either reddens the
+                # couplings the comment has with them and cannot import. A
+                # prefix rather than a list because the list was a second
+                # place to remember, and `demo_recording/links.py` (#373) is
+                # the first module either CLI's behaviour lives in.
                 target = skill / script
             elif script == "demo-video.yml":
                 target = workflow

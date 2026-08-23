@@ -137,8 +137,9 @@ seen red under a planted recorder defect in #351's pull request.
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
 ├── smoke-inject       # proves smoke's assertions can still fail (~54 min, nightly)
-├── unit               # the browser-free half (~6 s, 536 tests, no dependencies)
-├── ci-unit            # the three .github/scripts helpers (~0.2 s)
+├── unit               # the browser-free half (~4 s, 568 tests, no dependencies)
+├── ci-unit            # the .github/scripts helpers, and the two skill
+│                      #   CLIs whose output a person pastes (~2.5 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
 │                      #   sees, plus the docs' python fences (~0.3 s)
 ├── pixel              # the iteration loop: two cached chrome reference takes,
@@ -181,7 +182,7 @@ have read this sentence:
 ```sh
 tests/unit                        # the browser-free half of the recorder
 tests/unit --fault-inject         # break each thing an assertion watches
-tests/ci-unit                     # the CI workflow's three helper scripts
+tests/ci-unit                     # the CI helpers, demo-grade and demo-shots
 tests/ci-unit --fault-inject
 tests/lint                        # ruff check + ruff format --check + doc fences
 tests/lint --self-test            # prove all three grade something

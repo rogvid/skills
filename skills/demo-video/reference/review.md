@@ -144,6 +144,56 @@ from demo_recording import beat_frames
 beat_frames(Path("demos/2026-07-26-x"))
 ```
 
+## Handing a person the pictures (`scripts/demo-shots`)
+
+Everything above is about a *reader* — an agent given the frames, or the beat
+log read by a tool. This section is the other audience. `images/*.png` is the
+storyboard author's own selection of key moments, it is committed, and it is
+already in the pull request; what it needs is a shape a person reads in
+seconds.
+
+```sh
+scripts/demo-shots <demo folder>
+```
+
+prints one markdown block — every `shot()` in the order it was taken, under
+the caption that was on screen at the time, tagged with the criterion the beat
+claimed. Paste it into a session, a pull-request description, or a comment.
+
+**It is not a verdict and it is built so it cannot become one.** No sentence
+it writes says a clause was shown; this repository's own `tests/ci-unit`
+sweeps its output for the vocabulary that would say so — the same alphabet
+the CI comment is held to — and the only text exempt is what it quotes: a caption is the author's words
+and a clause is the ticket's. Whether a still shows its clause is the
+reader's question, and this command's whole job is to put the picture in
+front of them with enough context to ask it.
+
+Two things it will not do quietly:
+
+- **A still the beat log names and this take did not write is reported**, not
+  skipped. Four beats rendering as three pictures reads as a demo that showed
+  three things.
+- **A path that leaves the take is named, never linked.** `timeline.json` is
+  committed and editable in a pull request, and the value goes into a URL.
+
+### When the pictures embed, and when they do not
+
+Off a commit that is on a remote branch, the stills are embedded raw at that
+commit and render inline in a GitHub comment. Four things send the block back
+to relative paths instead, and it prints which one on stderr, because the fix
+differs:
+
+| what it found | what to do |
+|---|---|
+| no git repository | nothing — relative paths are the answer here |
+| a repository with no commits | commit the take |
+| uncommitted changes in the demo folder | commit them; the commit does not hold what is on disk |
+| a commit on no remote branch | push it |
+| an origin remote that is not github.com | nothing — there is no raw URL to build |
+
+Relative paths render in a pull-request *description* and not in a comment, so
+the note is worth reading before pasting.
+
 ## Why the comprehension review reports contradictions separately
 
 Step 6's reviewer answers four questions, not three, and the fourth — the
