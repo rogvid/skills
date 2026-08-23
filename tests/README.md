@@ -2323,7 +2323,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 50 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 51 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -2342,6 +2342,7 @@ paragraph whose job is to say what this manifest does not cover.
 
   | ungraded check function | what carries its browser-free claims |
   |---|---|
+  | `check_clock_before_recording` | `ClockProbe` in `tests/unit` — the whole of it, on a scripted step list: the refusal's wording, the cadence it will and will not state, and the two sweeps that derive the safe-arms list from `run_phases` (#370). Genuinely ungraded *as a check that runs*: it refuses before a take exists, so no arm of this manifest can reach it, and a host that does not step its clock never produces the refusal at all |
   | `check_take` | `ContentRect` — the rect the picture half is scored over, exactly, on all four numbers (#135/#195). The artifact half — the files exist, are this run's, and are not repeats of one another — is genuinely ungraded |
   | `check_content_healthy` | `ContentRect`, same six tests: the trim reaches the caption bar on both media, does not eat the app, and never comes back zero-sized |
   | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
