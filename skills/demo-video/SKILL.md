@@ -147,6 +147,7 @@ read them all up front, and do not skip one the text tells you to open.
 | [reference/failures.md](reference/failures.md) | When a take raises, when `strict=True` refuses one, or when `failure/` appears beside the demo |
 | [reference/terminal.md](reference/terminal.md) | When writing a `TerminalRecorder` storyboard — the full verb table, the four patterns, the gotchas |
 | [reference/narration.md](reference/narration.md) | When `ELEVENLABS_API_KEY` is set and captions will be spoken |
+| [reference/stills.md](reference/stills.md) | When you want the pictures now and the video later — `stills_only=True` runs the same storyboard in seconds |
 | [reference/ci.md](reference/ci.md) | When wiring the recording into GitHub Actions so branches record themselves |
 
 ## Setup (once per project)
@@ -237,6 +238,7 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_TIMEZONE` | `timezone_id` — browser timezone, always applied | `UTC` |
 | `DEMO_VIDEO_LOCALE` | `locale` — browser locale, always applied | `en-US` |
 | `DEMO_VIDEO_SPEECH` | `speech` — force narration on/off (`1`/`0`). **`speech=False` records silently even with a key set**; with no key it is off already, and forcing it *on* without one refuses the take | auto by API key |
+| `DEMO_VIDEO_STILLS_ONLY` | `stills_only` — run the storyboard for its `shot()` pictures and record no video (`1`/`0`). Pacing zeroed, narration off; writes no mp4 and no `frames/`, and `timeline.json` says `mode: "stills"` so nothing reads it as a take — [reference/stills.md](reference/stills.md) | off |
 | `DEMO_VIDEO_STRICT` | `strict` — fail the take on console errors / non-zero exits (`1`/`0`) | off |
 | `DEMO_VIDEO_EVIDENCE` | `evidence` — write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | `voice_id` — ElevenLabs voice | Sarah (premade) |
@@ -305,9 +307,6 @@ below are encoded in the recorder; the point is to *not fight them*.
   rec.spotlight()     # then clear
   ```
 
-  `hold()` waits for the current narration line to finish (or `min_s` when
-  silent). Without it, a short `pause()` can clear the highlight while the
-  narrator is still talking about it — exactly the flicker above.
 - **One salient change at a time.** The eye can track one moving/appearing
   thing. Don't navigate, spotlight, and type in the same instant; sequence
   them, caption first (it tells the eye where to look), then the visual.
@@ -421,7 +420,10 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    - End with a closing line that sums up the story, then `caption("")`.
 4. **Record:** `uv run <demo folder>/record.py` (with the project's env
    loaded if it configures DEMO_VIDEO_* or the ElevenLabs key:
-   `set -a; source .env; set +a`). Aim for 30–60 s.
+   `set -a; source .env; set +a`). Aim for 30–60 s. **While the storyboard
+   is still wrong, run it with `DEMO_VIDEO_STILLS_ONLY=1`** — same verbs and
+   the same stills in seconds, no video ([reference/stills.md](reference/stills.md));
+   record the take once the pictures are right.
 5. **Verify by looking, not by exit code:** read the `images/*.png` stills
    to confirm the story is actually visible; check `ffprobe` duration. Read
    `timeline.md` too — it is the take's own account of what ran and when, so

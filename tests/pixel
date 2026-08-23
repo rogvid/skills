@@ -74,6 +74,7 @@ import argparse
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import shutil
@@ -103,6 +104,7 @@ from _pixels import (  # noqa: E402
     channels_apart,
     gray_frames,
     off_card,
+    psnr_db,
     strip_rgb,
     to_video_rect,
 )
@@ -127,6 +129,27 @@ MIN_RECORDER_MODULES = 8
 # the first pointer verb. Below it the pointer-free stretch is too thin for an
 # absence probe to mean anything, and the take is refused rather than cached.
 MIN_POINTERLESS_BEATS = 3
+
+# -- the stills-only arm (#372) ------------------------------------------------
+#
+# The web take records its storyboard twice: once paced, then again with the
+# video declined. The second run lands in this sub-directory of the first, so
+# it shares one cache marker and one digest — two takes could go stale apart,
+# and a comparison between a fresh picture and a stale one grades nothing.
+STILLS_ARM = "stills-only"
+# What "the same picture" means here. The two runs drive the same app through
+# the same beats with the page's clock frozen, so the pixels are expected to
+# be identical and mostly are: on the take this bar was set from, one still
+# came back byte-for-byte and the other at 96 dB — a text caret, which is an
+# infinite animation and is deliberately left running.
+#
+# The bar is 40 dB rather than "identical" because that caret is real, and it
+# is nowhere near the failure it has to catch: with the stills-only settle
+# removed the same two stills come back at 12.0 dB and 21.7 dB — a card
+# caught mid-fade and a spotlight scrim dimming the whole app instead of
+# picking out the tile its caption names. 40 dB sits in the empty middle of
+# that gap, which is the only place a threshold is worth putting.
+MIN_STILLS_PSNR = 40.0
 
 SERVER_START_TIMEOUT_S = 10.0
 
@@ -350,18 +373,31 @@ def record_web(out_dir: Path, base_url: str) -> dict:
     #351's absence probe needs. The marker records the beat index where that
     stretch ends, read back off the take's own timeline rather than counted
     by hand.
+
+    **Recorded twice** (#372): once paced, then again with the video declined.
+    The stills-only mode's whole claim is that its pictures are the frames
+    `shot()` would have written either way, and the only way to grade that is
+    to hold both against each other — `check_stills_match_the_take` does.
     """
     from demo_recording import Recorder
 
     criteria = {"AC-1": "The dashboard shows the current figures."}
-    with Recorder(
-        out_dir,
+    settings = dict(
         base_url=base_url,
         speech=False,
         strict=True,
         deterministic=True,
         criteria=criteria,
-    ) as rec:
+    )
+
+    def storyboard(rec) -> None:
+        """The beats both arms run, verbatim.
+
+        Nested rather than a module-level helper, and that is the cache key
+        talking: `digest_inputs` hashes `inspect.getsource(RECORD["web"])`, so
+        a storyboard living inside this function is hashed with it and one
+        living beside it silently would not be.
+        """
         rec.goto("/")
         rec.wait_for("#kpi-rev")
         # Settle the app before the card, the same distance tests/smoke's
@@ -373,11 +409,20 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         # -- the pointer-free stretch: nothing above or below this comment
         # moves the cursor until the move_to further down -------------------
         rec.criterion("AC-1")
+        # Both stills are aimed at the recorder's own overlays on purpose:
+        # those are the elements the determinism rule spares so they animate
+        # on camera, which makes them the ones a run with no pacing can
+        # photograph half-finished (#372). This one is on the card as it
+        # fades in.
+        rec.shot("01-criterion", ac="AC-1")
         rec.interlude("")
         rec.caption("A small dashboard.", ac="AC-1")
         rec.hold()
         rec.spotlight("#kpi-rev")
         rec.hold()
+        # The still the mode's first run got wrong: the spotlight's scrim
+        # caught mid-fade, 15.7 dB from this one.
+        rec.shot("02-spotlight", ac="AC-1")
         rec.spotlight()
         rec.caption("The pointer has not moved yet.")
         # -- first pointer verb of the take: the park ------------------------
@@ -393,6 +438,8 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         rec.hold()
         rec.caption("")
 
+    with Recorder(out_dir, **settings) as rec:
+        storyboard(rec)
         geom = dict(rec._geom)
         size = (rec._size["width"], rec._size["height"])
         # The park in the app document's OWN coordinates, read inside the
@@ -408,6 +455,13 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         )
         if not park or len(park) != 4:
             raise PixelFailure("web: #search has no box - the page never rendered")
+
+    # Second, so the paced arm is what `check_complete` reads, and into a
+    # sub-directory of it so the two share one marker and one digest: two
+    # takes could go stale apart, and a comparison between a fresh picture
+    # and a stale one grades nothing.
+    with Recorder(out_dir / STILLS_ARM, stills_only=True, **settings) as rec:
+        storyboard(rec)
 
     doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
     beats = doc.get("beats") or []
@@ -1205,10 +1259,92 @@ def check_cursor_absence(
 # checks are skipped, so they never fail for a reason they do not name), then
 # the golden properties over the cached frames. A check reads the take and the
 # marker's `info`; it never records.
+def check_stills_match_the_take(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
+    """The stills-only arm's pictures against the paced take's (#372).
+
+    The mode's acceptance criterion, and the only check here that grades it:
+    *the stills are the frames `shot()` would have written either way*. Both
+    arms drove the same app through the same beats with the page's clock
+    frozen, so every `images/*.png` should come back the same picture.
+
+    Why this needs a pixel check rather than an assertion. Zeroing the pacing
+    does not only make the run faster — it takes away the wait that the
+    recorder's own overlays were finishing inside. The determinism rule spares
+    those overlays on purpose so a spotlight, a caption and a card animate on
+    camera, so they are exactly the elements a run with no pacing photographs
+    half-finished. Nothing about that is visible in the beat log, the
+    filenames, the timeline, or any count: the run succeeds, writes the right
+    files, and hands over a picture showing less than it says.
+
+    Both directions are graded. A still the stills arm never wrote is as much
+    a failure as one that came out different, and a *paced* still missing is
+    the same check pointing the other way — either means the two arms stopped
+    running the same storyboard, which is the assumption everything above
+    rests on.
+    """
+    name = "stills-match"
+    problems = []
+    measured: list[str] = []
+    paced_dir = take / "images"
+    quick_dir = take / STILLS_ARM / "images"
+    paced = sorted(p.name for p in paced_dir.glob("*.png"))
+    quick = sorted(p.name for p in quick_dir.glob("*.png"))
+    if not paced:
+        problems = [
+            f"{take.name}/{name}: the paced arm wrote no stills - the "
+            f"storyboard must call shot(), it is what this check compares"
+        ]
+        _verdict(name, take, problems, "")
+        return problems
+    if paced != quick:
+        problems = [
+            f"{take.name}/{name}: the two arms wrote different stills - paced "
+            f"{paced}, stills-only {quick}. They ran the same storyboard, so "
+            f"this is a shot() that did not happen, not a picture that differs"
+        ]
+        _verdict(name, take, problems, "")
+        return problems
+    for shot in paced:
+        quality = psnr_db(paced_dir / shot, quick_dir / shot)
+        if quality is None:
+            problems.append(
+                f"{take.name}/{name}: {shot} could not be compared - ffmpeg returned no "
+                f"psnr, so nothing here is graded rather than passing"
+            )
+            continue
+        measured.append(
+            f"{shot} {'inf' if quality == math.inf else f'{quality:.0f}'} dB"
+        )
+        if quality < MIN_STILLS_PSNR:
+            problems.append(
+                f"{take.name}/{name}: {shot} is {quality:.1f} dB from the paced take's, "
+                f"under the {MIN_STILLS_PSNR:.0f} dB bar - the stills-only "
+                f"run photographed something the paced one had finished "
+                f"(an overlay mid-fade is the measured case)"
+            )
+        if dump is not None:
+            dump.mkdir(parents=True, exist_ok=True)
+            for arm, src in (("paced", paced_dir), ("stills", quick_dir)):
+                (dump / dump_name(name, f"{shot[:-4]}-{arm}")).write_bytes(
+                    (src / shot).read_bytes()
+                )
+    _verdict(
+        name,
+        take,
+        problems,
+        f"{len(paced)} still(s) held against the paced take: "
+        f"{', '.join(measured)} (bar {MIN_STILLS_PSNR:.0f} dB)",
+    )
+    return problems
+
+
 CHECKS: dict[str, list[Callable]] = {
     "terminal": [check_complete, check_opening_card],
     "web": [
         check_complete,
+        check_stills_match_the_take,
         check_card_vs_window,
         check_cursor_parked,
         check_cursor_absence,

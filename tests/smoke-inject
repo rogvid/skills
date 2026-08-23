@@ -109,6 +109,9 @@ ARM_SECONDS = {
     # before a browser starts. Measured at 0.31 s, rounded to the 1 s this
     # table's other rows are in.
     "--lock-only": 1,
+    # The storyboard declares 11 s of holds and spends none of them: measured
+    # at 2.3 s wall clock, browser launch included, rounded up.
+    "--stills-only": 3,
     "--evidence-only": 7,
     "--coverage-only": 15,
     "--issues-only": 26,
@@ -141,6 +144,42 @@ class Injection(NamedTuple):
 # The order is the order they run in: cheapest arm first, so a manifest that is
 # going to abort on a stale search string does it in eight seconds.
 INJECTIONS = [
+    # -- stills without a video (issue #372), ~3 s an entry
+    #
+    # Two entries against one check, and they are the two halves it exists for:
+    # the mode's claim is "no recording" *and* "no waiting", and either alone
+    # is satisfied by the wrong fix. A mode that declines the screencast and
+    # then paces the storyboard is correct and pointless; one that runs fast
+    # and leaves a real mp4 in a folder whose timeline says `media: null` is
+    # fast and lying. The picture the mode produces is graded in
+    # `tests/pixel` (`stills-match`) and its artifact shape browser-free in
+    # `tests/unit` (`StillsOnly`) — this arm is only what needs a browser.
+    Injection(
+        name="a stills-only run records a video after all",
+        module="core.py",
+        old=(
+            "                record_video_dir=(\n"
+            "                    None if self.stills_only else str(self._video_dir)\n"
+            "                ),"
+        ),
+        new="                record_video_dir=str(self._video_dir),",
+        arm="--stills-only",
+        sites=("check_stills_only",),
+        must_contain=("this run declined the ",),
+    ),
+    Injection(
+        name="a stills-only run holds every frame it was told to",
+        module="core.py",
+        old=(
+            "        if self.stills_only:\n"
+            "            self._pump_events()\n"
+            "            return\n"
+        ),
+        new="        if False:\n            return\n",
+        arm="--stills-only",
+        sites=("check_stills_only",),
+        must_contain=("s budget, over a storyboard",),
+    ),
     # -- what a run that never started leaves behind (issue #105), 1 s an entry
     #
     # Three entries against one check function, because it is a *pair* of

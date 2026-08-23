@@ -747,6 +747,18 @@ def _beat_verb(
     return decorate
 
 
+#: Finish every animation that has an end (see `_settle_animations`). Returns
+#: the count, which nothing reads today — the value is that a future caller
+#: can tell "settled nothing" from "could not run".
+_SETTLE_JS = """() => {
+  let done = 0;
+  for (const a of document.getAnimations()) {
+    try { a.finish(); done += 1; } catch (e) { /* infinite, or detached */ }
+  }
+  return done;
+}"""
+
+
 class _DemoBase:
     """Recording + narration substrate shared by every demo medium.
 
@@ -810,7 +822,7 @@ class _DemoBase:
             # extension points, each beside the sealed member it extends
             "_watch_extra",
             "_before_shot",
-            "_idle",
+            "_hold_frame",
         }
     )
 
@@ -869,6 +881,12 @@ class _DemoBase:
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
+        stills_only: bool | None = None,
+        # Last, and kept last. `tests/unit`'s "a way to permit a public host
+        # appears as a constructor argument" injection anchors on this line
+        # followed by the closing paren, and a parameter added after it makes
+        # that injection stop landing — which the fault-injection driver
+        # refuses on (exit 3) rather than quietly passing.
         allow_private: bool | None = None,
     ) -> None:
         # Every setting resolves explicit parameter > DEMO_VIDEO_* env var
@@ -913,6 +931,23 @@ class _DemoBase:
         self._ticket = _checked_ticket(ticket)
         self.images_dir = self.out_dir / "images"
         self._video_dir = self.out_dir / ".video"
+        # Run the storyboard for its pictures and skip the video (issue #372).
+        # Every verb still runs; what goes is the pacing, which exists for a
+        # viewer's eyes and for nothing else — the field take this was measured
+        # on spent 68% of 124 s holding frames, and `shot()` is a plain
+        # `page.screenshot()` that has never had anything to do with the
+        # recording.
+        #
+        # A *mode*, not a faster take, and the difference is written down
+        # everywhere it could be mistaken: no screencast is attached, so there
+        # is no webm, no encode, and no picture to measure; `timeline.json`
+        # carries `mode: "stills"` with `media: null` and no `content`; and the
+        # consumers that cut frames out of an mp4 refuse the directory by name.
+        # This supersedes #354, which asked for the same run with the pictures
+        # thrown away — one flag, because two would be two ways to be wrong.
+        if stills_only is None:
+            stills_only = _env_flag("STILLS_ONLY")
+        self.stills_only = False if stills_only is None else bool(stills_only)
         if accent_rgb is None:
             raw = _env("ACCENT_RGB", "235,110,20")
             parts = [p.strip() for p in raw.split(",")]
@@ -953,7 +988,15 @@ class _DemoBase:
             raise RuntimeError(
                 "speech is forced on but ELEVENLABS_API_KEY is not set"
             )
+        if speech is True and self.stills_only:
+            raise RuntimeError(
+                "speech is forced on for a stills-only run, which encodes no "
+                "mp4 and so has no audio track to mix a voice onto. Drop "
+                "speech=True, or record a take."
+            )
         self._speech = bool(api_key) if speech is None else speech
+        if self.stills_only:
+            self._speech = False
         self._api_key = api_key
         # Default voice "Sarah" is premade — works on free-tier keys.
         self._voice_id = voice_id or _env("VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
@@ -1047,6 +1090,12 @@ class _DemoBase:
         if self._speech:
             print(f"demo-video: narration ON (voice {self._voice_id})",
                   file=sys.stderr)
+        elif self.stills_only:
+            print(
+                "demo-video: narration OFF — a stills-only run encodes no "
+                "mp4, so there is no track for a voice to go on.",
+                file=sys.stderr,
+            )
         else:
             print(
                 "demo-video: narration OFF — no ELEVENLABS_API_KEY in this "
@@ -1083,6 +1132,21 @@ class _DemoBase:
                 f"of this storyboard will not match. Recorder("
                 f"deterministic=True) freezes it; read the skill's "
                 f"reference/determinism.md first, it changes what some apps do.",
+                file=sys.stderr,
+            )
+        # ...and, loudest of the three, that this run is not a recording. The
+        # other two describe a take; this one says there is no take. Somebody
+        # who set the env var in a shell three commands ago and then wondered
+        # where demo.mp4 went is the reader.
+        if self.stills_only:
+            print(
+                "demo-video: STILLS-ONLY run — the storyboard runs in full, "
+                "every shot() is written to images/, and no video is "
+                "recorded. Pacing is zeroed, narration is off, and "
+                "timeline.json says mode: stills with media: null, so nothing "
+                "downstream can read this as a take. Unset "
+                "DEMO_VIDEO_STILLS_ONLY (or pass stills_only=False) to "
+                "record one.",
                 file=sys.stderr,
             )
 
@@ -1163,10 +1227,19 @@ class _DemoBase:
             # out the same on a machine in Tórshavn as on a CI runner in
             # us-east-1. None of the three changes what an app computes, so
             # none of them is gated on `deterministic`.
+            # Declining the screencast is the whole saving of a stills-only
+            # run, and this is the only place it can be declined: Chromium
+            # starts capturing with the page. `page.video` is then None, so
+            # every downstream "did this take encode anything" answer —
+            # `_converted`, `duration`, `content`, the beat-frame sheet —
+            # follows from the recording that does not exist rather than from
+            # a second flag somebody has to remember to check.
             self._context = self._browser.new_context(
                 viewport=self._size,
-                record_video_dir=str(self._video_dir),
-                record_video_size=self._size,
+                record_video_dir=(
+                    None if self.stills_only else str(self._video_dir)
+                ),
+                record_video_size=None if self.stills_only else self._size,
                 locale=self._locale,
                 timezone_id=self._timezone_id,
                 reduced_motion="reduce",
@@ -1816,7 +1889,7 @@ class _DemoBase:
             "generated_by": "demo-video",
             "recorder": type(self).__name__,
             "segment": self.segment,
-            "media": self._media_path().name,
+            "media": self._media_name(),
             "beat": {
                 key: beat.get(key)
                 for key in ("index", "t_start", "t_end", "verb", "selector",
@@ -1983,7 +2056,7 @@ take with fewer beats than the last one would otherwise leave the
             # story surprisingly often.
             "issues": [dict(issue) for issue in self._issues],
             "issue_count": self._issue_count,
-            "media": self._media_path().name,
+            "media": self._media_name(),
             "screen_captured": self._failure_screen_text is not None,
         }
         return doc
@@ -2142,6 +2215,20 @@ take with fewer beats than the last one would otherwise leave the
         name = f"{self.segment}.seg.mp4" if self.segment else "demo.mp4"
         return self.out_dir / name
 
+    def _media_name(self) -> str | None:
+        """What an artifact should call this take's video — None on a stills
+        run, where there is not one (issue #372).
+
+        Null rather than the name it *would* have had. A name is a pointer,
+        and in a directory that has been recorded into before — which is the
+        ordinary case, because `record.py` is committed so it can be re-run —
+        `demo.mp4` is sitting right there from a previous take. Writing the
+        name anyway would point this run's timeline, its evidence documents
+        and its failure dump at that file: the stale-`duration` lie of #20,
+        one field over and in three more places.
+        """
+        return None if self.stills_only else self._media_path().name
+
     def _note_overlays_up(self) -> None:
         """Ask the page whether this recorder's own overlays are still showing.
 
@@ -2290,6 +2377,22 @@ take with fewer beats than the last one would otherwise leave the
                     f"that needs the length has to probe the file itself.",
                     file=sys.stderr,
                 )
+        elif self.stills_only:
+            # Not a warning. A stills-only run encoding nothing is the mode
+            # working, and printing the take's "no mp4" alarm over it would
+            # train a reader to ignore the line that matters.
+            print(
+                "demo-video: stills-only run — no video was recorded, so "
+                "timeline.json says mode: stills, media: null and "
+                "duration: null."
+                + (
+                    f" The {mp4.name} in {self.out_dir} is a previous run's, "
+                    f"and this timeline does not describe it."
+                    if mp4.exists()
+                    else ""
+                ),
+                file=sys.stderr,
+            )
         else:
             print(
                 "demo-video: this take encoded no mp4, so timeline.json says "
@@ -2314,7 +2417,7 @@ take with fewer beats than the last one would otherwise leave the
             # outside one, so a timeline written before this key existed reads
             # as it always did. Nothing here fetched or resolved it.
             **_ticket_field(self._ticket),
-            "media": mp4.name,
+            "media": self._media_name(),
             "duration": duration,
             # Which clock produced this take. Without it a still committed to a
             # repo carries no record of the conditions it was recorded under,
@@ -2363,6 +2466,21 @@ take with fewer beats than the last one would otherwise leave the
             "issues": issues,
             "issue_count": self._issue_count,
         }
+        # Both of these are the `failure` construction below, for the same
+        # reason: **presence is the signal** (issue #372).
+        #
+        # `mode` is absent on a take, so a take's timeline.json is byte-for-byte
+        # what it was before stills-only runs existed, and a reader that has
+        # never heard of one is never handed `mode: "take"` to interpret.
+        #
+        # `content` is *removed* rather than left null, and the difference is
+        # a real one. On a take, `content: null` means an mp4 was expected and
+        # the picture could not be measured — the answer #97 exists to give.
+        # A stills run has no frames at all, so it makes no claim about them:
+        # the key is not there, and `mode` says why.
+        if self.stills_only:
+            doc.pop("content")
+            doc["mode"] = "stills"
         # Absent on a clean take, so a successful take's timeline.json is
         # byte-for-byte what it was before this key existed — and so that its
         # presence is the whole signal, with no `failure: null` to skim past.
@@ -2373,7 +2491,70 @@ take with fewer beats than the last one would otherwise leave the
     # -- shared storyboard verbs -------------------------------------------
 
     def _idle(self, seconds: float) -> None:
-        """Hold for `seconds`. Overridden by media that must keep working
+        """Hold the frame for `seconds` — the one place this package waits.
+
+        Every paced verb arrives here: `pause`, `hold`, the tail of a caption,
+        an interlude, a criterion card, the terminal's per-keystroke delay.
+        That is why the stills-only short-circuit is *here* and why `_idle`
+        itself is sealed (issue #372). A medium extends the waiting by
+        implementing `_hold_frame`; it cannot reach past the mode check, so
+        there is no medium in which a stills-only run quietly still paces.
+
+        The pump survives the short-circuit. Playwright's sync API delivers
+        `console`/`pageerror` only while it is inside a call, so skipping it
+        would hand every event a stills run provokes to whichever beat made
+        the next call — the storyboard would run fast and misattribute what it
+        found.
+
+        What is deliberately *not* here is landing the animations the pacing
+        used to land. That belongs to `shot()` and only there: a stills run's
+        one visual output is the stills, so settling anywhere else would be a
+        cost paid per beat for a picture nobody takes.
+        """
+        if self.stills_only:
+            self._pump_events()
+            return
+        self._hold_frame(seconds)
+
+    def _settle_animations(self) -> None:
+        """Land every running animation on its end state (stills-only).
+
+        **Zeroing the pacing is not enough on its own, and this is the half
+        that was measured.** The determinism rule spares the recorder's own
+        overlays — `#__demo*`, `#__chrome*`, anything marked
+        `data-demo-video-animate` — precisely so a spotlight, a caption and an
+        interlude card *do* fade on camera. In a take the hold after the verb
+        is what lets them finish. Take the hold away and nothing does: the
+        first stills run of the reference storyboard caught its criterion card
+        mid-fade and its spotlight's scrim half-faded — dimming the whole app
+        instead of picking out the tile the caption names — at 12.0 dB and
+        21.7 dB PSNR from the take's own stills. A difference anyone would
+        see, in the direction of showing less.
+
+        So the mode restores by construction what the pacing used to restore
+        by waiting. Every frame, not just the wrapper's: the app's own
+        transitions were settled by the same hold, and a still of a panel
+        halfway open is the same lie one field over.
+
+        Called from `shot()` and nowhere else. Everything a stills run leaves
+        behind is a document except the stills, and a document does not care
+        what a transition was halfway through — so one evaluate per picture
+        is the whole cost, rather than one per beat.
+
+        Skipped rather than forced where there is no end to jump to — an
+        infinite animation (a spinner) throws on `finish()`, and a spinner
+        still spinning is what a take would have shown too. Never fatal: like
+        the pump, this is here to make the picture right and is not a reason
+        to lose a run.
+        """
+        for frame in self.page.frames:
+            try:
+                frame.evaluate(_SETTLE_JS)
+            except Exception:  # noqa: BLE001 - a detached frame, mid-navigation
+                continue
+
+    def _hold_frame(self, seconds: float) -> None:
+        """Wait out `seconds`. Overridden by media that must keep working
         (pumping output) while the frame is held.
 
         Sliced against a deadline rather than one flat sleep, so page events
@@ -2639,13 +2820,24 @@ take with fewer beats than the last one would otherwise leave the
         the beat and its `ac` claim with it, and the coverage report reads
         nothing else. Medium-specific work goes in `_before_shot`.
         """
+        # A stills run has no hold for the recorder's own overlays to finish
+        # inside, so this is where they are finished (#372). Here and not in
+        # `_idle`: the still is the only thing such a run renders. Read
+        # `_settle_animations` — the picture it exists for was measured
+        # 12.0 dB wrong without it.
+        if self.stills_only:
+            self._settle_animations()
         self._before_shot()
         claims = self._checked_ac(ac, "shot()")
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()
         with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):
-            # Full-bleed on the web recorder — the whole page, no window
-            # frame — so a still is not a crop of the video.
+            # The recorded page, chrome and all. On the wrapper path (#358)
+            # that page *is* the framed picture, so a still and the frame the
+            # video shows at the same instant are the same image — which is
+            # what lets a stills-only run stand in for one (#372). The
+            # comment this replaces described the composite, where the still
+            # was full-bleed and the video was not; #368 deleted that path.
             self.page.screenshot(path=str(path))
         return path
 

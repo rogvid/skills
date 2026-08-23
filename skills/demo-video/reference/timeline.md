@@ -89,6 +89,14 @@ key is fine, renaming one is not:
 - `duration` is the length of the mp4 **this take encoded**, and is `null`
   when it encoded none — even if a `demo.mp4` from an earlier run is sitting
   right there. A null is the honest answer; the previous take's number is not.
+- `mode` is **absent on a take** and `"stills"` on a stills-only run — a run
+  that drove the storyboard for its `shot()` pictures with no video attached
+  ([stills.md](stills.md)). When it is present, `media` and `duration` are
+  `null` and `content` is **absent**, and `beat_frames()`, `demo-grade` and
+  `stitch()` each refuse the folder naming the mode. `content` absent and
+  `content: null` are different statements: null says an mp4 was expected and
+  its picture could not be measured, absent says the run never had frames to
+  make a claim about.
 - `issues` is what the recorder saw *behind* the pixels; `issue_count` is how
   many it saw, and is larger than `len(issues)` only when a take blew past the
   200-issue cap.

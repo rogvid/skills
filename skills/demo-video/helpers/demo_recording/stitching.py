@@ -255,6 +255,12 @@ def _segment_timeline(out_dir: Path, segment: str, media: Path, probed: float) -
             f"segment rather than merging a document this code does not know "
             f"the shape of"
         )
+    if doc.get("mode") == "stills":
+        raise ValueError(
+            f"{json_path} is a stills-only run, not a segment (issue #372): "
+            f"it recorded no video, so there is nothing of it to join onto "
+            f"this demo. Re-record segment {segment!r} without stills_only."
+        )
     if doc.get("media") != media.name:
         raise ValueError(
             f"{json_path} describes {doc.get('media')!r}, not {media.name!r} — "
