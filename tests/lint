@@ -1202,17 +1202,25 @@ def issue_guard() -> int:
     number).
     """
     bad = 0
-    states = {26: "CLOSED", 255: "OPEN"}
+    # **Numbers this repository will never carry, and that is the fix rather
+    # than a shortcut.** These strings are examples of prose, not prose — but
+    # `check_issue_refs` sweeps every tracked `.py`, this file included, so a
+    # real number here is read as a live pointer. The table used #26 and #255,
+    # and it passed only while #255 stayed open: closing it made the sweep
+    # report this fixture as two stale pointers, on a push that had nothing to
+    # do with either. `states` is injected, so what the cases grade is
+    # unchanged; what changes is that the tracker can no longer redden them.
+    states = {9000: "CLOSED", 9002: "OPEN"}
     cases = (
-        ("a closed issue presented as pending", "Tracked in [#26](x).", 1),
-        ("an open issue presented as pending", "Tracked in [#255](x).", 0),
-        ("a closed issue cited as a measurement", "Measured in #26.", 0),
-        ("a closed issue beside an open one", "Tracked in #26 and #255.", 0),
+        ("a closed issue presented as pending", "Tracked in [#9000](x).", 1),
+        ("an open issue presented as pending", "Tracked in [#9002](x).", 0),
+        ("a closed issue cited as a measurement", "Measured in #9000.", 0),
+        ("a closed issue beside an open one", "Tracked in #9000 and #9002.", 0),
         ("a number the tracker does not carry", "Tracked in PR #9001.", 0),
-        ("a closed issue named only by URL", "Until then, see /issues/26.", 1),
+        ("a closed issue named only by URL", "Until then, see /issues/9000.", 1),
         (
             "pending prose two sentences from the number",
-            "It is tracked in the usual place. Nobody reads #26.",
+            "It is tracked in the usual place. Nobody reads #9000.",
             0,
         ),
     )

@@ -116,7 +116,7 @@ as PNGs named by check and instant, for a pull request's before/after.
 What stays ungraded here, deliberately: spotlight transition shape and
 caption timing are time-measuring and belong to smoke's lock; whether a
 viewer *recognises* the card as a card is graded nowhere (Known gaps); and
-`frames.md` ordering is manifest arithmetic, owned by
+`frames.md` ordering is manifest arithmetic, and is tracked in
 [#300](https://github.com/rogvid/skills/issues/300).
 The contract: a change to anything that draws a frame - the chrome in
 `skills/demo-video/helpers/demo_recording/` - runs this loop before its PR
@@ -3015,15 +3015,23 @@ knows is missing is worse than one that is openly absent.
   after Chromium's clock goes backwards, which is not something this repo can
   measure from outside. [#224](https://github.com/rogvid/skills/issues/224) is
   closed as not reproducing — its −900 ms was an artifact of the sampler #250
-  fixed — and the live defect at that magnitude is tracked in
-  [#255](https://github.com/rogvid/skills/issues/255), with the opposite sign.
+  fixed. The defect at that magnitude with the opposite sign was #255, and
+  **#255 is closed**: all four of its slices shipped (#256 the hole, #257 the
+  message, #258 the baseline, #259 folded into #256), and its second mechanism
+  — **a partial loss**, a capture keeping only a fraction of the step — was
+  **retracted**.
+  There is no such fraction; the muxer loses the whole step or none of it, at
+  97.0–100.2 % over 10 steps in 9 takes. The three figures that looked like
+  partial losses were in-hole instants read as though they were shifts.
 
   **The bars were not widened for it.** `MAX_SKEW_DRIFT_S` at 250 ms is the
   sharp claim this whole correction exists to make usable, and a bar wide
   enough for -800 ms of it grades nothing at all. So a `--terminal-only` run on
   a box whose wall clock steps inside the take is still red about half the
   time, and it is red about something true and now says which part of it is
-  the host and which is not.
+  the host and which is not. Since
+  [#370](https://github.com/rogvid/skills/issues/370) it does not get that far:
+  the arm is refused before it records, in 40 s rather than 186 s.
 
 - **~~`stitch()` does not merge `capture_clock`.~~ Fixed**
   ([#225](https://github.com/rogvid/skills/issues/225)). The merged envelope
