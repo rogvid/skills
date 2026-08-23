@@ -16,10 +16,18 @@ beat and the still that claims each one. It names the ticket too —
 to produce the same manifest in six months, whatever has happened to the issue
 since.
 
-The waits are assertions, not decoration. The `state="hidden"` wait on the
-control fails the take if the × is drawn beside an empty box; the visible wait
-after typing fails it if the control never appears. After the click, the take
-demands the box empty, the control gone again, the heading say (4), and all
+The waits are assertions, not decoration, and each of the four was seen fail
+against a planted app defect when #377 repaired them. The `state="hidden"`
+wait on the control fails the take if the × is drawn beside an empty box; the
+visible wait after typing fails it if the control never appears.
+
+**They are asked of `rec.app`, not `rec.page`.** `rec.page` is the recorder's
+own chrome document — the app is in an iframe — and a chrome document answers
+"hidden" for an element it has never contained, which is these assertions
+passing while grading nothing (#377). Where a verb covers the wait, the verb
+is better still: it stamps a beat the review can see.
+
+After the click, the take demands the box empty, the control gone again, the heading say (4), and all
 four open tickets listed — TQ-106 in particular, which the search had filtered
 out, so its return can only mean the list was restored. The demo runs under
 the Open filter on purpose: clearing into the seven-ticket All view would not
@@ -69,7 +77,14 @@ with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA, ticket=TICKET) as rec:
     rec.spotlight(".queue-search")
     # The criterion's second sentence, asserted: a × drawn beside the empty
     # box would leave the control visible here and fail the take.
-    rec.page.wait_for_selector(CLEAR, state="hidden")
+    #
+    # `rec.app`, not `rec.page` (#377). Since the wrapper cutover (#358)
+    # `rec.page` is the recorder's own chrome document and the app lives in an
+    # iframe; asking the chrome for `#clear-search` gets "hidden" whatever the
+    # app is doing, which is this assertion passing for the wrong reason.
+    # `state="hidden"` is why no verb covers this one: `rec.wait_for` waits for
+    # a thing to appear, and the criterion is about a thing being absent.
+    rec.app.wait_for_selector(CLEAR, state="hidden")
     rec.hold()
     rec.shot("01-empty-box", ac="AC-1")
     rec.spotlight()
@@ -87,6 +102,11 @@ with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA, ticket=TICKET) as rec:
     rec.wait_for(".ticket")
     # The criterion's first sentence, asserted: the box holds text, so the
     # control has to be visible.
+    #
+    # This is also the control on the two `state="hidden"` waits either side of
+    # it. "Hidden" is Playwright's answer for an element that is not there at
+    # all, so a mistyped CLEAR would satisfy both of them; it cannot satisfy
+    # this one, which demands the same selector visible.
     rec.wait_for(CLEAR)
     rec.spotlight(CLEAR)
     rec.hold()
@@ -98,8 +118,8 @@ with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA, ticket=TICKET) as rec:
     # The criterion, asserted piece by piece: the box is empty, the control
     # is gone with it, and the list is the Open filter's own again — TQ-106
     # was filtered out by the search, so only a restored list holds it.
-    rec.page.wait_for_function("document.querySelector('#queue-search').value === ''")
-    rec.page.wait_for_selector(CLEAR, state="hidden")
+    rec.app.wait_for_function("document.querySelector('#queue-search').value === ''")
+    rec.app.wait_for_selector(CLEAR, state="hidden")
     rec.wait_for(".ticket[data-id='TQ-101']")
     rec.wait_for(".ticket[data-id='TQ-102']")
     rec.wait_for(".ticket[data-id='TQ-104']")
@@ -111,8 +131,11 @@ with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA, ticket=TICKET) as rec:
     rec.shot("03-restored", ac="AC-2")
 
     rec.caption("The heading counts what the Open filter lists.", ac="AC-2")
-    # Four open tickets listed above, and the heading has to agree.
-    rec.page.wait_for_selector("#queue-heading:has-text('(4)')")
+    # Four open tickets listed above, and the heading has to agree. The verb
+    # rather than a raw call: this one waits for something to be *visible*, so
+    # `rec.wait_for` covers it, and it stamps a beat the review can see
+    # (SKILL.md: "Wait with rec.wait_for, not rec.page.wait_for_selector").
+    rec.wait_for("#queue-heading:has-text('(4)')")
     rec.spotlight("#queue-heading")
     rec.hold()
     rec.shot("04-heading", ac="AC-2")

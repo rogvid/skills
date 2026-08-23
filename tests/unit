@@ -4108,6 +4108,85 @@ MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
 MASK_SWEEP_FILE_FLOOR = 18
 
 
+#: What a committed storyboard may reach for through `rec.page` (#377).
+#: Both are *input devices*, not the document: a keystroke goes to whatever has
+#: focus and a mouse event to whatever is under the pointer, so neither cares
+#: which document it is asked from. Everything else on `rec.page` is a query
+#: against the recorder's own chrome, which since #358 is not the app.
+STORYBOARD_PAGE_ATTRS = frozenset({"keyboard", "mouse"})
+
+#: Under this, the sweep is reading an emptied `examples/`.
+STORYBOARD_SWEEP_FILE_FLOOR = 4
+
+
+class StoryboardsReachTheApp(unittest.TestCase):
+    """No committed storyboard queries the app through the wrapper (#377).
+
+    The wrapper cutover made `rec.page` the recorder's own chrome document and
+    put the app in an iframe reachable as `rec.app`. A storyboard that kept
+    asking `rec.page` for an app element does not fail loudly — it gets the
+    chrome's answer. `wait_for_selector(..., state="hidden")` is the bad case
+    and it is the one that happened: "hidden" is Playwright's answer for an
+    element that is not in the document at all, so two assertions written to
+    catch a × drawn beside an empty box passed for two months by asking a
+    document that has never contained a ×.
+
+    Read off the **AST** rather than the text. Every file swept here also
+    *discusses* `rec.page` in its comments — the fixed storyboard quotes
+    SKILL.md's "not rec.page.wait_for_selector" advice verbatim — and a regex
+    over lines would flag the sentence warning against the thing.
+    """
+
+    def swept(self):
+        for path in sorted(_EXAMPLES.rglob("record.py")):
+            yield f"examples/{path.relative_to(_EXAMPLES).as_posix()}", path
+
+    def reached(self) -> dict[str, list[str]]:
+        """`{label: [attribute, ...]}` for every `rec.page.X` in real code."""
+        found: dict[str, list[str]] = {}
+        for label, path in self.swept():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                inner = node.value
+                if (
+                    isinstance(inner, ast.Attribute)
+                    and inner.attr == "page"
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id == "rec"
+                ):
+                    found.setdefault(label, []).append(node.attr)
+        return found
+
+    def test_no_storyboard_queries_the_app_through_the_wrapper(self):
+        offending = {
+            label: sorted(set(a for a in attrs if a not in STORYBOARD_PAGE_ATTRS))
+            for label, attrs in self.reached().items()
+        }
+        offending = {k: v for k, v in offending.items() if v}
+        self.assertEqual(
+            offending,
+            {},
+            "these storyboards ask the recorder's chrome document for the "
+            "app's elements; `rec.app` is the app's frame, and the verbs are "
+            "better still where one covers the wait",
+        )
+
+    def test_the_sweep_can_see_a_rec_page_call_at_all(self):
+        # Both halves of the haystack. Every assertion above is satisfied by a
+        # sweep that opened nothing, and by a matcher that stopped recognising
+        # `rec.page.X` — which is what an AST walk looking at the wrong node
+        # type does, silently.
+        self.assertGreaterEqual(len(list(self.swept())), STORYBOARD_SWEEP_FILE_FLOOR)
+        seen = sorted({a for attrs in self.reached().values() for a in attrs})
+        self.assertEqual(
+            seen,
+            ["keyboard"],
+            "the permitted form is what proves the matcher still matches",
+        )
+
+
 class MaskProse(unittest.TestCase):
     """The removed masking layer is not described as though it were there."""
 
@@ -11347,6 +11426,39 @@ class StillsOnly(unittest.TestCase):
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    # -- committed storyboards reach the app, not the chrome (issue #377) ----
+    (
+        # **The defect #377 is about**, restored exactly: the assertion that a
+        # × is absent beside an empty box, asked of the recorder's own chrome
+        # document. It does not raise — "hidden" is Playwright's answer for an
+        # element that is not in the document at all — so the take passes, the
+        # coverage table claims the clause, and the criterion is graded by
+        # nothing. Two months of that is what this sweep is for.
+        "a storyboard asks the wrapper chrome for the app's clear control",
+        "examples/ticket-queue/demos/2026-08-18-clear-search/record.py",
+        '    rec.app.wait_for_selector(CLEAR, state="hidden")\n    rec.hold()',
+        '    rec.page.wait_for_selector(CLEAR, state="hidden")\n    rec.hold()',
+        [
+            "StoryboardsReachTheApp."
+            "test_no_storyboard_queries_the_app_through_the_wrapper"
+        ],
+    ),
+    (
+        # The matcher, not the content. An AST walk that looks at the wrong
+        # node type finds nothing and reports every storyboard clean — the
+        # vacuous sweep, and this is the only assertion that notices.
+        "the storyboard sweep stops recognising a rec.page call",
+        "tests/unit",
+        # Two lines, so the pattern does not also match this entry's own
+        # literal: `--fault-inject` patches a copy of this file, and a
+        # one-line anchor occurs in the code and in the manifest describing
+        # it, which the driver refuses (exit 3) rather than guessing.
+        "                    isinstance(inner, ast.Attribute)\n"
+        '                    and inner.attr == "page"',
+        "                    isinstance(inner, ast.Attribute)\n"
+        '                    and inner.attr == "not_a_page"',
+        ["StoryboardsReachTheApp.test_the_sweep_can_see_a_rec_page_call_at_all"],
+    ),
     # -- stills-only runs (issue #372) ---------------------------------------
     (
         # The folder stops saying what it is. Everything else about it already
