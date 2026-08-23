@@ -339,6 +339,43 @@ and tightening the bars was not worth a ticket nobody would pick up. The
 measurement survives in its issue body. `--allow-concurrent` overrides the
 refusal; a run that needed it cannot be read as a verdict.
 
+### The clock probe, before anything is recorded
+
+A host whose wall clock steps backwards takes that time out of `demo.mp4` and
+leaves the beat log where it was, so every timing bar in `tests/smoke` reads a
+skew that is the host's rather than the recorder's. Until
+[#370](https://github.com/rogvid/skills/issues/370) that was discovered by
+recording for three minutes and failing a bar: four `--terminal-only` runs in
+one session, ~32 minutes, none green, every failure the step.
+
+So `--web-only`, `--terminal-only` and a whole run now watch the clock for
+**40 s** first, and refuse before recording if it steps. The refusal prints the
+step, states a cadence only if it saw two of them, and names the arms that are
+still safe on that host. Measured on a stepping box: **38.7 s to a refusal**
+against 123 s to a confusing bar failure.
+
+Three things about the window, because each of them is a trade rather than a
+default:
+
+- **40 s is set by the cadence**, not by taste. A probe shorter than the
+  interval between steps cannot promise to see one, and the widest interval
+  this repo has measured is 32.3 s. `ClockProbe` in `tests/unit` holds those
+  measurements and fails if the window drops below the widest.
+- **`--segments-only` and `--cheap` are not probed.** `--segments-only` reaches
+  a timing phase but costs 29 s, so a 40 s probe in front of it spends more
+  than it can save; `tests/smoke-inject` re-records that arm on a step instead
+  ([#258](https://github.com/rogvid/skills/issues/258)). `--cheap` is what CI
+  runs on every push, and it pays nothing.
+- **`tests/smoke-inject` passes `--allow-stepping-clock` on every arm**, for
+  that same reason: it already handles a stepping host after the fact, and
+  paying 40 s per entry to be told what the re-record fixes would be the cost
+  the per-arm flags exist to avoid. The arm costs in the table below are
+  therefore unchanged.
+
+`--allow-stepping-clock` overrides the refusal by hand too, with the same
+caveat `--allow-concurrent` carries: a run that needed it cannot be read as a
+verdict.
+
 Prerequisites: `uv`, `ffmpeg`/`ffprobe` on PATH, and Chromium for Playwright
 (`uv run --with playwright playwright install chromium`; add `--with-deps` on a
 fresh Linux box). The script's PEP 723 header pins **Playwright ≥ 1.49**:
