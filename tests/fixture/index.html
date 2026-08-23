@@ -431,7 +431,36 @@ if (params.has("evidence")) {
     "font:12px/1.5 ui-monospace,monospace;color:#1c1a17;";
   ev.innerHTML =
     '<div id="ev-spot-attrs" data-token="zz-attr-00000000"\n' +
-    '  data-cfg=\'{"key":"zz-json-00000000"}\'>nothing rendered here</div>';
+    '  data-cfg=\'{"key":"zz-json-00000000"}\'>nothing rendered here</div>' +
+    // Two shapes of on-screen text `aria_snapshot()` structurally cannot
+    // carry (#353), and one control that is not on screen at all.
+    //
+    //   * a rich-text editor. `role="textbox"` promises the tree an
+    //     accessible *value*, read off a `value` property a div does not
+    //     have, so the node renders as `- textbox "…"` and stops there.
+    //   * an `aria-hidden` subtree that is still painted. The attribute
+    //     removes it from the accessibility tree by definition; the pixels
+    //     stay.
+    //   * the same attribute on something `display:none`. Nothing was on
+    //     screen, so nothing was omitted, and a probe that reported this
+    //     would be reporting every icon wrapper on every real page.
+    '<div id="ev-rich" contenteditable="true" role="textbox"\n' +
+    '  aria-label="Notes">zz-rich-00000000</div>' +
+    '<div id="ev-hidden" aria-hidden="true">zz-painted-00000000</div>' +
+    '<div id="ev-unpainted" aria-hidden="true" style="display:none">' +
+    'zz-unpainted-00000000</div>' +
+    // The second unpainted shape, and it is here so the probe's two
+    // visibility guards are gradeable apart. `display:none` is caught by the
+    // computed-style test *and* by the zero-size test; a box clipped to no
+    // height is caught only by the second, and its computed display is
+    // `block` with visibility `visible`.
+    '<div id="ev-clipped" aria-hidden="true"\n' +
+    '  style="height:0;overflow:hidden">zz-clipped-00000000</div>' +
+    // The third, and the one only the computed-style test can catch: a box
+    // with real width and height that is simply not painted. `display:none`
+    // trips both guards, so without this the style test grades nothing.
+    '<div id="ev-invisible" aria-hidden="true"\n' +
+    '  style="visibility:hidden">zz-invisible-00000000</div>';
   document.body.appendChild(ev);
 }
 

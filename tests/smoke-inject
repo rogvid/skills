@@ -144,6 +144,53 @@ class Injection(NamedTuple):
 # The order is the order they run in: cheapest arm first, so a manifest that is
 # going to abort on a stale search string does it in eight seconds.
 INJECTIONS = [
+    # -- evidence says what it could not see (issue #353), ~7 s an entry
+    #
+    # Two entries, and they are the two directions the field can be wrong in.
+    # Silence is the defect the issue is about — evidence claims to describe
+    # what the beat showed, and two shapes of visible text never reach
+    # `aria_snapshot()` — but a probe that reports everything is the same
+    # artifact lie pointing the other way, and it is the one that gets the
+    # field ignored: `aria-hidden` is on an icon wrapper somewhere on nearly
+    # every real page, and reporting those buries the two that matter.
+    Injection(
+        name="evidence stops saying what the snapshot could not carry",
+        module="web.py",
+        old=(
+            "        omits = doc.evaluate(_ARIA_OMITS_JS)\n"
+            "        if omits:\n"
+            '            payload["aria_omits"] = omits'
+        ),
+        new="        pass",
+        arm="--evidence-only",
+        sites=("check_evidence_omissions",),
+        must_contain=("without saying so is an artifact",),
+    ),
+    Injection(
+        name="the omission probe reports text that was never on screen",
+        module="web.py",
+        old="    if (box.width === 0 || box.height === 0) continue;",
+        new="    if (false) continue;",
+        arm="--evidence-only",
+        sites=("check_evidence_omissions",),
+        must_contain=("clipped to no height, so it was never painted",),
+    ),
+    Injection(
+        # The other visibility guard. `display:none` trips this one *and* the
+        # zero-size test above, so the fixture carries a shape for each —
+        # otherwise breaking either leaves the other holding, and the control
+        # cannot say which of them was doing the work.
+        name="the omission probe stops checking whether a subtree is displayed",
+        module="web.py",
+        old=(
+            "    if (style.visibility === 'hidden' || style.display === 'none')"
+            " continue;"
+        ),
+        new="    if (false) continue;",
+        arm="--evidence-only",
+        sites=("check_evidence_omissions",),
+        must_contain=("`visibility:hidden`, so it was never painted",),
+    ),
     # -- stills without a video (issue #372), ~3 s an entry
     #
     # Two entries against one check, and they are the two halves it exists for:

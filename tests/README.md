@@ -136,7 +136,7 @@ seen red under a planted recorder defect in #351's pull request.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~54 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~55 min, nightly)
 ├── unit               # the browser-free half (~4 s, 568 tests, no dependencies)
 ├── ci-unit            # the .github/scripts helpers, and the two skill
 │                      #   CLIs whose output a person pastes (~2.5 s)
@@ -318,7 +318,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~195 s)
-tests/smoke-inject                # all 73 entries, ~54 min
+tests/smoke-inject                # all 76 entries, ~55 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -1257,15 +1257,26 @@ So the assertions were **written rather than trimmed**, and there are three:
   and named in `truncated`. A cap applied to `aria` and not to `scope_aria` is
   a cap on a third of what a spotlight beat writes.
 
-  **Truncation is the only omission that is marked.** Two shapes of on-screen
-  text never reach the snapshot at all and nothing says so: the contents of a
-  rich-text editor (`contenteditable` with `role="textbox"`, whose accessible
-  value is read off a `value` property a `div` does not have) and anything
-  under `aria-hidden="true"`. Measured with Playwright 1.62.0 against a page
-  filling seven input shapes — the other five, dialog inputs included, come
-  through. That is tracked in
-  [#353](https://github.com/rogvid/skills/issues/353), and it bounds what any
-  evidence-reading tool can do.
+  **Truncation used to be the only omission that was marked.** Two shapes of
+  on-screen text never reach the snapshot at all — the contents of a rich-text
+  editor (`contenteditable` with `role="textbox"`, whose accessible value is
+  read off a `value` property a `div` does not have) and anything under
+  `aria-hidden="true"` — and until
+  [#353](https://github.com/rogvid/skills/issues/353) they left no trace, so
+  the file read as a complete account of a screen it had only partly seen.
+  They now go in `aria_omits`, a field absent when there is nothing to say.
+  Measured with Playwright 1.62.0 against a page filling seven input shapes:
+  the other five, **dialog inputs included**, come through — which is why the
+  shape #353 was filed against could never have been asserted.
+
+  Four injections cover it, and three of them are the *other* direction: a
+  probe that also reports what was never painted buries the two that matter
+  under every icon wrapper on a real page. There is one per visibility guard,
+  because `display:none` trips both and would otherwise leave either deletable
+  in silence — the fixture carries a clipped box for the zero-size test and a
+  `visibility:hidden` box for the computed-style one. The caption-claims lint
+  that will read this field is tracked in
+  [#356](https://github.com/rogvid/skills/issues/356).
 
 Plus the two that never touched masking: a previous take's evidence is cleared
 from the directory on a re-record while another *segment's* files survive, and
@@ -2288,7 +2299,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-73 entries, 15 arms, ~54.5 min of takes
+76 entries, 15 arms, ~54.8 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -2324,7 +2335,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
 | `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the cover painted a colour that is not the window body, so frame 0 is not the cover at all — #110's own defect, the card raised late, can no longer be planted here: since [#362](https://github.com/rogvid/skills/issues/362) the shared chrome covers frame 0 twice, independently, and breaking either cover alone leaves frame 0 reading 24.0; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
 | `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
-| `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
+| `--evidence-only` | 4 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one. Or evidence goes back to omitting on-screen text in silence ([#353](https://github.com/rogvid/skills/issues/353)): a rich-text editor's contents and a painted `aria-hidden` subtree, neither of which `aria_snapshot()` can carry. The other two entries are the opposite direction — a probe that also reports what was never painted buries the two that matter under every icon wrapper on the page — and there is one per visibility guard, because `display:none` trips both and would leave either deletable in silence |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
 | `--wrapper-only` | 9 | the wrapper take (#358, #360) stops keeping its promises silently: a caption dispatched and never painted in its band; a caption too tall for the band shaved at both edges with no caption_clipped issue saying so (#366's review finding); the caption's appearance repainting pixels inside the app rect, which is the overlap the band exists to remove; evidence captured from the wrapper chrome instead of the app frame, with url, title and aria all plausible; a frame-refused app surfacing as a bare `ERR_BLOCKED_BY_RESPONSE` naming no header; or the block swallowed entirely, so a silently blank window records to the end as a demo — the artifact-lie outcome the issue names outright. Three more are #360's chrome parity, each invisible to every artifact but the encoded frames: the card layer shipping transparent, so the take opens on the slot's white canvas instead of the hold; the card's field nudged off the window body it must equal on the single-encoder path; and a mid-take goto emptying the caption band while the beat log keeps reporting the line |
 | `--failure-only` | 2 | a crash dump that exists and says nothing — an empty `screen.txt`, a marker that names neither the exception nor whether the mp4 is this take's |
@@ -2333,7 +2344,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 51 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 52 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
