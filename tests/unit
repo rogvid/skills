@@ -102,6 +102,13 @@ from demo_recording.frames import (  # noqa: E402
     beat_frames,
     render_frames_md,
 )
+from demo_recording.links import (  # noqa: E402
+    beat_captions,
+    beat_stills,
+    github_repo,
+    raw_url,
+    take_relative,
+)
 from demo_recording.markdown import _fmt_t, _md_cell  # noqa: E402
 from demo_recording.narration import (  # noqa: E402
     TTS_KEY_CHARS,
@@ -1853,7 +1860,20 @@ _EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
 # names, and `hold(min_s=1.5)` is documented in full in the verb table. A
 # restatement earns its place less than the one sentence telling an author
 # the fast loop exists. What was left over is this raise.
-SKILL_LINE_BUDGET = 632
+# Raised 632 → 634 on 2026-08-23, for `scripts/demo-shots` (#373): a shipped
+# command the always-loaded file has to name, in the one place a reader is
+# deciding what to put in front of a person. Two lines net, and they are net:
+# the first draft of the paragraph cost five, and it was rewritten twice —
+# `pr-block`'s "the block embeds each judged beat's committed still, raw off
+# GitHub at the head commit" is now one sentence covering both commands
+# instead of one sentence per command, which is where three of the five went.
+#
+# What was *not* paid for by trimming, and the honest reason: nothing else in
+# step 8 earns its place less than naming the command. The alternative was to
+# leave `demo-shots` documented only in `scripts/` and in reference/, where an
+# agent deciding how to hand a reviewer the pictures would never meet it —
+# which is the failure the budget's own preamble says a budget must not cause.
+SKILL_LINE_BUDGET = 634
 
 # `reference/` holding fewer than this is `reference/` being emptied, which
 # would make both assertions below hold trivially. Not a count of the files
@@ -4117,6 +4137,120 @@ STORYBOARD_PAGE_ATTRS = frozenset({"keyboard", "mouse"})
 
 #: Under this, the sweep is reading an emptied `examples/`.
 STORYBOARD_SWEEP_FILE_FLOOR = 4
+
+
+class StillPaths(unittest.TestCase):
+    """`links.take_relative` — the guard on a path that goes into a URL (#373).
+
+    `timeline.json` is a committed file, so its `still` value is editable in a
+    pull request, and two commands paste it into a raw.githubusercontent.com
+    URL and a `git cat-file` argument. This is the only thing between that and
+    publishing a picture from somewhere else under this take's caption, so it
+    is graded at its edges rather than on one happy path.
+    """
+
+    def test_an_ordinary_path_inside_the_take_survives_unchanged(self):
+        self.assertEqual(take_relative("images/01-a.png"), "images/01-a.png")
+        self.assertEqual(take_relative("a/b/c.png"), "a/b/c.png")
+
+    def test_noise_that_means_nothing_is_dropped(self):
+        # `./` and doubled separators are not an escape, and a caller
+        # comparing the result with a path on disk should not have to care.
+        self.assertEqual(take_relative("./images/01-a.png"), "images/01-a.png")
+        self.assertEqual(take_relative("images//01-a.png"), "images/01-a.png")
+
+    def test_every_shape_that_leaves_the_take_is_refused(self):
+        for escaping in (
+            "../elsewhere.png",
+            "images/../../elsewhere.png",
+            "a/b/../../../c.png",
+            "/etc/passwd",
+            "/images/01-a.png",
+            "..",
+            "images\\..\\..\\x.png",
+            "..\\x.png",
+        ):
+            with self.subTest(escaping):
+                self.assertIsNone(take_relative(escaping))
+
+    def test_a_path_that_is_only_noise_is_refused(self):
+        # Not "" — an empty relative path would join to the take directory
+        # itself, and `(demo / "").exists()` is True.
+        for empty in ("", ".", "./", "//", "./././"):
+            with self.subTest(repr(empty)):
+                self.assertIsNone(take_relative(empty))
+
+    def test_a_backslash_anywhere_is_refused_outright(self):
+        # Not split on, refused. A backslash is a separator on the platform
+        # half of the world, and `a\\..\\b` survives a `/`-only split with
+        # its `..` invisible.
+        self.assertIsNone(take_relative("images\\01-a.png"))
+
+
+class RemoteUrls(unittest.TestCase):
+    """`links.github_repo` and `links.raw_url` — what a picture is linked at."""
+
+    def test_the_remote_spellings_git_actually_writes(self):
+        for remote in (
+            "git@github.com:rogvid/skills.git",
+            "git@github.com:rogvid/skills",
+            "https://github.com/rogvid/skills.git",
+            "https://github.com/rogvid/skills",
+            "https://github.com/rogvid/skills/",
+            "ssh://git@github.com/rogvid/skills.git",
+        ):
+            with self.subTest(remote):
+                self.assertEqual(github_repo(remote), "rogvid/skills")
+
+    def test_anything_that_is_not_github_gets_no_url_rather_than_a_guess(self):
+        for remote in (
+            "git@gitlab.com:rogvid/skills.git",
+            "https://example.invalid/rogvid/skills",
+            "/srv/git/skills.git",
+            "",
+            None,
+        ):
+            with self.subTest(remote):
+                self.assertIsNone(github_repo(remote))
+
+    def test_a_url_names_the_commit_and_never_a_branch(self):
+        # A branch moves. A picture pasted into a pull-request description has
+        # to keep showing what it showed when it was pasted.
+        url = raw_url("o/r", "a" * 40, "demos/x/images/01-a.png")
+        self.assertEqual(
+            url,
+            f"https://raw.githubusercontent.com/o/r/{'a' * 40}/demos/x/images/01-a.png",
+        )
+
+    def test_a_path_with_a_space_is_escaped_rather_than_broken(self):
+        self.assertIn("a%20b.png", raw_url("o/r", "sha", "images/a b.png"))
+
+
+class BeatColumns(unittest.TestCase):
+    """`links.beat_stills` / `beat_captions` — the two columns a block reads."""
+
+    BEATS = {
+        "beats": [
+            {"index": 0, "caption": "A queue.", "still": "images/01.png"},
+            {"index": 1, "caption": "   ", "still": "  "},
+            {"index": 2, "caption": "Filtered.", "still": None},
+            {"caption": "no index", "still": "images/orphan.png"},
+            {"index": "3", "caption": "index is a string", "still": "images/s.png"},
+        ]
+    }
+
+    def test_only_beats_with_a_usable_index_and_value_are_returned(self):
+        # Whitespace, null, a missing index and an index of the wrong type all
+        # drop out. A block that took `"  "` as a still would render an image
+        # tag pointing at the take directory.
+        self.assertEqual(beat_stills(self.BEATS), {0: "images/01.png"})
+        self.assertEqual(beat_captions(self.BEATS), {0: "A queue.", 2: "Filtered."})
+
+    def test_a_timeline_with_no_beats_is_empty_rather_than_an_error(self):
+        for doc in ({}, {"beats": None}, {"beats": []}):
+            with self.subTest(doc):
+                self.assertEqual(beat_stills(doc), {})
+                self.assertEqual(beat_captions(doc), {})
 
 
 class StoryboardsReachTheApp(unittest.TestCase):

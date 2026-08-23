@@ -143,7 +143,7 @@ read them all up front, and do not skip one the text tells you to open.
 | [reference/limits.md](reference/limits.md) | Before planning a demo, when two of a take's artifacts seem to contradict each other, or before reading a green run as coverage — every limit above, with its measurement |
 | [reference/determinism.md](reference/determinism.md) | Before `deterministic=True`. A frozen clock changes what an app does, and usually does it silently |
 | [reference/timeline.md](reference/timeline.md) | When reading `timeline.json`/`timeline.md`, when a take warns about its `content`, or when consuming the beat log as a contract |
-| [reference/review.md](reference/review.md) | At Process step 6 — handing a take to a reviewing agent, reading `evidence/`, or recording against a ticket with `criteria=` |
+| [reference/review.md](reference/review.md) | At Process step 6 — handing a take to a reviewing agent or a person, reading `evidence/`, or recording against a ticket with `criteria=` |
 | [reference/failures.md](reference/failures.md) | When a take raises, when `strict=True` refuses one, or when `failure/` appears beside the demo |
 | [reference/terminal.md](reference/terminal.md) | When writing a `TerminalRecorder` storyboard — the full verb table, the four patterns, the gotchas |
 | [reference/narration.md](reference/narration.md) | When `ELEVENLABS_API_KEY` is set and captions will be spoken |
@@ -527,11 +527,13 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    the merged pair `stitch()` wrote next to `demo.mp4`; the per-segment
    `*.seg.timeline.*` are working files that go with `*.seg.mp4`, and
    `stitch()` removes them for you unless you asked to keep the parts.
-   **When 6b graded the take**: commit, push, then run
-   `scripts/demo-grade pr-block <demo folder>` and put its output in the
-   pull-request description. The block embeds each judged beat's committed
-   still, raw off GitHub at the head commit. Nothing under `review/` is
-   committed — it is a working file like the rest.
+   **To hand a person the pictures**, `scripts/demo-shots <demo folder>`
+   prints one markdown block: every `shot()` in order, under the caption that
+   was up, tagged with its `ac=`. It grades nothing. **When 6b graded the
+   take**, commit and push, then `scripts/demo-grade pr-block <demo folder>`
+   prints a second block carrying the reader's findings. Both embed committed
+   stills raw off GitHub at the head commit, and both name a file they cannot
+   link rather than dropping it. Nothing under `review/` is committed.
    **`demo.mp4` does not.** A video is
    stale by the next change to the feature and bloats history permanently,
    and anyone with the skill installed can regenerate it with
@@ -616,8 +618,8 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 
 The skill is self-contained: this file, the `reference/` directory it links
 into, the `helpers/demo_recording/` package, `ensure.sh` at the skill root,
-`scripts/demo-grade` (step 6b) and `scripts/demo-target-guard` (the target
-classifier), the vendored `helpers/assets/xterm/` terminal assets, and
+`scripts/demo-grade` (step 6b), `scripts/demo-shots` (the stills block) and
+`scripts/demo-target-guard` (the target classifier), the vendored `helpers/assets/xterm/` terminal assets, and
 `README.md`. Install it with the `skills` CLI — into the current project:
 
 ```sh

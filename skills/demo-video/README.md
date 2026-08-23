@@ -154,6 +154,8 @@ demo-video/
 ├── scripts/
 │   ├── demo-grade                 # the blind reader's brief, and the verdict
 │   │                              #   comparing it with the ac= tags (step 6b)
+│   ├── demo-shots                 # the take's stills as one pasteable block,
+│   │                              #   captions and ac= tags, grading nothing
 │   └── demo-target-guard          # the target classifier, on the command line
 └── helpers/
     ├── demo_recording/            # package: the recorders, and what reads their output
@@ -174,6 +176,7 @@ demo-video/
     │   ├── failure.py             #   the dump a take that did not finish leaves
     │   ├── narration.py           #   ElevenLabs synthesis and its content cache
     │   ├── markdown.py            #   escaping a value into a markdown table
+    │   ├── links.py               #   a committed still's path, caption, and URL
     │   └── stitching.py           #   joining segments into one demo, losslessly
     └── assets/xterm/              # vendored xterm.js (terminal rendering)
 ```
