@@ -1631,7 +1631,19 @@ def run_arm(root: Path, arm: str, out_dir: Path) -> tuple[int, str, str]:
     """One arm of the staged `tests/smoke`, through its own shebang."""
     try:
         done = subprocess.run(
-            [str(root / "tests" / "smoke"), arm, "--out-dir", str(out_dir)],
+            [
+                str(root / "tests" / "smoke"),
+                arm,
+                "--out-dir",
+                str(out_dir),
+                # The pre-run clock probe (issue #370) refuses the timing arms
+                # on a stepping host. This driver must not be refused: it
+                # already handles that host, differently and after the fact —
+                # `rerecord_reason` throws away a take whose clock stepped and
+                # records again (issue #258). Both together would mean paying
+                # 40 s per entry to be told what the re-record already fixes.
+                "--allow-stepping-clock",
+            ],
             capture_output=True,
             text=True,
             timeout=ARM_TIMEOUT_S,

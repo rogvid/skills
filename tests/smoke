@@ -918,6 +918,75 @@ HOST_CLOCK_MIN_STEP_S = 0.005
 # nothing about it, which is precisely what the catalogue says to expect.
 HOST_CLOCK_MAX_GAP_S = 0.25
 
+# -- the clock probe (issue #370) ------------------------------------------
+#
+# **How long a run watches the wall clock before it records anything.** A host
+# that steps its clock backwards takes that time out of demo.mp4 and leaves the
+# beat log where it was, so every timing bar in this file reads a skew that is
+# the host's rather than the recorder's. Today that is discovered by recording
+# for three minutes and failing a bar; issue #370 measured four `--terminal-only`
+# runs in one session, ~32 minutes, none green, every failure the step.
+#
+# **The window is set by the cadence, not by taste.** A probe shorter than the
+# interval between steps cannot promise to see one, and the interval is the
+# thing being detected — so the window is the longest cadence measured on a
+# stepping box plus a margin:
+#
+#   | measured                    | step            | cadence  |
+#   |-----------------------------|-----------------|----------|
+#   | issue #370, 2026-08-23      | -1.29 s         | ~25 s    |
+#   | issue #255, 44 steps, 1407 s| -1.460…-1.509 s | ~32.2 s  |
+#   | this box, 2026-08-23, 60 s  | -1.498, -1.479 s| 32.3 s   |
+#
+# 40 s covers all three. It does **not** buy a cadence figure: at 32 s the
+# window usually holds exactly one step, and one step has no interval. That is
+# why `clock_probe_report` states the cadence only when it saw two — a mean of
+# one gap is a number a reader would act on and this probe cannot earn it.
+#
+# There is no early exit on the first step. It would save ~20 s on a host that
+# is about to be refused anyway, and it would cost the second step, which is
+# the only thing that turns "it stepped" into "it steps".
+CLOCK_PROBE_S = 40.0
+
+# How often the probe checks whether its window is up. Nothing to do with the
+# sampling rate — `HostClock` runs its own thread at `INTERVAL_S` — this is
+# only how long a finished probe may sit there before it returns.
+CLOCK_PROBE_POLL_S = 0.1
+
+# Which arms this probe stands in front of, and the whole of the argument for
+# the list being this short.
+#
+# `run_web`, `run_terminal` and `run_segments` are the three phases that hand a
+# beat log and a video to `check_timeline`, so they are the three that a step
+# can redden. `--segments-only` reaches only the third and costs 29 s: a 40 s
+# probe in front of a 29 s arm spends more than it can save, and
+# `tests/smoke-inject` already re-records that arm when `capture_clock.steps`
+# is non-empty (issue #258), which is the same protection bought after the fact
+# instead of before it. So the probe guards the two expensive timing arms and a
+# full run, and `--cheap` — which CI runs on every push, and which reaches
+# `run_segments` — pays nothing.
+CLOCK_PROBE_ARMS = ("--web-only", "--terminal-only")
+
+# The arms a stepping host may still be certified on: every arm that never
+# reaches `check_timeline`. `--segments-only` is **not** here — it reaches
+# `run_segments`, and the reason it is out of `CLOCK_PROBE_ARMS` is cost, not
+# safety.
+CLOCK_SAFE_ARMS = (
+    "--determinism-only",
+    "--evidence-only",
+    "--narration-only",
+    "--failure-only",
+    "--polish-only",
+    "--content-only",
+    "--overlay-only",
+    "--coverage-only",
+    "--strict-only",
+    "--wrapper-only",
+    "--stills-only",
+    "--issues-only",
+    "--lock-only",
+)
+
 # The rate the window is sampled at (the recorders encode at 25 fps, so this is
 # every frame and the measurement quantises to 40 ms), and how far past the
 # beat it runs.
@@ -2393,6 +2462,124 @@ def watch_wall_clock() -> Iterator[HostClock]:
     finally:
         clock._stop.set()
         clock._thread.join(timeout=1.0)
+
+
+def probe_wall_clock(window_s: float = CLOCK_PROBE_S) -> HostClock:
+    """Watch the host's wall clock for `window_s`, recording nothing else.
+
+    **Deliberately the same `HostClock` the takes are graded with**, and that
+    is not the catalogue's "check that shares the bug's blind spot". This
+    probe's question is not *does the host step* in the abstract — it is *will
+    the sampler that grades the next take see a step*, and the only instrument
+    that can answer that is the sampler itself. A second implementation here
+    could disagree with the one that matters, and the disagreement would be
+    the probe's, not the host's.
+
+    The window is wall-clock time spent doing nothing, which is the cost of
+    the whole feature. See `CLOCK_PROBE_S`.
+    """
+    with watch_wall_clock() as clock:
+        deadline = time.monotonic() + window_s
+        while time.monotonic() < deadline:
+            time.sleep(CLOCK_PROBE_POLL_S)
+    return clock
+
+
+def clock_probe_report(
+    steps: list[tuple[float, float]],
+    window_s: float,
+    refused: tuple[str, ...],
+    safe: tuple[str, ...],
+) -> list[str]:
+    """What the probe saw, as lines. Empty when the clock held still.
+
+    Pure, and separate from `probe_wall_clock` for the usual reason: the
+    interesting behaviour is what a reader is told, and a test that had to
+    wait forty seconds for a real host to misbehave would grade the wait.
+
+    `steps` is `HostClock.steps` — (seconds from the probe's start, delta).
+    """
+    if not steps:
+        return []
+    sizes = ", ".join(f"{delta * 1000:+.0f} ms" for _, delta in steps)
+    at = ", ".join(f"{t:.1f} s" for t, _ in steps)
+    lines = [
+        f"the host's wall clock stepped {len(steps)} "
+        f"{'time' if len(steps) == 1 else 'times'} in {window_s:.0f} s of "
+        f"watching: {sizes}, at {at} into the probe.",
+    ]
+    if len(steps) >= 2:
+        gaps = [b - a for (a, _), (b, _) in zip(steps, steps[1:], strict=False)]
+        mean = sum(gaps) / len(gaps)
+        lines.append(
+            f"Cadence: one step every {mean:.1f} s "
+            f"({', '.join(f'{g:.1f} s' for g in gaps)} between them)."
+        )
+    else:
+        # One step is not a cadence, and saying so is the point: a reader
+        # handed "every 40 s" from a single observation would size a timeout
+        # against a number this probe never measured.
+        lines.append(
+            f"One step is not a cadence — this {window_s:.0f} s window saw "
+            f"one, so how often it happens is not measured here."
+        )
+    lines += [
+        "",
+        "A backward step takes that much wall time out of demo.mp4 and leaves "
+        "the beat log where it was, so every timing bar in "
+        f"{' and '.join(refused)} reads a skew that is this host's and not the "
+        "recorder's. Refusing before recording rather than after (issue #370).",
+        "",
+        f"Safe to run on this host anyway: {' '.join(safe)}. None of them "
+        "grades a beat log against a video.",
+        "",
+        "To record regardless — a run that needs this cannot be read as a "
+        "verdict — pass --allow-stepping-clock.",
+    ]
+    return lines
+
+
+def check_clock_before_recording(
+    only: str | None, allow: bool, window_s: float = CLOCK_PROBE_S
+) -> list[str]:
+    """Refuse the timing arms on a host whose wall clock steps (issue #370).
+
+    Returns the refusal as failure lines, or `[]` to carry on. A full run
+    (`only is None`) is probed too: it reaches all three timing phases.
+    """
+    if allow or not (only is None or only in CLOCK_PROBE_ARMS):
+        return []
+    if window_s <= 0:
+        return []
+    refused = CLOCK_PROBE_ARMS if only is None else (only,)
+    print(
+        f"smoke: watching the wall clock for {window_s:.0f}s before recording "
+        f"(issue #370)...",
+        flush=True,
+    )
+    clock = probe_wall_clock(window_s)
+    if not clock.covered:
+        # The probe's own sampler stalled. Saying "steady" here would be the
+        # catalogue's environment-agreeing assertion: a watcher that was away
+        # cannot report what it did not watch.
+        print(
+            f"smoke: the clock probe's sampler left a {clock.max_gap * 1000:.0f} ms "
+            f"gap, over its own {HOST_CLOCK_MAX_GAP_S * 1000:.0f} ms limit — it "
+            f"cannot say whether the clock held still, so it says nothing and "
+            f"the run goes ahead.",
+            flush=True,
+        )
+        return []
+    lines = clock_probe_report(clock.steps, window_s, refused, CLOCK_SAFE_ARMS)
+    if not lines:
+        print(
+            f"smoke: wall clock steady over {window_s:.0f}s "
+            f"({clock.samples} samples, widest gap "
+            f"{clock.max_gap * 1000:.0f} ms) — timing arms may run.",
+            flush=True,
+        )
+        return []
+    return ["\n    ".join(lines)]
 
 
 def _check_clock_coverage(
@@ -12981,6 +13168,15 @@ def main() -> int:
         "needs this flag cannot be read as a verdict.",
     )
     parser.add_argument(
+        "--allow-stepping-clock",
+        action="store_true",
+        help="record the timing arms even when the pre-run probe finds the "
+        "host's wall clock stepping (issue #370). Same shape as "
+        "--allow-concurrent and the same caveat: a step comes out of "
+        "demo.mp4 and not out of the beat log, so a run that needs this "
+        "flag cannot be read as a verdict.",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         help="where recordings land (default: a fresh temp dir). The web/ and "
@@ -13035,6 +13231,24 @@ def main() -> int:
         return 1
 
     scrub_env()
+
+    # Before the machine lock, and that ordering is deliberate: the probe
+    # records nothing and touches no shared state, so holding the lock for
+    # forty seconds of watching a clock would block a suite that could have
+    # run. A refusal here also never reaches `open_output`, so it leaves no
+    # directory to send anybody to — the same shape as the lock's own refusal
+    # (issue #105), and `main()` already words that case.
+    refusal = check_clock_before_recording(only, args.allow_stepping_clock)
+    if refusal:
+        print("\nsmoke: REFUSED", file=sys.stderr)
+        for line in refusal:
+            print(f"  - {line}", file=sys.stderr)
+        print(
+            "\nsmoke: nothing was recorded — this run never started, so "
+            "there is no output directory to look in.",
+            file=sys.stderr,
+        )
+        return 1
 
     failures: list[str] = []
     out_root: Path | None = None

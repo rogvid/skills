@@ -10259,6 +10259,206 @@ class BaselineRerecord(unittest.TestCase):
         self.assertIn("genuinely flaky", block)
 
 
+class ClockProbe(unittest.TestCase):
+    """The probe that refuses the timing arms before recording (issue #370).
+
+    The loop this replaces cost eight minutes to say what forty seconds says:
+    four `--terminal-only` runs in one session, ~32 minutes, none green, every
+    failure the host's wall clock stepping. `GOAL.md` is explicit that a slow
+    loop gets fixed rather than routed around.
+
+    **Two claims are graded here and they are different in kind.** That the
+    message is honest about what one observation can support is a claim about
+    words, and substrings are enough for it. That the arms the probe calls
+    *safe* are actually safe is a claim about the suite's own structure, and a
+    hand-written list would go stale the first time somebody adds a phase —
+    so `test_no_safe_arm_grades_a_beat_log_against_a_video` reads
+    `run_phases` and answers it from the code.
+    """
+
+    # Every cadence between wall-clock steps this repo has measured on a
+    # stepping box. The probe's window has to cover the widest of them or it
+    # cannot promise to see a step at all — which is the one thing it is for.
+    MEASURED_CADENCES_S = (
+        25.0,  # issue #370, 2026-08-23
+        32.2,  # issue #255, 44 steps over 1407 s
+        32.3,  # this box, 2026-08-23, two steps in 60 s
+    )
+
+    def setUp(self):
+        self.smoke = _smoke_module()
+        self.report = self.smoke.clock_probe_report
+
+    def said(self, *steps, window_s=40.0, refused=("--web-only",)):
+        return "\n".join(
+            self.report(list(steps), window_s, refused, self.smoke.CLOCK_SAFE_ARMS)
+        )
+
+    def test_a_steady_clock_says_nothing_at_all(self):
+        # The empty list is the interface: `check_clock_before_recording`
+        # reads "no lines" as "carry on", so a report that returned a cheerful
+        # sentence here would refuse every run on every host.
+        self.assertEqual(
+            self.report([], 40.0, ("--web-only",), self.smoke.CLOCK_SAFE_ARMS),
+            [],
+            "a probe that saw no step must produce no refusal lines",
+        )
+
+    def test_a_step_names_the_arm_it_refuses_and_what_the_step_was(self):
+        said = self.said((21.7, -1.485))
+        self.assertIn("-1485 ms", said)
+        self.assertIn("21.7 s", said)
+        self.assertIn("--web-only", said)
+
+    def test_two_steps_state_the_cadence_they_measured(self):
+        said = self.said((22.5, -1.498), (54.8, -1.479), window_s=60.0)
+        self.assertIn("one step every 32.3 s", said)
+
+    def test_one_step_refuses_to_state_a_cadence(self):
+        # The whole of the honesty here. A reader handed "every 40 s" from a
+        # single observation would size a timeout against a number nobody
+        # measured — this repo's *ungraded constant*, arrived at from the
+        # other end.
+        said = self.said((21.7, -1.485))
+        self.assertIn("not a cadence", said)
+        self.assertNotIn("every", said.split("not a cadence")[0])
+        self.assertNotIn("Cadence:", said)
+
+    def test_the_window_covers_every_cadence_this_repo_has_measured(self):
+        widest = max(self.MEASURED_CADENCES_S)
+        self.assertGreaterEqual(
+            self.smoke.CLOCK_PROBE_S,
+            widest,
+            f"the probe watches for {self.smoke.CLOCK_PROBE_S} s against a "
+            f"measured cadence of {widest} s — a window shorter than the "
+            f"interval between steps cannot promise to see one, and seeing "
+            f"one is the whole of what this probe does",
+        )
+
+    def test_the_refusal_says_how_to_override_it(self):
+        self.assertIn("--allow-stepping-clock", self.said((21.7, -1.485)))
+
+    # -- the structural claim ------------------------------------------------
+
+    def phases_by_arm(self) -> dict:
+        """arm -> the `run_*` phases it reaches, read out of `run_phases`.
+
+        Through `_smoke_guards`, which `CheapArm` already uses. A second
+        walker here would be a second answer to the same question, and the
+        first thing it did was collide with `CheapArm`'s own injection.
+        """
+        out: dict[str, set[str]] = {}
+        for arms, phase in _smoke_guards()[0]:
+            for arm in arms:
+                out.setdefault(arm, set()).add(phase)
+            # `--cheap` names itself in no guard — `selects()` derives it from
+            # the arms that do — and CI runs it on every push, so leaving it
+            # out would hide the one arm whose exposure matters most.
+            if self.smoke.selects("--cheap", arms):
+                out.setdefault("--cheap", set()).add(phase)
+        return out
+
+    def timing_phases(self) -> set:
+        """The `run_*` phases whose grading reads a beat log against a video."""
+        tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
+        out = set()
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if not node.name.startswith("run_"):
+                continue
+            named = {
+                inner.func.id
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+            }
+            if "check_timeline" in named:
+                out.add(node.name)
+        return out
+
+    def test_run_phases_is_still_readable_by_this_class(self):
+        # The control on the two sweeps below. Both answer "no problem found"
+        # when the parse comes back empty, so a `run_phases` this parser
+        # cannot read would make them pass while grading nothing — the
+        # catalogue's vacuous sweep, exactly.
+        by_arm = self.phases_by_arm()
+        self.assertGreaterEqual(len(by_arm), 10, by_arm)
+        timing = self.timing_phases()
+        self.assertEqual(
+            timing,
+            {"run_web", "run_terminal", "run_segments"},
+            "the phases that hand a beat log and a video to check_timeline "
+            "have changed; CLOCK_PROBE_ARMS and CLOCK_SAFE_ARMS are derived "
+            "from this set and both need re-deciding",
+        )
+
+    def test_no_safe_arm_grades_a_beat_log_against_a_video(self):
+        # The claim the refusal makes to a reader who has just been stopped:
+        # "safe to run on this host anyway". If any arm on that list reaches a
+        # timing phase, the message sends somebody at the failure it just
+        # saved them from.
+        by_arm, timing = self.phases_by_arm(), self.timing_phases()
+        for arm in self.smoke.CLOCK_SAFE_ARMS:
+            self.assertFalse(
+                by_arm.get(arm, set()) & timing,
+                f"{arm} is offered as safe on a stepping host but reaches "
+                f"{sorted(by_arm.get(arm, set()) & timing)}, which grades a "
+                f"beat log against a video",
+            )
+
+    def test_every_timing_arm_is_probed_or_excused_by_name(self):
+        # The other direction, and the one that catches a *new* timing arm.
+        # `--segments-only` is excused on cost, not on safety — 29 s of arm
+        # behind a 40 s probe — and tests/smoke-inject re-records it on a step
+        # instead (issue #258). Anything else appearing here is a timing arm
+        # nobody decided about.
+        by_arm, timing = self.phases_by_arm(), self.timing_phases()
+        exposed = {arm for arm, phases in by_arm.items() if phases & timing}
+        self.assertEqual(
+            exposed - set(self.smoke.CLOCK_PROBE_ARMS),
+            {"--segments-only", "--cheap"},
+            "an arm reaches a timing phase without the probe in front of it "
+            "and without being one of the two excused by name",
+        )
+
+    # -- what the probe stands in front of, and what it does not -------------
+
+    def gate(self, only, allow=False, window_s=40.0):
+        return self.smoke.check_clock_before_recording(only, allow, window_s)
+
+    def test_a_cheap_arm_is_not_made_to_wait(self):
+        # The cost claim, measured rather than asserted: a 40 s window would
+        # take 40 s. `--stills-only` records in 2.3 s and grades no timing, so
+        # a probe in front of it would be the largest cost in the arm.
+        started = time.monotonic()
+        self.assertEqual(self.gate("--stills-only"), [])
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_allow_stepping_clock_skips_the_wait_entirely(self):
+        started = time.monotonic()
+        self.assertEqual(self.gate("--web-only", allow=True), [])
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_full_run_is_probed_and_refuses_for_both_arms(self):
+        # `only is None` reaches every timing phase, so a full run has to be
+        # probed even though it names no arm.
+        said = "\n".join(
+            self.report(
+                [(21.7, -1.485)],
+                40.0,
+                self.smoke.CLOCK_PROBE_ARMS,
+                self.smoke.CLOCK_SAFE_ARMS,
+            )
+        )
+        self.assertIn("--web-only", said)
+        self.assertIn("--terminal-only", said)
+        # And the gate must actually watch on a full run rather than fall
+        # through the arm check.
+        started = time.monotonic()
+        self.gate(None, window_s=0.3)
+        self.assertGreater(time.monotonic() - started, 0.2)
+
+
 class LogEarlyCause(unittest.TestCase):
     """Which end `tests/smoke` blames for a beat ahead of its frame (#257).
 
@@ -12265,6 +12465,82 @@ INJECTIONS = [
             "FrameClockCorrection.test_two_holes_that_overlap_clamp_to_the_first_of_them",
             "FrameClockCorrection.test_a_hole_the_next_beat_outlives_leaves_that_beat_alone",
         ],
+    ),
+    # -- the clock probe (issue #370) ----------------------------------------
+    (
+        # A window shorter than the interval between steps cannot promise to
+        # see one, and seeing one is the whole of what the probe does. 20 s
+        # against a 32.3 s cadence catches roughly six runs in ten, and the
+        # four it misses record for three minutes and fail a timing bar —
+        # exactly the loop this replaces, now with 20 s added to it.
+        "the clock probe watches for less time than the cadence it looks for",
+        "tests/smoke",
+        "CLOCK_PROBE_S = 40.0",
+        "CLOCK_PROBE_S = 20.0",
+        ["ClockProbe.test_the_window_covers_every_cadence_this_repo_has_measured"],
+    ),
+    (
+        # One observation, stated as a rate. This is the *ungraded constant*
+        # arrived at from the reader's end: nothing downstream checks the
+        # figure, and somebody sizing a timeout against "every 40 s" is
+        # sizing it against a number this probe never measured.
+        "one step is reported as a cadence",
+        "tests/smoke",
+        '            f"One step is not a cadence — this {window_s:.0f} s window saw "\n'
+        '            f"one, so how often it happens is not measured here."',
+        '            f"Cadence: one step every {window_s:.1f} s."',
+        ["ClockProbe.test_one_step_refuses_to_state_a_cadence"],
+    ),
+    (
+        # The refusal's own advice, turned into the failure it just saved
+        # somebody from. `--segments-only` reaches `run_segments`, which hands
+        # a beat log and a video to `check_timeline`; offering it as safe on a
+        # stepping host sends the reader straight back into the bar.
+        "the refusal offers a timing arm as safe to run anyway",
+        "tests/smoke",
+        '    "--issues-only",\n    "--lock-only",\n)',
+        '    "--issues-only",\n    "--lock-only",\n    "--segments-only",\n)',
+        ["ClockProbe.test_no_safe_arm_grades_a_beat_log_against_a_video"],
+    ),
+    (
+        # A new timing arm, or an existing one quietly dropped off the probe's
+        # list. Either way an arm that grades a beat log against a video runs
+        # unprotected, and nothing else in this suite would notice.
+        "a timing arm loses the probe standing in front of it",
+        "tests/smoke",
+        'CLOCK_PROBE_ARMS = ("--web-only", "--terminal-only")',
+        'CLOCK_PROBE_ARMS = ("--web-only",)',
+        ["ClockProbe.test_every_timing_arm_is_probed_or_excused_by_name"],
+    ),
+    (
+        # `--allow-stepping-clock` stops being honoured. The flag is the
+        # documented way to record anyway, and a run that passes it and is
+        # refused regardless has no way through at all.
+        "the override flag stops letting a run through",
+        "tests/smoke",
+        "    if allow or not (only is None or only in CLOCK_PROBE_ARMS):",
+        "    if not (only is None or only in CLOCK_PROBE_ARMS):",
+        ["ClockProbe.test_allow_stepping_clock_skips_the_wait_entirely"],
+    ),
+    (
+        # A full run stops being probed. It names no arm, so an arm-membership
+        # test alone passes it through — and it reaches all three timing
+        # phases, which makes it the most expensive thing the probe protects.
+        "a whole run is no longer probed because it names no arm",
+        "tests/smoke",
+        "    if allow or not (only is None or only in CLOCK_PROBE_ARMS):",
+        "    if allow or only not in CLOCK_PROBE_ARMS:",
+        ["ClockProbe.test_a_full_run_is_probed_and_refuses_for_both_arms"],
+    ),
+    (
+        # The steady path made to speak. `check_clock_before_recording` reads
+        # "no lines" as "carry on", so a report that says something cheerful
+        # about a clock that held still refuses every run on every host.
+        "a steady clock produces refusal lines",
+        "tests/smoke",
+        "    if not steps:\n        return []",
+        "    if False:\n        return []",
+        ["ClockProbe.test_a_steady_clock_says_nothing_at_all"],
     ),
     (
         # ...and the other side of the same key, which `narration.py` has

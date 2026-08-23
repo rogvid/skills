@@ -116,7 +116,7 @@ as PNGs named by check and instant, for a pull request's before/after.
 What stays ungraded here, deliberately: spotlight transition shape and
 caption timing are time-measuring and belong to smoke's lock; whether a
 viewer *recognises* the card as a card is graded nowhere (Known gaps); and
-`frames.md` ordering is manifest arithmetic, owned by
+`frames.md` ordering is manifest arithmetic, and is tracked in
 [#300](https://github.com/rogvid/skills/issues/300).
 The contract: a change to anything that draws a frame - the chrome in
 `skills/demo-video/helpers/demo_recording/` - runs this loop before its PR
@@ -338,6 +338,43 @@ and it was **closed as `not planned` on 2026-08-13** in the same triage the
 and tightening the bars was not worth a ticket nobody would pick up. The
 measurement survives in its issue body. `--allow-concurrent` overrides the
 refusal; a run that needed it cannot be read as a verdict.
+
+### The clock probe, before anything is recorded
+
+A host whose wall clock steps backwards takes that time out of `demo.mp4` and
+leaves the beat log where it was, so every timing bar in `tests/smoke` reads a
+skew that is the host's rather than the recorder's. Until
+[#370](https://github.com/rogvid/skills/issues/370) that was discovered by
+recording for three minutes and failing a bar: four `--terminal-only` runs in
+one session, ~32 minutes, none green, every failure the step.
+
+So `--web-only`, `--terminal-only` and a whole run now watch the clock for
+**40 s** first, and refuse before recording if it steps. The refusal prints the
+step, states a cadence only if it saw two of them, and names the arms that are
+still safe on that host. Measured on a stepping box: **38.7 s to a refusal**
+against 123 s to a confusing bar failure.
+
+Three things about the window, because each of them is a trade rather than a
+default:
+
+- **40 s is set by the cadence**, not by taste. A probe shorter than the
+  interval between steps cannot promise to see one, and the widest interval
+  this repo has measured is 32.3 s. `ClockProbe` in `tests/unit` holds those
+  measurements and fails if the window drops below the widest.
+- **`--segments-only` and `--cheap` are not probed.** `--segments-only` reaches
+  a timing phase but costs 29 s, so a 40 s probe in front of it spends more
+  than it can save; `tests/smoke-inject` re-records that arm on a step instead
+  ([#258](https://github.com/rogvid/skills/issues/258)). `--cheap` is what CI
+  runs on every push, and it pays nothing.
+- **`tests/smoke-inject` passes `--allow-stepping-clock` on every arm**, for
+  that same reason: it already handles a stepping host after the fact, and
+  paying 40 s per entry to be told what the re-record fixes would be the cost
+  the per-arm flags exist to avoid. The arm costs in the table below are
+  therefore unchanged.
+
+`--allow-stepping-clock` overrides the refusal by hand too, with the same
+caveat `--allow-concurrent` carries: a run that needed it cannot be read as a
+verdict.
 
 Prerequisites: `uv`, `ffmpeg`/`ffprobe` on PATH, and Chromium for Playwright
 (`uv run --with playwright playwright install chromium`; add `--with-deps` on a
@@ -2286,7 +2323,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 50 check functions have no entry**, and the harness
+- **17 of `tests/smoke`'s 51 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -2305,6 +2342,7 @@ paragraph whose job is to say what this manifest does not cover.
 
   | ungraded check function | what carries its browser-free claims |
   |---|---|
+  | `check_clock_before_recording` | `ClockProbe` in `tests/unit` — the whole of it, on a scripted step list: the refusal's wording, the cadence it will and will not state, and the two sweeps that derive the safe-arms list from `run_phases` (#370). Genuinely ungraded *as a check that runs*: it refuses before a take exists, so no arm of this manifest can reach it, and a host that does not step its clock never produces the refusal at all |
   | `check_take` | `ContentRect` — the rect the picture half is scored over, exactly, on all four numbers (#135/#195). The artifact half — the files exist, are this run's, and are not repeats of one another — is genuinely ungraded |
   | `check_content_healthy` | `ContentRect`, same six tests: the trim reaches the caption bar on both media, does not eat the app, and never comes back zero-sized |
   | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
@@ -2978,15 +3016,23 @@ knows is missing is worse than one that is openly absent.
   after Chromium's clock goes backwards, which is not something this repo can
   measure from outside. [#224](https://github.com/rogvid/skills/issues/224) is
   closed as not reproducing — its −900 ms was an artifact of the sampler #250
-  fixed — and the live defect at that magnitude is tracked in
-  [#255](https://github.com/rogvid/skills/issues/255), with the opposite sign.
+  fixed. The defect at that magnitude with the opposite sign was #255, and
+  **#255 is closed**: all four of its slices shipped (#256 the hole, #257 the
+  message, #258 the baseline, #259 folded into #256), and its second mechanism
+  — **a partial loss**, a capture keeping only a fraction of the step — was
+  **retracted**.
+  There is no such fraction; the muxer loses the whole step or none of it, at
+  97.0–100.2 % over 10 steps in 9 takes. The three figures that looked like
+  partial losses were in-hole instants read as though they were shifts.
 
   **The bars were not widened for it.** `MAX_SKEW_DRIFT_S` at 250 ms is the
   sharp claim this whole correction exists to make usable, and a bar wide
   enough for -800 ms of it grades nothing at all. So a `--terminal-only` run on
   a box whose wall clock steps inside the take is still red about half the
   time, and it is red about something true and now says which part of it is
-  the host and which is not.
+  the host and which is not. Since
+  [#370](https://github.com/rogvid/skills/issues/370) it does not get that far:
+  the arm is refused before it records, in 40 s rather than 186 s.
 
 - **~~`stitch()` does not merge `capture_clock`.~~ Fixed**
   ([#225](https://github.com/rogvid/skills/issues/225)). The merged envelope
