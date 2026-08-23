@@ -63,11 +63,11 @@ segments, and verification all work identically. This document leads with
 the web recorder; the **Terminal demos** section below covers what differs,
 and is **Unix-only** because it uses a PTY.
 
-Both record into a **framed window on a soft pastel background** (rounded
-window, title bar, traffic lights), framed in-page: the web app records in
-an iframe at true pixel size, caption in a reserved band **below** the app
-rect, so the page is the finished picture — no exit composite, one encode
-per take, and `shot()` stills match the video exactly, chrome included.
+Both record into the **same framed window on a soft pastel background** (rounded
+window, title bar, traffic lights): one recorder-owned chrome whose content slot
+holds the web app in an iframe at true pixel size, or the terminal's xterm.js
+screen, with the caption in a reserved band **below** the app rect. The page is
+the finished picture — one encode per take, and `shot()` stills match the video.
 `rec.page` is the framed page; `rec.app` is the app's document. Two edges:
 an app answering `X-Frame-Options`/CSP `frame-ancestors` refuses the take
 by name, and the dot is verb-driven — raw `rec.page.mouse` never moves it.
@@ -264,7 +264,7 @@ exception, or a non-zero exit. Both are
 |---|---|
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
-| `caption(text)` | Narrator line in the caption band below the app; `""` clears. The band is the recorder's own document, so the line survives full page loads and SPA routing alike and `caption_lost` cannot fire on a web take — caption death on navigation is a terminal-take concern only (its caption is in-page, until #362). A line taller than the two-line band is shaved at the band's edges and recorded as a `caption_clipped` issue: shorten it, or split it over two captions |
+| `caption(text)` | Narrator line in the caption band below the app; `""` clears. Both media draw it in the same band, which is the recorder's own document — so the line survives full page loads and SPA routing alike, and `caption_lost` cannot fire at all any more. A line taller than the two-line band is shaved at the band's edges and recorded as a `caption_clipped` issue: shorten it, or split it over two captions |
 | `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See [reference/review.md](reference/review.md). |
 | `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped — so the viewer meets the clause and then watches it happen. The beat claims AC-3 and nothing else; the beats after it are untagged. Held to reading speed, and cleared by `interlude("")` like any card. |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |

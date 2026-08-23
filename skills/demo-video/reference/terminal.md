@@ -35,21 +35,30 @@ with TerminalRecorder(
 The recorder starts capturing when it creates the page, which is before any
 storyboard statement can paint anything — so a card raised by the first verb
 arrives ~290 ms late and the segment opens on an empty terminal with a lone
-prompt. `interlude=` raises the card from a context init script instead,
-before the page has painted at all, and the PTY, the terminal's own setup and
-the shell's first prompt all happen behind it. The recorder also **takes it
-down** when `interlude_hold` is up, so there is no `interlude("")` to forget.
+prompt.
 
-It records an ordinary `interlude` beat, so `timeline.json` reads the same
-either way. `Recorder` (web) has no such argument and does not need one: its
-page is blank until `goto()`, so there is no "before" to flash — and a card
-painted before that first `goto()` would be destroyed by it.
+Nothing bare is on screen either way, because every take opens on the
+recorder's **opening hold**: an opaque field in the window's own colour, up in
+frame 0 from an init script, cleared when the medium has something to show
+(here, the shell's first prompt). The PTY, the xterm.js injection and that
+first prompt all happen behind it. Both media work this way.
+
+What `interlude=` adds is *intent*: the clause is raised in the window's card
+layer over the hold, so the viewer reads a sentence instead of a blank window.
+The recorder also **takes it down** when `interlude_hold` is up, so there is no
+`interlude("")` to forget. It records an ordinary `interlude` beat, so
+`timeline.json` reads the same as a mid-take card.
+
+`Recorder` (web) has no such argument. Its hold is cleared by the first
+`goto()`; if you want a clause over a web segment's opening, use `interlude()`
+as its first statement.
 
 **Check it in the timeline rather than by watching.** Every terminal take reads
 its own first frame after the encode and writes the answer into
 `content.opening.card`: `state` is `"card"`, `"bare"` or `"between"`, beside
-the luma it came from and whether this take asked for a card. `demo.mp4` is not
-a file anybody commits, so this is the only account of that frame a demo
+the luma it came from and whether this take asked for a clause. The hold is
+unconditional, so `"bare"` is a defect however the take was written. `demo.mp4`
+is not a file anybody commits, so this is the only account of that frame a demo
 directory carries — and the same flash has been reported three times by people
 watching. Nothing enforces it; read it. See *`opening.card`* in
 [timeline.md](timeline.md).

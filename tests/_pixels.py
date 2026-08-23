@@ -116,17 +116,6 @@ def to_video_rect(rect: Rect, geom: dict) -> Rect:
     )
 
 
-def caption_band(frame_size: tuple[int, int]) -> Rect:
-    """The strip of a full still that holds the caption.
-
-    Covers both recorders: the web caption's reserved band sits ~54-150 px
-    off the frame bottom at the default viewport (chrome_geometry), and the
-    terminal's in-page bar 88 px off it, ~70 px tall.
-    """
-    width, height = frame_size
-    return (0, max(0, height - 160), width, 140)
-
-
 # Where in the app rect the strip is read: a band across the top, inset from
 # every edge. Above the centred text on purpose — glyphs move the mean by ~5
 # levels and by however many words the clause has, which is a reading of the

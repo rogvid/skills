@@ -129,7 +129,6 @@ if _HERE not in sys.path:
 from _pixels import (  # noqa: E402
     FRAME_BAND,
     Rect,
-    caption_band,
     card_run,
     card_strip,
     channels_apart,
@@ -199,8 +198,10 @@ MIN_CONTENT_STDDEV = {
 # (caption_probe_band) rather than a full-width strip — the probe caption
 # measures 4.99 on a healthy take against 0.00 undrawn (a band with no
 # caption is the same flat window body in both stills), so the floor keeps
-# a 2.5x margin under the weakest healthy reading.
-MIN_CAPTION_BAND_DIFF = {"web": 2.0, "terminal": 1.0, "segments": 2.0}
+# a 2.5x margin under the weakest healthy reading. The terminal caption
+# paints in the same chrome band since #362 (measured 4.87 on the terminal
+# arm's probe stills), so it carries the web floor for the web reason.
+MIN_CAPTION_BAND_DIFF = {"web": 2.0, "terminal": 2.0, "segments": 2.0}
 
 # Consecutive stills must differ by at least this mean absolute luma, on the
 # 160x90 grayscale reduction. This detects a *duplicate* — a stale or copied
@@ -989,8 +990,9 @@ ALIGN_ARRIVAL_FRACTION = 0.25
 # Re-measured on the wrapper band (#361), same probe rect as
 # MIN_CAPTION_BAND_DIFF: the probe caption settles at 4.96-5.17 mean luma
 # over the band on healthy takes, so the web floors keep a ~2.5x margin
-# where the legacy full-frame caption gave 6.0 a wider one.
-MIN_ALIGN_BAND_DELTA = {"web": 2.0, "terminal": 1.0, "segments": 2.0}
+# where the legacy full-frame caption gave 6.0 a wider one. The terminal
+# rides the same band since #362 and carries the same floor.
+MIN_ALIGN_BAND_DELTA = {"web": 2.0, "terminal": 2.0, "segments": 2.0}
 
 # -- review frames (frames/, issue #8) ---------------------------------------
 #
@@ -1372,39 +1374,74 @@ MIN_SPOTLIGHT_CLEAR_S = 0.45
 # transparent, and it says nothing about a card painted late, because a beat's
 # timestamp is when the recorder logged the card, not when a viewer saw it.
 #
-# The discriminator is one corner of the frame, outside the terminal window:
+# The discriminator is a strip of the app rect, re-based when #362 mounted
+# the terminal in the shared chrome (until then it was a corner of
+# background beside the bespoke window, which the shared card layer — app
+# rect only — made blind):
 #
-#   the card         a full-bleed #1c1a17 rectangle          luma ~26
-#   bare terminal    the recorder's pastel gradient          luma ~225
+#   the cover     the opening hold / clause card, window body    luma ~24
+#   the defect    the slot's unheld white canvas                 luma ~255
 #
-# An order of magnitude apart, and neither number is a threshold anybody tuned
-# — they are two constants in the recorder's own styling. The corner is read
-# off the live `#__term_win` box rather than hardcoded, so a change to the
-# window chrome carries it.
+# An order of magnitude apart, and neither number is a threshold anybody
+# tuned — they are two constants in the recorder's own styling. The strip is
+# OPENING_STRIP_FRACTIONS of `rec._geom`'s app rect, this file's own copy of
+# `terminal.OPENING_STRIP`'s arithmetic. Terminal content is as dark as the
+# cover, so "the cover came down" is graded as the strip **ceasing to be a
+# flat field** (TERMINAL_REVEAL_MIN_STDDEV) rather than as luma — the
+# revealed terminal puts prompt and command rows through the strip, a cover
+# left up stays flat (#91).
 OPENING_CARD = "…and the same thing, on the command line."
 
-# Held long enough that the dark prefix below has 2.5x of margin over its bar,
-# and short enough that this take stays a few seconds.
+# Held long enough that the covered stretch below has 2.5x of margin over
+# its bar, and short enough that this take stays a few seconds.
 OPENING_HOLD_S = 2.5
 
 # 20 fps is plenty for a card that is up for seconds, and keeps the sweep to a
 # few hundred frames.
 OPENING_SAMPLE_FPS = 20
 
-# What counts as the card, and what counts as the gradient behind it. The gap
-# between them is deliberately enormous and deliberately empty: a frame that
-# lands between the two is the card mid-fade, and the assertions below refuse
-# to call that either one.
+# What counts as the cover, and what counts as the slot's canvas showing
+# through it. The gap between them is deliberately enormous and deliberately
+# empty: a frame that lands between the two is a fade, and the assertions
+# below refuse to call that either one.
 OPENING_CARD_MAX_LUMA = 60.0
 OPENING_BARE_MIN_LUMA = 150.0
 
-# How much of the video must be card before anything else. The card is held for
-# OPENING_HOLD_S, so a healthy take reads ~2.5 s here; the bar is at 1.0 s,
-# which leaves room for a screencast that stalls (issue #18) without leaving
-# room for a card that arrives after the terminal does.
+# terminal.OPENING_STRIP, this file's own copy (the suite imports no policy
+# from the recorder): the strip of the app rect the opening claims read — a
+# top band starting near the left edge, where a shell's first rows land.
+OPENING_STRIP_FRACTIONS = (0.01, 0.04, 0.90, 0.16)
+
+# What counts as the terminal having appeared in the strip: the strip's own
+# luma **standard deviation**. The cover is a flat field by construction and
+# terminal text is not, so this separates the two on their structure rather
+# than on their brightness — which is the whole difficulty, since the
+# revealed terminal is as dark as the cover it replaces.
+#
+# Change-against-frame-0 was tried first and does not grade. Measured over
+# two takes of this strip: the covered stretch reads 0.00 against frame 0 on
+# the pixel loop's reference take but 1.68 on this suite's, because the
+# chrome document arrives *after* frame 0 on a slower host and the whole
+# flat field shifts by that much when it does. The first revealed command
+# reads 1.86. A bar between 1.68 and 1.86 grades nothing; it just picks a
+# host.
+#
+# Standard deviation over the same two takes: covered 0.105-0.147, the
+# chrome-arrival transient at worst 0.686, the first revealed command
+# 2.10-2.12, the settled terminal 13.7-13.9. 1.2 is the geometric middle of
+# 0.686 and 2.10 — 1.75x clear of the worst covered reading and 1.75x under
+# the weakest revealed one. tests/pixel TERMINAL_REVEAL_MIN_STDDEV is the
+# same number for the same measurement.
+TERMINAL_REVEAL_MIN_STDDEV = 1.2
+
+# How long the take must stay covered before the terminal first shows. The
+# card is held for OPENING_HOLD_S, so a healthy take reveals at ~3 s; the
+# bar is at 1.0 s, which leaves room for a screencast that stalls (issue
+# #18) without leaving room for a cover that comes down before the card
+# could be read.
 MIN_OPENING_CARD_S = 1.0
 
-# Frames the corner sweep must produce before anything is concluded from it. A
+# Frames the strip sweep must produce before anything is concluded from it. A
 # sweep of three frames would satisfy every assertion below by accident.
 MIN_OPENING_FRAMES = 40
 
@@ -1414,13 +1451,13 @@ MIN_OPENING_FRAMES = 40
 # Not a tolerance for the answer being roughly right. The two readings are the
 # same crop of the same frame of the same file, reduced the same way, and they
 # come out equal to the rounding the timeline publishes (0.05) — the strip is
-# computed twice, once by the recorder off `#__term_win` and once by
-# `record_terminal_opening` off the same live box, and both then read frame
-# zero with `-t` and no `fps` filter. What this has to be far under is the
-# thing it exists to catch: a number that describes something other than this
-# video, which is 200 luma levels away when the card is not up. An order of
-# magnitude either side, which is the shape to prefer over a comfortable
-# margin.
+# computed twice, once by the recorder off its `_geom` and once by
+# `record_terminal_opening` off this file's own copy of the fractions, and
+# both then read frame zero with `-t` and no `fps` filter. What this has to
+# be far under is the thing it exists to catch: a number that describes
+# something other than this video, which is 200 luma levels away when the
+# cover is not up. An order of magnitude either side, which is the shape to
+# prefer over a comfortable margin.
 OPENING_CARD_AGREEMENT = 1.0
 
 OPENING_DURATION_S = (5.0, 30.0)
@@ -3879,12 +3916,12 @@ def record_terminal_opening(out_dir: Path) -> tuple[list[str], dict]:
         rec.pause(0.6)
         rec.caption("")
 
-        win = rec.page.locator("#__term_win").bounding_box()
         host = rec.page.locator("#__term_host").bounding_box()
-        if win is None or host is None:
+        if host is None:
             raise SmokeFailure(
-                "#__term_win/#__term_host has no box — the terminal window "
-                "never rendered, so there is no margin to read the card out of"
+                "#__term_host has no box — the terminal never rendered in "
+                "the chrome's slot, so there is no strip to read the cover "
+                "out of"
             )
         app: Rect = (
             int(host["x"]),
@@ -3892,16 +3929,21 @@ def record_terminal_opening(out_dir: Path) -> tuple[list[str], dict]:
             int(host["width"]),
             int(host["height"]),
         )
+        geom = dict(rec._geom)
         size = (rec._size["width"], rec._size["height"])
 
-    # The strip of background to the right of the terminal window. Outside the
-    # window on purpose — inside it the card and the terminal are both dark and
-    # the two are told apart by their text, which is not a robust thing to
-    # measure. Also the opposite corner from TICKER_JS's 8x8 element, so the
-    # ticker cannot contribute a single level to this.
-    right = int(win["x"] + win["width"])
-    corner: Rect = (right + 8, 0, max(8, size[0] - right - 16), 50)
-    return b.problems, {"corner": corner, "app": app, "size": size}
+    # The opening strip: this file's own fractions of the shared chrome's
+    # app rect (#362) — where the cover and, later, the shell's first rows
+    # are. Far from TICKER_JS's 8x8 corner element, so the ticker cannot
+    # contribute a single level to this.
+    fx, fy, fw, fh = OPENING_STRIP_FRACTIONS
+    strip: Rect = (
+        geom["appx"] + int(geom["appw"] * fx),
+        geom["appy"] + int(geom["apph"] * fy),
+        max(8, int(geom["appw"] * fw)),
+        max(8, int(geom["apph"] * fh)),
+    )
+    return b.problems, {"strip": strip, "app": app, "size": size}
 
 
 def record_content(out_dir: Path, cleared: bool) -> tuple[list[str], dict]:
@@ -5997,19 +6039,18 @@ def caption_probe_band(
 ) -> Rect:
     """Where this medium's caption paints, at `factor` times the frame size.
 
-    The terminal caption is an in-page lower-third and keeps `caption_band`'s
-    whole-width strip. A web (and segments) caption paints in the wrapper
-    chrome's reserved band below the app rect (#358/#361), and reading the
-    old full-width strip dilutes its change with ~7x of static chrome —
-    measured 2.68 mean luma over the strip for a caption whose own band
-    moves by an order of magnitude more. The arithmetic is
-    `chrome_geometry`'s, duplicated at native size (the loop-vs-suite rule:
-    policy is not imported), then scaled, because the geometry's even-pixel
-    rounding does not commute with scaling.
+    Every medium's caption paints in the wrapper chrome's reserved band
+    below the app rect — web and segments since #358/#361, terminal since
+    #362 — and reading the legacy full-width bottom strip dilutes its
+    change with ~7x of static chrome: measured 2.68 mean luma over the
+    strip for a caption whose own band moves by an order of magnitude
+    more. The arithmetic is `chrome_geometry`'s, duplicated at native size
+    (the loop-vs-suite rule: policy is not imported), then scaled, because
+    the geometry's even-pixel rounding does not commute with scaling.
+    `label` no longer dispatches; it stays so a failure message's caller
+    reads the same as the checks it feeds.
     """
-    if label == "terminal":
-        width, height = frame_size
-        return caption_band((round(width * factor), round(height * factor)))
+    del label
     width, height = frame_size
     appw = int(width * 0.80) & ~1
     apph = int(height * 2 / 3) & ~1
@@ -8007,29 +8048,35 @@ def check_spotlight_transitions(
 
 
 def check_opening_card(out_dir: Path, info: dict) -> list[str]:
-    """A terminal segment opens on its card, not on a bare terminal (#110).
+    """A terminal segment opens on its cover, not on a bare slot (#110).
 
-    Three statements about one sweep of one corner of the frame, and each is
+    Three statements about one sweep of one strip of the app rect (#362
+    moved it inside the window — see OPENING_STRIP_FRACTIONS), and each is
     broken by a different mistake:
 
-      * the *first* frame is the card — a card raised at the storyboard's first
-        statement, or faded in rather than painted, fails here;
-      * every frame up to the first bare-terminal one is card, and there is at
-        least MIN_OPENING_CARD_S of them — a card that arrives after the
-        terminal does fails here;
-      * the corner does end up bare — a card that is never taken down (#91's
-        half of this seam) fails here, and without it the first two are equally
-        true of a recorder that painted a black rectangle and stopped.
+      * the *first* frame is the cover — a hold that never painted leaves
+        frame 0 reading the slot's white canvas;
+      * no frame of the strip is ever bare — a cover cleared before xterm.js
+        painted is a white flash in the window;
+      * the strip stops being a flat field, and not before
+        MIN_OPENING_CARD_S — a cover never taken down stays flat forever
+        (#91's half of this seam, and without it the first two statements
+        are equally true of a recorder that painted a rectangle and
+        stopped), and one taken down early shows the terminal before the
+        card could be read (#110). Structure rather than luma, because the
+        revealed terminal is as dark as the cover it replaces — see
+        TERMINAL_REVEAL_MIN_STDDEV for the measurement, and for why change
+        against frame 0 was measured and rejected.
     """
     failures: list[str] = []
     mp4 = out_dir / "demo.mp4"
-    corner = info["corner"]
-    frames = gray_frames(mp4, rect=corner, sample_fps=OPENING_SAMPLE_FPS)
+    strip = info["strip"]
+    frames = gray_frames(mp4, rect=strip, sample_fps=OPENING_SAMPLE_FPS)
     luma = [sum(f) / len(f) for f in frames]
     if len(luma) < MIN_OPENING_FRAMES:
         return [
-            f"terminal-opening: the corner sweep decoded {len(luma)} frames at "
-            f"{OPENING_SAMPLE_FPS} fps over {corner}, under the "
+            f"terminal-opening: the strip sweep decoded {len(luma)} frames at "
+            f"{OPENING_SAMPLE_FPS} fps over {strip}, under the "
             f"{MIN_OPENING_FRAMES} floor — every statement below would be "
             f"satisfied by a video too short to hold the card at all"
         ]
@@ -8044,47 +8091,49 @@ def check_opening_card(out_dir: Path, info: dict) -> list[str]:
     if kind(luma[0]) != "card":
         failures.append(
             f"terminal-opening: the recording's first frame reads "
-            f"{luma[0]:.1f} mean luma in the corner at {corner}, which is "
-            f"{kind(luma[0])!r} and not the card (card <= "
-            f"{OPENING_CARD_MAX_LUMA}, bare terminal >= "
-            f"{OPENING_BARE_MIN_LUMA}). The segment opens on the terminal and "
-            f"the card arrives afterwards — issue #110."
-        )
-    # The prefix ends at the first frame that is not card — including a frame
-    # that is neither, which is the card mid-fade and is not "before the card"
-    # by any reading.
-    prefix = 0
-    while prefix < len(luma) and kind(luma[prefix]) == "card":
-        prefix += 1
-    prefix_s = prefix / OPENING_SAMPLE_FPS
-    if prefix_s < MIN_OPENING_CARD_S:
-        failures.append(
-            f"terminal-opening: the card covers only the first {prefix_s:.2f}s "
-            f"of the recording ({prefix} frames at {OPENING_SAMPLE_FPS} fps), "
-            f"under the {MIN_OPENING_CARD_S}s bar for a card held "
-            f"{OPENING_HOLD_S}s. Frame {prefix} reads {luma[min(prefix, len(luma) - 1)]:.1f} "
-            f"— the viewer sees the terminal before the card that is supposed "
-            f"to be covering it."
+            f"{luma[0]:.1f} mean luma over the strip at {strip}, which is "
+            f"{kind(luma[0])!r} and not the cover (cover <= "
+            f"{OPENING_CARD_MAX_LUMA}, bare slot >= "
+            f"{OPENING_BARE_MIN_LUMA}). The segment opens on the slot's "
+            f"canvas and the cover arrives afterwards — issue #110."
         )
     bare = [i for i, value in enumerate(luma) if kind(value) == "bare"]
-    if not bare:
+    if bare:
         failures.append(
-            f"terminal-opening: the corner never reaches "
-            f"{OPENING_BARE_MIN_LUMA} mean luma in "
-            f"{len(luma) / OPENING_SAMPLE_FPS:.1f}s — the card the recorder "
-            f"raised is never taken down (issue #91), and the whole take is "
-            f"behind it. Corner range {min(luma):.1f}..{max(luma):.1f}."
+            f"terminal-opening: frame {bare[0]} "
+            f"({bare[0] / OPENING_SAMPLE_FPS:.2f}s) reads "
+            f"{luma[bare[0]]:.1f} mean luma over {strip} (bare >= "
+            f"{OPENING_BARE_MIN_LUMA}) — the slot's canvas showed through, "
+            f"so the cover came down before the terminal painted."
         )
-    elif kind(luma[-1]) != "bare":
+    spread = [statistics.pstdev(f) for f in frames]
+    revealed = next(
+        (i for i, s in enumerate(spread) if s >= TERMINAL_REVEAL_MIN_STDDEV), None
+    )
+    revealed_s = None if revealed is None else revealed / OPENING_SAMPLE_FPS
+    if revealed is None:
         failures.append(
-            f"terminal-opening: the recording's last frame reads {luma[-1]:.1f} "
-            f"in the corner ({kind(luma[-1])!r}) — the card came back, or never "
-            f"finished fading"
+            f"terminal-opening: no frame of {len(frames)} at "
+            f"{OPENING_SAMPLE_FPS} fps ever reaches "
+            f"{TERMINAL_REVEAL_MIN_STDDEV} luma stddev over {strip} (worst "
+            f"{max(spread):.2f}) — the strip is a flat field for the whole "
+            f"take, so the cover the recorder raised is never taken down "
+            f"(issue #91) and the whole take is behind it."
+        )
+    elif revealed_s < MIN_OPENING_CARD_S:
+        failures.append(
+            f"terminal-opening: the strip stops being a flat field at "
+            f"{revealed_s:.2f}s ({spread[revealed]:.2f} luma stddev, floor "
+            f"{TERMINAL_REVEAL_MIN_STDDEV}), under the {MIN_OPENING_CARD_S}s "
+            f"bar for a card held {OPENING_HOLD_S}s — the viewer sees the "
+            f"terminal before the card that is supposed to be covering it."
         )
     if not failures:
         print(
-            f"smoke: terminal-opening card covers the first {prefix_s:.2f}s "
-            f"(corner {luma[0]:.0f} -> {luma[-1]:.0f}), then clears"
+            f"smoke: terminal-opening cover up from frame 0 "
+            f"(luma {luma[0]:.0f}, no bare frame, max {max(luma):.0f}, "
+            f"covered stddev worst {max(spread[:revealed]):.2f}), "
+            f"terminal revealed from {revealed_s:.2f}s"
         )
     return failures
 
@@ -8115,11 +8164,12 @@ def check_reported_opening_card(out_dir: Path, info: dict) -> list[str]:
 
     The second is what keeps the rest from being a document agreeing with
     itself, and its independence is deliberately narrow: the strip comes from
-    `record_terminal_opening`'s own reading of the live `#__term_win` box, and
-    the frame is decoded here rather than taken from the take's word for it.
-    What it cannot see is a recorder and a harness making the same mistake
-    about which corner to read; the sweep above, which reads the whole take
-    rather than one frame, is what makes that mistake visible.
+    `record_terminal_opening`'s own copy of the OPENING_STRIP fractions over
+    the shared geometry, and the frame is decoded here rather than taken
+    from the take's word for it. What it cannot see is a recorder and a
+    harness making the same mistake about which strip to read; the sweep
+    above, which reads the whole take rather than one frame, is what makes
+    that mistake visible.
 
     **What is deliberately not asserted here**: that `state` follows the `luma`
     beside it. Every take this arm records opens on the card, so a `state`
@@ -8175,14 +8225,14 @@ def check_reported_opening_card(out_dir: Path, info: dict) -> list[str]:
     # the reason OPENING_FIRST_FRAME_S spells out.
     try:
         first = gray_frames(
-            out_dir / "demo.mp4", info["corner"], duration=OPENING_FIRST_FRAME_S
+            out_dir / "demo.mp4", info["strip"], duration=OPENING_FIRST_FRAME_S
         )
     except RuntimeError as exc:
         return failures + [f"{label}: {exc}"]
     if not first:
         return failures + [
             f"{label}: nothing decoded from the first {OPENING_FIRST_FRAME_S}s "
-            f"of demo.mp4 over {info['corner']}, so the reported reading has "
+            f"of demo.mp4 over {info['strip']}, so the reported reading has "
             f"nothing to be checked against"
         ]
     measured = sum(first[0]) / len(first[0])
@@ -8190,7 +8240,7 @@ def check_reported_opening_card(out_dir: Path, info: dict) -> list[str]:
         failures.append(
             f"{label}: the take reports its first frame at {luma} mean luma "
             f"over {card.get('rect')}, and frame zero of demo.mp4 reads "
-            f"{measured:.1f} over {info['corner']} — {abs(measured - luma):.1f} "
+            f"{measured:.1f} over {info['strip']} — {abs(measured - luma):.1f} "
             f"apart, over the {OPENING_CARD_AGREEMENT} these two readings of "
             f"one frame are allowed. The number in the timeline is not a "
             f"measurement of this video"
@@ -8202,7 +8252,7 @@ def check_reported_opening_card(out_dir: Path, info: dict) -> list[str]:
         failures.append(
             f"{label}: this take opened with TerminalRecorder(interlude=…) and "
             f"reports its first frame as {state!r} at {luma} mean luma — the "
-            f"segment opens on the terminal and the card arrives afterwards "
+            f"segment opens on the bare slot and the cover arrives afterwards "
             f"(issue #110), and this time the take's own report says so"
         )
     if card.get("raised") is not True:

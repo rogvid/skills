@@ -1343,22 +1343,35 @@ after it is 300 ms too late to see a restore that was still pending. A lower
 bound on a wait is also the one timing bar contention cannot turn red.
 
 `terminal-opening/` records a segment opened with
-`TerminalRecorder(interlude=…)` and reads **one corner of the frame**, outside
-the terminal window, at 20 fps for the whole take:
+`TerminalRecorder(interlude=…)` and reads **a strip across the top of the app
+rect** at 20 fps for the whole take. The strip moved inside the window when
+[#362](https://github.com/rogvid/skills/issues/362) mounted the terminal in the
+shared chrome: the card layer covers the app rect and nothing else, so the
+background beside the window no longer changes and can no longer say what the
+take opened on.
 
 | | mean luma |
 |---|---|
-| the card (`#1c1a17`, full bleed) | 26 |
-| bare terminal (the recorder's pastel gradient) | 226 |
+| the cover — the opening hold, or the clause card over it | 24 |
+| the slot's bare canvas | 255 |
 
 Neither number is a threshold anybody tuned — they are two constants in the
-recorder's own styling, an order of magnitude apart, and the corner is read off
-the live `#__term_win` box rather than hardcoded. Three statements, each broken
-by a different mistake: the recording's **first** frame is card; the card
-covers at least the first second (it is held 2.5); and the corner **does** end
-up bare, which is the control — without it, the first two are equally true of a
-recorder that painted a black rectangle and stopped, and that is exactly
+recorder's own styling, an order of magnitude apart, and the strip is derived
+from `chrome_geometry`'s app rect rather than hardcoded. Three statements, each
+broken by a different mistake: the recording's **first** frame is the cover; no
+frame of the strip is ever bare, which a cover cleared before xterm.js painted
+would break; and the strip **does** stop being a flat field, which is the
+control — without it, the first two are equally true of a recorder that painted
+a rectangle and stopped, and that is exactly
 [#91](https://github.com/rogvid/skills/issues/91).
+
+The control is read as **structure, not brightness**: the revealed terminal is
+as dark as the cover it replaces, so luma cannot separate them, and the strip's
+own standard deviation can — a flat cover reads 0.11-0.15, one line of terminal
+text reads 2.1, a settled screen 13.9. Change against frame 0 was measured first
+and rejected: the covered stretch reads 0.00 on one box and 1.68 on another,
+against 1.86 for the first revealed command, so the bar would have picked a host
+rather than a defect.
 
 Nine injections, each one exact string in one file, with a driver that refuses
 to run unless the pattern matched exactly once:
@@ -1371,14 +1384,14 @@ to run unless the pattern matched exactly once:
 | the enter's `transform` removed | "the highlight never went on, so the exit measurement is about nothing" |
 | the clear leaves `style=""` on an element that had no attribute | the before/after style comparison |
 | the clear's promise resolves before the transition ends | the 0.45 s bar |
-| the card raised 400 ms into the document instead of at document start | first frame is bare, and the prefix is 0.00 s |
-| the card built at `opacity: 0` like `interlude()` builds it | the same two, plus the content floor |
-| the card never cleared | "the corner never reaches 150 mean luma — the card is never taken down" |
+| the cover painted a colour that is not the window body | first frame is bare |
+| the cover built at `opacity: 0` like `interlude()` builds it | the same, plus the content floor |
+| the cover never cleared | "the strip is a flat field for the whole take — the cover is never taken down" |
 
 **The same frame, from the other side (issue #235).** Everything above grades
 the video, and no demo directory ships one. So the recorder reads its own first
-frame after the encode — the same strip, off the live `#__term_win` box, on the
-segment's own frame zero — and writes it into `content.opening.card`:
+frame after the encode — the same strip, derived from the same chrome geometry,
+on the segment's own frame zero — and writes it into `content.opening.card`:
 `luma`, `state` (one of `card`, `bare`, `between`), `raised` (whether this take
 asked for a card at all), the two bars it was classified against, and a `note`
 when there was no reading. **Reported, never enforced**: nothing warns, refuses
@@ -1390,21 +1403,24 @@ would be flaky on the runner it most needs to be trusted on.
 and complete, it says `card`, it says the card was asked for, and — the one
 that keeps the rest from being a document agreeing with itself — the number in
 it is within `OPENING_CARD_AGREEMENT` (1.0) of frame zero re-read here. Both
-readings came out at **25.8** on this box, which is [#207](https://github.com/rogvid/skills/issues/207)'s
-number for the fixed take. Four `tests/smoke-inject` entries, one per statement,
+readings came out at **24.0** on this box — the window body the shared chrome
+paints the cover with, where before #362 it was 25.8 over the strip of
+background beside the bespoke window ([#207](https://github.com/rogvid/skills/issues/207)'s
+number for the fixed take). Four `tests/smoke-inject` entries, one per statement,
 and the third of them is the injection #235's acceptance criterion names.
 
 **What this does not catch**, and is a stated limit rather than an oversight: a
 card that *fades in* over 450 ms rather than being painted opaque is invisible
 here. Measured — a faded-in card and a painted one produce byte-identical
-corner readings for the first 14 frames, because the recorder spends longer
+strip readings for the first 14 frames, because the recorder spends longer
 than the fade injecting xterm.js before Chromium's screencast emits anything.
 The recorder has no fade-in path (the element is appended already opaque, so no
 transition can run), but the suite is relying on setup cost for that and would
 not notice if it changed.
 
-**The corner is the discriminator; the timeline gap is not, and it was written
-down twice as though it were.** [#110](https://github.com/rogvid/skills/issues/110)
+**The pixels are the discriminator; the timeline gap is not, and it was written
+down twice as though it were.** (The readings below are the pre-#362 corner,
+kept as the history they are.) [#110](https://github.com/rogvid/skills/issues/110)
 measured the flash as part2's offset against the interlude beat's timestamp
 (37.76 s against 38.05 s), and
 [#206](https://github.com/rogvid/skills/issues/206) restated that gap as the
@@ -1425,7 +1441,7 @@ check would have reported the fixed take as marginally worse. The gap is
 which goes to `about:blank`, injects xterm.js, opens the PTY and waits for the
 first prompt before it raises the card, so the first beat lands ~0.36 s into
 the segment either way. A beat's timestamp says when the card was *logged*;
-only the pixels say when it was up. The corner sweep discriminates it 226 → 26
+only the pixels say when it was up. The sweep discriminates it 226 → 26
 at the boundary frame, across four re-records including one under load. This is
 recorded here because nothing asserts on that gap today, and a number written
 into two closed issues as *the* check is the kind that becomes an assertion
@@ -2240,7 +2256,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the cursor dot parked on-screen so it ships in every still with no pointer verb run, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the card raised 400 ms into the document, which is [#110](https://github.com/rogvid/skills/issues/110) itself and the injection that issue's acceptance criterion names; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
+| `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the cover painted a colour that is not the window body, so frame 0 is not the cover at all — #110's own defect, the card raised late, can no longer be planted here: since [#362](https://github.com/rogvid/skills/issues/362) the shared chrome covers frame 0 twice, independently, and breaking either cover alone leaves frame 0 reading 24.0; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
 | `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
 | `--evidence-only` | 1 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |

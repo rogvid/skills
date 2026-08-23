@@ -672,18 +672,32 @@ INJECTIONS = [
         must_contain=("The number in the timeline is not a ",),
     ),
     Injection(
-        # The defect itself, exactly as #110 measured it: the card raised from
-        # a timer instead of at document start, so capture begins on the bare
-        # terminal and the card arrives afterwards. `check_opening_card` fires
-        # too — it is the same frame — and the entry is aimed at the *report*,
-        # which is the only account of that frame anybody ships.
-        name="the opening card is raised 400 ms into the document",
+        # The cover paints the wrong colour, so frame 0 is not the cover —
+        # the report says `bare` on a take that asked for a clause, which is
+        # what #110 reads like in the artifact. `check_opening_card` fires
+        # too, it is the same frame, and the entry is aimed at the *report*:
+        # the only account of that frame anybody ships.
+        #
+        # **This is not #110's own defect, and #110's own defect can no
+        # longer be planted here.** It was "the card is raised late", and it
+        # was plantable while one init script owned frame 0 on the terminal
+        # path (`terminal._OPENING_CARD_JS`, retired by #362). The terminal
+        # now records the shared chrome, which covers frame 0 **twice** and
+        # independently: `chrome.OPENING_HOLD_JS` on the initial document,
+        # and the `#__chrome_hold` element `chrome_html` ships opaque in its
+        # own markup. Measured — delaying the init script's build by 400 ms,
+        # the old injection exactly, leaves frame 0 reading 24.0 over the
+        # strip, because the chrome document is up by the first encoded
+        # frame. Breaking either cover alone changes nothing a frame can see,
+        # which is the fix working rather than the assertion failing.
+        #
+        # So the entry plants at the one place both covers read: the window
+        # body they are both painted with. A palette mistake there is the
+        # #291 class, which this repository has actually shipped.
+        name="the cover paints a colour that is not the window body",
         module="terminal.py",
-        old=(
-            "  if (document.body) build();\n"
-            "  else addEventListener('DOMContentLoaded', build);\n"
-        ),
-        new="  setTimeout(build, 400);\n",
+        old='TERM_WINDOW_BODY = _TERM_THEME["background"]',
+        new='TERM_WINDOW_BODY = "#f4f2ee"',
         arm="--polish-only",
         sites=("check_reported_opening_card",),
         must_contain=("and this time the take's own report says so",),

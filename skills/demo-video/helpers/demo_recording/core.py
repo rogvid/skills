@@ -87,54 +87,24 @@ from .timeline import (
     write_timeline,
 )
 
-# Caption bar: a narrator line burned into the recording (and stills), so
-# the video explains itself to someone watching with no other context.
-_CAPTION_JS = """
-window.__demoCaption = (text) => {
-  let el = document.getElementById('__demo_caption');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = '__demo_caption';
-    el.style.cssText = `
-      position: fixed; left: 50%; bottom: __CAPBOTTOM__px; transform: translateX(-50%);
-      max-width: 90%; padding: 12px 30px; border-radius: 12px;
-      background: rgba(22,20,16,.72); backdrop-filter: blur(3px);
-      color: #f7f4ee; text-align: center;
-      font: 600 __CAPFONT__px/1.36 system-ui, sans-serif; letter-spacing: .01em;
-      pointer-events: none; z-index: 2147483646; opacity: 0;
-      transition: opacity .3s ease; box-shadow: 0 6px 24px rgba(0,0,0,.28);
-    `;
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-  el.style.opacity = text ? '1' : '0';
-};
-"""
-
-# Interlude: a full-screen title card for jumps over real-world time the
-# recording skips (minutes of background work between two segments).
+# The caption, the interlude card and the bridge scrim all render in the
+# wrapper chrome's own document (chrome.py): the caption in its reserved
+# band below the app rect, the cards in the card layer over it. Both media
+# mount that chrome — the web recorder since #358/#361, the terminal since
+# #362 — so the chrome document's inline `__demoCaption`/`__demoInterlude`/
+# `__demoBridge` are the only renderers left, and this module keeps only the
+# element ids they share with the verbs and the end-of-take probe.
 #
-# The card's styling is a module constant because a *second* thing builds this
-# same element: a segment that opens on a card raises it from an init script,
-# before the recorder's own setup and before the page has painted at all
-# (issue #110, and see terminal.py's `_OPENING_CARD_JS`). Both have to produce
-# an element `__demoInterlude` will then recognise and fade out, which means
-# one id and one stylesheet, in one place.
+# History: until #362 this module carried the in-page overlay path — a
+# `_CAPTION_JS` init script drawing a fixed-bottom caption bar inside the
+# recorded page (`_caption_bottom_px` placed it), an `_INTERLUDE_JS` builder
+# with a per-medium stylesheet (`INTERLUDE_CSS_TERMINAL`, the #110/#291
+# palette work), and a `_BRIDGE_JS` builder — because the terminal page was
+# its own document with no chrome to host them. The terminal now records the
+# shared chrome, the last consumer went with it, and a caption that dies
+# with its document died as a class: no recorded page navigates its own
+# chrome.
 INTERLUDE_ID = "__demo_interlude"
-
-# Everything about the card except its two colours. Split out so the palettes
-# below cannot drift apart in the properties other things depend on: the card
-# is **opaque**, it covers the viewport, and it sits one level above the
-# caption bar (2147483646) so no caption is drawn while it is up. All three are
-# load-bearing outside this file — reference/limits.md reasons from them about
-# what the picture check can and cannot see.
-_INTERLUDE_LAYOUT = (
-    "position: fixed; inset: 0; display: flex; align-items: center;"
-    " justify-content: center;"
-    " font: 500 30px/1.5 system-ui, sans-serif; text-align: center;"
-    " padding: 0 12%; z-index: 2147483647; opacity: 0;"
-    " transition: opacity .45s ease; pointer-events: none;"
-)
 
 # The web window's body — the fill chrome.py paints the dark rounded window
 # with, and with it the pad around the app rect, the opening hold, and the
@@ -156,37 +126,6 @@ _INTERLUDE_LAYOUT = (
 # level off the window (#301). #355's structural half retired the class:
 # one encoder, one declaration, and #361 deleted the compensated pair.
 WEB_WINDOW_BODY = "#181825"
-
-# The interlude card's stylesheet. One consumer today: the terminal
-# recorder, whose segments can *open* on this card (#110) — raised from an
-# init script before the recorder's own setup, so the id and the stylesheet
-# live here where both builders can reach them. The near-black terminal
-# palette is the feature there: the card blends with the terminal it covers.
-#
-# The web recorder's card is deliberately **not** built from this. The
-# wrapper document carries its own `__demoInterlude` element in the card
-# layer over the app rect (chrome.py, #360), declaring `WEB_WINDOW_BODY`
-# uncompensated — `_INTERLUDE_JS` below only ever finds that element already
-# in the tree and toggles it, so the stylesheet here never paints on a web
-# take. The per-medium CSS split this replaces (`INTERLUDE_CSS_WEB`, painted
-# in the compensated `WEB_CARD_BODY`) died with the composite in #361; see
-# WEB_WINDOW_BODY's history note.
-INTERLUDE_CSS_TERMINAL = (
-    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"
-)
-_INTERLUDE_JS = """
-window.__demoInterlude = (text) => {
-  let el = document.getElementById('__ID__');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = '__ID__';
-    el.style.cssText = '__CSS__';
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-  el.style.opacity = text ? '1' : '0';
-};
-"""
 
 # How long a `criterion()` card stays up when the storyboard does not say.
 #
@@ -210,34 +149,9 @@ CRITERION_HOLD_MAX_S = 9.0
 
 # Lightweight bridge: a centered label over a soft scrim, with the scene
 # still visible behind it. For short segment transitions where a full-screen
-# interlude card would feel heavy.
+# interlude card would feel heavy. Rendered by the chrome document's own
+# `__demoBridge` (chrome.py) — see the history note over INTERLUDE_ID.
 BRIDGE_ID = "__demo_bridge"
-_BRIDGE_JS = """
-window.__demoBridge = (text) => {
-  let el = document.getElementById('__ID__');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = '__ID__';
-    el.style.cssText = `
-      position: fixed; inset: 0; display: flex; align-items: center;
-      justify-content: center; z-index: 2147483647; opacity: 0;
-      transition: opacity .4s ease; pointer-events: none;
-      background: radial-gradient(ellipse at center,
-        rgba(18,15,28,.58) 0%, rgba(18,15,28,.16) 70%, rgba(18,15,28,0) 100%);
-    `;
-    const t = document.createElement('div');
-    t.id = '__demo_bridge_t';
-    t.style.cssText = `
-      color: #fff; font: 600 34px/1.4 system-ui, sans-serif; text-align: center;
-      max-width: 72%; text-shadow: 0 2px 22px rgba(0,0,0,.65);
-    `;
-    el.appendChild(t);
-    document.body.appendChild(el);
-  }
-  document.getElementById('__demo_bridge_t').textContent = text;
-  el.style.opacity = text ? '1' : '0';
-};
-"""
 
 # The two overlays this module puts on the page, by element id.
 #
@@ -451,9 +365,12 @@ _FROZEN_CLOCK_JS = """
 # frame; a finite one ends where it would have ended.
 #
 # Two things are spared, and both matter:
-#   * the recorder's own overlays (`#__demo…`, `#__term…`) — their motion is
-#     triggered by the storyboard, so it is already as repeatable as the
-#     storyboard is, and killing it would only make captions pop;
+#   * the recorder's own furniture (`#__demo…`, `#__term…`, `#__chrome…`) —
+#     its motion is triggered by the storyboard, so it is already as
+#     repeatable as the storyboard is, and killing it would only make
+#     captions pop. `#__chrome…` joined the list in #362, when the rule
+#     first reached the chrome document at all: the hold's 450 ms reveal is
+#     recorder motion by the same reading as a caption's fade;
 #   * anything carrying `data-demo-video-animate` — the documented opt-out for
 #     an element that must keep painting. Chromium's screencast emits a frame
 #     when the page paints (issue #18), so "no motion at all" is not a free
@@ -462,7 +379,8 @@ _FROZEN_CLOCK_JS = """
 _FREEZE_MOTION_JS = """
 (() => {
   const KEEP =
-    ':not([data-demo-video-animate]):not([id^="__demo"]):not([id^="__term"])';
+    ':not([data-demo-video-animate]):not([id^="__demo"]):not([id^="__term"])'
+    + ':not([id^="__chrome"])';
   // The pseudo-element arms are not padding: an animated ::after is the most
   // common spinner on the web.
   const CSS = ['', '::before', '::after'].map((p) => '*' + KEEP + p).join(',') + `{
@@ -1043,22 +961,12 @@ class _DemoBase:
             "SPEECH_MODEL", "eleven_multilingual_v2"
         )
         self._tts_dir = self.out_dir / ".tts"
-        # Caption font size in px. Both media record at true pixel size now,
-        # so this is the size on screen: the web recorder's band caption and
-        # the terminal's in-page bar both render it as declared. (The deleted
+        # Caption font size in px, handed to `chrome_html` by each medium's
+        # `_start`. Both media record at true pixel size, so this is the
+        # size on screen in the chrome's caption band. (The deleted
         # composite scaled the web page ~0.8 and compensated with 34px — see
         # web.py's history note.)
         self._caption_font_px = 26
-        # Caption distance from the frame bottom, in px — `_CAPTION_JS`'s
-        # in-page overlay only, which today means the terminal recorder (the
-        # web caption lives in the wrapper chrome's own band and never reads
-        # this). The terminal raises it so the bar clears its window's edge.
-        self._caption_bottom_px = 44
-        # The interlude card's stylesheet, read only when `_INTERLUDE_JS` has
-        # to *build* the element — which today means the terminal page: the
-        # web recorder's wrapper document ships the card element in its own
-        # card layer (chrome.py, #360), so the script only toggles it there.
-        self._interlude_css = INTERLUDE_CSS_TERMINAL
         self._lines: list[tuple[float, Path]] = []  # (video offset s, clip)
         # Both are readings of time.monotonic(). Nothing in this package
         # measures elapsed time any other way — not the beat log, not narration
@@ -1178,18 +1086,29 @@ class _DemoBase:
                 file=sys.stderr,
             )
 
-    def _interlude_script(self) -> str:
-        """`__demoInterlude`, carrying **this medium's** card (issue #291).
+    def _freeze_motion_here(self) -> None:
+        """Re-attach the motion rule to a document `set_content` just wrote.
 
-        A method rather than an expression inside `__enter__` because that is
-        where the dispatch would otherwise be, and `__enter__` needs a browser:
-        this is the whole of the per-medium choice, and it is the largest part
-        of it a browser-free test can reach. `tests/unit` reads what it returns
-        for a recorder of each medium.
+        `page.set_content` writes a new document into the same window. The
+        `<style>` the context init script appended goes with the old one,
+        and the init script does **not** run again — measured directly: a
+        probe init script's counter stays at 1 across `set_content` while
+        its style element is gone. Globals survive (same realm), which is
+        why the frozen clock needs nothing here and this does.
+
+        It went unnoticed until #362, because until then the only document
+        either medium wrote its chrome into was the web wrapper, whose app
+        is an iframe with a document of its own where the init script does
+        run. The terminal's content is *in* the written document, so every
+        animation probe in this repository's `tests/smoke --terminal-only`
+        read its authored duration — 2 s where the rule says 1 ms.
+
+        A no-op unless `deterministic=True`, like the init script it
+        repeats: the rule is opt-in and this does not widen that.
         """
-        return _INTERLUDE_JS.replace("__ID__", INTERLUDE_ID).replace(
-            "__CSS__", self._interlude_css
-        )
+        if not self.deterministic:
+            return
+        self.page.evaluate("() => {" + _FREEZE_MOTION_JS + "}")
 
     # -- subclass hooks -----------------------------------------------------
 
@@ -1259,14 +1178,11 @@ class _DemoBase:
                     _FROZEN_CLOCK_JS.replace("__EPOCH_MS__", str(self._clock_ms))
                 )
                 self._context.add_init_script(_FREEZE_MOTION_JS)
-            # Overlays common to every medium.
-            self._context.add_init_script(
-                _CAPTION_JS.replace("__CAPFONT__", str(self._caption_font_px))
-                .replace("__CAPBOTTOM__", str(self._caption_bottom_px))
-            )
-            self._context.add_init_script(self._interlude_script())
-            self._context.add_init_script(_BRIDGE_JS.replace("__ID__", BRIDGE_ID))
-            # Medium-specific init scripts (cursor, spotlight, ...).
+            # No caption/card init scripts ride along: the chrome document
+            # each medium's `_start` builds carries its own renderers
+            # (chrome.py), and nothing calls them before it is up — see the
+            # history note over INTERLUDE_ID.
+            # Medium-specific init scripts (opening hold, spotlight, ...).
             self._init_context(self._context)
             self.page = self._context.new_page()
             # Chromium's screencast starts with the page, so this — not the
@@ -2266,12 +2182,13 @@ take with fewer beats than the last one would otherwise leave the
         and the medium seam's whole rule is that a medium extends by
         implementing a hook it was offered.
 
-        Only `TerminalRecorder` answers. Its segments open on a card raised
-        before capture starts, and the strip of background beside its window
-        says in one number whether the card was up when the recording began.
-        The web recorder answers None — its opening is the wrapper hold, up
-        in frame 0 and cleared by the first `goto()` (#360), which the
-        review sheet names on the frames cut inside it (frames.py) rather
+        Only `TerminalRecorder` answers. Its takes open on the chrome's hold
+        (or the clause card `interlude=` raised over it), and a strip of the
+        app rect says in one number whether that cover was up when the
+        recording began (#362 moved the strip inside the window — see
+        `terminal.OPENING_STRIP`). The web recorder answers None — its
+        opening hold is graded by `tests/smoke --wrapper-only` and named by
+        the review sheet on the frames cut inside it (frames.py) rather
         than this field claiming a card the medium did not measure — so None
         lands in the artifact as `content.opening.card: null`.
         """
@@ -2297,15 +2214,16 @@ take with fewer beats than the last one would otherwise leave the
                 f"frame ({type(exc).__name__}: {exc}), so nothing about the "
                 f"picture was measured"
             )
-            # The opening frame is *not* measured over the app rect — a medium
-            # that can read its own window still knows where to look — so a
-            # take that lost one measurement does not have to lose the other
-            # (issue #235). Without this the whole `opening` block was null on
-            # this path, which is an absence with no reason in it: a terminal
-            # take that could read `#__term_win` and not `#__term_host` said
-            # nothing at all about the frame it opened on, and nothing said
-            # why. `gap` genuinely could not be measured here, and the note is
-            # where that is written down.
+            # The opening frame is *not* measured over `_content_rect`'s
+            # answer — a medium whose chrome geometry survived still knows
+            # where to look — so a take that lost one measurement does not
+            # have to lose the other (issue #235). Without this the whole
+            # `opening` block was null on this path, which is an absence
+            # with no reason in it: a terminal take that had its geometry
+            # and not its `#__term_host` box said nothing at all about the
+            # frame it opened on, and nothing said why. `gap` genuinely
+            # could not be measured here, and the note is where that is
+            # written down.
             self._content["opening"] = opening_report(
                 None,
                 "the app rect could not be worked out, so the opening gap was "
@@ -2552,16 +2470,19 @@ take with fewer beats than the last one would otherwise leave the
     def _note_caption_clipped(self, text: str, clipped: object) -> None:
         """A caption surface that measured itself clipped gets written down.
 
-        Only the wrapper chrome's `__demoCaption` (chrome.py, #358) returns a
-        number: its caption band has a fixed height and `overflow: hidden` —
-        the construction that keeps the app rect caption-free — so a caption
+        The chrome's `__demoCaption` (chrome.py, #358) returns the number:
+        its caption band has a fixed height and `overflow: hidden` — the
+        construction that keeps the app rect caption-free — so a caption
         too tall for the band is shaved at the band's edges while the beat
         log records the full sentence. Without this, that is `timeline.json`
         claiming a line the pixels do not show: measured on a 174-character
         caption, the band's flex centring shaved ~17 px off the top of the
         first line and the bottom of the third, `warnings` stayed empty and a
-        strict take stayed green. The in-page overlay `_CAPTION_JS` grows
-        with its text and returns nothing, so nothing fires off this path.
+        strict take stayed green. Both media share the band since #362, so
+        this fires on a terminal take exactly as on a web one. (The retired
+        in-page overlay grew with its text and returned nothing — the None
+        guard below is also what keeps a scripted page that answers nothing
+        from minting an issue.)
 
         The text is deliberately **not** capped or reflowed — the honest
         artifact is the point. An issue rather than a refusal, and not in

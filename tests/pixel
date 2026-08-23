@@ -45,8 +45,9 @@ own. This file never opens the lock path.
 check over a take with no frames would fail for a reason it does not name),
 then the four golden chrome properties, the defects humans caught by eye:
 
-- **opening-card** (terminal): frame 0 is the card, the card holds an
-  unbroken prefix, and the corner later reads bare as the control (#110).
+- **opening-card** (terminal): frame 0 is the cover, no frame of the strip
+  ever shows the slot's bare canvas, and the strip later stops being a flat
+  field as the control - the terminal appeared (#110).
 - **card-vs-window** (web): the criterion card and the window body around
   the app are one colour in demo.mp4, worst channel — one uncompensated
   declaration through one encoder (#291's class, retired by #360/#361) -
@@ -77,6 +78,7 @@ import os
 import re
 import shutil
 import socket
+import statistics
 import struct
 import subprocess
 import sys
@@ -135,17 +137,37 @@ SERVER_START_TIMEOUT_S = 10.0
 # that applies it. Each constant names its smoke counterpart so a retuning
 # there is a prompt to retune here — and a divergence is a decision, not drift.
 
-# tests/smoke's OPENING_* family. Card and bare are deliberately far apart with
-# a deliberately empty gap: a frame between the two is the card mid-fade, and
-# nothing here calls that either one.
+# tests/smoke's OPENING_* family, re-based with the terminal's move into the
+# shared chrome (#362): the sweep reads a strip of the app rect (the shared
+# card layer covers the app rect and nothing else, so the old strip of
+# background beside the bespoke window never changes any more). Covered and
+# bare are deliberately far apart with a deliberately empty gap: a frame
+# between the two is a fade, and nothing here calls that either one.
 OPENING_SAMPLE_FPS = 20  # tests/smoke OPENING_SAMPLE_FPS
 OPENING_CARD_MAX_LUMA = 60.0  # tests/smoke OPENING_CARD_MAX_LUMA
 OPENING_BARE_MIN_LUMA = 150.0  # tests/smoke OPENING_BARE_MIN_LUMA
 # The value of tests/smoke's MIN_OPENING_CARD_S: the take holds its card 2.5 s,
-# the bar is 1.0 s — room for a stalled screencast (#18), none for a card that
-# arrives after the terminal does (#110).
+# the bar is 1.0 s — room for a stalled screencast (#18), none for a cover
+# that comes down before the card was read (#110).
 MIN_OPENING_CARD_S = 1.0
 MIN_OPENING_FRAMES = 40  # tests/smoke MIN_OPENING_FRAMES: the sweep floor
+# terminal.OPENING_STRIP, duplicated (the loop imports nothing from the
+# recorder): the strip of the app rect the opening claims read — a top band
+# starting near the left edge, where a shell's first rows land (CARD_STRIP's
+# web-tuned inset was measured missing every glyph of a short command).
+OPENING_STRIP_FRACTIONS = (0.01, 0.04, 0.90, 0.16)
+# What counts as the terminal having appeared in that strip: the strip's own
+# luma standard deviation. The cover is a flat field by construction and
+# terminal text is not, so the two are told apart on structure rather than
+# on brightness — the revealed terminal is as dark as the cover it replaces.
+# Change against frame 0 was measured first and does not grade: the covered
+# stretch reads 0.00 here but 1.68 on tests/smoke's own take, where the
+# chrome document arrives after frame 0 and shifts the whole flat field,
+# against 1.86 for the first revealed command. Standard deviation over both
+# takes: covered 0.105-0.147, chrome-arrival transient at worst 0.686, first
+# revealed command 2.10-2.12, settled terminal 13.7-13.9. tests/smoke
+# TERMINAL_REVEAL_MIN_STDDEV is the same number for the same measurement.
+TERMINAL_REVEAL_MIN_STDDEV = 1.2
 
 # core.WEB_WINDOW_BODY in decimal — the ONE declaration the wrapper card,
 # the window body and the opening hold all paint from (#360), duplicated
@@ -293,13 +315,13 @@ def record_terminal(out_dir: Path) -> dict:
         rec.pause(0.4)
         rec.caption("")
 
-        win = rec.page.locator("#__term_win").bounding_box()
         host = rec.page.locator("#__term_host").bounding_box()
-        if win is None or host is None:
+        if host is None:
             raise PixelFailure(
-                "terminal: #__term_win/#__term_host has no box - the terminal "
-                "window never rendered"
+                "terminal: #__term_host has no box - the terminal never "
+                "rendered in the chrome's slot"
             )
+        geom = dict(rec._geom)
         size = (rec._size["width"], rec._size["height"])
     return {
         "card": card,
@@ -309,7 +331,10 @@ def record_terminal(out_dir: Path) -> dict:
             int(host["width"]),
             int(host["height"]),
         ],
-        "win": [int(win["x"]), int(win["y"]), int(win["width"]), int(win["height"])],
+        # The shared chrome's geometry (#362) - the same dict the web take's
+        # marker carries, so the opening check derives its strip from the
+        # one shape every geometry consumer reads.
+        "geom": geom,
         "size": list(size),
     }
 
@@ -543,23 +568,15 @@ def recorded(take: Path) -> bool:
 def opening_kind(value: float) -> str:
     """card / bare / between, tests/smoke's classifier with the same bars.
 
-    `between` is the card mid-fade; it is deliberately neither, and a prefix
-    counter that treated it as card would call #128's half-faded frame 'the
-    card was still up'.
+    `between` is a fade caught mid-way; it is deliberately neither, so a
+    check never calls #128's half-faded frame either the cover or the bare
+    canvas.
     """
     if value <= OPENING_CARD_MAX_LUMA:
         return "card"
     if value >= OPENING_BARE_MIN_LUMA:
         return "bare"
     return "between"
-
-
-def card_prefix(luma: list[float]) -> int:
-    """How many leading frames read card — ends at the first that does not."""
-    prefix = 0
-    while prefix < len(luma) and opening_kind(luma[prefix]) == "card":
-        prefix += 1
-    return prefix
 
 
 def beat_spans(doc: dict, verb: str) -> list[tuple[float, float]]:
@@ -701,94 +718,139 @@ def _verdict(name: str, take: Path, problems: list[str], detail: str) -> None:
     print(f"{take.name}/{name}: {state} - {detail}")
 
 
+def opening_strip(geom: dict) -> Rect:
+    """`OPENING_STRIP_FRACTIONS` of the app rect - the recorder's own strip.
+
+    The same arithmetic `terminal._opening_card_rect` runs, duplicated (the
+    loop-vs-recorder rule), so the frames graded here are the frames the
+    take's own `content.opening.card` describes.
+    """
+    fx, fy, fw, fh = OPENING_STRIP_FRACTIONS
+    return (
+        geom["appx"] + int(geom["appw"] * fx),
+        geom["appy"] + int(geom["apph"] * fy),
+        max(8, int(geom["appw"] * fw)),
+        max(8, int(geom["apph"] * fh)),
+    )
+
+
 def check_opening_card(
     take: Path, info: dict | None, dump: Path | None = None
 ) -> list[str]:
-    """The terminal take opens on its card, holds it, then clears it (#110).
+    """The terminal take opens covered, holds the cover, then shows a
+    terminal (#110, re-based on the shared chrome by #362).
 
     tests/smoke's check_opening_card, on the cached take: one sweep of the
-    background strip beside the terminal window, three statements each broken
-    by a different mistake. Frame 0 is read by frame index out of the same
-    decode — never by seeking a timestamp, which is how #128 caught a fade
-    mid-way and called it neither.
+    opening strip inside the app rect, three statements each broken by a
+    different mistake. Terminal content is as dark as the hold, so "the
+    cover came down" is read as *change against frame 0* rather than as
+    luma — the revealed terminal puts prompt and command rows through the
+    strip, a hold left up changes nothing (#91). Frame 0 is read by frame
+    index out of the same decode — never by seeking a timestamp, which is
+    how #128 caught a fade mid-way and called it neither.
     """
     name = "opening-card"
     mp4 = take / "demo.mp4"
-    if not info or "win" not in info or "size" not in info:
+    if not info or "geom" not in info or "size" not in info:
         return [
-            f"{take.name}/{name}: the marker carries no window geometry - "
+            f"{take.name}/{name}: the marker carries no chrome geometry - "
+            f"it predates the terminal's move into the shared chrome (#362); "
             f"re-record (tests/pixel record --force)"
         ]
-    win, size = info["win"], info["size"]
-    # The strip of background to the right of the terminal window — outside
-    # it on purpose, same as tests/smoke: inside, the card and the terminal
-    # are both dark and are told apart by their text.
-    right = int(win[0]) + int(win[2])
-    corner: Rect = (right + 8, 0, max(8, int(size[0]) - right - 16), 50)
-    frames = gray_frames(mp4, rect=corner, sample_fps=OPENING_SAMPLE_FPS)
+    strip = opening_strip(info["geom"])
+    frames = gray_frames(mp4, rect=strip, sample_fps=OPENING_SAMPLE_FPS)
     luma = [sum(f) / len(f) for f in frames]
     if len(luma) < MIN_OPENING_FRAMES:
         return [
-            f"{take.name}/{name}: the corner sweep decoded {len(luma)} frames "
-            f"at {OPENING_SAMPLE_FPS} fps over {corner}, under the "
+            f"{take.name}/{name}: the strip sweep decoded {len(luma)} frames "
+            f"at {OPENING_SAMPLE_FPS} fps over {strip}, under the "
             f"{MIN_OPENING_FRAMES} floor - every statement below would be "
             f"satisfied by a video too short to hold the card at all"
         ]
 
     problems: list[str] = []
+    # Frame 0 is the cover - the opening hold, or the clause card over it -
+    # not the slot's white canvas (~255) or the unheld chrome (~225).
     if opening_kind(luma[0]) != "card":
         problems.append(
-            f"{take.name}/{name}: frame 0 reads {luma[0]:.1f} mean luma in the "
-            f"corner at {corner} ({opening_kind(luma[0])!r}, card <= "
-            f"{OPENING_CARD_MAX_LUMA:.0f}) - the take opens on the terminal "
-            f"and the card arrives afterwards, issue #110"
+            f"{take.name}/{name}: frame 0 reads {luma[0]:.1f} mean luma over "
+            f"the app strip {strip} ({opening_kind(luma[0])!r}, cover <= "
+            f"{OPENING_CARD_MAX_LUMA:.0f}) - the take opens on the slot's "
+            f"canvas and the cover arrives afterwards, issue #110"
         )
         dump_frame(dump, name, "frame-0-FAIL", mp4, frame_index=0)
-    prefix = card_prefix(luma)
-    prefix_s = prefix / OPENING_SAMPLE_FPS
-    if prefix_s < MIN_OPENING_CARD_S:
-        problems.append(
-            f"{take.name}/{name}: the card covers only the first "
-            f"{prefix_s:.2f}s ({prefix} frames at {OPENING_SAMPLE_FPS} fps), "
-            f"under the {MIN_OPENING_CARD_S}s bar - frame {prefix} reads "
-            f"{luma[min(prefix, len(luma) - 1)]:.1f}, the viewer sees the "
-            f"terminal before the card that should be covering it"
-        )
-        dump_frame(
-            dump, name, f"prefix-end-frame-{prefix}-FAIL", mp4, frame_index=prefix
-        )
-    bare = next(
+    # The slot's canvas never shows: a cover cleared before xterm.js painted
+    # is a white flash in the window, and no healthy frame of this strip is
+    # ever bare - the terminal is as dark as the hold.
+    flash = next(
         (i for i, value in enumerate(luma) if opening_kind(value) == "bare"), None
     )
-    if bare is None:
+    if flash is not None:
         problems.append(
-            f"{take.name}/{name}: the corner never reaches "
-            f"{OPENING_BARE_MIN_LUMA:.0f} mean luma in "
-            f"{len(luma) / OPENING_SAMPLE_FPS:.1f}s (range "
-            f"{min(luma):.1f}..{max(luma):.1f}) - without a bare control the "
-            f"first two statements are equally true of a recorder that "
-            f"painted a black rectangle and stopped (#91)"
+            f"{take.name}/{name}: frame {flash} "
+            f"({flash / OPENING_SAMPLE_FPS:.2f}s) reads {luma[flash]:.1f} "
+            f"mean luma over {strip} (bare >= {OPENING_BARE_MIN_LUMA:.0f}) - "
+            f"the slot's canvas showed through, so the cover came down "
+            f"before the terminal painted"
+        )
+        dump_frame(dump, name, f"flash-frame-{flash}-FAIL", mp4, frame_index=flash)
+    # The cover holds, then the terminal appears: the first frame that has
+    # moved against frame 0 is the reveal, it must exist (#91 - a hold left
+    # up changes nothing, ever) and it must not come before the card was
+    # readable (#110's other half).
+    spread = [statistics.pstdev(f) for f in frames]
+    revealed = next(
+        (i for i, v in enumerate(spread) if v >= TERMINAL_REVEAL_MIN_STDDEV), None
+    )
+    if revealed is None:
+        problems.append(
+            f"{take.name}/{name}: no frame of {len(frames)} at "
+            f"{OPENING_SAMPLE_FPS} fps ever reaches "
+            f"{TERMINAL_REVEAL_MIN_STDDEV} luma stddev over "
+            f"{strip} (worst {max(spread):.2f}) - the cover is never taken "
+            f"down (#91), and the frame-0 statement above would be satisfied "
+            f"by a recorder that painted a rectangle and stopped"
         )
         dump_frame(
-            dump, name, "last-frame-no-bare-FAIL", mp4, frame_index=len(luma) - 1
+            dump, name, "last-frame-no-reveal-FAIL", mp4, frame_index=len(luma) - 1
         )
+    else:
+        revealed_s = revealed / OPENING_SAMPLE_FPS
+        if revealed_s < MIN_OPENING_CARD_S:
+            problems.append(
+                f"{take.name}/{name}: the strip stops being a flat field "
+                f"at {revealed_s:.2f}s ({spread[revealed]:.2f} luma stddev, "
+                f"floor {TERMINAL_REVEAL_MIN_STDDEV}), under the "
+                f"{MIN_OPENING_CARD_S}s bar - the viewer sees the terminal "
+                f"before the card could be read, issue #110"
+            )
+            dump_frame(
+                dump,
+                name,
+                f"reveal-frame-{revealed}-FAIL",
+                mp4,
+                frame_index=revealed,
+            )
+        else:
+            dump_frame(
+                dump,
+                name,
+                f"revealed-from-{revealed_s:.2f}s",
+                mp4,
+                frame_index=revealed,
+            )
     dump_frame(dump, name, "frame-0", mp4, frame_index=0)
-    if bare is not None:
-        dump_frame(
-            dump,
-            name,
-            f"bare-from-{bare / OPENING_SAMPLE_FPS:.2f}s",
-            mp4,
-            frame_index=bare,
-        )
-    bare_s = f"{bare / OPENING_SAMPLE_FPS:.2f}s" if bare is not None else "never"
+    reveal_s = (
+        f"{revealed / OPENING_SAMPLE_FPS:.2f}s" if revealed is not None else "never"
+    )
     _verdict(
         name,
         take,
         problems,
-        f"frame 0 luma {luma[0]:.1f} (card <= {OPENING_CARD_MAX_LUMA:.0f}), "
-        f"card prefix {prefix_s:.2f}s (bar {MIN_OPENING_CARD_S:.1f}s), bare "
-        f">= {OPENING_BARE_MIN_LUMA:.0f} from {bare_s}",
+        f"frame 0 luma {luma[0]:.1f} over {strip} (cover <= "
+        f"{OPENING_CARD_MAX_LUMA:.0f}), no bare frame (max {max(luma):.1f}), "
+        f"terminal revealed from {reveal_s} (bar {MIN_OPENING_CARD_S:.1f}s, "
+        f"stddev floor {TERMINAL_REVEAL_MIN_STDDEV})",
     )
     return problems
 

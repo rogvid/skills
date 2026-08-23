@@ -22,7 +22,7 @@ app itself and writes what it saw into `timeline.json` as `issues`:
 | `request_failed` | a request that never got a response | no |
 | `http_error` | a response with status ≥ 400 (3xx redirects are normal) | no |
 | `nonzero_exit` | a `TerminalRecorder` `run()` whose command failed | yes |
-| `caption_lost` | a page load took the caption bar off the screen; the beat log cleared with it and the issue names the line and the new URL. Found only in timelines recorded before the wrapper cutover (#361): a web take's caption now lives in the recorder's own document, which no app navigation can destroy, so this can never fire — the recorder does not even subscribe the signal (#360). Caption death on navigation is a terminal-take concern only (its caption is in-page, until #362), and a terminal take's page never navigates | no |
+| `caption_lost` | a page load took the caption bar off the screen; the beat log cleared with it and the issue names the line and the new URL. Found only in timelines recorded before the cutovers (#361 for web, #362 for terminal). Every caption now lives in the recorder's own document, which no app navigation can destroy, so this can never fire — the recorder does not even subscribe the signal (#360). The kind stays published so an old committed timeline still reads | no |
 
 Each issue is **attributed to the beat that was running when it fired** —
 `beat` (an index into `beats`), plus the beat's `verb` and `caption` copied

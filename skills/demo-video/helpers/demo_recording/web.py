@@ -511,9 +511,10 @@ class Recorder(_DemoBase):
         and the beats that keep reporting the caption across a mid-take goto
         are right — the line really is still on screen (this repository's
         `tests/smoke --wrapper-only` reads it out of the band's pixels
-        across a full document load). The in-page caption that *does* die
-        with its document survives only on the terminal path, whose page the
-        recorder owns and never navigates, until #362 moves it here too.
+        across a full document load). Since #362 the terminal caption lives
+        in the same chrome band, so caption death on navigation is no
+        medium's concern — the `caption_lost` issue kind survives only in
+        timelines committed before the cutovers.
         """
         # **Kept deliberately when the masking went** — #142's carve-out.
         # Written for the paint gate, which is gone; nothing reads the flag.
@@ -543,10 +544,15 @@ class Recorder(_DemoBase):
                 caption_font_px=self._caption_font_px,
             )
         )
+        # The chrome document is written, not navigated to, so it never got
+        # the motion rule (`_freeze_motion_here`). The app iframe below has
+        # a document of its own and does get it from the init script; this
+        # is for the chrome around it, so both media are one behaviour.
+        self._freeze_motion_here()
         # Mounted here rather than shipped in the chrome document because the
-        # iframe is the *web* medium's content — #362 mounts xterm.js in the
-        # same slot. Size comes from the slot's CSS (chrome.py), which is the
-        # app rect exactly.
+        # iframe is the *web* medium's content — the terminal recorder mounts
+        # xterm.js in the same slot (#362). Size comes from the slot's CSS
+        # (chrome.py), which is the app rect exactly.
         self.page.evaluate(
             "() => {"
             " const frame = document.createElement('iframe');"
