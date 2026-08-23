@@ -470,16 +470,21 @@ INJECTIONS = [
         # The card raised at zero opacity: the element is in the tree with the
         # right text and the right stylesheet, so the aria snapshot, the beat
         # log and the coverage table are all exactly as they should be, and the
-        # app is what a viewer sees. Every other assertion in this arm passes.
-        # Injected into the chrome document's own `__demoInterlude` — the one
-        # a wrapper take's criterion() reaches (chrome.py).
+        # app is what a viewer sees. Injected into the chrome document's own
+        # `__demoInterlude` — the one a wrapper take's criterion() reaches
+        # (chrome.py). Since the check learned to locate the card in the video
+        # before measuring it (the #245 fade-aliasing fix), an invisible card
+        # is caught one step earlier: the only dark stretch overlapping the
+        # logged beat is the 0.6 s opening hold, and the length gate names it
+        # a card that never held. The colour comparison is unreachable — there
+        # is nothing to read the colour of, which is the defect.
         name="the card is built with the right colour and never shown",
         module="chrome.py",
         old="    card.style.opacity = text ? '1' : '0';",
         new="    card.style.opacity = '0';",
         arm="--coverage-only",
         sites=("check_wrapper_card",),
-        must_contain=("levels apart, worst channel (bar",),
+        must_contain=("the card flashed rather than held",),
     ),
     # -- what strict=True refuses (issue #3), 21 s an entry -------------------
     #

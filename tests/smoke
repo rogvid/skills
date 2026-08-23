@@ -130,6 +130,7 @@ from _pixels import (  # noqa: E402
     FRAME_BAND,
     Rect,
     caption_band,
+    card_run,
     card_strip,
     channels_apart,
     contrast,
@@ -9163,12 +9164,33 @@ WRAPPER_FIRST_FRAME_S = 0.05
 # pixels rather than declarations either way (#297's two recorded
 # anti-patterns).
 WRAPPER_CARD_WINDOW_TOLERANCE = 5.0
-# Where inside the criterion beat the card is sampled, and how far past its
-# end the no-card control is read. Fractions well inside the beat because
-# the beat log's clock and the video's sit ~130 ms apart (#245); the control
-# lands in the storyboard's deliberate pause after `interlude("")`.
+# The card is located in the video before anything is measured: the longest
+# dark stretch of the app strip that overlaps the logged criterion span
+# (`card_run`, shared with the pixel loop's golden), sampled only in its
+# interior. Beat-log fractions were how this check first shipped, and they
+# are the aliasing #245 warns about: on a stepping host the video slides
+# under the log, so a fixed fraction of the *logged* span lands on the
+# card's fade — measured on a kept take, the gap read 0.0 from 10% to 50%
+# through the logged beat, 5.6 at 60% (mid-fade) and 205 at 70% (card
+# gone). Those 5.x readings were reported as healthy encoder noise when
+# the bar was set; with the fade excluded the healthy band is 0.5-3.8.
+WRAPPER_CARD_SWEEP_FPS = 10
+# One classification bar with the opening card: at or under this mean luma
+# the strip is the card (or the hold), above ~150 it is the app.
+WRAPPER_CARD_LOCATE_MAX_LUMA = 60.0
+# Sweep frames skipped at each end of the located run before sampling. The
+# dark flag admits the first frames of the 0.45 s fade (a mid-fade frame
+# reads ~28-40 mean luma, still under the locate bar, while its colour is
+# already blended toward the app) — the kept take's 5.6 was exactly such a
+# frame.
+WRAPPER_CARD_EDGE_TRIM = 2
+# Where inside the trimmed run the card is sampled.
 WRAPPER_CARD_FRACTIONS = (0.3, 0.6)
-WRAPPER_CARD_CONTROL_AFTER_S = 1.2
+# The located run must hold at least this long AND at least half the logged
+# span, or the card flashed rather than held; and the video must go on past
+# the run long enough for a no-card control to exist.
+WRAPPER_CARD_MIN_STRETCH_S = 1.0
+WRAPPER_CARD_MIN_DOWN_S = 0.8
 # Under this separation between the no-card control and the window body, the
 # app cannot be told from the card and the readings above prove nothing.
 WRAPPER_CARD_CONTROL_MIN_GAP = 12.0
@@ -9532,6 +9554,12 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     alternatives (pinned equal, pinned apart) as anti-patterns, and neither
     is asserted here or anywhere.
 
+    The instants are found in the video, then tied to the log by overlap
+    (`card_run`, the pixel golden's locator): a fixed fraction of the
+    *logged* span lands on the card's fade when the host's clock steps
+    (#245) — see the note over WRAPPER_CARD_SWEEP_FPS for the take that
+    proved it.
+
     The premise the readings need: after the card is down, the strip must
     read as something *other* than the window body, or an app the colour of
     the card would pass with no card in the recording at all.
@@ -9550,7 +9578,40 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     strip = card_strip(app)
     pad = wrapper_pad_band(geom)
 
-    control_at = end + WRAPPER_CARD_CONTROL_AFTER_S
+    sweep = gray_frames(mp4, rect=strip, sample_fps=WRAPPER_CARD_SWEEP_FPS)
+    dark = [
+        sum(f) / len(f) <= WRAPPER_CARD_LOCATE_MAX_LUMA for f in sweep if len(f)
+    ]
+    media_s = len(sweep) / WRAPPER_CARD_SWEEP_FPS
+    run = card_run(dark, WRAPPER_CARD_SWEEP_FPS, (start, end))
+    if run is None:
+        return [
+            f"wrapper-card: no dark stretch of the app strip {strip} "
+            f"(<= {WRAPPER_CARD_LOCATE_MAX_LUMA:.0f} mean luma at "
+            f"{WRAPPER_CARD_SWEEP_FPS} fps, {media_s:.1f}s of video) overlaps "
+            f"the criterion beat logged at {start:.2f}-{end:.2f}s — the card "
+            f"never painted"
+        ]
+    run_start, run_len = run
+    rs = run_start / WRAPPER_CARD_SWEEP_FPS
+    re_ = (run_start + run_len) / WRAPPER_CARD_SWEEP_FPS
+    if run_len / WRAPPER_CARD_SWEEP_FPS < max(
+        WRAPPER_CARD_MIN_STRETCH_S, 0.5 * (end - start)
+    ):
+        return [
+            f"wrapper-card: the card stretch in the video is only "
+            f"{run_len / WRAPPER_CARD_SWEEP_FPS:.1f}s ({rs:.2f}-{re_:.2f}s) "
+            f"against a criterion beat logged {end - start:.1f}s long — the "
+            f"card flashed rather than held"
+        ]
+    if media_s - re_ < WRAPPER_CARD_MIN_DOWN_S:
+        return [
+            f"wrapper-card: the card stretch runs to {re_:.2f}s of a "
+            f"{media_s:.1f}s video — the card is never taken down, and there "
+            f"is no app stretch to tell it apart from"
+        ]
+
+    control_at = re_ + (media_s - re_) * 0.5
     control = strip_rgb(mp4, control_at, strip)
     control_pad = strip_rgb(mp4, control_at, pad)
     if control is None or control_pad is None:
@@ -9561,7 +9622,7 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     control_gap = channels_apart(control, control_pad)
     if control_gap <= WRAPPER_CARD_CONTROL_MIN_GAP:
         return [
-            f"wrapper-card: with the card down since {end:.2f}s the strip "
+            f"wrapper-card: with the card down since {re_:.2f}s the strip "
             f"{strip} reads {tuple(round(v) for v in control)} at "
             f"{control_at:.2f}s, only {control_gap:.0f} levels off the window "
             f"body {tuple(round(v) for v in control_pad)} (premise bar "
@@ -9569,10 +9630,14 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
             f"from the card, or the card was never taken down"
         ]
 
+    trim = WRAPPER_CARD_EDGE_TRIM / WRAPPER_CARD_SWEEP_FPS
+    lo, hi = rs + trim, re_ - trim
+    if hi <= lo:
+        lo = hi = (rs + re_) / 2
     failures: list[str] = []
     gaps: list[float] = []
     for fraction in WRAPPER_CARD_FRACTIONS:
-        at = start + (end - start) * fraction
+        at = lo + (hi - lo) * fraction
         card = strip_rgb(mp4, at, strip)
         body = strip_rgb(mp4, at, pad)
         if card is None or body is None:
@@ -9585,20 +9650,22 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
         gaps.append(gap)
         if gap > WRAPPER_CARD_WINDOW_TOLERANCE:
             failures.append(
-                f"wrapper-card: {(fraction * 100):.0f}% through the criterion "
-                f"beat the card reads {tuple(round(v) for v in card)} over "
-                f"{strip} and the window body "
-                f"{tuple(round(v) for v in body)} over {pad}, {gap:.1f} levels "
-                f"apart, worst channel (bar {WRAPPER_CARD_WINDOW_TOLERANCE}). "
-                f"On the wrapper path the two declare one colour and ride one "
-                f"encoder (#360), so this gap means the card's field was "
-                f"repainted away from core.WEB_WINDOW_BODY — the #291 mismatch "
-                f"a human once had to spot by eye"
+                f"wrapper-card: {at:.2f}s, inside the card's own stretch of "
+                f"the video ({rs:.2f}-{re_:.2f}s), the card reads "
+                f"{tuple(round(v) for v in card)} over {strip} and the window "
+                f"body {tuple(round(v) for v in body)} over {pad}, {gap:.1f} "
+                f"levels apart, worst channel (bar "
+                f"{WRAPPER_CARD_WINDOW_TOLERANCE}). On the wrapper path the "
+                f"two declare one colour and ride one encoder (#360), so this "
+                f"gap means the card's field was repainted away from "
+                f"core.WEB_WINDOW_BODY — the #291 mismatch a human once had "
+                f"to spot by eye"
             )
     if not failures:
         print(
             f"wrapper-card: card and window body sit {max(gaps):.1f} apart, "
-            f"worst channel over {len(gaps)} samples (bar "
+            f"worst channel over {len(gaps)} samples inside the card's "
+            f"{rs:.2f}-{re_:.2f}s stretch (bar "
             f"{WRAPPER_CARD_WINDOW_TOLERANCE}); the no-card control reads "
             f"{control_gap:.0f} off the body (premise bar "
             f"{WRAPPER_CARD_CONTROL_MIN_GAP}) — one declared colour, one "

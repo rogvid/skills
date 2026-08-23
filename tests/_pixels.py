@@ -243,3 +243,41 @@ def psnr_db(a: Path, b: Path) -> float | None:
     if not found:
         return None
     return math.inf if found.group(1) == "inf" else float(found.group(1))
+
+
+def true_runs(flags: list[bool]) -> list[tuple[int, int]]:
+    """Every contiguous True stretch, as (start, length), in order."""
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, flag in enumerate([*flags, False]):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            runs.append((start, i - start))
+            start = None
+    return runs
+
+
+def card_run(
+    flags: list[bool], fps: int, span: tuple[float, float]
+) -> tuple[int, int] | None:
+    """The longest dark stretch that overlaps the logged card span, or None.
+
+    Not simply the longest: a wrapper take carries a *second* dark stretch
+    in the same strip — the opening hold, up from frame 0 in the window's
+    own colour and deliberately so (#360) — and on a short take it can
+    outlast the card. Overlap keeps the same 2 s of leading slack the
+    beat-tie always had (the log's clock and the video's disagree, #245);
+    a run ending earlier than that, or starting after the span's end, is
+    not the card the timeline logged.
+    """
+    start_s, end_s = span
+    best: tuple[int, int] | None = None
+    for run_start, run_len in true_runs(flags):
+        run_start_s = run_start / fps
+        run_end_s = (run_start + run_len) / fps
+        if run_end_s < start_s - 2.0 or run_start_s > end_s:
+            continue
+        if best is None or run_len > best[1]:
+            best = (run_start, run_len)
+    return best
