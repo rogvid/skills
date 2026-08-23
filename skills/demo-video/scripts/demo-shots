@@ -107,11 +107,21 @@ def _load_timeline(demo: Path) -> tuple[dict, Path]:
 class Shot:
     """One `shot()` beat, as this block renders it."""
 
-    def __init__(self, index: int, name: str, caption: str, criteria: list[str]):
+    def __init__(
+        self,
+        index: int,
+        name: str,
+        caption: str,
+        criteria: list[str],
+        unmet: bool = False,
+    ):
         self.index = index
         self.name = name
         self.caption = caption
         self.criteria = criteria
+        #: The storyboard marked this beat as evidence its clause is *not*
+        #: met (#374). These render first — see `render`.
+        self.unmet = unmet
         #: The still's path inside the take, or None when the beat named a
         #: path this take may not link (see `take_relative`).
         self.rel: str | None = None
@@ -143,6 +153,7 @@ def shots(timeline: dict) -> list[Shot]:
             str(name) if isinstance(name, str) and name.strip() else stills[index],
             captions.get(index, ""),
             tags,
+            beat.get("shows") == "unmet",
         )
         error = beat.get("error")
         if isinstance(error, dict):
@@ -280,13 +291,25 @@ def render(
 ) -> str:
     """The block. A pure function of the take's own documents and the links."""
     n = len(found)
+    against = [shot for shot in found if shot.unmet]
+    rest = [shot for shot in found if not shot.unmet]
+    # The order sentence has to match the order (#374). A block that says
+    # "in the order they were taken" over a block that leads with the
+    # disagreement is a small lie in the one paragraph a reader trusts to
+    # tell them how to read the rest.
+    order = (
+        "in the order they were taken"
+        if not against
+        else "the ones the storyboard marks unmet first, the rest in the "
+        "order they were taken"
+    )
     out = [
         MARKER,
         "",
         f"## {n} still{'s' if n != 1 else ''} the storyboard took",
         "",
-        f"From `{where}`, in the order they were taken. Each caption is the "
-        f"line that was on screen at that moment.",
+        f"From `{where}`, {order}. Each caption is the line that was on "
+        f"screen at that moment.",
         "",
     ]
     ticket = timeline.get("ticket")
@@ -312,12 +335,42 @@ def render(
             "and recorded no video.",
             "",
         ]
-    for position, shot in enumerate(found, 1):
-        tags = " ".join(f"`{c}`" for c in shot.criteria)
-        head = f"**{position}.**" + (f" {tags}" if tags else "")
-        caption = shot.caption or f"*no caption was up — the still is `{shot.name}`*"
-        out += [f"{head} {caption}", "", picture(shot, demo, links), ""]
+    # The stills the storyboard marks as evidence *against* a clause come
+    # first (#374), and the rest stay in the order they were taken. That is
+    # the whole ordering rule: a reviewer who reads one screen of this block
+    # has to have met the disagreement, and a chronological walk buries it
+    # wherever in the take it happened to occur.
+    if against:
+        by_clause = sorted({c for shot in against for c in shot.criteria})
+        listed = ", ".join(f"`{c}`" for c in by_clause)
+        out += [
+            f"### The storyboard marks {listed} as unmet",
+            "",
+            "These beats are pointed at a clause as evidence **against** it. "
+            "That is the storyboard author's assertion, written down by the "
+            "recorder — nothing read the ticket, and nothing compared a "
+            "picture with a clause. They are first here because they are "
+            "the reason to look.",
+            "",
+        ]
+        for position, shot in enumerate(against, 1):
+            out += _still_md(position, shot, demo, links, clauses)
+        out += ["### The rest, in the order they were taken", ""]
+    for position, shot in enumerate(rest, len(against) + 1):
+        out += _still_md(position, shot, demo, links, clauses)
     return "\n".join(out).rstrip() + "\n"
+
+
+def _still_md(
+    position: int, shot: Shot, demo: Path, links: Links, clauses: list
+) -> list[str]:
+    """One still: its number, its tags, its caption, and the picture."""
+    tags = " ".join(f"`{c}`" for c in shot.criteria)
+    head = f"**{position}.**" + (f" {tags}" if tags else "")
+    if shot.unmet:
+        head += " **— claimed unmet**"
+    caption = shot.caption or f"*no caption was up — the still is `{shot.name}`*"
+    return [f"{head} {caption}", "", picture(shot, demo, links), ""]
 
 
 def main(argv: list[str] | None = None) -> int:

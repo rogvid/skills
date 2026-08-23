@@ -4139,6 +4139,153 @@ STORYBOARD_PAGE_ATTRS = frozenset({"keyboard", "mouse"})
 STORYBOARD_SWEEP_FILE_FLOOR = 4
 
 
+class ShowsUnmet(unittest.TestCase):
+    """A beat pointed at a clause as evidence *against* it (issue #374).
+
+    The skill could only record agreement. This is the other direction, and
+    the risk it carries is not correctness but wording: a storyboard author
+    asserts that a clause does not hold, and every artifact downstream has to
+    say *who* asserted it. These tests grade the recorder's half — the guard
+    at the call, and what lands in the beat log and the coverage report.
+    """
+
+    CRITERIA = {
+        "AC-1": "A search box above the queue narrows the list as you type.",
+        "AC-2": "Search and the status filter combine.",
+    }
+
+    def rec(self):
+        return recorder(self, page=DrawingPage(), criteria=self.CRITERIA)
+
+    def beats(self, rec) -> list[dict]:
+        return [dict(b) for b in rec._beats]
+
+    # -- the guard at the call ----------------------------------------------
+
+    def test_unmet_without_a_criterion_is_refused_at_the_line(self):
+        # Unmet *what*. A beat marked as evidence against nothing names no
+        # clause anybody can check, and the artifact would report a problem
+        # with no subject. Refused where the mistake was made, like every
+        # other authoring error here.
+        for call in ("caption", "shot"):
+            with self.subTest(call):
+                rec = self.rec()
+                with self.assertRaises(ValueError) as refused:
+                    getattr(rec, call)("x", shows="unmet")
+                self.assertIn("no ac=", str(refused.exception))
+                self.assertIn(call + "()", str(refused.exception))
+
+    def test_a_polarity_that_is_neither_is_refused_and_lists_the_two(self):
+        rec = self.rec()
+        for wrong in ("met?", "MET", "true", "not-met", 1, True):
+            with self.subTest(wrong):
+                with self.assertRaises(ValueError) as refused:
+                    rec.shot("x", ac="AC-1", shows=wrong)
+                self.assertIn("'met', 'unmet'", str(refused.exception))
+
+    def test_met_is_the_default_and_needs_no_saying(self):
+        rec = self.rec()
+        rec.shot("01-a", ac="AC-1")
+        rec.shot("02-b", ac="AC-1", shows="met")
+        self.assertNotIn("shows", self.beats(rec)[0])
+        self.assertNotIn("shows", self.beats(rec)[1])
+
+    # -- what lands in the beat log -----------------------------------------
+
+    def test_the_beat_carries_the_polarity_and_only_when_it_is_unmet(self):
+        rec = self.rec()
+        rec.caption("The flag is still there.", ac="AC-2", shows="unmet")
+        rec.shot("03-no-flag", ac="AC-2", shows="unmet")
+        rec.shot("04-fine", ac="AC-1")
+        beats = [b for b in self.beats(rec) if b.get("ac")]
+        self.assertEqual([b.get("shows") for b in beats], ["unmet", "unmet", None])
+        # Absent, not null. A take recorded before this key existed reads
+        # exactly as it always did (#24's rule).
+        self.assertNotIn("shows", beats[2])
+
+    def test_the_criterion_card_takes_no_polarity(self):
+        # A card puts the ticket's own sentence on screen; it is not evidence
+        # either way, and the beats after it are what show what happens. A
+        # storyboard reaching for it gets a TypeError at the call.
+        rec = self.rec()
+        with self.assertRaises(TypeError):
+            rec.criterion("AC-1", shows="unmet")  # type: ignore[call-arg]
+
+    # -- what the coverage report says --------------------------------------
+
+    def test_the_claim_row_carries_the_polarity_for_the_renderers(self):
+        # Copied onto the row for the same reason `error` is: every renderer
+        # reads the row and never the beat, and a row without it renders a
+        # claim against a clause identically to one for it.
+        rec = self.rec()
+        rec.shot("03-no-flag", ac="AC-2", shows="unmet")
+        rec.shot("04-fine", ac="AC-1")
+        report = coverage_report(self.CRITERIA, self.beats(rec))
+        self.assertEqual(report["claimed"]["AC-2"][0]["shows"], "unmet")
+        self.assertNotIn("shows", report["claimed"]["AC-1"][0])
+
+    def test_unmet_rolls_up_and_is_not_the_same_list_as_unclaimed(self):
+        # The two answer different questions and a reader must not read one
+        # as the other: AC-2 was claimed — a frame was pointed at it — and
+        # AC-1 had no beat at all.
+        rec = self.rec()
+        rec.shot("03-no-flag", ac="AC-2", shows="unmet")
+        report = coverage_report(self.CRITERIA, self.beats(rec))
+        self.assertEqual(report["unmet"], ["AC-2"])
+        self.assertEqual(report["unclaimed"], ["AC-1"])
+
+    def test_a_clause_claimed_both_ways_appears_in_unmet(self):
+        # One beat says it holds, another says it does not. The roll-up is
+        # "at least one beat marks this unmet", because that is the beat a
+        # reviewer has to look at; a rule that needed unanimity would hide it.
+        rec = self.rec()
+        rec.shot("01-ok", ac="AC-2")
+        rec.shot("02-not", ac="AC-2", shows="unmet")
+        report = coverage_report(self.CRITERIA, self.beats(rec))
+        self.assertEqual(report["unmet"], ["AC-2"])
+        self.assertEqual(len(report["claimed"]["AC-2"]), 2)
+
+    def test_a_take_with_nothing_unmet_reports_an_empty_list(self):
+        # Empty, not absent: every consumer iterating this key sees the same
+        # shape on every take, and "no clause is marked unmet" is an answer.
+        rec = self.rec()
+        rec.shot("01-ok", ac="AC-1")
+        self.assertEqual(coverage_report(self.CRITERIA, self.beats(rec))["unmet"], [])
+
+    # -- what timeline.md says about it -------------------------------------
+
+    def test_the_markdown_attributes_the_claim_and_never_judges_it(self):
+        rec = self.rec()
+        rec.shot("03-no-flag", ac="AC-2", shows="unmet")
+        rec.shot("04-fine", ac="AC-1")
+        doc = {
+            "schema": TIMELINE_SCHEMA,
+            "beats": self.beats(rec),
+            "coverage": coverage_report(self.CRITERIA, self.beats(rec)),
+        }
+        body = render_timeline_md(doc)
+        self.assertIn("The storyboard marks **AC-2** as **unmet**", body)
+        self.assertIn("claimed unmet", body)
+        # The wording is the feature. This file has no idea whether the clause
+        # holds, and a sentence that said so would undo the disclaimer the
+        # rest of the section spends its words on.
+        for verdict in ("AC-2 failed", "is broken", "regression"):
+            self.assertNotIn(verdict, body)
+
+    def test_a_take_with_nothing_unmet_renders_no_such_note(self):
+        # The control. Without it "the note appears" holds just as well on a
+        # renderer that prints it on every take.
+        rec = self.rec()
+        rec.shot("04-fine", ac="AC-1")
+        doc = {
+            "schema": TIMELINE_SCHEMA,
+            "beats": self.beats(rec),
+            "coverage": coverage_report(self.CRITERIA, self.beats(rec)),
+        }
+        body = render_timeline_md(doc)
+        self.assertNotIn("unmet", body)
+
+
 class StillPaths(unittest.TestCase):
     """`links.take_relative` — the guard on a path that goes into a URL (#373).
 
@@ -4498,6 +4645,13 @@ class FakePage:
 
     def evaluate(self, *args, **kwargs):
         return None
+
+    def screenshot(self, path: str, **kwargs) -> None:
+        """What `shot()` calls. `recorder()` builds no directories —
+        `__enter__` does, and these tests never enter one."""
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"")
 
 
 class NoisyPage(FakePage):
@@ -5897,13 +6051,6 @@ class FramedPage(DrawingPage):
             _SettledFrame(name, self.settled, name in dead)
             for name in ("wrapper", "app")
         ]
-
-    def screenshot(self, path: str, **kwargs) -> None:
-        # `recorder()` builds no directories — `__enter__` does, and these
-        # tests never enter one.
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"")
 
 
 # A clause with the shape of a real one: a whole sentence out of a ticket, long
@@ -11560,6 +11707,79 @@ class StillsOnly(unittest.TestCase):
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    # -- a beat pointed against a clause (issue #374) ------------------------
+    (
+        # The guard that makes an unmet claim checkable at all: without an
+        # `ac=`, the take reports a problem naming no clause. Nothing else
+        # notices — the beat log is well-formed, the coverage report is
+        # unchanged, and the block prints a "claimed unmet" row about nothing.
+        "a beat can be marked unmet without naming a criterion",
+        "coverage.py",
+        "    if shows == UNMET and not claims:",
+        "    if False:",
+        ["ShowsUnmet.test_unmet_without_a_criterion_is_refused_at_the_line"],
+    ),
+    (
+        # The polarity never reaches the row every renderer reads, so a claim
+        # *against* a clause renders identically to one for it — in
+        # `timeline.md`, in the CI comment, and in the stills block. The take
+        # then reports the branch working where its author said it does not.
+        "the claim row drops which way the claim points",
+        "coverage.py",
+        '    if beat.get("shows") == UNMET:\n        row["shows"] = UNMET',
+        "    if False:\n        pass",
+        [
+            "ShowsUnmet.test_the_claim_row_carries_the_polarity_for_the_renderers",
+            "ShowsUnmet.test_unmet_rolls_up_and_is_not_the_same_list_as_unclaimed",
+            "ShowsUnmet.test_the_markdown_attributes_the_claim_and_never_judges_it",
+        ],
+    ),
+    (
+        # `unmet` folded into `unclaimed`. The two are different findings — a
+        # clause somebody pointed a frame at and said fails, against one
+        # nobody mentioned — and merging them reports "nobody showed this"
+        # for the more useful evidence of the two.
+        "a clause claimed unmet is reported as claimed by nobody",
+        "coverage.py",
+        '        "unclaimed": [key for key, beats_ in claimed.items() if not beats_],',
+        '        "unclaimed": [\n'
+        "            key\n"
+        "            for key, beats_ in claimed.items()\n"
+        '            if not beats_ or any(r.get("shows") == UNMET for r in beats_)\n'
+        "        ],",
+        ["ShowsUnmet.test_unmet_rolls_up_and_is_not_the_same_list_as_unclaimed"],
+    ),
+    (
+        # `met` written down on every ordinary claim. Harmless-looking, and it
+        # rewrites every timeline this skill has produced: a reader who has
+        # never heard of #374 is handed `shows: "met"` to interpret on a beat
+        # that always meant exactly that.
+        "the default polarity is written into every beat",
+        "coverage.py",
+        '    return {"shows": shows} if shows == UNMET else {}',
+        '    return {"shows": shows}',
+        ["ShowsUnmet.test_met_is_the_default_and_needs_no_saying"],
+    ),
+    (
+        # The beat log's own copy. `coverage` still carries the polarity, so
+        # every table renders right and only the beat table goes quiet — the
+        # half a reader checks when they want to know which beat it was.
+        "the beat does not record which way its claim points",
+        "core.py",
+        "            **_ac_field(claims),\n            **_shows_field(polarity),",
+        "            **_ac_field(claims),",
+        ["ShowsUnmet.test_the_beat_carries_the_polarity_and_only_when_it_is_unmet"],
+    ),
+    (
+        # `timeline.md` stops saying it. The JSON still carries the polarity,
+        # so nothing machine-readable is wrong — only the document a person
+        # opens, which renders a claim against a clause as a claim for it.
+        "timeline.md renders an unmet claim as an ordinary one",
+        "timeline.py",
+        '    unmet = [key for key in coverage.get("unmet") or [] if key in criteria]',
+        "    unmet = []",
+        ["ShowsUnmet.test_the_markdown_attributes_the_claim_and_never_judges_it"],
+    ),
     # -- committed storyboards reach the app, not the chrome (issue #377) ----
     (
         # **The defect #377 is about**, restored exactly: the assertion that a
@@ -14388,8 +14608,11 @@ INJECTIONS = [
         # owning this method could have dropped without anyone seeing it.
         "a still stops recording the criterion it demonstrates",
         "core.py",
-        '        with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):',
-        '        with self._beat("shot", selector=name, still=rel):',
+        # The call is four lines since #374 gave `shot` a polarity to write
+        # alongside the tag. Re-anchored on `_ac_field`'s own line, which is
+        # the one this entry is about.
+        "            **_ac_field(claims),\n            **_shows_field(polarity),",
+        "            **_shows_field(polarity),",
         ["TerminalStill.test_the_still_is_still_a_beat_that_carries_its_criterion"],
     ),
     (

@@ -51,7 +51,9 @@ from .content import (
 from .coverage import (
     _ac_field,
     _checked_criteria,
+    _checked_shows,
     _checked_ticket,
+    _shows_field,
     _ticket_field,
     coverage_report,
 )
@@ -2625,7 +2627,12 @@ take with fewer beats than the last one would otherwise leave the
         # `claimed` is a list of beats rather than a count of tags.
         return list(dict.fromkeys(ids))
 
-    def caption(self, text: str, ac: str | Sequence[str] | None = None) -> None:
+    def caption(
+        self,
+        text: str,
+        ac: str | Sequence[str] | None = None,
+        shows: str | None = None,
+    ) -> None:
         """Show a narrator line at the bottom of the frame ("" hides it).
 
         With speech enabled the line is also spoken; the previous line
@@ -2634,14 +2641,23 @@ take with fewer beats than the last one would otherwise leave the
         `ac` names the acceptance criterion this line is here to demonstrate —
         `caption("The overdraft is rejected at submit.", ac="AC-3")`. It is a
         **claim**, recorded as one: see "acceptance criteria and coverage".
+
+        `shows="unmet"` points the claim the other way (issue #374): this
+        beat is evidence the clause is **not** met. It needs an `ac=` — unmet
+        what — and it is the storyboard author's assertion, recorded as one
+        exactly like the ordinary direction. Nothing in this recorder read the
+        ticket or judged the frame.
         """
         claims = self._checked_ac(ac, "caption()")
+        polarity = _checked_shows(shows, claims, "caption()")
         # Synthesizing and waiting out the previous spoken line happens
         # *before* the beat opens: the beat's t_start is when this caption
         # reaches the screen, which is what a reviewer extracting a frame at
         # that timestamp expects to see.
         clip = self._prepare_line(text)
-        with self._beat("caption", caption=text, **_ac_field(claims)):
+        with self._beat(
+            "caption", caption=text, **_ac_field(claims), **_shows_field(polarity)
+        ):
             clipped = self.page.evaluate("t => window.__demoCaption(t)", text)
             self._note_caption_clipped(text, clipped)
             self._caption = text
@@ -2809,12 +2825,24 @@ take with fewer beats than the last one would otherwise leave the
         points at — stays the base's to guarantee.
         """
 
-    def shot(self, name: str, ac: str | Sequence[str] | None = None) -> Path:
+    def shot(
+        self,
+        name: str,
+        ac: str | Sequence[str] | None = None,
+        shows: str | None = None,
+    ) -> Path:
         """Still for the written guide -> images/<name>.png.
 
         `ac` names the acceptance criterion this still is here to demonstrate.
         A tagged `shot` is the strongest thing a coverage report can hand a
         reviewer — a committed picture of the moment, at a known timestamp.
+
+        `shows="unmet"` says this picture is evidence the clause is **not**
+        met — `shot("03-no-flag", ac="AC-2", shows="unmet")` (issue #374).
+        That is the case worth the most to a reviewer, because it is the one
+        reading the diff would not have told them. It is still a claim: the
+        storyboard author asserted it, the recorder wrote it down, and nothing
+        here compared the picture with the ticket.
 
         **Sealed** (see `MEDIUM_HOOKS`): a medium that replaced this would take
         the beat and its `ac` claim with it, and the coverage report reads
@@ -2829,9 +2857,16 @@ take with fewer beats than the last one would otherwise leave the
             self._settle_animations()
         self._before_shot()
         claims = self._checked_ac(ac, "shot()")
+        polarity = _checked_shows(shows, claims, "shot()")
         path = self.images_dir / f"{name}.png"
         rel = path.relative_to(self.out_dir).as_posix()
-        with self._beat("shot", selector=name, still=rel, **_ac_field(claims)):
+        with self._beat(
+            "shot",
+            selector=name,
+            still=rel,
+            **_ac_field(claims),
+            **_shows_field(polarity),
+        ):
             # The recorded page, chrome and all. On the wrapper path (#358)
             # that page *is* the framed picture, so a still and the frame the
             # video shows at the same instant are the same image — which is

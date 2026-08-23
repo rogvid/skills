@@ -377,6 +377,60 @@ with what that ticket says.
 **1 of 3 criteria have no beat claiming them: `AC-3`.**
 ```
 
+### Showing that a clause is *not* met: `shows="unmet"`
+
+The skill could only record agreement. `ac=` tags a beat as demonstrating a
+clause, and until issue #374 there was no way to record the opposite — a
+frame showing the branch doing something the ticket says it should not, or not
+doing something it says it should.
+
+That is the case worth the most to a reviewer, because it is the one where
+reading the diff would not have told them either.
+
+```python
+rec.caption("Submitting still leaves the flag set.", ac="AC-2", shows="unmet")
+rec.shot("03-no-flag", ac="AC-2", shows="unmet")
+```
+
+`shows="unmet"` needs an `ac=` and is refused without one — unmet *what*. A
+beat marked as evidence against nothing in particular reports a problem no
+reader can check, which is the one artifact this feature must not produce.
+`"met"` is the default and needs no saying; writing it is allowed and changes
+nothing.
+
+**It is a claim, exactly like the other direction.** The storyboard's author
+asserted it. Nothing in the recorder read the ticket, and nothing compared the
+picture with the clause. Every artifact says so in those terms — "the
+storyboard marks AC-2 unmet", never "AC-2 failed" — and this repository's
+`tests/ci-unit` refuses the verdict spellings on the sentences those renderers
+write, `failed`, `broken`, `regression` and `violates` among them. A caption
+and a clause are quoted through untouched: they are the author's words and the
+ticket's.
+
+### Where an unmet claim shows up
+
+| artifact | what it says |
+|---|---|
+| the beat | `shows: "unmet"`, absent on every other beat |
+| `coverage.claimed[id]` | the same key on the row, so every renderer reads it without looking up the beat |
+| `coverage.unmet` | the ids at least one beat marks unmet — a roll-up, so no two renderers derive it differently |
+| `timeline.md` | a note above the table, and `— claimed unmet` on the row |
+| `scripts/demo-shots` | those stills **first**, under a heading naming the clauses, before anything else the take claims |
+| the CI comment | the same, leading the acceptance section |
+
+`unmet` and `unclaimed` are different findings and are never merged. A clause
+in `unmet` was claimed — somebody pointed a frame at it and said it does not
+hold. A clause in `unclaimed` had no beat at all. Reporting the first as the
+second would file the more useful evidence under "nobody showed this".
+
+**A clause claimed both ways is in `unmet`.** One beat says it holds and
+another says it does not; the second is the one a reviewer has to look at, and
+a rule that needed every beat to agree would hide it.
+
+**Deliberately not in scope: finding the mismatch.** A person or an agent
+noticing that the branch disagrees with the ticket is what produces the
+storyboard. This is how you show it once you have noticed.
+
 ### What a take that died renders instead
 
 A verb that raises is recorded on its beat (`error`), and the claim that beat

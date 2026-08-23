@@ -274,10 +274,16 @@ from .markdown import _fmt_t, _md_cell
 #                          ({id: [beats that tagged it]} — every declared id is
 #                          a key, with an empty list where nothing did),
 #                          `unclaimed` (the ids no beat tagged, the one
-#                          machine-checkable finding here), `tagged_beats`,
+#                          machine-checkable finding here), `unmet` (the ids at
+#                          least one beat marks as **not** met — see `shows`
+#                          on a beat, issue #374 — which is a different
+#                          statement from `unclaimed`: a clause here was
+#                          claimed, pointing the other way, and a clause there
+#                          had no beat at all), `tagged_beats`,
 #                          `untagged_beats`, and `conflicts` on a merged demo
 #                          whose segments used different text for one id.
-#                          A claimed row carries `error` — the raising beat's
+#                          A claimed row carries `shows: "unmet"` on the same
+#                          terms as the beat does, and carries `error` — the raising beat's
 #                          `type` and `message` — **only** when that beat's
 #                          verb raised, absent otherwise (issue #24), because
 #                          a claim a beat threw out of is not a claim the take
@@ -360,6 +366,14 @@ from .markdown import _fmt_t, _md_cell
 #                      `ac=`, and on a `criterion` beat, which claims the one
 #                      clause it put on screen. A claim by the storyboard's
 #                      author and nothing more — see `coverage` above.
+#   shows     str?   — **absent** on a beat whose `ac=` claim points the
+#                      ordinary way, which is every beat recorded before #374
+#                      and almost every beat since. `"unmet"` when the
+#                      storyboard marked the beat as evidence the clause is
+#                      **not** met (`shot(..., ac="AC-2", shows="unmet")`).
+#                      Refused without an `ac=`: unmet what. Still a claim —
+#                      the author asserted it, and nothing in the recorder
+#                      read the ticket or judged the frame.
 #   evidence  str?   — path, relative to the timeline file, of this beat's
 #                      evidence file ("evidence/beat-04.json"); null when
 #                      evidence capture is off. See "per-beat evidence" below
@@ -1204,9 +1218,25 @@ def _coverage_md(coverage: object, failure: object = None) -> list[str]:
         return []
     claimed = coverage.get("claimed") or {}
     unclaimed = coverage.get("unclaimed") or []
+    unmet = [key for key in coverage.get("unmet") or [] if key in criteria]
     out = ["## Acceptance criteria", ""]
     if isinstance(failure, dict):
         out += _coverage_failure_md(failure, criteria, claimed)
+    if unmet:
+        # Above the table, because it is the reason somebody would read the
+        # table at all (#374) — and worded as attribution, not as a verdict.
+        # This file has no idea whether the clause holds; a storyboard author
+        # pointed a frame at it and said it does not. Saying "AC-2 failed"
+        # here would be this document making the judgement it spends the rest
+        # of the section disclaiming.
+        listed = ", ".join(f"**{_md_cell(key)}**" for key in unmet)
+        out += [
+            f"> The storyboard marks {listed} as **unmet** — it points at a "
+            f"beat as evidence against the clause rather than for it. The "
+            f"rows are below, marked the same way. That is the author's "
+            f"assertion; nothing here read the ticket or judged the frame.",
+            "",
+        ]
     out += [
         "This take was recorded against a ticket. **The table below is what "
         "the storyboard *claimed*, not what it proved** — an `ac=` tag is a "
@@ -1243,6 +1273,18 @@ def _coverage_md(coverage: object, failure: object = None) -> list[str]:
                 cell = "*not written*" if still else ""
             else:
                 cell = f"`{_md_cell(still)}`" if still else ""
+            # On the row, not only in the note above it (#374). A reader
+            # scanning the table meets the rows, and a row claiming a clause
+            # does not hold must not look like one claiming it does.
+            #
+            # "unmet" and not "not met", here and in every renderer: the word
+            # sweep over what these files write refuses `met` as a whole word
+            # — "All acceptance criteria are met" is the verdict it exists to
+            # stop — and "not met" contains it. `unmet` is also the word the
+            # storyboard typed (`shows="unmet"`), so the artifact and the
+            # source say the same thing.
+            if row.get("shows") == "unmet":
+                beat += " — **claimed unmet**"
             out.append(f"| {label} | {beat} | {_fmt_t(row.get('t_start'))} | {cell} |")
     out.append("")
     if unclaimed:
