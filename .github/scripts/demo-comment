@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -100,6 +101,22 @@ def _cell(text: str) -> str:
     out = (text or "").replace("\\", "\\\\").replace("|", "\\|")
     out = " ".join(out.split())  # a newline in a cell ends the row
     return out or "&nbsp;"
+
+
+def _label(text: str) -> str:
+    """`_cell`, plus the two brackets that would end a link's visible text.
+
+    Only for text that goes **inside `[...]`**, which is a narrower place than
+    a table cell and needs one more escape. A committed file named
+    `x](/o/other).png` renders as `[x](/o/other).png](href)` — a link whose
+    visible text and target disagree, and this is the one cell in the comment
+    a reviewer is invited to click (issue #300).
+
+    Not folded into `_cell`: captions are authored prose and already admit
+    markdown by design, so escaping brackets everywhere would turn a
+    storyboard's own link into literal text.
+    """
+    return _cell(text).replace("[", "\\[").replace("]", "\\]")
 
 
 def story_beats(beats: list[dict]) -> list[tuple[float, str]]:
@@ -208,6 +225,13 @@ class _Picture(NamedTuple):
 
     cell: str
     found: bool  # a still this take published, which the cell points at
+    # Why there is no picture, when there is none: one of "raised",
+    # "outside", "missing", "none" — or "" when `found`. The gap headline
+    # above the table is written per reason, because "no still was published"
+    # was **false** for the `outside` branch: that still exists and was
+    # published, it just is not inside the demo (issue #300, item 4). Absent
+    # on the old shape, so a caller reading only `cell`/`found` is unchanged.
+    reason: str = ""
 
 
 def _inside_demo(still: str) -> str | None:
@@ -260,12 +284,38 @@ def _picture(
     missing rather than linked as this take's. A still the manifest names and
     nothing published is the artifact-lies case: it is reported, never skipped
     and never linked.
+
+    **Which still, when a clause has several — the rule, written down because
+    the table is one picture per clause and the choice is invisible in it.**
+
+    1. **A beat marked `shows="unmet"` wins**, earliest first. The storyboard
+       is pointing at that frame as evidence the clause does *not* hold, and
+       that is the frame a reviewer must not be steered away from (#374).
+    2. **Otherwise the last published still** among the clause's claims.
+
+    Last, not first, and this is the item this rule exists for (issue #300).
+    A storyboard demonstrates a clause by building to it, so the first shot
+    that claims a clause is usually the **pre-state**: in this repository's own
+    `2026-08-11-criterion-card` take, `AC-1` linked `01-queue.png` — beat 4,
+    the queue before anything was typed — while `02-invoice.png` at beat 12 is
+    the frame that shows the clause satisfied. The link worked, resolved, and
+    showed the wrong moment, which is the failure a reviewer actually acts on.
+
+    **The limit, stated because "last" is a heuristic and not a proof.** A
+    clause shown mid-take and then navigated away from links its final frame,
+    which may no longer show it. Nothing here reads the pixels, so no rule
+    available at this layer can do better; `scripts/demo-shots` renders *every*
+    still a take published and is the answer when one picture is not enough.
     """
     if not rows:
-        return _Picture("—", False)
+        return _Picture("—", False, "none")
     named: list[str] = []
     outside: list[str] = []
     raised: list[str] = []
+    # (is this claim against the clause, path inside the demo) for each row
+    # whose still this take actually published. Collected rather than returned
+    # on, because the choice between them is a rule — see the docstring.
+    usable: list[tuple[bool, str]] = []
     for row in rows:
         # Before the existence check, and that order is the point: on a take
         # that died, a still of this name left behind by a *previous* recording
@@ -286,10 +336,16 @@ def _picture(
             continue
         if not (directory / rel).exists():
             continue
+        usable.append((row.get("shows") == "unmet", rel))
+    if usable:
+        # Rule 1 then rule 2, and `next` keeps the earliest unmet rather than
+        # the last: a storyboard that says a clause fails says it once, and if
+        # it says it twice the first is where the reviewer's attention goes.
+        rel = next((r for against, r in usable if against), usable[-1][1])
         href = _still_href(repo_url, sha, f"{demo}/{rel}")
         # The file name alone in the cell: the row already says which clause
         # and which demo, and the full path crowds a three-column table.
-        label = _cell(rel.rsplit("/", 1)[-1])
+        label = _label(rel.rsplit("/", 1)[-1])
         return _Picture(f"[{label}]({href})" if href else f"`{_cell(rel)}`", True)
     if raised:
         # First among the reasons there is nothing here, because it is a fact
@@ -298,20 +354,23 @@ def _picture(
         return _Picture(
             f"*the beat claiming this raised {_cell(raised[0])}, so it wrote no still*",
             False,
+            "raised",
         )
     if outside:
         return _Picture(
             f"*`{_cell(outside[0])}` is not a path inside this demo, "
             f"so it is not linked*",
             False,
+            "outside",
         )
     if named:
         return _Picture(
             f"*`{_cell(named[0])}` is named here, but this take published "
             f"no such file*",
             False,
+            "missing",
         )
-    return _Picture("*no still*", False)
+    return _Picture("*no still*", False, "none")
 
 
 def _ticket_check(directory: Path) -> dict | None:
@@ -498,7 +557,20 @@ def render_coverage(
         for key in criteria
     }
     unillustrated = [
-        key for key in criteria if key not in unclaimed and not pictures[key].found
+        key
+        for key in criteria
+        if key not in unclaimed
+        and not pictures[key].found
+        and pictures[key].reason != "outside"
+    ]
+    # Split out, because the sentence below is **false** for this branch: the
+    # still exists and this take published it, it is simply not inside the
+    # demo directory, so it has no URL here (issue #300, item 4). The cell
+    # said so two lines down and the headline contradicted it.
+    outside_demo = [
+        key
+        for key in criteria
+        if key not in unclaimed and pictures[key].reason == "outside"
     ]
 
     gap: list[str] = []
@@ -538,6 +610,16 @@ def render_coverage(
             f"no still was published for "
             f"{_plural(len(unillustrated), 'it', 'them')}. There is nothing "
             f"here to open.**",
+            "",
+        ]
+    if outside_demo:
+        ids = _and_list([f"`{_cell(key)}`" for key in outside_demo])
+        gap += [
+            f"**{ids} {_plural(len(outside_demo), 'is', 'are')} claimed by a "
+            f"beat whose still is outside this demo's directory.** The file "
+            f"exists; it has no URL here, because a path that leaves the demo "
+            f"can name any picture in the repository. The cell says which "
+            f"path it was.",
             "",
         ]
     if covered:
@@ -618,7 +700,7 @@ def demo_dir(demo_root: str, name: str) -> Path:
     return Path(demo_root) / name if demo_root else Path(name)
 
 
-def repo_path(prefix: str, name: str) -> str:
+def repo_path(prefix: str, name: str) -> str | None:
     """`name` as the *repository* sees it, not as the workflow ran it.
 
     A `--demo` path is relative to the caller's `working-directory`, which the
@@ -627,8 +709,25 @@ def repo_path(prefix: str, name: str) -> str:
     `demos/2026-07-28-queue-search` is four directories down in git. A still
     linked without that prefix is a 404 that looks exactly like a working link,
     which is why the prefix is passed in rather than inferred.
+
+    **Returns None for a prefix that is not a plain relative path** — the same
+    discipline `_inside_demo` applies to the still, and it was missing here
+    (issue #300). Measured: `repo_path("../up", "demos/x")` gave
+    `../up/demos/x` and `repo_path("/abs", "demos/x")` silently gave
+    `abs/demos/x`, dropping the leading slash and linking a path that is not
+    the one anybody asked for. Both produce a URL that is plausible and wrong,
+    which is worse for a reviewer than no link.
+
+    The caller refuses rather than falling back: unlike a still, the prefix is
+    **configuration**, not data. A workflow with a bad `--path-prefix` gets
+    every link in the comment wrong at once, and that is a thing to fix rather
+    than to work around quietly.
     """
+    if prefix.startswith("/") or "\\" in prefix:
+        return None
     parts = [p for p in f"{prefix}/{name}".split("/") if p not in ("", ".")]
+    if ".." in parts:
+        return None
     return "/".join(parts)
 
 
@@ -699,7 +798,10 @@ def render_demo(
     # report exists to test (issue #273, the same ordering `timeline.md` uses).
     lines += render_coverage(
         timeline.get("coverage"),
-        demo=repo_path(path_prefix, name),
+        # `main()` refused a prefix that is not a plain relative path, so
+        # this cannot be None. Named rather than assumed: a caller that
+        # skipped that check would otherwise get `None/x` into a URL.
+        demo=repo_path(path_prefix, name) or "",
         directory=demo_dir(demo_root, name),
         repo_url=repo_url,
         sha=sha,
@@ -847,10 +949,18 @@ def _default_repo_url() -> str:
     Both are set in every Actions step, so the workflow needs no new argument
     for the still links to work; the server URL is read rather than hardcoded
     so a GitHub Enterprise host links its own blobs and not github.com's.
+
+    **Neither is defaulted (issue #300).** Falling back to `github.com` when
+    `GITHUB_SERVER_URL` is missing put an Enterprise runner's stills at a host
+    that has never held them — a link that resolves, for somebody else's
+    repository or for nothing. Everything around this already prefers
+    refusing: `_still_href` returns None without a repo url or a sha, and the
+    still is *named* in the table instead of linked. Returning "" here joins
+    that behaviour rather than guessing at the one place a guess is invisible.
     """
-    server = (os.environ.get("GITHUB_SERVER_URL") or "https://github.com").rstrip("/")
+    server = (os.environ.get("GITHUB_SERVER_URL") or "").rstrip("/")
     repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip("/")
-    return f"{server}/{repo}" if repo else ""
+    return f"{server}/{repo}" if server and repo else ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -931,6 +1041,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
         demos.append((name, json.loads(timeline_path.read_text(encoding="utf-8"))))
+
+    # Before anything renders (issue #300). The prefix is configuration, not
+    # data: a bad one gets every still link in the comment wrong at once, and
+    # each is a URL that resolves to nothing while looking exactly like a
+    # working link. Refusing here is the only place it can be said once.
+    if repo_path(args.path_prefix, "probe") is None:
+        print(
+            f"demo-comment: --path-prefix {args.path_prefix!r} is not a plain "
+            f"relative path. It is joined to every demo name to build the "
+            f"still links, so a `..`, a leading `/` or a backslash makes every "
+            f"picture in this comment point somewhere nobody asked for.",
+            file=sys.stderr,
+        )
+        return 2
 
     body = render(
         demos,
