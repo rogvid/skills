@@ -51,7 +51,9 @@ also owe an injection manifest; `tests/eval/grader/README.md` is the corpus.
 It records two short chrome reference takes into the gitignored
 `tests/.pixel-cache/` - a terminal opening on its title card, and the web
 chrome (criterion card, interlude, caption, spotlight, cursor park) against
-`tests/fixture` on an ephemeral port - keyed by a digest over every
+`tests/fixture` on an ephemeral port, the web one recorded **twice** - paced,
+then again as a stills-only run into `web/stills-only/`
+([#372](https://github.com/rogvid/skills/issues/372)) - keyed by a digest over every
 `helpers/demo_recording/*.py`, each take's own storyboard source, the vendored
 xterm assets and the fixture page.
 Cold (a stale or missing take) costs ~20-25 s per take, one Chromium launch
@@ -64,8 +66,8 @@ loop makes is colour or geometry off frames already on disk.
 What it grades ([#351](https://github.com/rogvid/skills/issues/351)):
 completeness (demo.mp4, timeline.json, at least one review frame - the floor;
 when it fails, the take's golden properties are skipped rather than failing
-for a reason they do not name), then the four golden chrome properties, one
-line of measured numbers each. Thresholds are duplicated from `smoke` by
+for a reason they do not name), then the five golden properties, one line of
+measured numbers each. Thresholds are duplicated from `smoke` by
 design - the loop must not import the 12k-line suite - and each names its
 counterpart at its definition:
 
@@ -74,6 +76,16 @@ counterpart at its definition:
   smoke's `MIN_OPENING_CARD_S`), and the corner later reads bare (≥ 150) as
   the control. Frame 0 is read by index out of one full decode, never by
   seeking a timestamp (#128).
+- **stills-match** (web take, #372): every `images/*.png` the stills-only
+  arm wrote, held against the paced arm's under the same name, at ≥ 40 dB
+  PSNR. The mode's acceptance criterion is that its stills are the frames
+  `shot()` would have written either way, and this is the only thing that
+  grades it: zeroing the pacing also takes away the wait the recorder's own
+  overlays were finishing inside, and the determinism rule spares those
+  overlays on purpose so they animate on camera. Both stills read `inf` dB
+  today; with the stills-only settle removed they read 12.0 and 21.7 dB,
+  which is where the bar sits between. A still one arm did not write fails
+  the same check - it means the two arms stopped running one storyboard.
 - **card-vs-window** (web take, #291/#360): the criterion card and the
   window's bottom pad read out of `demo.mp4` at two instants inside the
   card, ≤ 6 levels off the ONE declared colour (`core.WEB_WINDOW_BODY`,
@@ -116,7 +128,9 @@ Its cache arithmetic - digest, staleness, marker - is graded browser-free in
 `unit` (`PixelCache`), and the checks' pure arithmetic - the opening
 classifier, the card-stretch locator, the accent predicate and centroid, the
 beat-span lookup, the dump naming - in `PixelChecks`, with eight `tests/pixel`
-entries in the `INJECTIONS` table. The frame readings themselves were each
+entries in the `INJECTIONS` table. `stills-match` is graded the other way
+round: the recorder defect it exists for is planted in `helpers/`, and the
+`StillsOnly` entries in `INJECTIONS` cover the browser-free half. The frame readings themselves were each
 seen red under a planted recorder defect in #351's pull request.
 
 ```
@@ -283,6 +297,8 @@ tests/smoke --strict-only         # just the two takes strict=True must refuse
 tests/smoke --wrapper-only        # just the wrapper pair: verbs through the
                                   #   app iframe, caption band, and the take
                                   #   that must refuse X-Frame-Options (#358)
+tests/smoke --stills-only         # just the stills-only run: the pictures
+                                  #   with no video and no pacing (#372)
 tests/smoke --issues-only         # just the broken page and the failing
                                   #   commands, which is what check_issues
                                   #   grades (issue #197)
@@ -301,7 +317,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~195 s)
-tests/smoke-inject                # all 71 entries, ~54 min
+tests/smoke-inject                # all 73 entries, ~54 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -2146,6 +2162,7 @@ are what changed that, and they are now load-bearing rather than a convenience.
 | arm | clean, measured on one box |
 |---|---|
 | `--lock-only` | 1 s |
+| `--stills-only` | 3 s |
 | `--evidence-only` | 7 s |
 | `--coverage-only` | 15 s |
 | `--narration-only` | 8 s |
@@ -2223,7 +2240,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-71 entries, 14 arms, ~54.3 min of takes
+73 entries, 15 arms, ~54.5 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -2254,6 +2271,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--narration-only` | 6 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for. Two more are about *where* the voice went ([#226](https://github.com/rogvid/skills/issues/226)), which no window bar can see: the mix landing 250 ms from the second the take's own record names, and the record naming a second the mix did not use — caught only because the arm now watches the host's wall clock itself and compares |
 | `--coverage-only` | 12 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade. Two more grade the *picture* of that card ([#291](https://github.com/rogvid/skills/issues/291), single-encoder since [#361](https://github.com/rogvid/skills/issues/361)) — pixels read off `demo.mp4`, not values read out of a document: the card's field repainted off the window body it must equal, and a card dispatched in the right colour and never made visible. The compensated-pair entries died with the composite: a window repaint carries the card with it now, by construction, and is no longer a defect anything should catch |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
+| `--stills-only` | 2 | the mode that skips the video stops being either of the two things it claims ([#372](https://github.com/rogvid/skills/issues/372)): a run that declines the screencast and gets one anyway, leaving a real `demo.mp4` in a folder whose timeline says `media: null` — the artifact-lie outcome, and the only half a browser is needed for; or a run that records nothing and paces the storyboard anyway, which is correct and pointless. Either alone is satisfied by the wrong fix, which is why there are two. The pictures the mode produces are graded in `tests/pixel` (`stills-match`) and its artifact shape in `tests/unit` (`StillsOnly`) |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the cursor dot parked on-screen so it ships in every still with no pointer verb run, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
 | `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the cover painted a colour that is not the window body, so frame 0 is not the cover at all — #110's own defect, the card raised late, can no longer be planted here: since [#362](https://github.com/rogvid/skills/issues/362) the shared chrome covers frame 0 twice, independently, and breaking either cover alone leaves frame 0 reading 24.0; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
@@ -2267,7 +2285,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 49 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 50 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 

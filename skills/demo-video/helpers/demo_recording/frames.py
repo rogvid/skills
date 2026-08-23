@@ -297,13 +297,14 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     out_dir = Path(out_dir)
     if doc is None:
         doc = json.loads(timeline_paths(out_dir)[0].read_text())
+    stills_only = doc.get("mode") == "stills"
     mp4 = out_dir / str(doc.get("media") or "demo.mp4")
     frames_dir, json_path, md_path = frames_paths(out_dir)
     beats = doc.get("beats") or []
     manifest: dict = {
         "schema": FRAMES_SCHEMA,
         "generated_by": "demo-video",
-        "media": mp4.name,
+        "media": None if stills_only else mp4.name,
         "duration": doc.get("duration"),
         "recorder": doc.get("recorder"),
         "frames": [],
@@ -318,6 +319,20 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
         "clock_correction": None,
         "skipped": None,
     }
+    # First, because it is the more fundamental refusal: a segment has a video
+    # that belongs to a different sheet, and this has no video at all. Without
+    # it the `or "demo.mp4"` above walks into a previous run's file and cuts a
+    # sheet of frames from a recording this timeline does not describe — under
+    # this run's beat names (issue #372, the shape of #20).
+    if stills_only:
+        manifest["skipped"] = (
+            "this is a stills-only run, not a take: it attached no screencast "
+            "and encoded no video, so there is no recording to cut frames out "
+            "of. The pictures it did take are in images/, named by the "
+            "storyboard, and every beat that took one points at it. Re-run "
+            "the storyboard without stills_only for a sheet"
+        )
+        return manifest
     if doc.get("segment"):
         manifest["skipped"] = (
             f"{doc['segment']} is one segment of a demo, not a demo; its beats "

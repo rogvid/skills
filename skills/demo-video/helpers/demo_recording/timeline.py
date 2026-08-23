@@ -62,7 +62,20 @@ from .markdown import _fmt_t, _md_cell
 #                          answer and picking one would be this document
 #                          stating something no segment said. Each part's own
 #                          is in `segments` either way.
-#   media         str    — the mp4 this timeline describes, e.g. "demo.mp4"
+#   mode          str?   — **absent on a take**, and "stills" on a stills-only
+#                          run (issue #372): a run that drove the storyboard
+#                          for its `shot()` pictures with no video attached.
+#                          Absent rather than "take" for #24's reason — a
+#                          reader that never heard of the mode meets the
+#                          document it always met. When it is present, `media`
+#                          and `duration` are null and `content` is *absent*,
+#                          and `beat_frames`, `demo-grade` and `stitch` all
+#                          refuse the folder by name. See reference/stills.md.
+#   media         str?   — the mp4 this timeline describes, e.g. "demo.mp4".
+#                          Null when `mode` is "stills": nothing was recorded,
+#                          and a name here would point at a *previous* run's
+#                          file in any folder recorded into before (#20's lie,
+#                          one field over).
 #   duration      float? — that mp4's real duration (ffprobe), null if absent
 #   determinism   dict   — the conditions the take was recorded under:
 #                          `deterministic` (was the clock frozen and motion
@@ -164,10 +177,15 @@ from .markdown import _fmt_t, _md_cell
 #                          longest stretch in seconds where nothing in the rect
 #                          changed), `static_from`, `static_limit`, `opening`
 #                          (see below) and `warnings` (empty on a healthy take).
-#                          **Null** on a take that encoded no mp4. This is the
-#                          only field in this document that describes the frames
-#                          rather than the storyboard — see "did the recording
-#                          show anything?" for why it had to exist.
+#                          **Null** on a take that encoded no mp4, and
+#                          **absent** on a stills-only run — two different
+#                          statements. Null says an mp4 was expected and the
+#                          picture could not be measured; absent says the run
+#                          never had frames to make a claim about (#372).
+#                          This is the only field in this document that
+#                          describes the frames rather than the storyboard —
+#                          see "did the recording show anything?" for why it
+#                          had to exist.
 #   content.opening
 #                 dict?  — what the take opened on, and what the encode did
 #                          about it: `gap` (seconds of featureless, unchanging
@@ -1280,7 +1298,14 @@ def render_timeline_md(doc: dict) -> str:
     a take on exit, or a stitch that merges several — renders the same way.
     """
     beats = doc.get("beats") or []
-    head = [f"`{doc.get('media') or 'demo.mp4'}`"]
+    # A stills-only run has no video, and the header is the one line every
+    # reader sees. `doc.get('media') or 'demo.mp4'` would put a filename there
+    # that names nothing — or, in a folder recorded into before, a previous
+    # take's file (issue #372).
+    stills = doc.get("mode") == "stills"
+    head = ["**no video** — stills-only run"] if stills else [
+        f"`{doc.get('media') or 'demo.mp4'}`"
+    ]
     if doc.get("segment"):
         head.append(f"segment `{doc['segment']}`")
     if doc.get("recorder"):
@@ -1310,6 +1335,17 @@ def render_timeline_md(doc: dict) -> str:
         "edit it by hand, re-record instead.",
         "",
     ]
+    if stills:
+        out += [
+            "This storyboard was run for its pictures only. **Nothing here "
+            "describes a recording**: no video was captured, so `media` and "
+            "`duration` are null and there is no picture check. The stills "
+            "the beats point at are real and were taken by this run. The "
+            "start and end times below are seconds from the start of the "
+            "run, not offsets into a video, because there is no video for "
+            "them to be offsets into.",
+            "",
+        ]
     # Before the beat table, not after it. A reader who opens this file after a
     # crash is reading it *because* something went wrong, and a timeline that
     # only mentions the failure in a footnote is the artifact-lies problem in

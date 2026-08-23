@@ -360,6 +360,7 @@ class Recorder(_DemoBase):
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
+        stills_only: bool | None = None,
         allow_private: bool | None = None,
     ) -> None:
         super().__init__(
@@ -370,6 +371,7 @@ class Recorder(_DemoBase):
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
             criteria=criteria, ticket=ticket, allow_private=allow_private,
+            stills_only=stills_only,
         )
         self.base_url = (
             base_url or _env("BASE_URL", "http://localhost:8000")
@@ -949,7 +951,12 @@ class Recorder(_DemoBase):
         records, and what it does not defend against" in SKILL.md.
         """
         self.click(selector)
-        self.page.keyboard.type(text, delay=delay_ms)
+        # The per-character delay is pacing — it exists so a viewer sees the
+        # text appear rather than snap into place — and it is the one piece of
+        # pacing that does not go through `_idle`, because Playwright owns the
+        # loop. A stills-only run zeroes it here for the same reason the base
+        # zeroes the rest (#372): a 40-character field costs 1.6 s of nothing.
+        self.page.keyboard.type(text, delay=0 if self.stills_only else delay_ms)
 
     @_beat_verb("clear")
     def clear(self, selector: str) -> None:

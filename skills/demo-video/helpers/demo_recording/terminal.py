@@ -264,6 +264,7 @@ class TerminalRecorder(_DemoBase):
         evidence: bool | None = None,
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
+        stills_only: bool | None = None,
         allow_private: bool | None = None,
         type_delay_ms: int = 45,
         interlude: str | None = None,
@@ -280,6 +281,7 @@ class TerminalRecorder(_DemoBase):
             deterministic=deterministic, clock=clock,
             timezone_id=timezone_id, locale=locale, evidence=evidence,
             criteria=criteria, ticket=ticket, allow_private=allow_private,
+            stills_only=stills_only,
         )
         self._shell = shell or _env("TERMINAL_SHELL") or "/bin/bash"
         fs = font_size
@@ -695,9 +697,15 @@ class TerminalRecorder(_DemoBase):
                 beat=beat, exit_code=code, command=command,
             )
 
-    def _idle(self, seconds: float) -> None:
+    def _hold_frame(self, seconds: float) -> None:
         """Hold the frame while pumping program output, so long-running
-        commands keep scrolling on screen instead of freezing."""
+        commands keep scrolling on screen instead of freezing.
+
+        `_hold_frame` and not `_idle`: the base seals `_idle` so a stills-only
+        run cannot be paced by a medium that forgot about it (#372). Nothing
+        is lost by not running here in that mode — the PTY is drained by
+        `_screen()`, which is what `wait_for_text` and `wait_for_prompt` call
+        on every pass of their own loops."""
         end = time.monotonic() + seconds
         while True:
             self._pump()

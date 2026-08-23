@@ -52,6 +52,7 @@ import tokenize
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 HELPERS = REPO / "skills" / "demo-video" / "helpers"
@@ -111,6 +112,7 @@ from demo_recording.narration import (  # noqa: E402
 from demo_recording.stitching import (  # noqa: E402
     MERGE_OVERLAP_SLACK_S,
     _merged_timeline,
+    _segment_timeline,
 )
 from demo_recording.target import TargetRefused  # noqa: E402
 from demo_recording.timeline import (  # noqa: E402
@@ -1837,7 +1839,21 @@ _EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
 # 1.5 s floor exists earns its place less than a rule whose absence killed a
 # take. What was left over is this raise. The reviewer reading protocol went
 # to reference/review.md, not here, per the first paragraph's preference.
-SKILL_LINE_BUDGET = 630
+# Raised 630 → 632 on 2026-08-23, for stills-only runs (#372): the mode that
+# takes the storyboard's pictures without recording a video, which turns the
+# inner loop from ~19 s per look into ~2 s on the storyboard it was measured
+# on. Three lines: the Configuration row, the reference-table row, and the
+# sentence in step 4 that is the only place a storyboard author meets it —
+# the rest of it is reference/stills.md.
+#
+# The argument the paragraph above demands, made in kind first: three lines
+# were cut from **Pacing and perception** to pay for it. They restated the
+# code fence directly above them ("`hold()` waits for the current narration
+# line to finish") and the flicker the section's own first bullet already
+# names, and `hold(min_s=1.5)` is documented in full in the verb table. A
+# restatement earns its place less than the one sentence telling an author
+# the fast loop exists. What was left over is this raise.
+SKILL_LINE_BUDGET = 632
 
 # `reference/` holding fewer than this is `reference/` being emptied, which
 # would make both assertions below hold trivially. Not a count of the files
@@ -4203,9 +4219,15 @@ class _VerbBodyStopped(RuntimeError):
 
 
 class _NoWait:
-    """Hold no frames. These tests grade the beat log, not the wall clock."""
+    """Hold no frames. These tests grade the beat log, not the wall clock.
 
-    def _idle(self, seconds: float) -> None:
+    `_hold_frame`, not `_idle`: `_idle` is sealed on `_DemoBase` so that the
+    stills-only short-circuit cannot be reached past (#372), and this mixin
+    sits ahead of the recorder in the MRO — which `__init_subclass__` treats
+    as a shadow exactly as it treats a method on the class.
+    """
+
+    def _hold_frame(self, seconds: float) -> None:
         return None
 
 
@@ -4246,6 +4268,10 @@ class FakePage:
         # this process about, readable without a round trip. The issue a lost
         # caption records names it (#180).
         self.url = url
+        # A page with no iframes, which is what `page.frames` is on one: the
+        # main frame, and the main frame is the page. `FramedPage` below is
+        # the other shape.
+        self.frames = [self]
 
     def on(self, event: str, handler) -> None:
         self.subscribed.setdefault(event, []).append(handler)
@@ -5608,6 +5634,65 @@ class DrawingPage(FakePage):
         return None
 
 
+class _Keyboard:
+    """Playwright's `page.keyboard`, remembering what delay it was typed at."""
+
+    def __init__(self) -> None:
+        self.delays: list[int] = []
+
+    def type(self, text: str, delay: int = 0) -> None:
+        self.delays.append(delay)
+
+
+class TypingPage(DrawingPage):
+    """A page with a keyboard. The per-character delay is the only pacing in
+    the package Playwright owns rather than `_idle`, so it is the only one
+    that has to be read off the call (#372)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.keyboard = _Keyboard()
+
+
+class _SettledFrame:
+    """One frame of a page, which logs when it is asked to settle."""
+
+    def __init__(self, name: str, log: list[str], dead: bool) -> None:
+        self.name = name
+        self._log = log
+        self._dead = dead
+
+    def evaluate(self, script, arg=None, **kwargs):
+        if self._dead:
+            raise RuntimeError("Frame was detached")
+        self._log.append(self.name)
+        return 0
+
+
+class FramedPage(DrawingPage):
+    """A wrapper page with the app frame inside it, as a web take has.
+
+    `frames` is Playwright's: the main frame first, then every child. The
+    stills-only settle runs over all of them, so a page with one frame would
+    not tell "settles the page" from "settles everything on it" (#372).
+    """
+
+    def __init__(self, dead=frozenset()) -> None:
+        super().__init__()
+        self.settled: list[str] = []
+        self.frames = [
+            _SettledFrame(name, self.settled, name in dead)
+            for name in ("wrapper", "app")
+        ]
+
+    def screenshot(self, path: str, **kwargs) -> None:
+        # `recorder()` builds no directories — `__enter__` does, and these
+        # tests never enter one.
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"")
+
+
 # A clause with the shape of a real one: a whole sentence out of a ticket, long
 # enough that showing its id instead would be an obvious difference and short
 # enough to be a card. Taken from ticket #129's AC-1, which the reference
@@ -5724,7 +5809,7 @@ class _HoldClock:
 
     Stood in for `core.time` so a 7.5 s spoken line costs this suite
     microseconds while the beat log still comes out with the timestamps a real
-    take would write. `_idle` is where a take spends a hold, and it is left
+    take would write. `_hold_frame` is where a take spends a hold, and it is left
     running exactly as it ships — its own `time.sleep` is what moves this
     clock, so a hold the recorder skipped moves nothing.
     """
@@ -5754,7 +5839,7 @@ class CriterionHold(unittest.TestCase):
             super().__init__(*args, **kwargs)
             self.held: list[float] = []
 
-        def _idle(self, seconds: float) -> None:
+        def _hold_frame(self, seconds: float) -> None:
             self.held.append(seconds)
 
     def held_for(self, text: str, spoken: float | None = None, **call) -> float:
@@ -5798,7 +5883,7 @@ class CriterionHold(unittest.TestCase):
         """The beat log of a take that raised a card while a line was still
         being spoken, and then took it down with the documented clear.
 
-        Run over `_HoldClock` and with the production `_idle` — the loop, the
+        Run over `_HoldClock` and with the production `_hold_frame` — the loop, the
         pump and the slicing against a deadline, all of it — because what is
         being read here is `t_start`/`t_end`, and a recorder that holds nothing
         writes a beat log where every beat is instantaneous.
@@ -10298,6 +10383,30 @@ class _GradeCase(unittest.TestCase):
         return done.stderr
 
 
+class GradeRefusesAStillsRun(_GradeCase):
+    """#372: the grader reads frames, and a stills run has none."""
+
+    def test_every_command_refuses_before_it_grades_anything(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        demo = _grade_demo(tmp.name)
+        doc = json.loads((demo / "timeline.json").read_text())
+        doc["mode"] = "stills"
+        doc["media"] = None
+        (demo / "timeline.json").write_text(json.dumps(doc), encoding="utf-8")
+        # Both commands, because each loads the timeline for itself. The
+        # frames manifest here is intact and full of beats, so a command that
+        # graded it would look like it worked.
+        reading = demo / "reading.json"
+        reading.write_text(json.dumps(_grade_reading([])), encoding="utf-8")
+        for args in (
+            ("brief", str(demo)),
+            ("verdict", str(demo), "--reading", str(reading)),
+        ):
+            with self.subTest(args[0]):
+                self.assertIn("stills-only run", self.refused(*args))
+
+
 class BriefIsBlind(_GradeCase):
     """The brief is a pure function of the clauses and the frame manifest."""
 
@@ -10971,10 +11080,408 @@ class ExitStatus(_GradeCase):
         self.assertEqual(set(re.findall(r"\b([0-9])\b", section)), {"0", "2"})
 
 
+class StillsOnly(unittest.TestCase):
+    """A run that takes the pictures and skips the video (issue #372).
+
+    The mode's whole risk is that it produces a folder that *looks* like a
+    take. Every test here is about a way that could happen: an artifact that
+    names a video, a consumer that reads one, or a picture that came out
+    different because nothing waited for it.
+    """
+
+    def built(self, **settings):
+        """A constructed recorder. Not `recorder()`, which pins speech off —
+        and whether it is off, and for which of two reasons, is half of what
+        is being graded here."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with target_env(), contextlib.redirect_stderr(io.StringIO()):
+            return Recorder(tmp.name, evidence=False, **settings)
+
+    def doc(self, **settings) -> dict:
+        """The timeline document a run with these settings would write."""
+        rec = recorder(self, page=DrawingPage(), **settings)
+        rec.caption("A small dashboard.")
+        with contextlib.redirect_stderr(io.StringIO()):
+            return rec._timeline_doc()
+
+    def test_the_timeline_says_which_of_the_two_this_was(self):
+        stills = self.doc(stills_only=True)
+        self.assertEqual(stills["mode"], "stills")
+        self.assertIsNone(stills["media"])
+        self.assertIsNone(stills["duration"])
+        # The claim `content` would make is about frames, and there are none.
+        # Not `content: null`, which on a take means an mp4 was expected and
+        # could not be measured.
+        self.assertNotIn("content", stills)
+
+    def test_a_take_carries_none_of_it_and_is_unchanged(self):
+        # The control on the test above. Without it "stills runs say mode"
+        # holds just as well on a recorder that says it on every run, and a
+        # reader who has to interpret `mode: "take"` is a reader this mode
+        # created work for.
+        take = self.doc()
+        self.assertNotIn("mode", take)
+        self.assertEqual(take["media"], "demo.mp4")
+        self.assertIn("content", take)
+
+    def test_the_evidence_documents_name_no_video_either(self):
+        # The same pointer, three files over. `evidence/beat-NN.json` is read
+        # on its own — that is what its envelope is for — so a `media` naming
+        # a file this run did not write is the timeline's lie, distributed.
+        for stills_only, expected in ((True, None), (False, "demo.mp4")):
+            with self.subTest(stills_only=stills_only):
+                rec = recorder(self, page=DrawingPage(), stills_only=stills_only)
+                doc = rec._evidence_doc({"index": 0, "verb": "caption"}, {})
+                self.assertEqual(doc["media"], expected)
+
+    def test_the_failure_dump_names_no_video_either(self):
+        rec = recorder(self, page=DrawingPage(), stills_only=True)
+        dump = rec._failure_doc(
+            {"type": "RuntimeError", "message": "no", "beat": None, "verb": None}
+        )
+        self.assertIsNone(dump["media"])
+
+    # -- the pacing ---------------------------------------------------------
+
+    def held(self, stills_only: bool) -> list[float]:
+        """What the run asked `_hold_frame` to wait out, in order."""
+
+        class Held(Recorder):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.waits: list[float] = []
+
+            def _hold_frame(self, seconds: float) -> None:
+                self.waits.append(seconds)
+
+        rec = recorder(self, cls=Held, page=DrawingPage(), stills_only=stills_only)
+        rec.pause(5.0)
+        rec.hold(3.0)
+        rec.caption("Six words is over the floor.")
+        return rec.waits
+
+    def test_a_stills_run_waits_for_nothing_and_a_take_waits_for_all_of_it(self):
+        # Both halves, because "held nothing" is also what a broken harness
+        # reports. The take's numbers are the storyboard's own: 5.0 and 3.0 as
+        # written, and the caption's read-speed hold.
+        self.assertEqual(self.held(stills_only=True), [])
+        self.assertEqual(self.held(stills_only=False), [5.0, 3.0, 0.6 + 6 * 0.34])
+
+    def test_no_medium_can_pace_a_stills_run_past_the_mode(self):
+        # `_idle` is sealed and `_hold_frame` is the hook, so the check is
+        # unreachable-by-construction rather than a rule two media remembered.
+        self.assertIn("_hold_frame", _DemoBase.MEDIUM_HOOKS)
+        self.assertNotIn("_idle", _DemoBase.MEDIUM_HOOKS)
+        with self.assertRaises(TypeError) as refused:
+            type("Paced", (Recorder,), {"_idle": lambda self, s: None})
+        self.assertIn("_idle", str(refused.exception))
+
+    def test_the_terminal_types_through_the_hook_and_not_around_it(self):
+        # The per-keystroke delay is pacing, and it is the one piece of it a
+        # medium owns. Read off the source because running it needs a PTY:
+        # what matters is that it goes through `_idle`, which the mode
+        # short-circuits, and not through a `time.sleep` of its own.
+        typed = inspect.getsource(TerminalRecorder._type)
+        self.assertIn("self._idle(self._type_delay)", typed)
+        self.assertNotIn("time.sleep", typed)
+
+    def test_the_web_recorder_types_at_full_speed_in_a_stills_run(self):
+        # The other keystroke delay, and the only pacing in the package that
+        # does not pass through `_idle` — Playwright owns that loop.
+        for stills_only, expected in ((True, 0), (False, 40)):
+            with self.subTest(stills_only=stills_only):
+                rec = recorder(self, page=TypingPage(), stills_only=stills_only)
+                # `type_into` clicks the field first, and a click needs a live
+                # locator. The delay is what is under test, so the click is
+                # stood down rather than simulated.
+                rec.click = lambda selector: None  # type: ignore[method-assign]
+                rec.type_into("#search", "overdraft")
+                self.assertEqual(rec.page.keyboard.delays, [expected])
+
+    # -- the picture --------------------------------------------------------
+
+    def test_a_stills_run_lands_every_animation_before_it_takes_a_still(self):
+        # The defect this was measured on: the determinism rule spares the
+        # recorder's own overlays so they fade on camera, and with the hold
+        # gone the spotlight's scrim was caught halfway — a still 15.7 dB
+        # from the take's, dimming the app instead of picking out the tile.
+        page = FramedPage()
+        rec = recorder(self, page=page, stills_only=True)
+        rec.shot("01-dashboard")
+        # Every frame, not only the wrapper's: the app's own transitions were
+        # settled by the same hold.
+        self.assertEqual(page.settled, ["wrapper", "app"])
+
+    def test_a_take_settles_nothing_because_holding_the_frame_does(self):
+        page = FramedPage()
+        rec = recorder(self, cls=WebRec, page=page, stills_only=False)
+        rec.shot("01-dashboard")
+        self.assertEqual(page.settled, [])
+
+    def test_nothing_settles_on_a_beat_that_takes_no_picture(self):
+        # The cost half of the same decision: a document does not care what a
+        # transition was halfway through, so a stills run pays one evaluate
+        # per picture and not one per beat.
+        page = FramedPage()
+        rec = recorder(self, page=page, stills_only=True)
+        rec.pause(1.0)
+        rec.caption("A small dashboard.")
+        self.assertEqual(page.settled, [])
+
+    def test_a_frame_that_cannot_be_reached_does_not_lose_the_run(self):
+        # A frame navigating away mid-run detaches, and `evaluate` throws.
+        # Settling is here to make the picture right; it is not a reason to
+        # lose one.
+        page = FramedPage(dead={"app"})
+        rec = recorder(self, page=page, stills_only=True)
+        rec.shot("01-dashboard")
+        self.assertEqual(page.settled, ["wrapper"])
+
+    # -- narration ----------------------------------------------------------
+
+    def test_narration_is_off_even_with_a_key_in_the_environment(self):
+        with mock.patch.dict(os.environ, {"ELEVENLABS_API_KEY": "sk-real"}):
+            self.assertFalse(self.built(stills_only=True)._speech)
+            # The control: the same environment, the other mode, speech on.
+            self.assertTrue(self.built(stills_only=False)._speech)
+
+    def test_forcing_speech_on_a_stills_run_is_refused_at_the_constructor(self):
+        # Not silently ignored. There is no mp4 for a voice to go onto, and a
+        # storyboard that asked for one has misunderstood which mode it is in.
+        with mock.patch.dict(os.environ, {"ELEVENLABS_API_KEY": "sk-real"}):
+            with self.assertRaises(RuntimeError) as refused:
+                self.built(stills_only=True, speech=True)
+        self.assertIn("stills-only", str(refused.exception))
+
+    # -- how it is turned on ------------------------------------------------
+
+    def test_the_environment_turns_it_on_and_an_argument_overrides_that(self):
+        with mock.patch.dict(os.environ, {"DEMO_VIDEO_STILLS_ONLY": "1"}):
+            self.assertTrue(recorder(self).stills_only)
+            self.assertFalse(recorder(self, stills_only=False).stills_only)
+        self.assertFalse(recorder(self).stills_only)
+
+    def test_both_media_take_every_setting_the_base_offers(self):
+        # The gap this mode fell into while it was being written: the base
+        # grew a parameter, both media kept their own hand-copied signatures,
+        # and `Recorder(stills_only=True)` was a TypeError while
+        # `_DemoBase(stills_only=True)` worked. Nothing graded the seam, so
+        # every future setting has the same hole.
+        base = inspect.signature(_DemoBase.__init__).parameters
+        for cls in (Recorder, TerminalRecorder):
+            with self.subTest(cls.__name__):
+                mine = inspect.signature(cls.__init__).parameters
+                missing = [n for n in base if n not in mine]
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{cls.__name__} does not accept {missing} — the base "
+                    f"reads it, and no storyboard can reach it",
+                )
+                forwarded = inspect.getsource(cls.__init__).split("super().__init__")[1]
+                unforwarded = [
+                    n
+                    for n in base
+                    if n not in ("self", "out_dir") and f"{n}=" not in forwarded
+                ]
+                self.assertEqual(
+                    unforwarded,
+                    [],
+                    f"{cls.__name__} accepts {unforwarded} and drops them on "
+                    f"the floor, which is worse than not taking them",
+                )
+
+    # -- what refuses this folder -------------------------------------------
+
+    def test_the_frame_sheet_refuses_and_writes_nothing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = Path(tmp.name)
+        (out / "timeline.json").write_text(
+            json.dumps(
+                {
+                    "schema": TIMELINE_SCHEMA,
+                    "mode": "stills",
+                    "media": None,
+                    "duration": None,
+                    "beats": [
+                        {"index": 0, "verb": "caption", "t_start": 0.0, "t_end": 0.1},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest = beat_frames(out)
+        self.assertIn("stills-only run", manifest["skipped"])
+        self.assertIsNone(manifest["media"])
+        self.assertEqual(manifest["frames"], [])
+        # The half that matters. Without the refusal `media or "demo.mp4"`
+        # walks into whatever mp4 the folder holds — in a directory recorded
+        # into before, a previous take's — and cuts a sheet of frames from it
+        # under this run's beat names.
+        self.assertFalse((out / "frames").exists())
+
+    def test_stitching_refuses_a_stills_run_as_a_segment(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = Path(tmp.name)
+        (out / "part1.seg.mp4").write_bytes(b"not really a video")
+        (out / "part1.seg.timeline.json").write_text(
+            json.dumps(
+                {
+                    "schema": TIMELINE_SCHEMA,
+                    "mode": "stills",
+                    "media": None,
+                    "beats": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ValueError) as refused:
+            _segment_timeline(out, "part1", out / "part1.seg.mp4", 1.0)
+        self.assertIn("stills-only run", str(refused.exception))
+
+
 # --------------------------------------------------------------------------
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    # -- stills-only runs (issue #372) ---------------------------------------
+    (
+        # The folder stops saying what it is. Everything else about it already
+        # looks like a take that failed to encode — beats, evidence, images —
+        # so this is the single field between "no video was recorded" and "the
+        # video is missing", and every refusal downstream reads it.
+        "a stills-only run stops declaring itself in the timeline",
+        "core.py",
+        '            doc.pop("content")\n            doc["mode"] = "stills"',
+        '            doc.pop("content")',
+        # Only the test that grades the *writer*. The three refusal tests
+        # below build their own stills timeline by hand — deliberately, since
+        # each grades a consumer's reading of the field and not the recorder's
+        # writing of it — so this injection leaves them green, which is what
+        # `--fault-inject` reported the first time this entry claimed them.
+        ["StillsOnly.test_the_timeline_says_which_of_the_two_this_was"],
+    ),
+    (
+        # The pointer comes back: three artifacts name a demo.mp4 this run did
+        # not write. In a directory recorded into before — the ordinary case,
+        # because record.py is committed so it can be re-run — that file is
+        # sitting there from a previous take. This is #20's stale duration,
+        # one field over and in three more places.
+        "a stills-only run names a video it did not record",
+        "core.py",
+        "        return None if self.stills_only else self._media_path().name",
+        "        return self._media_path().name",
+        [
+            "StillsOnly.test_the_timeline_says_which_of_the_two_this_was",
+            "StillsOnly.test_the_evidence_documents_name_no_video_either",
+            "StillsOnly.test_the_failure_dump_names_no_video_either",
+        ],
+    ),
+    (
+        # The short-circuit settles the frame and then holds it anyway. The
+        # mode still writes the right artifacts and the right pictures, so
+        # nothing is wrong with the output — it just costs the 68% of a take
+        # that is pure pacing, which is the entire reason the mode exists.
+        "a stills-only run settles the frame and then paces it anyway",
+        "core.py",
+        "        if self.stills_only:\n            self._pump_events()\n            return",
+        "        if self.stills_only:\n            self._pump_events()",
+        [
+            "StillsOnly."
+            "test_a_stills_run_waits_for_nothing_and_a_take_waits_for_all_of_it"
+        ],
+    ),
+    (
+        # **The defect this mode was measured making**, restored exactly. The
+        # determinism rule spares the recorder's own overlays so they fade on
+        # camera; with the hold gone nothing waits for them, and the reference
+        # storyboard's spotlight was caught mid-fade — a still 15.7 dB PSNR
+        # from the take's, dimming the whole app instead of picking out the
+        # tile its caption names. Nothing else in the run changes: same beats,
+        # same filenames, same timeline. Only the picture is wrong.
+        "a stills-only run photographs its overlays mid-animation",
+        "core.py",
+        "        if self.stills_only:\n            self._settle_animations()\n        self._before_shot()",
+        "        self._before_shot()",
+        [
+            "StillsOnly."
+            "test_a_stills_run_lands_every_animation_before_it_takes_a_still",
+        ],
+    ),
+    (
+        # Only the wrapper settles. The recorder's own chrome lands, so the
+        # spotlight and the caption look right and the still passes any check
+        # aimed at them — while the app inside the iframe, which is the half a
+        # reviewer is actually reading, is photographed mid-transition.
+        "the stills-only settle reaches the chrome but not the app",
+        "core.py",
+        "        for frame in self.page.frames:",
+        "        for frame in [self.page]:",
+        [
+            "StillsOnly."
+            "test_a_stills_run_lands_every_animation_before_it_takes_a_still",
+        ],
+    ),
+    (
+        # The frame sheet stops recognising the mode and falls through to
+        # `media or "demo.mp4"`: it cuts a sheet out of whatever mp4 the
+        # folder holds — a previous take's — and files it under this run's
+        # beat names, which is the exact lie the mode's `media: null` exists
+        # to prevent.
+        "the frame sheet reads a stills-only folder as a take",
+        "frames.py",
+        '    stills_only = doc.get("mode") == "stills"',
+        "    stills_only = False",
+        ["StillsOnly.test_the_frame_sheet_refuses_and_writes_nothing"],
+    ),
+    (
+        # The grader stops recognising it. It would still refuse — there is no
+        # frames/frames.json — but for the wrong reason, and "there is no
+        # frames/frames.json" reads as a sheet somebody forgot to generate
+        # rather than as a run that can never have one.
+        "the grader takes a stills-only run as a take with a missing sheet",
+        "scripts/demo-grade",
+        '    if timeline.get("mode") != "stills":\n        return',
+        "    return",
+        ["GradeRefusesAStillsRun.test_every_command_refuses_before_it_grades_anything"],
+    ),
+    (
+        # The one piece of pacing Playwright owns rather than `_idle`. A
+        # storyboard that fills a form pays its per-character delay in full —
+        # 1.6 s for a 40-character field — in a mode whose whole claim is that
+        # it pays none of it.
+        "a stills-only run still types one character at a time",
+        "web.py",
+        "        self.page.keyboard.type(text, delay=0 if self.stills_only else delay_ms)",
+        "        self.page.keyboard.type(text, delay=delay_ms)",
+        ["StillsOnly.test_the_web_recorder_types_at_full_speed_in_a_stills_run"],
+    ),
+    (
+        # Narration synthesizes and paces a run that will never encode an
+        # audio track: every line is sent to ElevenLabs, billed, cached, and
+        # then waited out by `_prepare_line` — the slowest thing in the
+        # recorder, in the mode built to be the fastest.
+        "a stills-only run still narrates",
+        "core.py",
+        "        if self.stills_only:\n            self._speech = False",
+        "        if self.stills_only:\n            pass",
+        ["StillsOnly.test_narration_is_off_even_with_a_key_in_the_environment"],
+    ),
+    (
+        # The seam this mode fell into while it was being written: the base
+        # grew a parameter, the medium kept its own hand-copied signature, and
+        # `Recorder(stills_only=True)` was a TypeError while the base accepted
+        # it fine. Silent for every setting that is only read from the
+        # environment, which is most of them.
+        "the web recorder accepts a base setting and drops it",
+        "web.py",
+        "criteria=criteria, ticket=ticket, allow_private=allow_private,\n            stills_only=stills_only,",
+        "criteria=criteria, ticket=ticket, allow_private=allow_private,",
+        ["StillsOnly.test_both_media_take_every_setting_the_base_offers"],
+    ),
     # -- the pixel loop's cache key (tests/pixel, #350) -----------------------
     (
         # The stale-input pass, exactly: the digest still names every recorder
@@ -14857,9 +15364,13 @@ INJECTIONS = [
         # swap mutation exists.
         "the brief orders the clauses by the beats that claim them",
         "scripts/demo-grade",
-        '    timeline = _load_json(timeline_json, "timeline.json")\n'
+        # Anchored on the refusal line above it (#372) rather than on the
+        # `_load_json` that used to be there: all three commands load a
+        # timeline, and this is the only one that reaches `declared_criteria`
+        # on the very next line.
+        "    refuse_stills_only(timeline, timeline_json)\n"
         "    criteria = declared_criteria(timeline, timeline_json)",
-        '    timeline = _load_json(timeline_json, "timeline.json")\n'
+        "    refuse_stills_only(timeline, timeline_json)\n"
         "    criteria = declared_criteria(timeline, timeline_json)\n"
         '    _claimed = (timeline.get("coverage") or {}).get("claimed") or {}\n'
         "    criteria = {\n"

@@ -9939,6 +9939,119 @@ def check_wrapper_refusal(out_dir: Path, raised: BaseException | None) -> list[s
     return failures
 
 
+# -- the stills-only run (issue #372) ------------------------------------------
+#
+# A run that drives the storyboard for its `shot()` pictures and records no
+# video. The artifact shape is graded browser-free in `tests/unit`
+# (`StillsOnly`) and the pictures are graded in `tests/pixel`
+# (`stills-match`); what only a real browser can answer is here, and it is the
+# one that would make an artifact lie: **is there actually no mp4**. The mode
+# declines the screencast in `new_context`, and a mode that declined it and
+# got one anyway would write `mode: "stills"`, `media: null` and
+# `duration: null` over a real recording sitting in the folder.
+#
+# The pacing claim is graded with it, because this arm is the only place the
+# storyboard's declared holds and the wall clock can be compared. The floor is
+# generous on purpose — see STILLS_PACING_BUDGET_S.
+
+# What the stills-only storyboard below asks to be held for, in seconds. A run
+# that paced it cannot finish inside the budget under it.
+STILLS_DECLARED_HOLD_S = 4.0 + 4.0 + 3.0
+# The bar. Well above the ~2 s this arm measures and well under the pacing it
+# must not have spent: the gap is the whole reading, and putting the bar in
+# the empty middle of it is what keeps a slow CI box from failing an arm that
+# is behaving. Browser launch and page load are inside the number.
+STILLS_PACING_BUDGET_S = 8.0
+
+STILLS_CAPTION = "The same storyboard, without the waiting."
+
+
+def run_stills_only(out_root: Path) -> list[str]:
+    """A stills-only run against the fixture: no video, and no time spent."""
+    from demo_recording import Recorder
+
+    out_dir = fresh_take_dir(out_root, "stills-only")
+    started = time.monotonic()
+    with fixture_server() as base_url:
+        try:
+            with Recorder(
+                out_dir,
+                base_url=base_url,
+                speech=False,
+                strict=True,
+                stills_only=True,
+                criteria={"AC-1": STILLS_CLAUSE},
+            ) as rec:
+                rec.goto("/")
+                rec.wait_for("#kpi-rev")
+                rec.criterion("AC-1", hold=4.0)
+                rec.interlude("")
+                rec.caption(STILLS_CAPTION, ac="AC-1")
+                rec.shot("01-dashboard", ac="AC-1")
+                rec.pause(4.0)
+                rec.interlude("A card, held for three seconds.", hold=3.0)
+                rec.shot("02-card")
+                rec.interlude("")
+        except Exception as exc:  # noqa: BLE001 - a raising take is the failure
+            return [f"stills-only: recording raised {type(exc).__name__}: {exc}"]
+    return check_stills_only(out_dir, time.monotonic() - started)
+
+
+STILLS_CLAUSE = "The dashboard shows the current figures."
+
+
+def check_stills_only(out_dir: Path, elapsed: float) -> list[str]:
+    """Nothing here may be readable as a take, and none of it may be slow."""
+    failures = []
+    # The one a browser has to answer. Everything else about this folder is
+    # written by code `tests/unit` reaches with a fake page; whether Chromium
+    # was actually told not to capture is only visible here.
+    for stray in ("demo.mp4", "frames"):
+        if (out_dir / stray).exists():
+            failures.append(
+                f"stills-only: {stray} exists, and this run declined the "
+                f"screencast — so whatever wrote it is a recording the "
+                f"timeline beside it says does not exist ({stray})"
+            )
+    stills = sorted(p.name for p in (out_dir / "images").glob("*.png"))
+    if stills != ["01-dashboard.png", "02-card.png"]:
+        failures.append(
+            f"stills-only: images/ holds {stills}, not both shots — the "
+            f"pictures are the entire output of this mode"
+        )
+    doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
+    for key, want in (("mode", "stills"), ("media", None), ("duration", None)):
+        if doc.get(key, "absent") != want:
+            failures.append(
+                f"stills-only: timeline.json says {key}={doc.get(key, 'absent')!r}, "
+                f"not {want!r} — a reader cannot tell this from a take that "
+                f"failed to encode"
+            )
+    if "content" in doc:
+        failures.append(
+            "stills-only: timeline.json carries `content`, which is a claim "
+            "about frames this run never had"
+        )
+    if not (out_dir / "evidence").is_dir():
+        failures.append(
+            "stills-only: no evidence/ — the mode writes it, and a beat "
+            "pointing at a file that is not there is the ordering #11 forbids"
+        )
+    if elapsed > STILLS_PACING_BUDGET_S:
+        failures.append(
+            f"stills-only: the run took {elapsed:.1f}s against a "
+            f"{STILLS_PACING_BUDGET_S:.0f}s budget, over a storyboard "
+            f"declaring {STILLS_DECLARED_HOLD_S:.0f}s of holds — the pacing "
+            f"is being spent, which is the whole of what this mode saves"
+        )
+    print(
+        f"stills-only: {len(stills)} still(s), no video, {elapsed:.1f}s "
+        f"(budget {STILLS_PACING_BUDGET_S:.0f}s over "
+        f"{STILLS_DECLARED_HOLD_S:.0f}s of declared holds)"
+    )
+    return failures
+
+
 def run_wrapper(out_root: Path) -> list[str]:
     """The wrapper pair (#358): the healthy take, then the refused one."""
     from demo_recording import Recorder
@@ -12280,8 +12393,8 @@ def run_crash_interrupt(out_root: Path, base_url: str) -> list[str]:
     `KeyboardInterrupt` is a `BaseException`, so `except Exception` around the
     beat body would let it through unrecorded and every guard written for
     `Exception` misses it. A real SIGINT arrives inside the `time.sleep` in
-    `_idle`, which is where `pause()` spends its whole beat — so `_idle` is
-    where it is raised from here. The beat is a real `pause` beat, opened and
+    `_hold_frame`, which is where `pause()` spends its whole beat — so
+    `_hold_frame` is where it is raised from here. The beat is a real `pause` beat, opened and
     closed by the recorder's own decorator.
     """
     from demo_recording import Recorder
@@ -12297,7 +12410,7 @@ def run_crash_interrupt(out_root: Path, base_url: str) -> list[str]:
             def _sigint(_seconds: float) -> None:
                 raise KeyboardInterrupt("operator gave up on a hung demo")
 
-            rec._idle = _sigint  # type: ignore[method-assign]
+            rec._hold_frame = _sigint  # type: ignore[method-assign]
             rec.pause(1.0)
     except BaseException as exc:  # noqa: BLE001 - the raise is the assertion
         raised = exc
@@ -12835,6 +12948,12 @@ def main() -> int:
         "sending X-Frame-Options (issue #358)",
     )
     parser.add_argument(
+        "--stills-only",
+        action="store_true",
+        help="record only the stills-only run: the storyboard's pictures with "
+        "no video, no pacing and nothing readable as a take (issue #372)",
+    )
+    parser.add_argument(
         "--issues-only",
         action="store_true",
         help="record only the broken-page and failing-command takes, which is "
@@ -12891,6 +13010,7 @@ def main() -> int:
             ("--coverage-only", args.coverage_only),
             ("--strict-only", args.strict_only),
             ("--wrapper-only", args.wrapper_only),
+            ("--stills-only", args.stills_only),
             ("--issues-only", args.issues_only),
             ("--lock-only", args.lock_only),
             ("--cheap", args.cheap),
@@ -13124,6 +13244,11 @@ def run_phases(only: str | None, out_root: Path) -> list[str]:
     # — the arm records in well under a minute against --web-only's 123 s.
     if selects(only, ("--web-only", "--wrapper-only")):
         failures += run_wrapper(out_root)
+    # Stills without a video (#372). A web take, so --web-only reaches it; its
+    # own flag exists because the arm records in ~2 s and an assertion is only
+    # as gradeable as its cheapest arm (#197).
+    if selects(only, ("--web-only", "--stills-only")):
+        failures += run_stills_only(out_root)
     if selects(only, ("--web-only", "--evidence-only")):
         failures += run_evidence(out_root)
     # Speech end to end (issue #157). A web take, so it is reachable from

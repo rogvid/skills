@@ -257,6 +257,32 @@ def _load_json(path: Path, what: str) -> dict:
     return doc
 
 
+def refuse_stills_only(timeline: dict, where: Path) -> None:
+    """Refuse a stills-only run, by name and before anything is graded.
+
+    A stills-only run (issue #372) writes a `timeline.json` and an `images/`
+    folder and no video. This tool grades what a blind reader finds **in the
+    frames**, and the frames come out of the recording — so on such a
+    directory there is nothing to grade. Without this it would refuse anyway,
+    for the wrong reason: `frames/frames.json` is simply absent, and "there is
+    no frames/frames.json" reads as a sheet somebody forgot to generate rather
+    than as a run that could never have one.
+
+    Named here rather than left to `frame_records`: the difference between a
+    missing artifact and an artifact that cannot exist is the whole of what a
+    caller needs to know to do the right next thing.
+    """
+    if timeline.get("mode") != "stills":
+        return
+    raise Refused(
+        f"{where} is a stills-only run, not a take: it recorded no video, so "
+        f"there is no frame sheet for a reader to look at and nothing here to "
+        f"grade. A stills run is for putting pictures in front of a person "
+        f"quickly; grading is for a take. Re-run the storyboard without "
+        f"stills_only (unset DEMO_VIDEO_STILLS_ONLY) and grade that."
+    )
+
+
 def declared_criteria(timeline: dict, where: Path) -> dict[str, str]:
     """The clauses this take was recorded against, as the ticket words them.
 
@@ -1044,6 +1070,7 @@ def cmd_brief(demo: Path) -> int:
     timeline_json = timeline_paths(demo)[0]
     frames_json = frames_paths(demo)[1]
     timeline = _load_json(timeline_json, "timeline.json")
+    refuse_stills_only(timeline, timeline_json)
     criteria = declared_criteria(timeline, timeline_json)
     records = frame_records(_load_json(frames_json, "frames/frames.json"), frames_json)
     frames = [str(record["file"]) for record in records]
@@ -1085,6 +1112,7 @@ def cmd_verdict(demo: Path, reading_path: Path) -> int:
     frames_dir = frames_paths(demo)[0]
     timeline_json = timeline_paths(demo)[0]
     timeline = _load_json(timeline_json, "timeline.json")
+    refuse_stills_only(timeline, timeline_json)
     frames_json = frames_paths(demo)[1]
     criteria = declared_criteria(timeline, timeline_json)
     records = frame_records(_load_json(frames_json, "frames/frames.json"), frames_json)
@@ -1380,6 +1408,7 @@ def cmd_pr_block(demo: Path) -> int:
         )
     timeline_json = timeline_paths(demo)[0]
     timeline = _load_json(timeline_json, "timeline.json")
+    refuse_stills_only(timeline, timeline_json)
     basis = doc.get("basis") or {}
     criteria = declared_criteria(timeline, timeline_json)
     if basis.get("digest") != basis_digest(criteria, claimed_beats(timeline)):
