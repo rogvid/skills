@@ -581,7 +581,8 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
   waste the take — script 1–2 steps per message.
 - **Layout shifts strand the cursor.** Elements the app inserts mid-recording
   move, the cursor does not — re-`move_to` after any wait that can reflow.
-  The dot stays undrawn until the pointer first moves, and after each `goto()`.
+  The dot stays undrawn until the first pointer verb — then it keeps its last
+  parked spot, `goto()` included: it lives in the recorder's page, not the app.
 - **A blind click to dismiss an overlay.** A `mouse.click(400, 400)` landed
   on a file row, opened a dialog, and its backdrop swallowed every later
   click — dead take. Dismiss via a named neutral element, never coordinates.

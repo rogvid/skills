@@ -9579,9 +9579,7 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     pad = wrapper_pad_band(geom)
 
     sweep = gray_frames(mp4, rect=strip, sample_fps=WRAPPER_CARD_SWEEP_FPS)
-    dark = [
-        sum(f) / len(f) <= WRAPPER_CARD_LOCATE_MAX_LUMA for f in sweep if len(f)
-    ]
+    dark = [sum(f) / len(f) <= WRAPPER_CARD_LOCATE_MAX_LUMA for f in sweep if len(f)]
     media_s = len(sweep) / WRAPPER_CARD_SWEEP_FPS
     run = card_run(dark, WRAPPER_CARD_SWEEP_FPS, (start, end))
     if run is None:
