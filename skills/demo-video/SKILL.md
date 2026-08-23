@@ -64,12 +64,13 @@ the web recorder; the **Terminal demos** section below covers what differs,
 and is **Unix-only** because it uses a PTY.
 
 Both record into a **framed window on a soft pastel background** (rounded
-window, title bar, traffic-light buttons) so the eye has an obvious focus —
-the caption sits as a lower-third. The terminal frames itself in-page; the
-web recording is composited into the window by ffmpeg on exit, which scales
-it down (hence the larger web caption). One consequence: web `shot()` stills
-are captured full-bleed (no window frame) — good for embedding in a guide,
-but they will not match the windowed video exactly.
+window, title bar, traffic lights), framed in-page: the web app records in
+an iframe at true pixel size, caption in a reserved band **below** the app
+rect, so the page is the finished picture — no exit composite, one encode
+per take, and `shot()` stills match the video exactly, chrome included.
+`rec.page` is the framed page; `rec.app` is the app's document. Two edges:
+an app answering `X-Frame-Options`/CSP `frame-ancestors` refuses the take
+by name, and the dot is verb-driven — raw `rec.page.mouse` never moves it.
 
 Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 
@@ -237,7 +238,6 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_LOCALE` | `locale` — browser locale, always applied | `en-US` |
 | `DEMO_VIDEO_SPEECH` | `speech` — force narration on/off (`1`/`0`). **`speech=False` records silently even with a key set**; with no key it is off already, and forcing it *on* without one refuses the take | auto by API key |
 | `DEMO_VIDEO_STRICT` | `strict` — fail the take on console errors / non-zero exits (`1`/`0`) | off |
-| `DEMO_VIDEO_WRAPPER` | `wrapper` — record the web app in an iframe on a recorder-owned page: chrome in the recording, caption in its own band below the app, no exit composite. `rec.page` stays the wrapper page; `rec.app` is the app's document. The cursor dot is verb-driven, so raw `rec.page.mouse` work moves it nowhere; a caption taller than its band is clipped and recorded as a `caption_clipped` issue. Refuses apps sending `X-Frame-Options`/CSP `frame-ancestors`. Transitional (#358; #361 makes it the default) | off |
 | `DEMO_VIDEO_EVIDENCE` | `evidence` — write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | `voice_id` — ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | `speech_model` — ElevenLabs model | `eleven_multilingual_v2` |
@@ -264,7 +264,7 @@ exception, or a non-zero exit. Both are
 |---|---|
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
-| `caption(text)` | Narrator line at the bottom; `""` clears. On the composite path it dies on full page loads — the beat log clears with it, records a `caption_lost` issue naming the line, survives SPA routing; re-caption after a load. A wrapper take's caption lives in the recorder's own band, survives navigation, and `caption_lost` can never fire there |
+| `caption(text)` | Narrator line in the caption band below the app; `""` clears. The band is the recorder's own document, so the line survives full page loads and SPA routing alike and `caption_lost` cannot fire on a web take — caption death on navigation is a terminal-take concern only (its caption is in-page, until #362). A line taller than the two-line band is shaved at the band's edges and recorded as a `caption_clipped` issue: shorten it, or split it over two captions |
 | `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. See [reference/review.md](reference/review.md). |
 | `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped — so the viewer meets the clause and then watches it happen. The beat claims AC-3 and nothing else; the beats after it are untagged. Held to reading speed, and cleared by `interlude("")` like any card. |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |
@@ -397,11 +397,11 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
      `rec.spotlight(selector)` on the element it talks about, so viewers
      never see a highlight belonging to the previous line.
 3. **Caption every beat.** A fresh caption before each thing the viewer
-   should understand, a new one after any navigation, `caption("")` to end
-   clean. On a full page load the caption dies with the DOM; in an SPA
-   (hash routing) it *survives* into the next view and reads as a mistimed
-   line — so `caption("")` before the click that navigates, fresh caption
-   after, in both cases. Rules (each earned in a fresh-eyes review round):
+   should understand, `caption("")` to end clean. The caption lives in the
+   recorder's own band and survives every navigation — full loads and SPA
+   routing alike — so a line left up across one reads as narrating the next
+   view too: `caption("")` before the click that navigates, fresh caption
+   after. Rules (each earned in a fresh-eyes review round):
    - A caption may only claim what is visible in the frame. Don't promise
      an action the demo never performs — scope the words to what's shown,
      or show it. The prohibition alone does not hold — captions get written

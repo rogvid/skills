@@ -306,48 +306,39 @@ CONTENT_STATIC_BEATS_MAX = 8
 
 # -- the blank opening (issue #119) ------------------------------------------
 #
-# Chromium's screencast starts with the page, and the page is `about:blank`
-# until the storyboard's first `goto()` returns. `about:blank` paints white, so
-# every web take opened on a flat white app rect — measured at ~400 ms on the
-# reference demo, and reported by a human watching it, not by anything here.
+# Chromium's screencast starts with the page, and an unpainted page is white,
+# so a recorder that did nothing about its opening put a flat white app rect
+# in front of every viewer — measured at ~400 ms on the reference demo, and
+# reported by a human watching it, not by anything here.
 #
 # `_t0` cannot simply be moved later to skip it: the comment on it in
 # `__enter__` is load-bearing, and says why. Frame zero of the recording is the
 # page's creation, so pinning `_t0` anywhere else shifts every beat timestamp
 # and every narration offset earlier than the frame it describes.
 #
-# **So the gap is covered, not cut.** The web recorder finds the first frame
-# that differs from the one the take opened on, and composites *that* frame
-# over the app rect for the seconds before it. Content at every later time
-# stays exactly where it was: the video's duration is unchanged, the audio is
-# untouched, and not one timestamp moves — which is the whole reason this shape
-# was chosen over trimming, whose uniform `t -= trim` would have to be threaded
-# through `frames/` extraction, `stitch()`'s merged offsets and the capture-loss
-# offset in issue #18.
+# Both recorders now open on their own furniture instead: the terminal on its
+# opening card (#110), the web recorder on the wrapper hold — an opaque field
+# in the window's own colour over the app rect, up in frame 0 and cleared by
+# the first `goto()` (chrome.OPENING_HOLD_JS, #360). Neither fabricates a
+# frame the capture did not record, so `held` — the seconds a take's *encode*
+# covered with a composited still — is null on every take either records, and
+# `content.opening.gap` simply describes what the encoded file opens on: on a
+# healthy web take that is the hold's own featureless stretch, warning-free,
+# because only a recorder that claims to cover can warn.
 #
-# **What it costs, and why the artifact has to say so.** Those first frames show
-# the app before it painted. That is a picture the recording did not capture,
-# and a recorder that fabricates one silently is doing the thing this whole
-# package refuses to do everywhere else. So `content.opening` carries `held` —
-# how many seconds were covered — and the summary line says it out loud.
-#
-# **The number that grades it is measured from the other side.** `held` is what
-# the recorder believes it did; `gap` is measured afterwards, off the encoded
-# mp4, by the same sampling the picture check uses. On a web take that worked,
-# `gap` is 0.0 *because* the hold landed — so a hold that silently did nothing
-# shows up as a non-zero `gap` on the file somebody watches, and warns. The two
-# numbers come from different passes over different files on purpose.
-#
-# Neither number is invented for recorders that do not do this: `held` is null
-# for them (the terminal recorder frames itself in the page and `_postprocess`
-# is a no-op there), and only a recorder that holds can warn about a gap it
-# failed to cover.
+# `held` and `limit` stay in the report for the recorder that earned them
+# (#119's exit-time hold, deleted with the composite in #361 — web.py has the
+# history note): a committed timeline that says `held: 0.4` keeps meaning
+# what it meant, and `opening_warning` still reads the pair, so a future
+# medium that covers its opening at encode time inherits the honesty
+# machinery instead of re-inventing it.
 
-# How long an opening gap may be before the recorder refuses to cover it. Past
-# this the opening is not a screencast artefact, it is an app that takes a long
-# time to paint — which is information about the app, and covering seconds of it
-# would be inventing a demo rather than repairing one. Over the limit nothing is
-# held, `note` says why, and the measured `gap` then warns on its own.
+# How long an opening gap may be before a recorder that covers at encode time
+# should refuse to cover it. Past this the opening is not a screencast
+# artefact, it is an app that takes a long time to paint — which is
+# information about the app, and covering seconds of it would be inventing a
+# demo rather than repairing one. Reported as `content.opening.limit` on
+# every take, so the numbers beside it keep their scale.
 OPENING_HOLD_LIMIT_S = 1.5
 
 # How far in to look for the first change, and how finely. 20 fps because the

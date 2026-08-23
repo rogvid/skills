@@ -96,30 +96,32 @@ def frame_difference(a: bytes, b: bytes) -> float:
     return sum(abs(x - y) for x, y in zip(a, b, strict=False)) / len(a)
 
 
-def to_video_rect(rect: Rect, geom: dict, frame_size: tuple[int, int]) -> Rect:
-    """A page-space rect, mapped to where it lands in the composited mp4.
+def to_video_rect(rect: Rect, geom: dict) -> Rect:
+    """An app-document rect, mapped to where it lands in the recorded frame.
 
-    The web recorder scales the page into a window (~0.8) and overlays it on a
-    background, so a rect read off the live page is not where those pixels are
-    in demo.mp4. Derived from the recorder's own geometry rather than a
-    hardcoded factor, so a change to the window carries this with it.
+    The app records inside the wrapper's content slot at true pixel size
+    (#358, cutover #361), so the mapping is the slot's offset and no scale —
+    the deleted composite's ~0.8 factor went with it. Derived from the
+    recorder's own geometry rather than hardcoded, so a chrome change
+    carries this with it. Rects already in wrapper-page coordinates (a
+    Playwright `bounding_box()`, which answers in main-frame coordinates
+    even for iframe elements) need no mapping at all.
     """
-    width, height = frame_size
-    sx, sy = geom["appw"] / width, geom["apph"] / height
     x, y, w, h = rect
     return (
-        int(geom["appx"] + x * sx),
-        int(geom["appy"] + y * sy),
-        max(2, int(w * sx)),
-        max(2, int(h * sy)),
+        int(geom["appx"] + x),
+        int(geom["appy"] + y),
+        max(2, int(w)),
+        max(2, int(h)),
     )
 
 
 def caption_band(frame_size: tuple[int, int]) -> Rect:
-    """The strip of a full still that holds the burned-in caption bar.
+    """The strip of a full still that holds the caption.
 
-    Covers both recorders: the web caption sits 44 px off the page bottom and
-    the terminal's 88 px, and both boxes are around 70 px tall.
+    Covers both recorders: the web caption's reserved band sits ~54-150 px
+    off the frame bottom at the default viewport (chrome_geometry), and the
+    terminal's in-page bar 88 px off it, ~70 px tall.
     """
     width, height = frame_size
     return (0, max(0, height - 160), width, 140)
@@ -134,16 +136,20 @@ def caption_band(frame_size: tuple[int, int]) -> Rect:
 # the window's pad, ~2 px wide once the page is scaled into the window.
 CARD_STRIP = (0.10, 0.06, 0.80, 0.12)  # x, y, w, h as fractions of the app rect
 
-# And where the window's body is read: a band below the app rect, inset from
-# the left and right so the window's rounded corners and its drop shadow stay
-# out of the mean. Below rather than above because the title bar up there is a
-# different colour again and carries text and three coloured dots; this band is
-# flat window body and nothing else.
+# And where the window's body is read: a band of bare window body, inset
+# from the left and right so the window's rounded corners and its drop
+# shadow stay out of the mean. On a wrapper take that is the window's
+# *bottom pad*, below the caption band (each suite's `wrapper_pad_band`
+# builds the rect from these fractions): the title bar is a different
+# colour again and carries text and three coloured dots, and the strip
+# directly below the app rect is the caption band, which carries a bubble
+# whenever a line is up.
 #
-# **Nothing the card does can paint here** — the pad is part of the frame still
-# ffmpeg composites the app video *onto*, a different layer entirely. That is
-# what makes the reading worth grading against the card: the two bands are the
-# two encoder paths of #301, one each, and the claim is that they agree.
+# **Nothing the card does can paint here** — the card layer covers the app
+# rect exactly (chrome.py). That is what makes the reading worth grading
+# against the card: same encoder, two layers, and the claim is that the one
+# declared colour arrives as one (#360; the two-encoder pair this replaced
+# is #301's history).
 FRAME_BAND = (0.15, 0.70)  # x offset and width, as fractions of the app rect
 
 
@@ -194,27 +200,6 @@ def card_strip(app: Rect) -> Rect:
         max(8, int(w * fw)),
         max(8, int(h * fh)),
     )
-
-
-def frame_band(app: Rect, win: Rect) -> Rect | None:
-    """The band of the window's body this reads the frame's colour out of.
-
-    Between the bottom of the app rect and the bottom of the window — the pad
-    the recorder leaves so the window's rounded corners stay visible around the
-    video. `None` when there is no pad to read.
-
-    Graded against the card by `check_criterion_card`'s second claim, and
-    printed beside it on a healthy run.
-    """
-    ax, ay, aw, ah = app
-    _, wy, _, wh = win
-    top, bottom = ay + ah, wy + wh
-    if bottom - top < 6:
-        return None
-    fx, fw = FRAME_BAND
-    # Inset from the pad's own edges: the outermost row blends into the drop
-    # shadow, and the innermost into the video above it.
-    return (ax + int(aw * fx), top + 2, max(8, int(aw * fw)), bottom - top - 4)
 
 
 def off_card(rgb: tuple[float, float, float], card: tuple[int, int, int]) -> float:

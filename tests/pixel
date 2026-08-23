@@ -18,11 +18,12 @@ Two takes land in `tests/.pixel-cache/` (gitignored):
 
 - `terminal` - a terminal segment opened on a title card, two commands, no
   server. The shape issue #110 was measured on.
-- `web` - the recorder's web chrome against `tests/fixture/index.html` on an
-  ephemeral port: criterion card, interlude, caption, spotlight, and a cursor
-  park. Its storyboard keeps every pointer verb until late in the take, and
-  the marker says at which beat the pointer first moves, so #351 can probe
-  cursor *absence* over the front stretch without a third take.
+- `web` - the recorder's wrapper chrome (#358/#361) against
+  `tests/fixture/index.html` on an ephemeral port: criterion card, interlude,
+  caption, spotlight, and a cursor park. Its storyboard keeps every pointer
+  verb until late in the take, and the marker says at which beat the pointer
+  first moves, so #351 can probe cursor *absence* over the front stretch
+  without a third take.
 
 **Caching.** Each take carries a `.pixel-recording.json` marker naming the
 digest of everything whose bytes decide what its frames look like: every
@@ -46,14 +47,18 @@ then the four golden chrome properties, the defects humans caught by eye:
 
 - **opening-card** (terminal): frame 0 is the card, the card holds an
   unbroken prefix, and the corner later reads bare as the control (#110).
-- **card-vs-window** (web): the criterion card and the window pad around the
-  app are one colour in the composited demo.mp4, worst channel, and the app
-  strip is NOT the card's colour once the card is down (#291).
+- **card-vs-window** (web): the criterion card and the window body around
+  the app are one colour in demo.mp4, worst channel — one uncompensated
+  declaration through one encoder (#291's class, retired by #360/#361) -
+  and the app strip is NOT the card's colour once the card is down.
 - **cursor-parked** (web): the accent disc's measured centre sits at the
-  coordinate the storyboard parked it at, read out of pixels (#202).
+  coordinate the storyboard parked it at, read out of pixels (#202). The
+  wrapper dot is recorder-driven, and this is what grades its pixels — the
+  note pinned to #361.
 - **cursor-absence** (web): no frame before the take's first pointer verb
-  carries an accent pixel in the page-origin crop - #186's signature, the
-  take #193 said no suite records.
+  carries an accent pixel in the frame-origin crop, where a dot that ships
+  visible at load lands - #186's class, structurally closed by the driven
+  dot and still graded here so it cannot grow back.
 
 Each check prints one line with the numbers it measured, pass or fail.
 `--dump <dir>` writes the frames the checks read (and the offending frame,
@@ -93,7 +98,6 @@ from _pixels import (  # noqa: E402
     Rect,
     card_strip,
     channels_apart,
-    frame_band,
     gray_frames,
     off_card,
     strip_rgb,
@@ -142,30 +146,46 @@ OPENING_BARE_MIN_LUMA = 150.0  # tests/smoke OPENING_BARE_MIN_LUMA
 MIN_OPENING_CARD_S = 1.0
 MIN_OPENING_FRAMES = 40  # tests/smoke MIN_OPENING_FRAMES: the sweep floor
 
-# tests/smoke's WEB_CARD_RGB (= core.WEB_CARD_BODY, the compensated colour a
-# web card is dispatched in so it lands on the window through the app's own
-# encoder, #291/#301), with the same two bars: CARD_RGB_TOLERANCE for "the
-# card painted, in the colour dispatched" and CARD_WINDOW_TOLERANCE for "the
-# card and the window pad are one colour on screen". Neither claim reads a
-# declaration — #297's two recorded anti-patterns (pinning the declarations
-# equal, and pinning them ≥ 12 apart) were both green on builds a human
-# rejected, so both sides here are measured out of demo.mp4.
-WEB_CARD_RGB = (0x18, 0x17, 0x26)
-CARD_RGB_TOLERANCE = 6  # tests/smoke CARD_RGB_TOLERANCE
-CARD_WINDOW_TOLERANCE = 2  # tests/smoke CARD_WINDOW_TOLERANCE
-# Two instants inside the card beat (the issue's floor); smoke reads three.
-CARD_SAMPLE_FRACTIONS = (0.3, 0.7)
+# core.WEB_WINDOW_BODY in decimal — the ONE declaration the wrapper card,
+# the window body and the opening hold all paint from (#360), duplicated
+# here because the loop imports nothing from the recorder. Two bars, the
+# same two claims as tests/smoke's check_wrapper_card: CARD_RGB_TOLERANCE
+# for "the card painted, in the declared colour as encoded" and
+# CARD_WINDOW_TOLERANCE for "the card and the window body are one colour on
+# screen". Neither claim reads a declaration — #297's two recorded
+# anti-patterns (pinning declarations equal, and pinning them ≥ 12 apart)
+# were both green on builds a human rejected, so both sides here are
+# measured out of demo.mp4. There is no compensated pair left to drift:
+# #361 deleted it with the composite (see core.WEB_WINDOW_BODY's history).
+WEB_WINDOW_RGB = (0x18, 0x18, 0x25)
+CARD_RGB_TOLERANCE = 6  # smoke's CARD-family bar, kept
+# tests/smoke WRAPPER_CARD_WINDOW_TOLERANCE, same value and same measured
+# reason: the single-declaration pair encodes 0.5-3.8 apart across healthy
+# runs (2.0-3.0 on this loop's own shorter take) — x264 settles the two
+# rects' chroma against different block histories — so what the reading
+# honestly resolves is a *repaint*, not a nudge. The defect the bar exists
+# to catch, a card layer repainted away from core.WEB_WINDOW_BODY, reads
+# >= 13 (the terminal palette) — 2.6x clear of the bar.
+CARD_WINDOW_TOLERANCE = 5
+# Two instants inside the located card stretch (the issue's floor); smoke
+# reads three. Inside its middle half, because the stretch's edges carry
+# the encoder settling onto the new scene — the 0.3 fraction was measured
+# reading a blend frame 5.9 levels off while the steady card read 2.0.
+CARD_SAMPLE_FRACTIONS = (0.4, 0.75)
 
 # The card is *located in the video* before its colour is graded: a luma
-# sweep of the app strip finds the one dark stretch, and the RGB claims are
-# read inside it. Not read at beat-log fractions, because this host's wall
-# clock steps ~0.8s mid-take about one recording in five, a backward step
-# deletes that much video, and capture_clock's step position is an aliased
-# sample (#245, #250) — a beat-log fraction mapped through it was measured
-# landing on the interlude fade, 24 levels off, on a healthy build. The
-# locator is luma and the claims are colour, so nothing is circular: the
-# terminal card on a web take (#291 itself) is exactly as dark and still
-# fails the RGB reading.
+# sweep of the app strip finds the dark stretches, and the RGB claims are
+# read inside the longest one that overlaps the logged criterion beat. Not
+# read at beat-log fractions, because this host's wall clock steps ~0.8s
+# mid-take about one recording in five, a backward step deletes that much
+# video, and capture_clock's step position is an aliased sample (#245,
+# #250) — a beat-log fraction mapped through it was measured landing on the
+# interlude fade, 24 levels off, on a healthy build. Overlap-aware rather
+# than simply the longest run, because a wrapper take has a *second* dark
+# stretch in the app strip that is deliberate: the opening hold, up from
+# frame 0 in the same window colour (#360). The locator is luma and the
+# claims are colour, so nothing is circular: the terminal card on a web
+# take (#291 itself) is exactly as dark and still fails the RGB reading.
 CARD_SWEEP_FPS = 10
 # Same family as OPENING_CARD_MAX_LUMA: the card strip reads ~24, the app
 # ~236, and the fade between them (~80-150) is deliberately outside, so the
@@ -185,20 +205,22 @@ ACCENT_RGB = (235, 110, 20)
 
 # What counts as a pixel of the cursor dot. Channel *gaps* rather than a
 # distance to ACCENT_RGB, because the dot is drawn at two alphas (.45 fill,
-# .95 border, web.py's _CURSOR_JS) over whatever the page has there: the
-# blends range (122,66,25)–(246,175,149) across dark and white grounds, all
-# of them ≥ 95 red-over-blue and ≥ 56 red-over-green, while the fixture's
-# paper (245,246,249), the web card (24,23,38) and the terminal card
-# (28,26,23) are all ≤ 5 on at least one gap.
+# .95 border, chrome.py's #__demo_cursor rule) over whatever the page has
+# there: the blends range (122,66,25)–(246,175,149) across dark and white
+# grounds, all of them ≥ 95 red-over-blue and ≥ 56 red-over-green, while
+# the fixture's paper (245,246,249), the window body (24,24,37) and the
+# terminal card (28,26,23) are all ≤ 5 on at least one gap.
 ACCENT_R_MINUS_B = 60
 ACCENT_R_MINUS_G = 40
 
 # How far the disc's measured centre may sit from the park, in video pixels.
 # The healthy reading is ~1 px (centroid over a review frame downscaled 0.8,
 # plus to_video_rect's integer truncation); the defect this exists to catch —
-# a pointer placed by something other than the storyboard (#202, #186's
-# synthetic mousemove) — is tens to hundreds of pixels away. 3 px keeps an
-# order of magnitude to the defect without ever forgiving a real drift.
+# a dot drawn anywhere but where the pointer was commanded (#202's class;
+# on the wrapper path the recorder drives the dot, so this is the check
+# that reads the drive's pixels) — is tens to hundreds of pixels away.
+# 3 px keeps an order of magnitude to the defect without ever forgiving a
+# real drift.
 CURSOR_PARK_TOLERANCE_PX = 3.0
 # The half-width of the window scanned around the expected centre. Wide
 # enough that a dot a few pixels off is measured rather than missed, narrow
@@ -211,10 +233,14 @@ CURSOR_SEARCH_RADIUS_PX = 40
 # discipline exists to catch.
 CURSOR_MIN_ACCENT_PX = 40
 
-# The #186 signature: the synthetic-mousemove dot differs in x 0-8, y 0-8 of
-# the page, 69 pixels of it. The probe reads that page crop mapped into each
-# review frame.
-ORIGIN_CROP_PAGE_PX = 8
+# Where a dot that ships visible at load lands: the frame-origin corner, in
+# wrapper-page (= video) pixels. #186's signature was 69 pixels inside
+# x 0-8, y 0-8 of the app page; the wrapper dot parks off-screen at
+# (-40,-40) (chrome.py) and is 18 px wide, so a park moved on-screen — the
+# planted form of "the dot was drawn before any pointer verb" — reads in
+# this corner. 16 px covers the whole dot for a park anywhere inside the
+# first few pixels.
+ORIGIN_CROP_PX = 16
 # The absence claim needs frames to be absent from: below this many kept
 # review frames before the first pointer beat, the probe is the vacuous sweep.
 MIN_ABSENCE_FRAMES = 2
@@ -290,10 +316,14 @@ def record_terminal(out_dir: Path) -> dict:
 def record_web(out_dir: Path, base_url: str) -> dict:
     """The web chrome take: criterion card, interlude, caption, spotlight, park.
 
-    Every pointer verb is held back until the end: the whole front of the take
-    runs with a cursor that has never moved, which is the stretch #351's
-    absence probe needs. The marker records the beat index where that stretch
-    ends, read back off the take's own timeline rather than counted by hand.
+    A wrapper take (#358/#361): the recorded page is the framed picture, the
+    app lives in the iframe at true pixel size, and `rec._geom` is
+    chrome_geometry's dict — the marker's single source for where everything
+    sits. Every pointer verb is held back until the end: the whole front of
+    the take runs with a cursor that has never moved, which is the stretch
+    #351's absence probe needs. The marker records the beat index where that
+    stretch ends, read back off the take's own timeline rather than counted
+    by hand.
     """
     from demo_recording import Recorder
 
@@ -308,6 +338,12 @@ def record_web(out_dir: Path, base_url: str) -> dict:
     ) as rec:
         rec.goto("/")
         rec.wait_for("#kpi-rev")
+        # Settle the app before the card, the same distance tests/smoke's
+        # wrapper take keeps: straight off the opening hold the card's
+        # chroma is encoded against the hold's own blocks and reads ~4
+        # levels off the pad; after a settled app stretch it reads ~1, which
+        # is what the 2-level bar was measured against.
+        rec.pause(1.0)
         # -- the pointer-free stretch: nothing above or below this comment
         # moves the cursor until the move_to further down -------------------
         rec.criterion("AC-1")
@@ -333,8 +369,18 @@ def record_web(out_dir: Path, base_url: str) -> dict:
 
         geom = dict(rec._geom)
         size = (rec._size["width"], rec._size["height"])
-        park = rec.page.locator("#search").bounding_box()
-        if park is None:
+        # The park in the app document's OWN coordinates, read inside the
+        # frame — the check maps it through the app-rect offset
+        # (to_video_rect + geom), so the mapping the recorder's verbs rely
+        # on is the thing being graded rather than assumed. A
+        # `bounding_box()` here would answer in wrapper-page coordinates
+        # with the offset already applied, and the check would be comparing
+        # the recorder's arithmetic with itself.
+        park = rec.app.locator("#search").first.evaluate(
+            "el => { const r = el.getBoundingClientRect();"
+            " return [r.x, r.y, r.width, r.height]; }"
+        )
+        if not park or len(park) != 4:
             raise PixelFailure("web: #search has no box - the page never rendered")
 
     doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
@@ -356,14 +402,9 @@ def record_web(out_dir: Path, base_url: str) -> dict:
     return {
         "geom": geom,
         "size": list(size),
-        # The page-space box of the parked element; to_video_rect + geom maps
-        # it into the composite.
-        "park": [
-            int(park["x"]),
-            int(park["y"]),
-            int(park["width"]),
-            int(park["height"]),
-        ],
+        # The app-document box of the parked element; to_video_rect + geom
+        # maps it into the recorded frame.
+        "park": [int(park[0]), int(park[1]), int(park[2]), int(park[3])],
         # Beats [0, this) ran with a pointer that had never moved.
         "no_pointer_until_beat": first_pointer,
     }
@@ -535,8 +576,7 @@ def beat_spans(doc: dict, verb: str) -> list[tuple[float, float]]:
 def longest_run(flags: list[bool]) -> tuple[int, int] | None:
     """(start, length) of the longest contiguous True stretch, or None.
 
-    Ties go to the earliest stretch. This is how the card is found in the
-    sweep: the one long dark run of the app strip.
+    Ties go to the earliest stretch.
     """
     best: tuple[int, int] | None = None
     start: int | None = None
@@ -547,6 +587,44 @@ def longest_run(flags: list[bool]) -> tuple[int, int] | None:
             if best is None or i - start > best[1]:
                 best = (start, i - start)
             start = None
+    return best
+
+
+def true_runs(flags: list[bool]) -> list[tuple[int, int]]:
+    """Every contiguous True stretch, as (start, length), in order."""
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, flag in enumerate([*flags, False]):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            runs.append((start, i - start))
+            start = None
+    return runs
+
+
+def card_run(
+    flags: list[bool], fps: int, span: tuple[float, float]
+) -> tuple[int, int] | None:
+    """The longest dark stretch that overlaps the logged card span, or None.
+
+    Not simply the longest: a wrapper take carries a *second* dark stretch
+    in the same strip — the opening hold, up from frame 0 in the window's
+    own colour and deliberately so (#360) — and on a short take it can
+    outlast the card. Overlap keeps the same 2 s of leading slack the
+    beat-tie always had (the log's clock and the video's disagree, #245);
+    a run ending earlier than that, or starting after the span's end, is
+    not the card the timeline logged.
+    """
+    start_s, end_s = span
+    best: tuple[int, int] | None = None
+    for run_start, run_len in true_runs(flags):
+        run_start_s = run_start / fps
+        run_end_s = (run_start + run_len) / fps
+        if run_end_s < start_s - 2.0 or run_start_s > end_s:
+            continue
+        if best is None or run_len > best[1]:
+            best = (run_start, run_len)
     return best
 
 
@@ -752,19 +830,44 @@ def check_opening_card(
     return problems
 
 
+def wrapper_pad_band(geom: dict) -> Rect:
+    """The strip of flat window body the card is compared against.
+
+    The window's **bottom pad** — between the caption band's end and the
+    window's bottom edge — because it is the one stretch of bare window
+    body a wrapper frame always shows: the caption band above it carries a
+    bubble whenever a line is up. tests/smoke's wrapper_pad_band, duplicated
+    for the thresholds' reason: the loop and the suite must not import each
+    other. Inset from the pad's own edges — the outermost rows blend into
+    the drop shadow and the band above.
+    """
+    pad_top = geom["bandy"] + geom["bandh"]
+    pad_bottom = geom["winy"] + geom["winh"]
+    return (
+        geom["bandx"] + int(geom["bandw"] * 0.15),
+        pad_top + 2,
+        max(8, int(geom["bandw"] * 0.70)),
+        max(2, pad_bottom - pad_top - 4),
+    )
+
+
 def check_card_vs_window(
     take: Path, info: dict | None, dump: Path | None = None
 ) -> list[str]:
-    """The web card is the window's own colour, read out of demo.mp4 (#291).
+    """The card is the window's own colour, read out of demo.mp4 (#291/#360).
 
-    Never a still: `shot()` photographs the page, the layer *before* the
-    composite, and the card and the window pad reach demo.mp4 through two
-    different encoders (#301) — a still can only ever show one of them.
+    On the wrapper path the card and the window body declare ONE colour
+    (`core.WEB_WINDOW_BODY`, duplicated above) and ride one encoder — the
+    compensated pair the composite needed died with it (#361) — and the
+    claim is still read out of the encoded pixels on both sides, never out
+    of declarations (#297's two recorded anti-patterns).
 
     The instants are found in the video (see CARD_SWEEP_FPS), then tied to
     the cached timeline's one criterion beat: the located stretch must
-    overlap the logged span and be at least half its length, so a dark
-    stretch that is not the logged card cannot stand in for it.
+    overlap the logged span (`card_run` — the opening hold is a second,
+    deliberate dark stretch in the same strip) and be at least half its
+    length, so a dark stretch that is not the logged card cannot stand in
+    for it.
     """
     name = "card-vs-window"
     mp4 = take / "demo.mp4"
@@ -774,6 +877,12 @@ def check_card_vs_window(
             f"re-record (tests/pixel record --force)"
         ]
     geom = info["geom"]
+    if "bandy" not in geom:
+        return [
+            f"{take.name}/{name}: the marker's geometry has no caption band - "
+            f"it predates the wrapper cutover; re-record "
+            f"(tests/pixel record --force)"
+        ]
     doc = json.loads((take / "timeline.json").read_text(encoding="utf-8"))
     spans = beat_spans(doc, "criterion")
     if len(spans) != 1:
@@ -784,30 +893,25 @@ def check_card_vs_window(
         ]
     start, end = spans[0]
     app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
-    win: Rect = (geom["winx"], geom["winy"], geom["winw"], geom["winh"])
     strip = card_strip(app)
-    band = frame_band(app, win)
-    if band is None:
-        return [
-            f"{take.name}/{name}: the window {win} leaves no pad around the "
-            f"app rect {app} wide enough to read - nothing can say whether "
-            f"the card is the window's own colour on screen, which is #291"
-        ]
+    band = wrapper_pad_band(geom)
 
-    # Where the card actually is in the file: the longest dark stretch of the
-    # app strip. The beat log says one exists and roughly where; the video
-    # says exactly where. See CARD_SWEEP_FPS for why the log's clock is not
-    # trusted to sub-second precision here.
+    # Where the card actually is in the file: the longest dark stretch of
+    # the app strip that overlaps the logged beat. The beat log says one
+    # exists and roughly where; the video says exactly where. See
+    # CARD_SWEEP_FPS for why the log's clock is not trusted to sub-second
+    # precision here, and card_run for why "longest overall" would find the
+    # opening hold instead.
     sweep = gray_frames(mp4, rect=strip, sample_fps=CARD_SWEEP_FPS)
     dark = [sum(f) / len(f) <= CARD_LOCATE_MAX_LUMA for f in sweep]
     media_s = len(sweep) / CARD_SWEEP_FPS
-    run = longest_run(dark)
+    run = card_run(dark, CARD_SWEEP_FPS, (start, end))
     if run is None:
         return [
-            f"{take.name}/{name}: no frame of the app strip {strip} ever "
-            f"reads <= {CARD_LOCATE_MAX_LUMA:.0f} luma across {media_s:.1f}s "
-            f"- the criterion card the timeline logs at {start:.2f}-{end:.2f}s "
-            f"never painted"
+            f"{take.name}/{name}: no dark stretch of the app strip {strip} "
+            f"(<= {CARD_LOCATE_MAX_LUMA:.0f} luma at {CARD_SWEEP_FPS} fps, "
+            f"{media_s:.1f}s of video) overlaps the criterion beat logged at "
+            f"{start:.2f}-{end:.2f}s - the card never painted"
         ]
     run_start, run_len = run
     rs, re_ = run_start / CARD_SWEEP_FPS, (run_start + run_len) / CARD_SWEEP_FPS
@@ -818,13 +922,6 @@ def check_card_vs_window(
             f"criterion beat logged {end - start:.1f}s long - the card "
             f"flashed rather than held"
         ]
-    if re_ < start - 2.0 or rs > end:
-        return [
-            f"{take.name}/{name}: the dark stretch at {rs:.2f}-{re_:.2f}s "
-            f"does not overlap the criterion beat logged at "
-            f"{start:.2f}-{end:.2f}s - whatever it is, it is not the card "
-            f"this take dispatched"
-        ]
     if media_s - re_ < MIN_CARD_DOWN_S:
         return [
             f"{take.name}/{name}: the card stretch runs to {re_:.2f}s of a "
@@ -832,9 +929,9 @@ def check_card_vs_window(
             f"there is no app stretch to tell it apart from"
         ]
 
-    # The control: after the card stretch, the strip must NOT be the card's
-    # colour — without this a fixture app that happened to be this dark blue
-    # would pass with no card in the recording at all.
+    # The control: after the card stretch, the strip must NOT be the window's
+    # colour — without this an app that happened to be this dark blue would
+    # pass with no card in the recording at all.
     control_at = re_ + (media_s - re_) * 0.5
     before = strip_rgb(mp4, control_at, strip)
     if before is None:
@@ -845,14 +942,14 @@ def check_card_vs_window(
         ]
     dump_frame(dump, name, f"card-down-control-t{control_at:.2f}s", mp4, at=control_at)
     problems: list[str] = []
-    control_off = off_card(before, WEB_CARD_RGB)
+    control_off = off_card(before, WEB_WINDOW_RGB)
     if control_off <= CARD_RGB_TOLERANCE:
         return [
             f"{take.name}/{name}: at {control_at:.2f}s, with the card down "
             f"since {re_:.2f}s, the strip reads "
             f"{tuple(round(v) for v in before)} - the card's own colour "
-            f"{WEB_CARD_RGB}. Either the app cannot be told from the card, or "
-            f"the card was never taken down"
+            f"{WEB_WINDOW_RGB}. Either the app cannot be told from the card, "
+            f"or the card was never taken down"
         ]
 
     drifts: list[float] = []
@@ -868,14 +965,14 @@ def check_card_vs_window(
             )
             continue
         dump_frame(dump, name, f"card-up-t{at:.2f}s", mp4, at=at)
-        drift = off_card(got, WEB_CARD_RGB)
+        drift = off_card(got, WEB_WINDOW_RGB)
         drifts.append(drift)
         if drift > CARD_RGB_TOLERANCE:
             problems.append(
                 f"{take.name}/{name}: {fraction * 100:.0f}% through the "
                 f"criterion beat the card reads "
                 f"{tuple(round(v) for v in got)} over {strip}, {drift:.0f} "
-                f"levels off the web card's {WEB_CARD_RGB} (bar "
+                f"levels off the declared window body {WEB_WINDOW_RGB} (bar "
                 f"{CARD_RGB_TOLERANCE}) - a web take painting the terminal "
                 f"palette here is issue #291 itself"
             )
@@ -886,18 +983,19 @@ def check_card_vs_window(
             problems.append(
                 f"{take.name}/{name}: {fraction * 100:.0f}% through the "
                 f"criterion beat the card reads "
-                f"{tuple(round(v) for v in got)} and the window pad "
+                f"{tuple(round(v) for v in got)} and the window body "
                 f"{tuple(round(v) for v in chrome)}, {gap:.0f} levels apart "
                 f"worst channel (bar {CARD_WINDOW_TOLERANCE}) - a viewer can "
-                f"tell the card from the window it sits in (#291): the "
-                f"encoder compensation is gone, one layer was repainted, or "
-                f"the encoder moved under it (#301)"
+                f"tell the card from the window it sits in (#291). The two "
+                f"declare one colour and ride one encoder here (#360), so "
+                f"one layer was repainted away from core.WEB_WINDOW_BODY"
             )
             dump_frame(dump, name, f"card-up-t{at:.2f}s-FAIL", mp4, at=at)
     detail = (
-        f"card {max(drifts):.0f} off {WEB_CARD_RGB} (bar {CARD_RGB_TOLERANCE}) "
-        f"and {max(gaps):.0f} off the window pad (bar {CARD_WINDOW_TOLERANCE}) "
-        f"over {len(drifts)} instants; card-down control {control_off:.0f} off"
+        f"card {max(drifts):.0f} off {WEB_WINDOW_RGB} (bar "
+        f"{CARD_RGB_TOLERANCE}) and {max(gaps):.0f} off the window body (bar "
+        f"{CARD_WINDOW_TOLERANCE}) over {len(drifts)} instants; card-down "
+        f"control {control_off:.0f} off"
         if drifts and gaps
         else "no instant inside the card beat could be read"
     )
@@ -911,9 +1009,12 @@ def check_cursor_parked(
     """The accent disc sits where the storyboard parked it, read from pixels.
 
     tests/smoke's check_parked_pointer asks the DOM; this reads the shipped
-    frame, which is what a viewer meets and what a compositor bug would move.
-    The parked coordinate is the marker's page-space park rect mapped through
-    to_video_rect — the recorder's own geometry, not a hardcoded scale.
+    frame, which is what a viewer meets. The wrapper dot is driven by the
+    recorder, one command per pointer step (#361) — this is the check that
+    grades the drive's *pixels*, per the note pinned on that issue. The
+    parked coordinate is the marker's app-document park rect mapped through
+    to_video_rect — the app-rect offset out of the recorder's own geometry,
+    not a hardcoded number.
     """
     name = "cursor-parked"
     if not info or not all(k in info for k in ("geom", "size", "park")):
@@ -936,7 +1037,7 @@ def check_cursor_parked(
     if dims is None:
         return [f"{take.name}/{name}: {frame.name} is not a PNG"]
     scale = dims[0] / size[0]  # review frames are downscaled (#343)
-    vx, vy, vw, vh = to_video_rect(tuple(park), geom, (size[0], size[1]))
+    vx, vy, vw, vh = to_video_rect(tuple(park), geom)
     expect = (vx + vw / 2, vy + vh / 2)
     radius = CURSOR_SEARCH_RADIUS_PX
     window = (
@@ -993,13 +1094,16 @@ def check_cursor_parked(
 def check_cursor_absence(
     take: Path, info: dict | None, dump: Path | None = None
 ) -> list[str]:
-    """No dot before the first pointer verb — #186's signature, #193's gap.
+    """No dot before the first pointer verb — #186's class, kept closed.
 
     Every kept review frame of a beat before the marker's
-    no_pointer_until_beat is probed for accent pixels in the page-origin crop
-    (x 0-8, y 0-8 — where the synthetic-mousemove dot of #186 landed, 69
-    pixels, all inside it). The take's whole front runs pointer-free by the
-    storyboard's contract, so one accent pixel there is the dot drawn at load.
+    no_pointer_until_beat is probed for accent pixels in the frame-origin
+    crop — where the wrapper dot lands if its off-screen park is lost and it
+    ships visible at load (see ORIGIN_CROP_PX). The take's whole front runs
+    pointer-free by the storyboard's contract, so one accent pixel there is
+    a dot no pointer verb commanded — the event-driven form of which was
+    #186, structurally removed by the recorder-driven dot and graded here so
+    it cannot grow back in any form.
     """
     name = "cursor-absence"
     if not info or not all(
@@ -1009,11 +1113,11 @@ def check_cursor_absence(
             f"{take.name}/{name}: the marker carries no pointer-free contract "
             f"- re-record (tests/pixel record --force)"
         ]
-    geom, size = info["geom"], info["size"]
+    size = info["size"]
     first_pointer = int(info["no_pointer_until_beat"])
-    crop = to_video_rect(
-        (0, 0, ORIGIN_CROP_PAGE_PX, ORIGIN_CROP_PAGE_PX), geom, (size[0], size[1])
-    )
+    # Wrapper-page coordinates ARE video coordinates (true pixel size, no
+    # composite), so the corner crop needs no geometry mapping.
+    crop = (0, 0, ORIGIN_CROP_PX, ORIGIN_CROP_PX)
     probed = 0
     worst = 0
     problems: list[str] = []
@@ -1050,9 +1154,9 @@ def check_cursor_absence(
         if count:
             problems.append(
                 f"{take.name}/{name}: beat {beat_index:02d}'s frame carries "
-                f"{count} accent pixels in the page-origin crop {crop}, "
-                f"before any pointer verb ran - the dot was drawn at load, "
-                f"which is #186's race shipped again"
+                f"{count} accent pixels in the frame-origin crop {crop}, "
+                f"before any pointer verb ran - the dot shipped visible at "
+                f"load, which is #186's class grown back in a new form"
             )
             dump_frame(dump, name, f"beat-{beat_index:02d}-FAIL", frame)
     if probed < MIN_ABSENCE_FRAMES:

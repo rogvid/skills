@@ -74,25 +74,30 @@ counterpart at its definition:
   smoke's `MIN_OPENING_CARD_S`), and the corner later reads bare (≥ 150) as
   the control. Frame 0 is read by index out of one full decode, never by
   seeking a timestamp (#128).
-- **card-vs-window** (web take, #291): the criterion card and the window pad
-  read out of the composited `demo.mp4` (never a still - the two layers
-  arrive through different encoders, #301) at two instants inside the card,
-  ≤ 6 levels off the dispatched `WEB_CARD_RGB` and ≤ 2 levels apart worst
-  channel, with a card-down control that must NOT read as the card. The
-  instants are located by a luma sweep of the strip itself and tied loosely
-  to the logged beat, because this host's wall clock steps ~0.8 s mid-take
-  about one recording in five and `capture_clock`'s step position is an
-  aliased sample (#245, #250) - a beat-log fraction mapped through it landed
-  on the interlude fade on a healthy build.
+- **card-vs-window** (web take, #291/#360): the criterion card and the
+  window's bottom pad read out of `demo.mp4` at two instants inside the
+  card, ≤ 6 levels off the ONE declared colour (`core.WEB_WINDOW_BODY`,
+  uncompensated since #361) and ≤ 5 levels apart worst channel (the
+  single-declaration pair encodes 0.5-3.8 apart across healthy runs, so
+  the reading resolves repaints, not nudges - the reasoning is at the
+  constant), with a card-down control that must NOT read as the card. The
+  instants are located by a luma sweep of the strip and tied to the logged
+  beat - overlap-aware, because the opening hold is a second, deliberate
+  dark stretch in the same strip - and never by a bare beat-log fraction:
+  this host's wall clock steps ~0.8 s mid-take about one recording in five
+  and `capture_clock`'s step position is an aliased sample (#245, #250).
 - **cursor-parked** (web take, #202): the accent disc's centre, measured as
   the centroid of accent-like pixels in the last review frame, sits within
   3 px per axis (video pixels) of the park rect's centre mapped through
-  `to_video_rect`. Read from pixels, where smoke's `check_parked_pointer`
-  asks the DOM. A missing disc fails, deliberately.
-- **cursor-absence** (web take, #186; closes #193's gap): every kept review
-  frame before the marker's `no_pointer_until_beat` carries zero accent
-  pixels in the page-origin crop (x 0-8, y 0-8 - the #186 signature), with a
-  floor of 2 probed frames so the sweep cannot be vacuous.
+  `to_video_rect` - the app-rect offset, since the app records at true
+  pixel size. The wrapper dot is recorder-driven (#361), and this golden is
+  what grades the drive's pixels. A missing disc fails, deliberately.
+- **cursor-absence** (web take, #186's class; closes #193's gap): every kept
+  review frame before the marker's `no_pointer_until_beat` carries zero
+  accent pixels in the frame-origin crop (16 px - where a dot whose
+  off-screen park is lost ships visible at load), with a floor of 2 probed
+  frames so the sweep cannot be vacuous. The event race behind #186 is
+  structurally gone - nothing listens - and this keeps it gone in any form.
 
 `--dump <dir>` writes every frame the checks read (and any offending frame)
 as PNGs named by check and instant, for a pull request's before/after.
@@ -117,7 +122,7 @@ seen red under a planted recorder defect in #351's pull request.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~55 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~54 min, nightly)
 ├── unit               # the browser-free half (~6 s, 536 tests, no dependencies)
 ├── ci-unit            # the three .github/scripts helpers (~0.2 s)
 ├── lint               # ruff at the version ci.yml pins, over the files CI
@@ -295,8 +300,8 @@ grades, the manifest that proves it can still fail:
 ```sh
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
-tests/smoke-inject --arm coverage # one arm's entries (~225 s)
-tests/smoke-inject                # all 73 entries, ~55 min
+tests/smoke-inject --arm coverage # one arm's entries (~195 s)
+tests/smoke-inject                # all 71 entries, ~54 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -541,23 +546,24 @@ every push.
 ### What now grades only at merge
 
 Four phases — `run_web`, `run_terminal`, `run_content` and `run_terminal_race`
-— and with them **eight check functions no other phase reaches**:
+— and with them **seven check functions no other phase reaches**:
 
 - `check_content_pair` — content/terminal; 1 `smoke-inject` entry, so nightly
 - `check_content_toured` — content/terminal; 1 entry, so nightly
 - `check_form_pacing` — web; 4 entries, so nightly
 - `_check_scored_region` — content/terminal; covered by the content entries
 - `_check_occlusion` — content/terminal; no entry, and none before this either
-- `check_opening` — web; **no entry**
 - `check_opening_gap` — web; **no entry**
 - `check_verb_classification` — content/terminal; **no entry**
 
-The last three are the real cost of the split and are written up under *Known
+The last two are the real cost of the split and are written up under *Known
 gaps*: no injection and no per-push take means nothing exercises them between a
 pull request opening and its merge, and `check_verb_classification` is the
 guard that caught `clear`/`press` going unclassified in #130.
 [#233](https://github.com/rogvid/skills/issues/233) is the entries that would
-close it.
+close it. (`check_opening` was on this list until #361 retired it with the
+composite hold it graded; the wrapper opening is `check_wrapper_opening`'s,
+which `--wrapper-only` reaches per push.)
 
 ### Why the four middle arms stayed on the push
 
@@ -613,11 +619,10 @@ window — and that bimodal spread alone scores 60–79. A fully blank web
 recording scores **61.8** that way and a healthy one **60.2**, so the metric is
 anti-correlated and no floor can work. Instead, the app's own rect is measured:
 
-- **web video** — `Recorder._geom`, the composited window position, read off the
-  live recorder rather than re-derived, so a change to the window geometry
-  carries the measurement with it
-- **web stills** — the full frame, since `shot()` captures the page full-bleed
-  before compositing
+- **web video and stills** — `Recorder._geom`, the wrapper chrome's app rect,
+  read off the live recorder rather than re-derived, so a change to the window
+  geometry carries the measurement with it. One rect for both since #361: a
+  `shot()` still is the framed page, the same picture the video records
 - **terminal** — the bounding box of `#__term_host`, the xterm.js host div
 
 The bottom 20% of each rect is dropped so the recorder's caption bar cannot
@@ -1426,14 +1431,13 @@ recorded here because nothing asserts on that gap today, and a number written
 into two closed issues as *the* check is the kind that becomes an assertion
 later — one that would look green forever.
 
-### What a web take opens on (issue #119)
+### What a web take opens on (issue #119, then #360/#361)
 
 The third defect in this file found by a human watching, and the most plausible-
-looking of the three: Chromium's screencast starts with the page, the page is
-`about:blank` until the first `goto()` returns, and `about:blank` paints white —
-so a web take opened on ~400 ms of flat white inside a *correct-looking* window
-frame. It does not read as a broken recorder. It reads as an app that loaded
-blank.
+looking of the three: Chromium's screencast starts with the page, before the
+first `goto()` has an app to show — so a web take opened on ~400 ms of flat
+white inside a *correct-looking* window frame. It does not read as a broken
+recorder. It reads as an app that loaded blank.
 
 Nothing in this file moved when that shipped, and neither did the recorder's own
 picture check: its `score` is a median, so it cannot see a leading blank shorter
@@ -1441,51 +1445,39 @@ than half the take, and `static_for` saw one 0.5 s gap against a 15 s limit.
 Both are the right design for what they grade, and both are the reason this
 needed its own assertion.
 
-`check_opening` rides on the `web/` take rather than recording a fourth one, and
-the placement is load-bearing: the fix is an overlay switched off part way
-through, so no timestamp may move, and `check_beat_frames` in that same take
-already matches each beat's frame against the caption that beat put up. A hold
-that shifted the clock lands those frames on the wrong captions.
+Two mechanisms have answered it. The composite path covered the gap at encode
+time — an ffmpeg overlay of the app's first painted frame, graded here by a
+`check_opening` that read frame zero against the take's own median. Both died
+with the composite ([#361](https://github.com/rogvid/skills/issues/361)). The
+wrapper take opens on the **in-page hold** instead: an opaque field in the
+window's own colour, up in frame 0 and cleared by the first `goto()`
+([#360](https://github.com/rogvid/skills/issues/360)) — chrome the recording
+really captured, so no frame is fabricated and no timestamp can move.
+`check_wrapper_opening` grades it twice per run, on the wrapper arm's take and
+on the long `web/` take: frame zero of the app strip reads the hold (≤ 60 mean
+luma, read with `-t` and no `fps` filter — the filter hands back a frame from
+mid-slot, which is how the first version of the old check passed on a blank
+take), and the strip later reads the bare app (≥ 150) as the control, without
+which the first claim is satisfied by a recorder that painted a rectangle and
+stopped (#91). The review sheet names the frames cut inside the hold
+(`frames.md`'s opening-hold note), so a flat dark window under a `goto`
+heading is documented rather than left to read as a failed load.
 
-Two arms, and they fail for different reasons:
+`check_opening_gap` is the surviving half of the old pair, and it exists
+because **the recorded takes cannot reach both shapes of the measurement**:
+`opening_gap` — the reading `content.opening.gap` reports on every take — has
+a blank floor that stops it firing on an app that painted immediately and then
+held still, and no take here holds that shape. Two videos are synthesised with
+ffmpeg, no browser: white until 0.6 s then colour bars (must measure 0.6 s),
+and colour bars throughout (must measure 0.0). The second is the control.
+Colour bars rather than `testsrc2` on purpose — `testsrc2` animates, so a
+video of it changes every frame and could not express "painted and holding
+still", which is the whole distinction being graded.
 
-| arm | what it grades |
-|---|---|
-| `content.opening.held` is above zero | that this take **had** a gap to cover. Without it, frame zero shows the app whatever the recorder does, and the arm below grades nothing. |
-| frame zero scores at least half the take's own median contrast | that the app is visible at t = 0, out of pixels — never through `opening_gap`, which is the code under test asking itself whether it worked. |
-
-**The first version of the second arm graded nothing, and the fault injection is
-what said so.** It sampled with `sample_fps=1` and read `frames[0]`. The `fps`
-filter quantises to its own output slots, and at 1 fps slot zero is a whole
-second wide — measured, it returns a frame from around 0.5 s, which on a broken
-take is *after* the blank has ended. It scored 17.06 on a video whose first
-frame was flat white. The window is now cut with `-t` instead, which decodes
-from the file's own first frame: 17.25 healthy against 0.00 blanked. Reading the
-assertion would not have found this; breaking the recorder did.
-
-`check_opening_gap` is the other half, and it exists because **the recorded
-takes can only ever show one of the two shapes**. A web take always opens blank,
-so nothing in this suite reaches the blank floor — the constant that stops
-`opening_gap` firing on an app that painted immediately and then held still. Two
-videos are synthesised with ffmpeg, no browser: white until 0.6 s then colour
-bars (must measure 0.6 s), and colour bars throughout (must measure 0.0). The
-second is the control. Colour bars rather than `testsrc2` on purpose —
-`testsrc2` animates, so a video of it changes every frame and could not express
-"painted and holding still", which is the whole distinction being graded.
-
-Injections caught:
-
-| break | what fires |
-|---|---|
-| the hold is composited but switched off (`enable='lt(t,0)'`) | frame zero scores 0.00 against the take's median |
-| the opening is never detected, so nothing is ever held | the premise arm — `held` comes back 0.0 |
-| the blank floor is removed | the synthetic control: a static painted picture reads as a 1.95 s opening |
-
-**What this does not cover.** Only the `web/` take is graded; the web segment
-inside `segments/` and the entropy takes hold their openings too, and nothing
-checks it there. And nothing here compares the held frames against what the app
-*would* have shown — the hold is the app's own first painted frame, so a wrong
-frame would have to come from somewhere else in the same recording.
+**What this does not cover.** Only the `web/` and `wrapper/` takes are graded;
+the web segments inside `segments/` and the entropy takes open on the same
+hold, and nothing reads their frame zero. And whether a *viewer* reads the
+hold as deliberate is the frames.md note's job, not a pixel's.
 
 ### Acceptance-criterion coverage (issue #12)
 
@@ -1852,11 +1844,16 @@ per clause and its beat numbers, and points every row at the wrong one.
   verb.
 
   **Two pixel readings are taken** (issue #291), both across the card's own
-  beat and both out of `demo.mp4`. `check_criterion_card` samples a strip of the
-  app rect and requires that it is the colour the package dispatched —
-  `#181726`, `WEB_CARD_BODY` — and it samples the pad of window body below the
-  app rect and requires the two to be **within 2 levels per channel**. The
-  shipped pair reads `(24, 21, 36)` against `(23, 22, 37)`: one level.
+  beat and both out of `demo.mp4`. `check_wrapper_card` samples a strip of
+  the app rect and requires that it is the window's declared colour as
+  encoded — `#181825`, `core.WEB_WINDOW_BODY`, the ONE declaration the card
+  and the window share since the cutover
+  ([#361](https://github.com/rogvid/skills/issues/361)) — and it samples the
+  window's bottom pad and requires the two to be **within 5 levels per
+  channel** — measured 0.5–3.8 across healthy runs (x264 settles the two
+  rects' chroma against different block histories), so what the reading
+  honestly resolves is a repaint, not a nudge: the planted 8-level repaint
+  reads ~9, the terminal-palette one ≥ 12.
 
   **What that second reading is for, and why it took four rounds to write.**
   #291 is *a web take's card is indistinguishable from the window it sits in* —
@@ -1864,26 +1861,15 @@ per clause and its beat numbers, and points every row at the wrong one.
   levels apart, which the person who found #291 rejected: they asked for the
   card to **match** the window. The round after that pinned the card's *declared*
   colour equal to the window's, and they rejected that too, by sampling a
-  shipped frame and finding the two five levels apart in blue. Both readings
-  were honest and both graded the wrong thing — one the wrong direction, one a
-  string. The window frame reaches `demo.mp4` as a screenshot and the card
-  reaches it through Chromium's VP8, so one declared colour arrives as two
-  ([#301](https://github.com/rogvid/skills/issues/301)); the card is therefore
-  declared two levels off the window *so that it lands on it*, and what is
-  graded is where the two land.
-
-  **A failure of that reading is not a flake.** The compensation is measured
-  against one encoder path — this Chromium's VP8, this ffmpeg, `yuv420p`. If any
-  of them moves, the two layers really do stop matching on screen and the bar
-  going red is correct. The fix is to re-measure `core.WEB_CARD_BODY` against
-  the window, never to widen `CARD_WINDOW_TOLERANCE`. **Where the constant was
-  measured, precisely:** one Linux developer box, sweeping 100 declared colours
-  through real takes. Two platforms then read the *shipped* value identically
-  off `demo.mp4` — that box and `ubuntu-latest` under `smoke (web, content and
-  terminal takes)`, both `(24, 21, 36)` for the card and `(23, 22, 37)` for the
-  window, not merely both under the bar. That is two hosts agreeing exactly,
-  which is evidence and not a guarantee: no Windows or macOS runner has ever
-  recorded a take here, and only this box was swept.
+  shipped frame and finding the two five levels apart in blue: the composite
+  path sent the window as a screenshot and the card through Chromium's VP8,
+  so one declared colour arrived as two
+  ([#301](https://github.com/rogvid/skills/issues/301)), and the fix was a
+  measured compensation constant. The cutover retired the class — one
+  encoder, one declaration — and the reading stays because it is the only
+  thing that grades the *result* rather than a string: a card repainted from
+  a literal still fails it in pixels, and no assertion anywhere pins two
+  declarations together or apart (#297's recorded anti-patterns).
 
   **What is still not graded: whether a viewer reads the result as a card.**
   Sameness is measurable and now measured; recognition is not. Nor is:
@@ -2221,7 +2207,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-73 entries, 14 arms, ~54.8 min of takes
+71 entries, 14 arms, ~54.3 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -2250,9 +2236,9 @@ paragraph whose job is to say what this manifest does not cover.
 |---|---|---|
 | `--lock-only` | 3 | a run the machine lock refuses goes back to building an output directory it will never write to and printing `recordings left in` under `smoke: FAILED`, naming it ([#105](https://github.com/rogvid/skills/issues/105)) — or the fix overshoots and no failing run is told where its recordings are, which the third entry is the control for |
 | `--narration-only` | 6 | the narration fixture goes back to leaving its interlude card up for the whole take, so every frame after the third beat — both captions the arm measures included — is the card and not the app, and nothing fails ([#168](https://github.com/rogvid/skills/issues/168)); or the three claims this 8 s arm is the cheapest way to reach stop grading ([#238](https://github.com/rogvid/skills/issues/238)) — the recorder reporting a healthy 2xx as a problem, which is the *only* over-reporting assertion in the file; a beat opening while the voice is still on the previous line; and every clip mixed in at zero offset, which the silent window before the first line is the control for. Two more are about *where* the voice went ([#226](https://github.com/rogvid/skills/issues/226)), which no window bar can see: the mix landing 250 ms from the second the take's own record names, and the record naming a second the mix did not use — caught only because the arm now watches the host's wall clock itself and compares |
-| `--coverage-only` | 14 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade. Four more grade the *picture* of that card ([#291](https://github.com/rogvid/skills/issues/291)) — pixels read off `demo.mp4`, not values read out of a document: a web take given the terminal's near-black card, which is the defect and which every artifact of the take describes correctly; a card dispatched in the right colour and never made visible; and two that only the card-against-window reading catches — the recorder's window repainted out from under a card that is exactly what it should be, and the card's encoder compensation dropped so that one declared colour serves both layers and they arrive five levels apart |
+| `--coverage-only` | 12 | the report flatters the storyboard: nothing reported unclaimed, a claim pointing at the wrong beat or forgetting its segment, an undeclared tag accepted, the finding dropped from `timeline.md`. Or the card that puts the ticket's own sentence on screen stops carrying it ([#280](https://github.com/rogvid/skills/issues/280)): the id shown in place of the clause, the clause claimed by nothing, the beat not saying which clause was up, and — the one no reading of `timeline.json` can catch — a card logged in full and never drawn, caught only by the assertion that reads the page snapshot. The fifth is the control: with no card raised at all, the other four have nothing to grade. Two more grade the *picture* of that card ([#291](https://github.com/rogvid/skills/issues/291), single-encoder since [#361](https://github.com/rogvid/skills/issues/361)) — pixels read off `demo.mp4`, not values read out of a document: the card's field repainted off the window body it must equal, and a card dispatched in the right colour and never made visible. The compensated-pair entries died with the composite: a window repaint carries the card with it now, by construction, and is no longer a defect anything should catch |
 | `--strict-only` | 2 | a take that should have been refused passes, or the refusal never says which beat caused it |
-| `--determinism-only` | 3 | a re-recording stops reproducing: the pointer parked wherever the race left it, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
+| `--determinism-only` | 3 | a re-recording stops reproducing: the cursor dot parked on-screen so it ships in every still with no pointer verb run, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
 | `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the card raised 400 ms into the document, which is [#110](https://github.com/rogvid/skills/issues/110) itself and the injection that issue's acceptance criterion names; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
 | `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
@@ -2265,7 +2251,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 51 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 49 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -2291,7 +2277,6 @@ paragraph whose job is to say what this manifest does not cover.
   | `check_determinism` | genuinely ungraded. It reads the clock, the locale and the motion setting *out of the page*, which is the whole point of it — a constructor that stored the flag and never wired it up satisfies anything asserted on the Python side |
   | `check_merge_offset` | genuinely ungraded as timing. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half. One claim of it is graded: `LogEarlyCause` reads the AST and requires its positive-skew message to come from `log_early_causes()` rather than from its own copy of a verdict (#257) — the wording, not the measurement |
   | `check_opening_gap` | `OpeningWarning` — `held: null` against `held: 0.0`, and the blank floor that keeps the warning readable. **Merge-only since #61**: `--web-only` is the only arm that reaches it |
-  | `check_opening` | genuinely ungraded — the first frame of a web take, measured in pixels (#119). **Merge-only since #61**: `--web-only` is the only arm that reaches it, so on a pull request nothing runs it and nothing injects against it |
   | `check_opening_card` | genuinely ungraded — three statements about one sweep of one corner of a frame (#110) |
   | `check_spotlight_transitions` | genuinely ungraded — the shape of the spotlight's exit, sampled frame by frame (#111) |
   | `_check_video` | genuinely ungraded — ffprobe against the file the take wrote |
@@ -2302,14 +2287,14 @@ paragraph whose job is to say what this manifest does not cover.
   | `_check_scene_fallback` | genuinely ungraded — measured straight off `demo.mp4`, because no beat in either storyboard is long enough to provoke it |
   | `_check_unstated_holes` | `HostClockHole` — the whole of it, on a scripted `HostClock`: the complaint, the marker that silences it, the steady-host control and both edge guards (#256). Genuinely ungraded *as a check that runs*: a host that does not step its wall clock produces no hole for it to find, so no arm has ever reached its failure |
 
-  **Three rows above are worse off than the rest, and #61 is why.**
-  `check_opening`, `check_opening_gap` and `check_verb_classification` are
+  **Two rows above are worse off than the rest, and #61 is why.**
+  `check_opening_gap` and `check_verb_classification` are
   ungraded by this manifest *and* reachable only from the three arms that no
   longer run per push, so between a pull request opening and its merge nothing
   exercises them at all. The others in this table are either reached by an arm
   `--cheap` still runs or covered by a `tests/unit` class that runs in a
   second. This is the one real cost of the split, it was measured before the
-  split was made, and closing it means giving those three an entry — see
+  split was made, and closing it means giving those two an entry — see
   **When each take runs** near the top of this file, and the *Known gaps*
   entry at the bottom.
 
@@ -2319,7 +2304,7 @@ paragraph whose job is to say what this manifest does not cover.
   `tests/smoke` walked from each `run_*` phase transitively through the take
   helper, the review-frame helper, the `record_*` functions and the stitch,
   against `run_phases`' `selects()` guards and `smoke-inject`'s `ARM_SECONDS`
-  — only **four** of the sixteen cost a medium arm. The other twelve are
+  — only **three** of the sixteen cost a medium arm. The other thirteen are
   reachable from arms of 19-29 s and are ungraded because nobody wrote the
   entry:
 
@@ -2337,12 +2322,14 @@ paragraph whose job is to say what this manifest does not cover.
     [#241](https://github.com/rogvid/skills/issues/241), which supersedes
     [#200](https://github.com/rogvid/skills/issues/200) — that issue counted
     two of these eight.
-  - **The four that really are expensive** — `check_opening` and
+  - **The three that really are expensive** —
     `check_opening_gap` on `--web-only` (123 s), `check_verb_classification`
     and `_check_occlusion` on `--content-only` (148 s).
     [#233](https://github.com/rogvid/skills/issues/233) covers the first
-    three; `_check_occlusion` is PSNR between two moments of a recording and
-    has neither an issue nor a cheaper arm.
+    two; `_check_occlusion` is PSNR between two moments of a recording and
+    has neither an issue nor a cheaper arm. (The composite-opening check was
+    the fourth, retired with the ffmpeg hold it graded — #361; the wrapper
+    opening has entries of its own, reached per push by `--wrapper-only`.)
 
   An arm above is the **cheapest** phase that reaches the function, which is
   not the arm this roster's prose implies for several of them: `check_take`,
@@ -2571,63 +2558,32 @@ knows is missing is worse than one that is openly absent.
   correction scaled by one would be worse than none. Nothing about any of it
   is narration-specific and nothing in `narration.py` should chase it.
 
-- **That a real Chromium hands a click's deferred document event to
-  `evaluate("0")`.** [#214](https://github.com/rogvid/skills/issues/214) is
-  closed: a beat now forces one pump before it stamps the caption it inherited,
-  so the `domcontentloaded` a click left in the connection lands *inside* that
-  beat instead of one beat later.
-  `MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat`
-  grades it by queueing the measured late half of each stream on a page that
-  releases it when the recorder calls — which is Playwright's documented sync
-  dispatch, and is a *stand-in* for it. What no assertion here can see is a
-  build that stopped delivering the queued event on a trivial `evaluate`, or
-  delivered it later than the beat that pumped. That is a claim about a browser
-  and belongs to `tests/smoke`, which has no arm for it
-  ([#228](https://github.com/rogvid/skills/issues/228)).
+- **The caption-stamp pump's browser half is unexercised in effect.** The
+  #214 machinery survives — a beat still forces one pump before it stamps the
+  caption it inherited — but since the cutover
+  ([#361](https://github.com/rogvid/skills/issues/361)) no page event mutates
+  the caption: the clearing that pump existed to catch rode a
+  `domcontentloaded` subscription the wrapper path does not make. The pump
+  still refreshes event attribution at beat open; the re-read of
+  `self._caption` after it re-reads a value nothing can have changed, and no
+  test can make it matter without re-adding the machinery it outlived.
 
-- **The take-level sentence both cursor fixes were accepted on is ungraded.**
-  [#186](https://github.com/rogvid/skills/issues/186) and
-  [#202](https://github.com/rogvid/skills/issues/202) were accepted on "two
-  takes of a storyboard that never moves the pointer produce byte-identical
-  stills". `tests/unit`'s `CursorMotion` grades the *rule* against event shapes
-  measured off three Chromium builds; the determinism arm parks the pointer
-  before anything is photographed and is structurally blind to it. An arm was
-  built for it and removed before merge, because the only event that exercises
-  the guard in such a take — the `mousemove` Chromium dispatches at load — is
-  delivered only when the page's `load` event fires inside 22 ms: 7 of 7 takes
-  under that bar received it, 0 of 9 over it, and the reviewer's box saw 0 of
-  12. Not machine load (7/9 loaded against 8/9 idle) and not listener timing
-  (installed at `readyState: 'loading'`, 7.2-8.4 ms, 16 of 16). The full
-  measurement, and the one route that might still work, are in
-  [#210](https://github.com/rogvid/skills/issues/210).
-
-- **That a pointer move made before `DOMContentLoaded` places the dot is graded
-  as a shape, not in a browser.**
-  [#203](https://github.com/rogvid/skills/issues/203) moved the overlay's
-  pointer subscriptions to `document_start` and left only the dot's insertion
-  at `DOMContentLoaded`. What `tests/unit`'s `CursorMotion` grades is exactly
-  that: the region the script defers holds no `addEventListener(`, read out of
-  the shipped `_CURSOR_JS`. It is a **textual** claim, and a subscription
-  registered through an indirection — a `const listen = () => window.add…`
-  called from `attach` — would satisfy it while the defect was back. The
-  browser measurement is in the pull request, not in any suite: 12 `Recorder`
-  takes per build through `goto(wait_until="commit")` plus a raw
-  `page.mouse.move`, counting only the takes where a probe confirmed the move
-  was delivered at `readyState: 'loading'`. Dot placed 0 of 17 such takes
-  before, 13 of 13 after, on Chromium 136, 147 and 149. **Chromium 151 could
-  not be measured at all**: its `DOMContentLoaded` lands at 11-17 ms and
-  Playwright's move at 39-68 ms, so 0 of 24 takes reached the window. Nothing
-  re-runs any of this, and a smoke arm for it would inherit
-  [#210](https://github.com/rogvid/skills/issues/210)'s problem — the browser,
-  not the storyboard, decides whether a take exercises the path.
-
-- **The same escape hatch loses the move outright in some takes, and no suite
-  sees that either.** Measured while grading #203 and unchanged by it: the
-  document receives no `mousemove` at all in 3 of 12 takes on Chromium 136, 4
-  of 12 on 147, 2 of 12 on 149 and **7 of 12 on 151**, so the take records no
-  cursor. `check_parked_pointer` cannot catch it — the determinism storyboard
-  parks after `Recorder.goto()`, which waits for `load`. Tracked with its
-  measurement in [#230](https://github.com/rogvid/skills/issues/230).
+- **The cursor-event class (#186/#202/#203/#210/#230) is closed by
+  construction, and its browser measurements are history, not suites.** The
+  composite path's dot followed `mousemove` events, and four issues of
+  measured Chromium behaviour — the load-time hover event, the per-build
+  `movementX` semantics, the pre-`DOMContentLoaded` delivery window, the
+  dropped move — were about exactly that. The wrapper dot moves only when a
+  pointer verb commands it (`_glide`, one update per step), so no event the
+  storyboard never sent can draw or move it; `CursorDrive` in `tests/unit`
+  grades the drive, `check_undrawn_pointer` reads the no-verb park out of
+  the DOM on every determinism take, and tests/pixel's cursor-parked and
+  cursor-absence goldens read the shipped frames. What the class left
+  behind as a real limit: **raw `rec.page.mouse` work moves the pointer and
+  not the dot** — the escape hatch records a take whose pointer acts with
+  no visible cursor, stated in SKILL.md and
+  reference/determinism.md rather than graded, because the storyboard
+  author chose to leave the verb layer.
 
 - **Nothing grades the opening frame of a demo anybody ships.**
   `check_opening_card` sweeps the corner of `terminal-opening/`, a take this
@@ -3276,9 +3232,9 @@ knows is missing is worse than one that is openly absent.
   `DEMO_VIDEO_EVIDENCE=0` env var behind it, are exercised nowhere — every
   take here writes evidence
   ([#48](https://github.com/rogvid/skills/issues/48)).
-- **Three checks are exercised by nothing between a pull request and its
+- **Two checks are exercised by nothing between a pull request and its
   merge.** `--cheap` is what CI records per push since
-  [#61](https://github.com/rogvid/skills/issues/61), and `check_opening`,
+  [#61](https://github.com/rogvid/skills/issues/61), and
   `check_opening_gap` and `check_verb_classification` are reachable only from
   `--web-only`, `--content-only` and `--terminal-only`, which now run on merge.
   They also have no `tests/smoke-inject` entry, so nightly injection does not

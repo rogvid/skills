@@ -225,13 +225,15 @@ off.
   "aria": "- banner:\n  - heading \"Northwind Ops\" [level=1]\n- text: Revenue $128,400 …",
   "scope_aria": "- text: $128,400",
   "html": "<div id=\"kpi-rev\">$128,400</div>",
+  "chrome": "caption: A small dashboard.",
   "truncated": [], "limits": { "aria": 12000, "html": 8000 } }
 ```
 
 | Field | What it is |
 |---|---|
-| `aria` | **`Recorder`**: the page's ARIA snapshot — a compact YAML tree of roles and accessible names, the same thing `expect(...).toMatchAriaSnapshot` compares. Semantic, ~10× smaller than the markup, and stable across restyling, which is why it is preferred over raw HTML |
+| `aria` | **`Recorder`**: the app document's ARIA snapshot — a compact YAML tree of roles and accessible names, the same thing `expect(...).toMatchAriaSnapshot` compares. Semantic, ~10× smaller than the markup, and stable across restyling, which is why it is preferred over raw HTML |
 | `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML` with every value-bearing attribute stripped. All three are null when no spotlight is up |
+| `chrome` | **`Recorder`**: what the recorder's own chrome shows on screen — the visible caption line, and any card or bridge label that is up. Read out of the wrapper document's DOM at capture time, never copied from the beat log: the caption lives in the chrome's reserved band, not in the app document the `aria` describes, so without this field no evidence file could say which narration line the frame showed |
 | `screen` | **`TerminalRecorder`**: the rendered screen, ANSI resolved by xterm.js, scrollback included — the same text `wait_for_text()` matches against |
 | `truncated` / `limits` | which fields were cut, and at what budget. A cut field also says so inline where it stops |
 | `error` | present *instead of* the page text when reading the screen raised. Capturing evidence is a diagnostic and must not cost an otherwise fine take, so the file is written anyway, saying what went wrong — which keeps every beat's `evidence` pointer resolving. `timeline.json` is unaffected |

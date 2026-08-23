@@ -1,9 +1,11 @@
 """Recorder — records a web app by driving a Playwright page.
 
-The original demo-video recorder, unchanged in behavior: overlays a visible
-cursor, burns narrator captions into the frame (via _DemoBase), and adds
-web storyboard verbs (goto/click/type_into/spotlight/…) plus the decorative
-on-screen "terminal card" for showing off-browser actions during a web demo.
+The web recorder records a wrapper page the recorder owns (issue #358,
+design record #355, cutover #361): window chrome, a caption band reserved
+below the app rect, the card layer and the cursor dot all live in the
+wrapper document (see chrome.py), and the app loads into an iframe at true
+pixel size. The recorded page *is* the framed picture — there is no
+exit-time composite, so a take costs one video encode, not two.
 
 Note: `Recorder.terminal()` is a *prop inside a web demo* — a styled card
 that fakes a command to make an off-browser action visible. To record an
@@ -18,203 +20,33 @@ actual CLI or TUI, use `TerminalRecorder` instead (see terminal.py).
         rec.shot("01-dashboard")          # -> images/01-dashboard.png
         rec.click("text=Orders")
     # exiting converts the recording into demo.mp4
+
+History: the composite path this replaced screenshotted a window frame once
+per run and had ffmpeg scale the app recording (~0.8) into it at exit —
+which cost a second full-video encode per retake, put the card and the
+window through two different encoders (the #291 colour mismatch and its
+measured #301 compensation, `WEB_CARD_BODY`), and rendered captions at 34px
+to survive the downscale. #355 records why in-page framing replaced it and
+#361 is the cutover that deleted it.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from urllib.parse import urlparse
 
 from .chrome import chrome_geometry, chrome_html, opening_hold_script
-from .content import OPENING_HOLD_LIMIT_S, content_rect, opening_gap
+from .content import content_rect
 from .core import (
-    INTERLUDE_CSS_WEB,
     WEB_WINDOW_BODY,
     _beat_verb,
     _DemoBase,
     _env,
-    _env_flag,
 )
 from .target import guard_target
-
-# Pastel gradient behind the window — matches the terminal recorder's
-# background so web and terminal demos share one look.
-_WEB_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
-
-# The window frame drawn behind the recording: gradient background + a dark
-# rounded window with a title bar and traffic-light buttons. Screenshotted
-# once per run; the app video is composited into its body by ffmpeg.
-#
-# `__WINBG__` is `core.WEB_WINDOW_BODY`, and it is a shared constant rather
-# than a literal because the interlude card is painted to match this colour in
-# the encoded frame (issue #291) — see `core.WEB_CARD_BODY`, which is this value
-# compensated for the extra encoder the card goes through (#301). Paint this
-# from a literal and the two drift apart on the next edit, with nothing left
-# tying the card's compensation to the thing it compensates for.
-_FRAME_HTML = """<!doctype html><meta charset="utf-8">
-<style>
-  html, body { margin: 0; height: 100%; }
-  body { background: __BG__; }
-  #win { position: fixed; left: __WINX__px; top: __WINY__px;
-    width: __WINW__px; height: __WINH__px; border-radius: 14px;
-    overflow: hidden; background: __WINBG__;
-    box-shadow: 0 34px 90px rgba(20,16,40,.40), 0 8px 22px rgba(20,16,40,.28); }
-  #bar { height: 36px; display: flex; align-items: center; gap: 8px;
-    padding: 0 14px; background: #232334;
-    font: 13px/1 ui-monospace, monospace; color: #9399b2; }
-  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
-  #ttl { flex: 1; text-align: center; letter-spacing: .02em; }
-</style>
-<div id="win">
-  <div id="bar">
-    <span class="dot" style="background:#ff5f57"></span>
-    <span class="dot" style="background:#febc2e"></span>
-    <span class="dot" style="background:#28c840"></span>
-    <span id="ttl">__TITLE__</span>
-    <span style="width:44px"></span>
-  </div>
-</div>
-"""
-
-# A visible stand-in for the mouse: headless recordings have no OS cursor,
-# so inject a dot that follows pointer events (and squeezes on click).
-#
-# **The dot follows pointer *motion*, not every `mousemove` — issue #186.**
-#
-# Chromium dispatches one `mousemove` of its own per document, at the widget's
-# initial pointer position — `(0, 0)` on a fresh page — when it recomputes
-# hover state after the first layout. Nothing about it says "synthetic": it is
-# `isTrusted`, it carries a `pointerover`, a `mouseover` and a `pointermove`
-# beside it exactly as a real move does, and it belongs to no storyboard beat.
-# Measured on the fixture page here, it is *created* at `timeStamp` 9 ms and
-# *delivered* at ~89 ms, against a `DOMContentLoaded` at ~20 ms — and `attach`
-# below subscribes at `DOMContentLoaded`, because it needs `document.body`.
-# Which of the two wins is load-dependent, so whether an 18 px dot is burned
-# into the top-left corner of a take's opening stills is a coin flip: eleven of
-# twelve takes under 14-way CPU load had it, one did not. That is what makes a
-# `deterministic=True` take's stills fail to reproduce (#185, #188), and it is
-# the whole of it — two stills that disagree differ in 69 of 921 600 pixels,
-# all of them inside x 0-8, y 0-8.
-#
-# What tells that event apart from a real one is not its trust, its type or
-# its timing: it is that it reports **a position the pointer was already at**.
-# So the overlay remembers the position it has been told about — seeded with
-# `(0, 0)`, where a fresh page's pointer sits and where that event lands — and
-# drops a `mousemove` that repeats it. Nothing is drawn until the pointer is
-# somewhere it has not been, so the dot stays where the stylesheet parks it,
-# off screen, until the storyboard moves the pointer for the first time. That
-# is the one thing here that does not depend on when an event was delivered:
-# both orderings of the load-time event and a storyboard's first move end with
-# the dot at the position the storyboard asked for.
-#
-# **Positions rather than `movementX`/`movementY`, and this is issue #202.**
-# The delta the browser reports for the *first* mouse event in a page is a
-# build detail, because there is no previous event to measure it against:
-#
-#   | Chromium | park at (60, 640) as the page's first mouse event |
-#   |---|---|
-#   | 136 (playwright 1.52) | `movementX/Y` 60, 640 — measured from the origin |
-#   | 147 (playwright 1.59) | `movementX/Y` **0, 0** — measured from itself |
-#   | 151 (playwright 1.61) | 60, 640 — and a settle event precedes it |
-#
-# A guard reading `movementX === 0 && movementY === 0` therefore threw the
-# storyboard's own park away on 147 — indistinguishable there from the
-# load-time event — while staying green on 151, which is how it passed CI and
-# `tests/smoke` on one machine and failed on another. Reading positions costs
-# nothing on any of the three and does not ask the engine for a delta at all,
-# so an engine that implements no `movementX` behaves like every other.
-#
-# What it cannot do, and cannot be made to do: draw the dot for a pointer verb
-# that lands on exactly `(0, 0)`. The pointer *starts* there, so "the pointer
-# was moved to the origin" and "the pointer has not moved" are the same state
-# and no rule reading events can separate them. A storyboard that wants the
-# cursor at the very corner of the viewport has to pass through somewhere else.
-#
-# **The dot is built at `document_start` and inserted at `DOMContentLoaded`,
-# and that split is issue #203.** All of the above is a rule about events, and
-# a rule about events is worth nothing while nothing is listening. `attach`
-# needs `document.body`, so it can only run at `DOMContentLoaded` — and a
-# `mousemove` dispatched before that used to be delivered to no handler at
-# all. Nothing replaces it: the pointer is where it was asked to be, the
-# browser has no reason to say so again, and the dot stays at the stylesheet's
-# off-screen park for the rest of the document. Reachable only by combining
-# two `rec.page` calls, neither of which `SKILL.md` or `reference/` documents —
-# what they document is the escape hatch itself, `rec.page`:
-#
-#     rec.page.goto(url, wait_until="commit")   # Recorder.goto waits for load
-#     rec.page.mouse.move(60, 640)
-#
-# Measured against `tests/fixture` with the position rule above already in
-# place, 12 takes per build, counting only the takes where a probe confirmed
-# the move was delivered while `document.readyState` was still `'loading'`:
-# the dot was placed in **0 of 17** such takes before this split and **13 of
-# 13** after, on Chromium 136, 147 and 149. Chromium 151 never reached the
-# window in 24 takes — its `DOMContentLoaded` lands at 11-17 ms and
-# Playwright's move at 39-68 ms — so it is untested rather than passing.
-#
-# So the listeners are registered while the script itself is evaluated, which
-# for a Playwright init script is `document_start`, and the element they write
-# to is created there too. **A detached element can be styled**: the inline
-# `left`/`top` a `mousemove` writes is still on the div when `attach` puts it
-# in the document, so the dot appears at `DOMContentLoaded` already standing
-# where the pointer went. Nothing is drawn any earlier than it used to be —
-# the stylesheet and the insertion are both still at `DOMContentLoaded`, and
-# an untouched pointer still leaves the parked-off-screen dot #186 is about.
-#
-# What is deliberately *not* covered: a move dispatched before the navigation.
-# That one lands in the previous document, which had its own overlay and its
-# own dot, and no rule in the new document can recover it. Nor is the move
-# Chromium drops on the floor — in the same 48 takes the document received no
-# `mousemove` at all in 3 of 12 on 136, 4 of 12 on 147, 2 of 12 on 149 and 7
-# of 12 on 151, identically before and after this change, and a dot cannot be
-# placed for an event that never arrives. That is issue #230.
-#
-# What this does not do: place the dot after a navigation. A document that
-# replaces the one the dot lived in gets a fresh, parked dot, and Chromium
-# sends its hover-recompute move only for the *first* document — measured, two
-# further navigations with the pointer inside the viewport produced no
-# `mousemove` at all, over four seconds. So the cursor is already absent
-# between a `goto()` and the next pointer verb today, and this changes nothing
-# about that.
-_CURSOR_JS = """
-(() => {
-  const dot = document.createElement('div');
-  dot.id = '__demo_cursor';
-  let atX = 0, atY = 0;
-  window.addEventListener('mousemove', (e) => {
-    if (e.clientX === atX && e.clientY === atY) return;
-    atX = e.clientX;
-    atY = e.clientY;
-    dot.style.left = e.clientX + 'px';
-    dot.style.top = e.clientY + 'px';
-  }, true);
-  window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
-  window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);
-  const attach = () => {
-    if (document.getElementById('__demo_cursor')) return;
-    const style = document.createElement('style');
-    style.textContent = `
-      #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;
-        height: 18px; border-radius: 50%; background: rgba(__ACCENT__,.45);
-        border: 2px solid rgba(__ACCENT__,.95); pointer-events: none;
-        z-index: 2147483647; transform: translate(-50%,-50%);
-        transition: width .1s, height .1s; }
-      #__demo_cursor.__down { width: 12px; height: 12px; }
-    `;
-    document.head.appendChild(style);
-    document.body.appendChild(dot);
-  };
-  if (document.readyState === 'loading')
-    document.addEventListener('DOMContentLoaded', attach);
-  else attach();
-})();
-"""
 
 # Terminal card: a small terminal-styled window that "types" a command on
 # screen, so events the demo triggers from outside the browser (a file
@@ -411,6 +243,30 @@ window.__demoSpotlightClear = () => {
 
 
 
+# What the recorder's own chrome is saying on screen, read out of the wrapper
+# document's DOM at capture time — never out of `self._caption`, which is the
+# beat log quoting itself (#134's blind spot). The caption and the cards left
+# the app's document with the wrapper (#358), so an evidence file that only
+# captured the app frame would silently stop saying which line was on screen —
+# and "a reviewer holding only this file can state what the frame showed"
+# (#9) includes the narration line the frame showed. Visibility-gated the way
+# core's overlay probe is (#163): a cleared caption is opacity 0, not removed.
+_CHROME_TEXT_JS = """() => {
+  const line = (id, name) => {
+    const el = document.getElementById(id);
+    if (!el || !el.textContent) return null;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return null;
+    if (parseFloat(style.opacity || '1') <= 0.5) return null;
+    return name + ': ' + el.textContent;
+  };
+  return [
+    line('__demo_caption', 'caption'),
+    line('__demo_interlude', 'card'),
+    line('__demo_bridge_t', 'bridge'),
+  ].filter(Boolean).join('\\n');
+}"""
+
 # The spotlight target's markup, cleaned, from a *clone* — nothing here may
 # touch the live page, which is being recorded.
 #
@@ -505,7 +361,6 @@ class Recorder(_DemoBase):
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
         allow_private: bool | None = None,
-        wrapper: bool | None = None,
     ) -> None:
         super().__init__(
             out_dir, segment=segment, accent_rgb=accent_rgb,
@@ -527,42 +382,29 @@ class Recorder(_DemoBase):
             self._allow_private,
             source="this take's base_url",
         )
-        # Opt-in wrapper path (issue #358, design record #355): the take
-        # records a recorder-owned wrapper page — window chrome, a caption
-        # band below the app rect — with the app in an iframe at true pixel
-        # size, and the exit-time composite does not run. Transitional: #361
-        # makes it the only path and removes the flag.
-        if wrapper is None:
-            wrapper = _env_flag("WRAPPER")
-        self._wrapper = bool(wrapper)
-        # The app iframe's Frame, once `_start` has mounted it (wrapper only).
+        # The app iframe's Frame, once `_start` has mounted it.
         self._app_frame: object | None = None
-        # Whether the wrapper take's opening hold has been cleared (#360).
-        # The hold is up from frame 0 (see chrome.OPENING_HOLD_JS) and the
-        # first goto() that lands is what clears it — the storyboard's first
+        # Whether this take's opening hold has been cleared (#360). The hold
+        # is up from frame 0 (see chrome.OPENING_HOLD_JS) and the first
+        # goto() that lands is what clears it — the storyboard's first
         # content beat, the moment there is an app to reveal.
         self._hold_cleared = False
-        # Where the wrapper take last commanded the pointer, in wrapper-page
+        # Where the take last commanded the pointer, in wrapper-page
         # coordinates. Seeded at the origin, where a fresh page's pointer
         # actually sits; `_glide` is the only writer.
         self._cursor_at: tuple[float, float] = (0.0, 0.0)
-        if not self._wrapper:
-            # The recording is composited into a window and scaled down
-            # (~0.8), so captions are rendered larger to stay readable in the
-            # final mp4. A wrapper take is recorded at true pixel size and
-            # keeps the base 26px — the terminal recorder's effective size —
-            # because there is no scale to compensate for.
-            self._caption_font_px = 34
-        # And the same composite is why the interlude card is not the default
-        # one: the terminal palette is the colour of a *terminal*, and inside
-        # this window frame a full-bleed field of it reads as one — the whole
-        # of issue #291. The web card is the window's own body colour instead,
-        # as it lands in demo.mp4. See core.INTERLUDE_CSS_WEB. On a wrapper
-        # take this dispatch is moot: the wrapper document defines its own
-        # `__demoInterlude` in the card layer (chrome.py, #360), declaring
-        # `WEB_WINDOW_BODY` uncompensated, and the init script this CSS rides
-        # never paints there.
-        self._interlude_css = INTERLUDE_CSS_WEB
+        # The caption keeps the base font size: the page is recorded at true
+        # pixel size, so there is no downscale to compensate for. (The
+        # composite path rendered captions at 34px to survive its ~0.8
+        # scale — see the module docstring's history note.)
+        #
+        # The interlude card likewise needs no per-medium stylesheet here:
+        # the wrapper document carries its own `__demoInterlude` in the card
+        # layer (chrome.py, #360), declaring `WEB_WINDOW_BODY` uncompensated,
+        # and the base init-script version never paints in it — the card
+        # element already exists in the chrome markup, so the init script
+        # only ever toggles it.
+        #
         # What spotlight() is currently pointing at, which is what a beat's
         # evidence is scoped to. Held here rather than read back out of the
         # page: `window.__spotEl` is an element handle, not a selector, and the
@@ -572,31 +414,15 @@ class Recorder(_DemoBase):
         # see `_note_navigation` for why the listener is kept anyway.
         self._navigated = False
 
-    def _frame_geometry(self) -> dict:
-        """Where the window and the app video sit in the final frame.
-        The app keeps the recording's aspect ratio; a pad leaves the window's
-        rounded corners visible around it."""
-        W, H = self._size["width"], self._size["height"]
-        pad, bar = 14, 36
-        appw = int(W * 0.80) & ~1                 # even width
-        apph = int(round(appw * H / W)) & ~1      # keep recording aspect
-        winw, winh = appw + 2 * pad, apph + 2 * pad + bar
-        winx, winy = (W - winw) // 2, (H - winh) // 2
-        return {
-            "appw": appw, "apph": apph, "winw": winw, "winh": winh,
-            "winx": winx, "winy": winy,
-            "appx": winx + pad, "appy": winy + bar + pad,
-        }
-
     def _content_rect(self) -> tuple[int, int, int, int] | None:
-        """Where the page lands inside the composited frame (issue #97).
+        """Where the app sits in the recorded frame (issue #97).
 
-        `_postprocess` scales the raw recording to `appw x apph` and overlays
-        it at `appx, appy` on the window-and-background still, so this is the
-        app's region of the *encoded* file — which is the only frame anybody
-        watches. Everything outside it is the recorder's own chrome, and that
-        chrome is exactly what made a whole-frame score rank a blank recording
-        above a healthy one (issue #17).
+        `chrome.chrome_geometry` is the single source: the app records in
+        the wrapper's content slot at true pixel size, so the slot's rect is
+        the app's region of the encoded file — which is the only frame
+        anybody watches. Everything outside it is the recorder's own chrome,
+        and that chrome is exactly what made a whole-frame score rank a
+        blank recording above a healthy one (issue #17).
         """
         geom = getattr(self, "_geom", None)
         if not geom:
@@ -609,55 +435,44 @@ class Recorder(_DemoBase):
     def app(self):
         """The app's document — where the verbs point.
 
-        On a wrapper take this is the app iframe's Playwright `Frame`; the
-        wrapper document around it is the recorder's own chrome, so
-        `rec.app.locator(...)` is the escape hatch that reaches the app the
-        way the verbs do. `rec.page` stays the wrapper `Page` — the whole
-        browser surface, chrome included — so nothing an escape hatch could
-        reach before is out of reach now.
-
-        Off the wrapper path it is the page's main frame, so a storyboard
-        written against `rec.app` records identically on both paths.
+        The app iframe's Playwright `Frame`; the wrapper document around it
+        is the recorder's own chrome, so `rec.app.locator(...)` is the
+        escape hatch that reaches the app the way the verbs do. `rec.page`
+        stays the wrapper `Page` — the whole browser surface, chrome
+        included — so nothing an escape hatch could reach before is out of
+        reach now.
         """
-        if self._wrapper:
-            if self._app_frame is None:
-                raise RuntimeError(
-                    "this wrapper take has no app frame yet — rec.app exists "
-                    "once the recorder has entered (`with Recorder(...) as "
-                    "rec:`), which is what mounts the iframe"
-                )
-            return self._app_frame
-        return self.page.main_frame
+        if self._app_frame is None:
+            raise RuntimeError(
+                "this take has no app frame yet — rec.app exists once the "
+                "recorder has entered (`with Recorder(...) as rec:`), which "
+                "is what mounts the iframe"
+            )
+        return self._app_frame
 
     def _target(self):
-        """What locator-driving verbs run against: the app frame on a wrapper
-        take, the page otherwise. `Frame` and `Page` share the whole surface
-        used here (locator/evaluate/url/title), so one call site serves both.
-        """
-        return self._app_frame if self._wrapper else self.page
+        """What locator-driving verbs run against: the app iframe's frame."""
+        return self.app
 
     def _init_context(self, context) -> None:
-        # The wrapper take's cursor lives in the wrapper document (see
-        # chrome.py) and is driven explicitly by the recorder, so the
-        # event-following dot is not injected there: context init scripts run
-        # in every frame, and the app iframe would otherwise draw a second
-        # dot on top of the chrome's.
-        if not self._wrapper:
-            context.add_init_script(_CURSOR_JS.replace("__ACCENT__", self._accent))
-        else:
-            # The opening hold (#360): frame 0 is the window's own colour
-            # over the app rect, not a white iframe waiting for the first
-            # goto. An init script for _OPENING_CARD_JS's reasons — see
-            # chrome.OPENING_HOLD_JS — and the geometry is recomputed here
-            # because init scripts are registered before the page (and
-            # therefore before `_start_wrapper` runs); `chrome_geometry` is
-            # pure, so the two calls cannot disagree.
-            context.add_init_script(
-                opening_hold_script(
-                    chrome_geometry(self._size["width"], self._size["height"]),
-                    window_body=WEB_WINDOW_BODY,
-                )
+        # The opening hold (#360): frame 0 is the window's own colour over
+        # the app rect, not a white iframe waiting for the first goto. An
+        # init script for _OPENING_CARD_JS's reasons — see
+        # chrome.OPENING_HOLD_JS — and the geometry is recomputed here
+        # because init scripts are registered before the page (and therefore
+        # before `_start` runs); `chrome_geometry` is pure, so the two calls
+        # cannot disagree.
+        #
+        # No cursor script rides along: the dot lives in the wrapper
+        # document (chrome.py) and is driven explicitly by the recorder
+        # (`_glide`), so there is no event-following overlay for the app
+        # iframe to draw a second dot with.
+        context.add_init_script(
+            opening_hold_script(
+                chrome_geometry(self._size["width"], self._size["height"]),
+                window_body=WEB_WINDOW_BODY,
             )
+        )
         context.add_init_script(
             _TERMINAL_JS.replace("__TERM_TITLE__", self._terminal_title)
             .replace("__TERM_PROMPT__", self._terminal_prompt)
@@ -680,12 +495,25 @@ class Recorder(_DemoBase):
         and empty of issues. The base now seals `_watch_page` and calls this,
         so the same mistake is a `TypeError` while the module imports.
 
-        Neither callback below calls into Playwright. Page events are
-        delivered on the same thread that is blocked inside a Playwright call,
-        so calling back into the API from one of them is a way to deadlock a
-        take — `_note_document_replaced` writes an issue and reads `page.url`,
-        which is the last URL the connection already told this process about
-        and costs no round trip.
+        The callback below never calls into Playwright. Page events are
+        delivered on the same thread that is blocked inside a Playwright
+        call, so calling back into the API from one of them is a way to
+        deadlock a take.
+
+        **Nothing here subscribes `domcontentloaded`.** The caption lives in
+        the wrapper document, `goto()` navigates the app *iframe*, and the
+        wrapper document is never replaced — a caption structurally cannot
+        be destroyed by navigation, so the #134/#180 `caption_lost` class
+        cannot exist on a web take and the recorder does not listen for it.
+        Not listening rather than listening-and-never-firing is the honest
+        shape: it makes "this issue cannot exist here" a property of the
+        code instead of an observation about one Playwright's event routing,
+        and the beats that keep reporting the caption across a mid-take goto
+        are right — the line really is still on screen (this repository's
+        `tests/smoke --wrapper-only` reads it out of the band's pixels
+        across a full document load). The in-page caption that *does* die
+        with its document survives only on the terminal path, whose page the
+        recorder owns and never navigates, until #362 moves it here too.
         """
         # **Kept deliberately when the masking went** — #142's carve-out.
         # Written for the paint gate, which is gone; nothing reads the flag.
@@ -694,70 +522,15 @@ class Recorder(_DemoBase):
         # attached after the parent's checkpoint had never been verified, which
         # is a statement about a mask and about nothing else.
         page.on("framenavigated", self._note_navigation)
-        # The caption bar is a DOM element, so a document replacing the one it
-        # lives in takes it off the screen (#134). This is the signal for that
-        # and `framenavigated` is not: Playwright fires `framenavigated` for
-        # same-document history navigation too, so an SPA route change would
-        # clear a caption that is still on screen — the same lie in the other
-        # direction. `domcontentloaded` is fired once per new document, and
-        # only for the main frame, so an iframe loading does not touch it.
-        #
-        # That last sentence was read off `playwright-core` and is now
-        # measured: `NAVIGATIONS` in `tests/unit` holds the page-event stream
-        # a real Chromium delivers for `goto`, a link click, `go_back`, a form
-        # submit, `location.href`, a meta refresh, a reload, two same-document
-        # SPA route changes and an iframe load, identical on Chromium 136, 147
-        # and 151, and the suite replays each one through this subscription
-        # (issue #179).
-        #
-        # On a **wrapper** take (#358, #360) the subscription itself is what
-        # goes: the caption lives in the wrapper document, `goto()` navigates
-        # the app *iframe*, and the wrapper document is never replaced — a
-        # caption structurally cannot be destroyed by navigation there, so
-        # `caption_lost` can never fire and the recorder does not listen for
-        # it. Not listening rather than listening-and-never-firing is the
-        # honest shape: it makes "this issue cannot exist on a wrapper take"
-        # a property of the code instead of an observation about one
-        # Playwright's event routing, and the beats that keep reporting the
-        # caption across a mid-take goto are right — the line really is
-        # still on screen (tests/smoke --wrapper-only reads it out of the
-        # band's pixels across a full document load).
-        if not self._wrapper:
-            page.on("domcontentloaded", self._note_document_replaced)
 
     def _start(self) -> None:
-        if self._wrapper:
-            self._start_wrapper()
-            return
-        # Render the window+background frame once (on a throwaway page, so the
-        # app page stays clean for goto). ffmpeg composites the recording into
-        # it in _postprocess.
-        self._geom = self._frame_geometry()
-        g = self._geom
-        # Browser-like window title: the app's host (e.g. "localhost:3000").
-        title = urlparse(self.base_url).netloc or "app"
-        html = (
-            _FRAME_HTML.replace("__BG__", _WEB_BG)
-            .replace("__WINBG__", WEB_WINDOW_BODY)
-            .replace("__WINX__", str(g["winx"])).replace("__WINY__", str(g["winy"]))
-            .replace("__WINW__", str(g["winw"])).replace("__WINH__", str(g["winh"]))
-            .replace("__TITLE__", title)
-        )
-        self._frame_png = self.out_dir / ".frame.png"
-        p = self._context.new_page()
-        p.set_content(html)
-        p.wait_for_timeout(150)
-        p.screenshot(path=str(self._frame_png))
-        p.close()
-
-    def _start_wrapper(self) -> None:
         """Build the wrapper page on the recorded page itself (issue #358).
 
         The chrome is the recording, not a still ffmpeg composites later: the
         recorded page carries the window, the caption band and the cursor
         overlay, and the app loads into an iframe sized to the app rect at
-        true pixel size. `self._geom` keeps `_frame_geometry`'s key names, so
-        `_content_rect` and every other geometry consumer reads one shape.
+        true pixel size. `self._geom` is `chrome_geometry`'s dict, the one
+        shape `_content_rect` and every other geometry consumer reads.
         """
         self._geom = chrome_geometry(self._size["width"], self._size["height"])
         title = urlparse(self.base_url).netloc or "app"
@@ -794,99 +567,6 @@ class Recorder(_DemoBase):
             )
         self._app_frame = frame
 
-    def _opening_hold(self, mp4: Path) -> Path | None:
-        """Cover this take's blank opening with the app's first painted frame.
-
-        Returns the still to composite over the app rect, or None when there is
-        nothing to cover. See "the blank opening" in `core` for why the gap is
-        covered rather than trimmed, and what it costs.
-
-        Measured on `mp4` **before** compositing, where the whole frame is the
-        app page and the window chrome does not exist yet — so there is no rect
-        to get wrong, and none of the chrome that made a whole-frame metric run
-        backwards in issue #17 is in the picture.
-        """
-        self._opening_held = 0.0
-        gap, note = opening_gap(
-            mp4, (0, 0, self._size["width"], self._size["height"])
-        )
-        if gap is None or gap <= 0:
-            return None
-        if gap > OPENING_HOLD_LIMIT_S:
-            # Deliberately nothing. `_measure_content` then measures the same
-            # gap on the encoded file and warns, which is the honest outcome:
-            # an app that takes this long to paint is showing the viewer
-            # something true about itself.
-            print(
-                f"demo-video: this take opened on {gap:.2f}s with nothing "
-                f"painted, over the {OPENING_HOLD_LIMIT_S}s the recorder will "
-                f"cover, so the opening is left as recorded"
-                + (f" ({note})" if note else ""),
-                file=sys.stderr,
-            )
-            return None
-        still = self.out_dir / ".hold.png"
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{gap:.3f}",
-             "-i", str(mp4), "-frames:v", "1", str(still)],
-            check=True,
-        )
-        self._opening_held = gap
-        return still
-
-    def _postprocess(self, mp4: Path) -> None:
-        if self._wrapper:
-            # The recorded page already is the framed picture — one encoder,
-            # no composite, and no ffmpeg opening-hold overlay: the wrapper's
-            # opening is held in-page instead, by the frame-0 hold in
-            # chrome.OPENING_HOLD_JS (#360). `_opening_held` stays None: this
-            # path never claims the *encode* covered a gap, which is the same
-            # honest answer the terminal recorder gives about its own opening
-            # card, and `content.opening.gap` then describes the hold as the
-            # featureless stretch it really is, warning-free.
-            return
-        # Composite the recorded video into the window body on the background.
-        g = self._geom
-        hold = self._opening_hold(mp4)
-        tmp = mp4.with_suffix(".comp.mp4")
-        inputs = ["-i", str(mp4), "-i", str(self._frame_png)]
-        filt = (
-            f"[0:v]scale={g['appw']}:{g['apph']}[app];"
-            f"[1:v][app]overlay={g['appx']}:{g['appy']}"
-        )
-        if hold is None:
-            filt += "[v]"
-        else:
-            # A second overlay of the same size at the same place, switched off
-            # the moment the app painted. Content at every t >= held keeps the
-            # timestamp it already had: the video's duration does not change,
-            # the audio is copied untouched, and nothing that reads a beat time
-            # has to know this happened.
-            inputs += ["-i", str(hold)]
-            filt += (
-                f"[base];[2:v]scale={g['appw']}:{g['apph']}[held];"
-                f"[base][held]overlay={g['appx']}:{g['appy']}"
-                f":enable='lt(t,{self._opening_held:.3f})'[v]"
-            )
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", *inputs,
-                 "-filter_complex", filt, "-map", "[v]", "-map", "0:a?",
-                 "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                 "-crf", "20", "-r", "25", "-movflags", "+faststart", str(tmp)],
-                check=True,
-            )
-            tmp.replace(mp4)
-        finally:
-            # In a finally because `.hold.png` is a frame of the *app*, not of
-            # the recorder's chrome: if ffmpeg raises, leaving it on disk leaves
-            # a full-size picture of whatever the app was showing sitting beside
-            # the demo.
-            self._frame_png.unlink(missing_ok=True)
-            if hold is not None:
-                hold.unlink(missing_ok=True)
-
-
     def _failure_screen(self) -> str | None:
         """The page's accessibility tree, for `failure/screen.txt` (issue #11).
 
@@ -909,9 +589,9 @@ class Recorder(_DemoBase):
     def _failure_page_text(self) -> str:
         """The ARIA tree, the URL and the title, as one document.
 
-        Read off `_target()`: on a wrapper take the page is the recorder's
-        own chrome and the crash happened in the app, so the app frame is
-        what a failure dump has to show.
+        Read off `_target()`: the page is the recorder's own chrome and the
+        crash happened in the app, so the app frame is what a failure dump
+        has to show.
         """
         target = self._target()
         aria, aria_format = self._aria(target.locator("body"))
@@ -929,59 +609,13 @@ class Recorder(_DemoBase):
 
         The flag used to mean "the next checkpoint must re-inject and re-verify
         the mask". There is no mask, so nothing consumes it. The *listener* is
-        what #142 keeps, and it fires for any frame and for same-document
-        history navigation as well, which is why it is not what invalidates the
-        caption — see `_note_document_replaced`.
+        what #142 keeps, and it fires for any frame — the app iframe's own
+        navigations included — and for same-document history navigation too.
 
         Deliberately does nothing else — see `_watch_page` for why touching
         Playwright from an event callback is not safe here.
         """
         self._navigated = True
-
-    def _note_document_replaced(self, page) -> None:
-        """A new document is in the main frame, so the caption bar is gone.
-
-        `_CAPTION_JS` builds `#__demo_caption` inside the document, and a full
-        page load destroys it. `self._caption` — which every beat that does not
-        carry its own caption is stamped with — is a Python attribute and
-        survives, so without this a mid-take `goto()` leaves every later beat
-        reporting a line that is not on screen, in a `timeline.json` this skill
-        says to commit (issue #134).
-
-        Clearing it here rather than in `goto()` covers a link click,
-        `go_back()`, a form submit, `location.href` and a meta refresh too:
-        they all replace the document and none of them goes through `goto`.
-        Measured, not assumed — see `_watch_extra` and `NAVIGATIONS` in
-        `tests/unit`.
-
-        **The line does not go quietly (issue #180).** Clearing alone leaves
-        the beat log honest and mute: a storyboard that captions, navigates
-        and then holds records an empty caption column and nothing that says
-        why, which is true and is almost certainly not what its author meant.
-        So the drop is recorded as a `caption_lost` issue naming the line and
-        the document that replaced it, and `timeline.md`'s Issues section
-        carries it. Deliberately **not** in `STRICT_KINDS`: this is the
-        storyboard's mistake, not the app saying it is broken, and strict mode
-        is a verdict on the app.
-        """
-        lost, self._caption = self._caption, ""
-        if not lost:
-            # Every take opens with a document load, and a storyboard that
-            # navigates before it says anything does it again. An issue per
-            # load with no caption up would be noise nobody reads.
-            return
-        try:
-            url = page.url
-        except Exception:  # noqa: BLE001 - a page dying still lost the caption
-            url = "(unknown)"
-        self._note_issue(
-            "caption_lost",
-            f"a new document at {url} replaced the one holding the caption "
-            f"{lost!r}, so the line left the screen — every beat after this "
-            f"reports no caption until the storyboard sets one again",
-            lost_caption=lost,
-            url=url,
-        )
 
     # -- evidence (issue #9) ------------------------------------------------
 
@@ -1002,9 +636,9 @@ class Recorder(_DemoBase):
     def _capture_page(self) -> dict:
         """One pass: the ARIA snapshot, the URL, and the spotlight target.
 
-        Captured from `_target()`: on a wrapper take (#358) the page's own
-        body is the recorder's chrome and one opaque iframe node, so evidence
-        read there would describe the recorder instead of the app.
+        Captured from `_target()` (#358): the page's own body is the
+        recorder's chrome and one opaque iframe node, so evidence read there
+        would describe the recorder instead of the app.
         """
         doc = self._target()
         aria, aria_format = self._aria(doc.locator("body"))
@@ -1016,6 +650,11 @@ class Recorder(_DemoBase):
             "aria": aria,
             "scope_aria": None,
             "html": None,
+            # The chrome's own on-screen text — the caption line, a card —
+            # read from the wrapper document, which is the other half of the
+            # screen now that the app frame no longer carries the recorder's
+            # furniture (see _CHROME_TEXT_JS).
+            "chrome": self.page.evaluate(_CHROME_TEXT_JS),
         }
         if self._spotlit:
             target = doc.locator(self._spotlit).first
@@ -1049,10 +688,9 @@ class Recorder(_DemoBase):
     @_beat_verb("goto")
     def goto(self, path: str = "") -> None:
         url = path if path.startswith("http") else self.base_url + path
-        # On a wrapper take the *iframe* navigates; the wrapper document —
-        # which holds the caption, the cursor and the chrome — never does,
-        # so a mid-take goto cannot take the caption off the screen (see
-        # `_watch_extra`).
+        # The *iframe* navigates; the wrapper document — which holds the
+        # caption, the cursor and the chrome — never does, so a mid-take
+        # goto cannot take the caption off the screen (see `_watch_extra`).
         target = self._target()
         # Asset fetches hang occasionally on a busy dev box — a reload
         # recovers, so retry rather than dying mid-recording.
@@ -1064,10 +702,10 @@ class Recorder(_DemoBase):
                 # An app that refuses framing is not a flake: Chromium
                 # cancels the iframe navigation over X-Frame-Options or CSP
                 # frame-ancestors with exactly this error, and what a retry
-                # would buy is the artifact-lie this slice must not ship — a
-                # silently blank window recorded as a demo. Refuse instead,
-                # naming the header (issue #358).
-                if self._wrapper and "ERR_BLOCKED_BY_RESPONSE" in str(exc):
+                # would buy is the artifact-lie this recorder must not ship
+                # — a silently blank window recorded as a demo. Refuse
+                # instead, naming the header (issue #358).
+                if "ERR_BLOCKED_BY_RESPONSE" in str(exc):
                     raise RuntimeError(self._frame_refusal(url)) from exc
                 if attempt == 2:
                     raise
@@ -1075,13 +713,37 @@ class Recorder(_DemoBase):
             target.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
             pass  # apps that poll never go network-idle; the page is up
-        if self._wrapper and not self._hold_cleared:
+        # A full page load used to take the recorder's cards down with the
+        # app's document — the card was an element inside it — and SKILL.md's
+        # segment pattern leans on that: interlude(...), then goto() to open
+        # on the app. The cards live in the wrapper document now (#360), so
+        # goto restores the contract deliberately: the verb that shows the
+        # app takes the recorder's own cards off it, exactly as it clears
+        # the opening hold below. Without this, a segment that opened on an
+        # interlude recorded the card over the app to the end of the take
+        # (seen red in tests/smoke --segments-only, as the recorder's own
+        # overlay-left-up warning). The caption is deliberately NOT cleared:
+        # its surviving navigation is #358/#360's whole point.
+        self.page.evaluate(
+            "() => { window.__demoInterlude(''); window.__demoBridge(''); }"
+        )
+        if not self._hold_cleared:
             # The storyboard's first content beat landed: there is an app in
             # the slot now, so the opening hold (up since frame 0 — see
             # chrome.OPENING_HOLD_JS) fades out. Inside this beat on purpose:
             # the beat log's account of when the app appeared is the goto.
             self.page.evaluate("() => window.__demoChromeHoldClear()")
             self._hold_cleared = True
+            # Written onto this beat so the review sheet can say which
+            # frames were cut inside the hold: the beat's own mid-point
+            # frame shows a flat field in the window's colour where the app
+            # will be, and a sheet that leaves that to the reader reads as a
+            # failed load (#361's reporting sweep). A video offset, like
+            # every beat timestamp; `stitch()` shifts it with the beat.
+            if self._in_beat and self._beats:
+                self._beats[-1]["opening_hold_until"] = round(
+                    time.monotonic() - self._t0, 3
+                )
 
     def _frame_refusal(self, url: str) -> str:
         """Why this app cannot be recorded through the wrapper's iframe.
@@ -1112,10 +774,10 @@ class Recorder(_DemoBase):
         )
         return (
             f"this app refuses to be framed: {url} answered with {named}, so "
-            f"Chromium blocked the wrapper take's iframe. Recording on would "
-            f"produce a silently blank window presented as a demo, so the "
-            f"take refuses instead. Record without wrapper=True, or serve "
-            f"the demo target without that header."
+            f"Chromium blocked the take's iframe. Recording on would produce "
+            f"a silently blank window presented as a demo, so the take "
+            f"refuses instead. Serve the demo target without that header, or "
+            f"record it with a target that allows framing."
         )
 
     @_beat_verb("terminal")
@@ -1123,9 +785,9 @@ class Recorder(_DemoBase):
         """Type a command in an on-screen terminal card, then perform the
         real action it describes right after this returns.
 
-        The card is raised in the app's document (`_target()`), so on a
-        wrapper take it appears over the app inside the window — the same
-        place it lands on a composite take — rather than over the chrome.
+        The card is raised in the app's document (`_target()`), so it
+        appears over the app inside the window — a prop inside the demo's
+        story, deliberately not on the chrome's card layer (see chrome.py).
         """
         self._target().evaluate("cmd => window.__demoTerminal(cmd)", command)
 
@@ -1176,8 +838,8 @@ class Recorder(_DemoBase):
         #
         # Both calls run in the app's document (`_target()`): the spotlight
         # functions are context init scripts, which Playwright evaluates in
-        # every frame, so they exist in the wrapper take's iframe too — and
-        # the element being lit lives there.
+        # every frame, so they exist in the app iframe too — and the element
+        # being lit lives there.
         self._target().evaluate("() => window.__demoSpotlightClear()")
         if selector:
             self._target().locator(selector).first.evaluate(
@@ -1193,24 +855,21 @@ class Recorder(_DemoBase):
     def _glide(self, x: float, y: float, steps: int) -> None:
         """Move the pointer to page coordinates `(x, y)`, dot included.
 
-        The legacy path is one Playwright call: the injected dot follows the
-        `mousemove` events. On a wrapper take the dot lives in the wrapper
-        document, and no wrapper listener can hear a move whose target is
-        inside the iframe — the browser delivers it to the iframe's document
-        — so the recorder drives the dot itself, one explicit update per
-        pointer step. The dot is exactly where the pointer was commanded to
-        be, by construction, which is also what makes the #186/#202 class
-        (a dot placed by an event the storyboard never sent) unreachable
-        here: nothing listens, so nothing synthetic can move it.
+        The dot lives in the wrapper document, and no wrapper listener can
+        hear a move whose target is inside the iframe — the browser delivers
+        it to the iframe's document — so the recorder drives the dot itself,
+        one explicit update per pointer step. The dot is exactly where the
+        pointer was commanded to be, by construction, which is also what
+        makes the #186/#202 class (a dot placed by an event the storyboard
+        never sent) unreachable here: nothing listens, so nothing synthetic
+        can move it. The stated cost: raw `rec.page.mouse` work moves the
+        pointer and not the dot.
 
-        Coordinates are wrapper-page coordinates either way — Playwright's
+        Coordinates are wrapper-page coordinates — Playwright's
         `bounding_box()` answers relative to the main frame's viewport even
         for elements inside an iframe, so the app-rect offset is already in
         every box the verbs read.
         """
-        if not self._wrapper:
-            self.page.mouse.move(x, y, steps=steps)
-            return
         sx, sy = self._cursor_at
         for i in range(1, steps + 1):
             xi = sx + (x - sx) * i / steps
@@ -1223,8 +882,6 @@ class Recorder(_DemoBase):
 
     def _cursor_pressed(self, down: bool) -> None:
         """Squeeze (or release) the wrapper document's cursor dot."""
-        if not self._wrapper:
-            return
         fn = "__demoChromeCursorDown" if down else "__demoChromeCursorUp"
         self.page.evaluate(f"() => window.{fn}()")
 
