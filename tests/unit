@@ -4599,6 +4599,153 @@ class TermRec(_NoWait, TerminalRecorder):
     pass
 
 
+class _NavPage:
+    """Enough page for `goto()` to finish, remembering where it was sent.
+
+    A recorder-shaped fake rather than a browser: the claim being graded is
+    that a URL is classified **before** Playwright is asked to navigate, and
+    the only way to see "before" is to be the thing that would have been
+    asked. `visited` empty after a refusal is the assertion.
+    """
+
+    def __init__(self):
+        self.visited: list[str] = []
+
+    def goto(self, url, timeout=None):
+        self.visited.append(url)
+
+    def wait_for_load_state(self, state, timeout=None):
+        return None
+
+    def evaluate(self, script, *args):
+        return None
+
+
+class GotoTarget(unittest.TestCase):
+    """`goto()`'s own argument is classified, not just `base_url` (#268).
+
+    `guard_target` ran over exactly two strings, both at construction:
+    `DEMO_VIDEO_BASE_URL` and the resolved `base_url`. `goto()` classified
+    nothing, so `rec.goto("https://app.acme.com/")` recorded production on a
+    take whose `base_url` was loopback, and the take came back green.
+
+    That matters more than an ordinary gap because **a storyboard is the thing
+    an agent writes**. The guard is configuration-shaped and the hole was in
+    the one input that is authored.
+
+    **This is still not an egress control**, and nothing here changes that:
+    `rec.page` is the documented escape hatch, a page's own `fetch` is
+    unreachable from Python, and a URL computed at run time from something
+    this module was never given is invisible. `target.py`'s docstring and
+    `SKILL.md` both say so and must keep saying so (#267).
+    """
+
+    def build(self, base_url=TARGET_LOOPBACK, **settings):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with target_env(), contextlib.redirect_stderr(io.StringIO()):
+            rec = WebRec(
+                tmp.name, base_url=base_url, speech=False, evidence=False, **settings
+            )
+        page = _NavPage()
+        rec.page = page  # the chrome document goto() evaluates against
+        rec._target = lambda: page  # type: ignore[method-assign]
+        rec._t0 = time.monotonic()
+        return rec, page
+
+    def test_an_absolute_public_url_is_refused_naming_the_host_and_the_class(self):
+        rec, page = self.build()
+        with self.assertRaises(TargetRefused) as caught:
+            rec.goto(TARGET_PUBLIC)
+        message = str(caught.exception)
+        self.assertIn(TARGET_PUBLIC, message)
+        self.assertIn("public", message)
+        # Where the URL came from. Without it the refusal names a host that is
+        # nowhere in the recorder's configuration and reads as an invention.
+        self.assertIn("goto()", message)
+        # The claim the whole thing rests on: nothing was navigated to.
+        self.assertEqual(page.visited, [], "the refused URL reached Playwright")
+
+    def test_an_absolute_loopback_url_still_navigates(self):
+        # The control, and a real shape: a demo whose app is on one port and
+        # whose mail catcher is on another cannot express the second as a path
+        # relative to base_url, so it has to pass an absolute URL. A guard
+        # that refused every absolute URL would pass the test above and take
+        # this away.
+        rec, page = self.build()
+        rec.goto("http://127.0.0.1:1080/")
+        self.assertEqual(page.visited, ["http://127.0.0.1:1080/"])
+
+    def test_a_relative_path_is_unchanged(self):
+        rec, page = self.build()
+        rec.goto("/orders")
+        self.assertEqual(page.visited, [f"{TARGET_LOOPBACK}/orders"])
+
+    def test_the_flag_is_the_one_this_take_was_built_with(self):
+        # The trap the issue names. Re-deriving the opt-in here — from the
+        # environment, or by asking `target.py` again — refuses at beat 12 a
+        # take that was permitted at beat 0, which is the worst possible
+        # moment: the browser is open and the artifacts are half-written.
+        rec, page = self.build(base_url=TARGET_PRIVATE, allow_private=True)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            rec.goto(TARGET_PRIVATE + "/admin")
+        self.assertEqual(page.visited, [TARGET_PRIVATE + "/admin"])
+
+    def test_a_private_url_is_still_refused_without_the_opt_in(self):
+        # The other side: the opt-in has to be *read*, not assumed.
+        rec, page = self.build()
+        with self.assertRaises(TargetRefused):
+            rec.goto(TARGET_PRIVATE + "/admin")
+        self.assertEqual(page.visited, [])
+
+    def test_a_relative_path_cannot_smuggle_a_host_through_userinfo(self):
+        # **The escape the issue reasoned could not exist.** #268 measured
+        # every `goto()` in the tree, found all of them relative, and
+        # concluded "zero callers would change behaviour" — reading *relative*
+        # as *cannot reach another host*. `path` is concatenated, not joined,
+        # so the declared base becomes **userinfo**:
+        #
+        #     base_url  http://127.0.0.1:8901
+        #     goto      "@tickets.acme.com/x"
+        #     built     http://127.0.0.1:8901@tickets.acme.com/x
+        #     host      tickets.acme.com
+        #
+        # Measured against two local servers with a real Chromium: it lands on
+        # the second one, and the declared app is never asked for anything.
+        rec, page = self.build()
+        with self.assertRaises(TargetRefused) as caught:
+            rec.goto("@tickets.acme.com/x")
+        self.assertIn("public", str(caught.exception))
+        self.assertEqual(page.visited, [])
+
+    def test_an_ordinary_relative_path_is_not_refused_by_that(self):
+        # The control on the line above, and it is load-bearing: the join
+        # keeps `base_url`'s host in every case that is not the userinfo one,
+        # and that host was classified at construction. `about:blank` is here
+        # because `SKILL.md`'s segment pattern sits next to it and it is the
+        # relative value least like a path.
+        rec, page = self.build()
+        rec.goto("about:blank")
+        rec.goto("/orders?q=1")
+        self.assertEqual(
+            page.visited,
+            [f"{TARGET_LOOPBACK}about:blank", f"{TARGET_LOOPBACK}/orders?q=1"],
+        )
+
+    def test_the_refusal_is_recorded_as_this_beat_failing(self):
+        # The exit path the issue asks about. `goto` is a `@_beat_verb`, so
+        # the refusal travels the same route as any raising verb — but "the
+        # artifacts say what they are" is a claim about *this* exception, and
+        # an assertion that took it on trust would be grading the decorator.
+        rec, page = self.build()
+        with self.assertRaises(TargetRefused):
+            rec.goto(TARGET_PUBLIC)
+        beat = rec._beats[-1]
+        self.assertEqual(beat["verb"], "goto")
+        self.assertEqual(beat["error"]["type"], "TargetRefused")
+        self.assertIn(TARGET_PUBLIC, beat["error"]["message"])
+
+
 class PressRec(WebRec):
     """#177's own example: a verb whose first parameter is named `key`.
 
@@ -11907,6 +12054,77 @@ class StillsOnly(unittest.TestCase):
 
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
+    # -- goto() classifies its own argument (issue #268) ----------------------
+    (
+        # The gap as it shipped: `guard_target` ran over `DEMO_VIDEO_BASE_URL`
+        # and the resolved `base_url` and over nothing else, so a storyboard
+        # that *named* production recorded it on a loopback take and came back
+        # green. A storyboard is the thing an agent writes, which is what makes
+        # this the input that most needed classifying.
+        "goto() stops classifying the URL a storyboard hands it",
+        "web.py",
+        '        guard_target(url, self._allow_private, source="this goto()\'s argument")',
+        "        pass",
+        [
+            "GotoTarget."
+            "test_an_absolute_public_url_is_refused_naming_the_host_and_the_class",
+            "GotoTarget.test_a_private_url_is_still_refused_without_the_opt_in",
+        ],
+    ),
+    (
+        # Refused, but **after** the request. The exception is identical, the
+        # message is identical, the beat records the same failure — and the
+        # page has already been fetched, which for a production host is the
+        # whole of the harm. Only the `visited` assertion can see this, which
+        # is why that assertion is there rather than a bare assertRaises.
+        "the URL is fetched first and classified afterwards",
+        "web.py",
+        '        guard_target(url, self._allow_private, source="this goto()\'s argument")',
+        "        self._target().goto(url, timeout=45_000)\n"
+        '        guard_target(url, self._allow_private, source="this goto()\'s argument")',
+        [
+            "GotoTarget."
+            "test_an_absolute_public_url_is_refused_naming_the_host_and_the_class"
+        ],
+    ),
+    (
+        # The opt-in re-derived from the environment instead of read off the
+        # take. A recorder built with `allow_private=True` is then refused at
+        # beat 12 — the browser open, the artifacts half-written — because the
+        # environment never carried the flag the constructor was handed.
+        "goto() re-reads the private opt-in instead of using this take's",
+        "web.py",
+        "        guard_target(url, self._allow_private, source=",
+        '        guard_target(url, _env_flag("ALLOW_PRIVATE") or False, source=',
+        ["GotoTarget.test_the_flag_is_the_one_this_take_was_built_with"],
+    ),
+    (
+        # The guard narrowed to the absolute branch — which is what I wrote
+        # first, on #268's own reasoning that a relative path cannot reach
+        # another host. It can: concatenation makes the declared base into
+        # userinfo, and `goto("@tickets.acme.com/x")` then walks straight
+        # past a guard that only reads arguments beginning with `http`.
+        "the guard only classifies an argument that starts with http",
+        "web.py",
+        '        guard_target(url, self._allow_private, source="this goto()\'s argument")',
+        '        if path.startswith("http"):\n'
+        '            guard_target(url, self._allow_private, source="this goto()\'s argument")',
+        ["GotoTarget.test_a_relative_path_cannot_smuggle_a_host_through_userinfo"],
+    ),
+    (
+        # The refusal stops saying where the URL came from. It then names a
+        # host that appears nowhere in the recorder's configuration, which is
+        # the exact failure `source=` was added for at construction (#267) —
+        # and it is worse here, because a storyboard has many gotos.
+        "the refusal stops saying which goto() named the host",
+        "web.py",
+        'source="this goto()\'s argument"',
+        'source=""',
+        [
+            "GotoTarget."
+            "test_an_absolute_public_url_is_refused_naming_the_host_and_the_class"
+        ],
+    ),
     # -- a beat pointed against a clause (issue #374) ------------------------
     (
         # The guard that makes an unmet claim checkable at all: without an

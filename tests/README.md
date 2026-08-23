@@ -116,8 +116,8 @@ as PNGs named by check and instant, for a pull request's before/after.
 What stays ungraded here, deliberately: spotlight transition shape and
 caption timing are time-measuring and belong to smoke's lock; whether a
 viewer *recognises* the card as a card is graded nowhere (Known gaps); and
-`frames.md` ordering is manifest arithmetic, and is tracked in
-[#300](https://github.com/rogvid/skills/issues/300).
+`frames.md` ordering is manifest arithmetic, graded by `FrameClockCorrection`
+in `tests/unit` rather than by any pixel.
 The contract: a change to anything that draws a frame - the chrome in
 `skills/demo-video/helpers/demo_recording/` - runs this loop before its PR
 opens and pastes its lines and `--dump` frames there (`AGENTS.md`, "A change
@@ -1256,6 +1256,16 @@ So the assertions were **written rather than trimmed**, and there are three:
   `scope_aria` and `html` — cut *to* the budget with only the marker past it,
   and named in `truncated`. A cap applied to `aria` and not to `scope_aria` is
   a cap on a third of what a spotlight beat writes.
+
+  **Truncation is the only omission that is marked.** Two shapes of on-screen
+  text never reach the snapshot at all and nothing says so: the contents of a
+  rich-text editor (`contenteditable` with `role="textbox"`, whose accessible
+  value is read off a `value` property a `div` does not have) and anything
+  under `aria-hidden="true"`. Measured with Playwright 1.62.0 against a page
+  filling seven input shapes — the other five, dialog inputs included, come
+  through. That is tracked in
+  [#353](https://github.com/rogvid/skills/issues/353), and it bounds what any
+  evidence-reading tool can do.
 
 Plus the two that never touched masking: a previous take's evidence is cleared
 from the directory on a re-record while another *segment's* files survive, and
@@ -3383,16 +3393,30 @@ knows is missing is worse than one that is openly absent.
   And the standing one, which is a scope statement rather than a gap:
   **anything the take reaches other than its classified target.** A page that
   fetches another origin, a terminal storyboard that curls one, a URL computed
-  at run time — and, named because it is the one a storyboard author reaches
-  for by accident, **`goto()`'s own argument**: `web.py` passes an absolute URL
-  straight through, so `rec.goto("https://app.acme.com/")` records production
-  and no assertion here notices
-  ([#268](https://github.com/rogvid/skills/issues/268)). This is a static
-  classifier over configuration and source text, not an egress control, and
-  `target.py`'s docstring says so in the same words. `SKILL.md` now says it too
-  ([#267](https://github.com/rogvid/skills/issues/267)), which is what stops a
-  caller reading the guard as one. `scripts/demo-target-guard` is also outside
-  mypy's scope, which runs over `skills/demo-video/helpers/` only.
+  at run time from something the recorder was never given, and `rec.page` —
+  the documented escape hatch, a Playwright handle this cannot reach.
+
+  **`goto()`'s own argument used to be on that list and no longer is**
+  ([#268](https://github.com/rogvid/skills/issues/268)). It is classified
+  before Playwright navigates, against the opt-in the take was built with, and
+  `GotoTarget` in `tests/unit` grades it — five injections, including the two
+  that matter: the URL fetched *first* and classified afterwards, which every
+  other assertion in that class is blind to, and the guard narrowed to
+  arguments beginning with `http`.
+
+  That narrowing is the shape #268 itself reasoned in, and it is wrong: `path`
+  is concatenated onto `base_url` rather than joined, so `goto("@evil.com/")`
+  builds `http://127.0.0.1:8901@evil.com/`, in which the declared base is
+  **userinfo** and the host is `evil.com`. Measured against two local servers
+  with a real Chromium: it lands on the second and the declared app is never
+  asked for anything.
+
+  This is still a static classifier over configuration and source text, not an
+  egress control, and `target.py`'s docstring and `SKILL.md`
+  ([#267](https://github.com/rogvid/skills/issues/267)) both say so — which is
+  what stops a caller reading the guard as one.
+  `scripts/demo-target-guard` is also outside mypy's scope, which runs over
+  `skills/demo-video/helpers/` only.
 
 - **Whether prose about masking is *otherwise* true, and prose anywhere
   `MaskProse` does not read.** `tests/unit`'s sweep flags every mention of

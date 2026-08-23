@@ -38,14 +38,14 @@ checked **even when a storyboard passes a loopback `base_url`** — a shell
 exporting production and a storyboard saying otherwise is refused rather than
 quietly resolved. Loopback passes, a private host needs `allow_private=True`, a
 public one is refused and no option permits it. CI runs the same classifier
-over `extra-env` and each storyboard's source
-([reference/ci.md](reference/ci.md)).
+over `extra-env` and each storyboard's source ([reference/ci.md](reference/ci.md)).
 
-**Nothing else is classified, and `goto()` is where that shows.** It passes an
-absolute URL straight through, so `rec.goto("https://app.acme.com/")` records
-production and nothing refuses it; `rec.page` is further out still. The guard
-catches a target you *misconfigured*, not one you *named* — it is not a
-control, and the paragraphs above are still the whole of the guidance.
+**`goto()` classifies its own argument too**, before Playwright navigates:
+`goto("https://app.acme.com/")` is refused, and so is a relative path that
+reaches another host through userinfo, `goto("@app.acme.com/")`. **`rec.page`
+is not, and never will be** — it is the escape hatch, so `rec.page.goto(...)`,
+the app's own `fetch`, and any URL you compute reach the network unexamined.
+This is a classifier over configuration and source, not an egress control.
 
 ## Overview
 
