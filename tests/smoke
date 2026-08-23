@@ -130,16 +130,14 @@ from _pixels import (  # noqa: E402
     FRAME_BAND,
     Rect,
     caption_band,
+    card_run,
     card_strip,
     channels_apart,
     contrast,
-    frame_band,
     frame_difference,
     gray_frames,
-    off_card,
     psnr_db,
     strip_rgb,
-    to_video_rect,
 )
 
 # Size floors. Deliberately low, and deliberately *not* the blank-video check —
@@ -163,7 +161,7 @@ MIN_PNG_BYTES = 5_000
 # strongest blank one. See tests/README.md for what this metric cannot
 # resolve — notably a total stylesheet failure, which scores ~10 and is
 # therefore checked separately via getComputedStyle rather than by pixels.
-# "segments" is the web recorder against the same fixture, composited the same
+# "segments" is the web recorder against the same fixture, framed the same
 # way, so it takes the web numbers here and in the two dicts below.
 MIN_CONTENT_STDDEV = {
     "web": 6.0,
@@ -194,11 +192,15 @@ MIN_CONTENT_STDDEV = {
 #
 # The terminal margin is 2.7x over its floor. It was the thinnest number in
 # this file when it was written (871eac3, against 4x or better everywhere
-# else) and it is now tied: `CARD_RGB_TOLERANCE` clears the terminal card by
-# 2.7x too, since #291 put two dark palettes next to each other. Both are
-# stated where they are set, and tests/README.md calls this one out under
-# "Known gaps".
-MIN_CAPTION_BAND_DIFF = {"web": 8.0, "terminal": 1.0, "segments": 8.0}
+# else); it is stated where it is set, and tests/README.md calls it out under
+# "Known gaps". The web numbers were re-measured on the wrapper band (#361):
+# the caption is light text in a bubble over the dark band now, not a dark
+# box on a light page, and the probe rect is the band itself
+# (caption_probe_band) rather than a full-width strip — the probe caption
+# measures 4.99 on a healthy take against 0.00 undrawn (a band with no
+# caption is the same flat window body in both stills), so the floor keeps
+# a 2.5x margin under the weakest healthy reading.
+MIN_CAPTION_BAND_DIFF = {"web": 2.0, "terminal": 1.0, "segments": 2.0}
 
 # Consecutive stills must differ by at least this mean absolute luma, on the
 # 160x90 grayscale reduction. This detects a *duplicate* — a stale or copied
@@ -477,28 +479,15 @@ ENTROPY_GAP_S = 1.0
 
 # Where this storyboard parks the mouse, before anything is photographed.
 #
-# A storyboard that never moves the pointer does not thereby leave the
-# recorder's stand-in cursor undrawn. Chromium dispatches a *synthetic*
-# mousemove at its last known pointer position — (0, 0) on a fresh page — once
-# layout settles, the recorder's handler moves the dot there, and an 18 px dot
-# centred on the origin paints a 9x9 arc into the top-left corner of every
-# still. That event is not part of the storyboard, and it is not reliably
-# delivered before the first `shot()`: measured on this box under 14-way CPU
-# load, twelve takes of this storyboard left the dot at the origin eleven
-# times and off-screen (where the recorder's stylesheet parks it) once.
-#
-# Two takes that disagree about it differ by exactly 69 pixels and by nothing
-# else, which is the whole of issue #185 — three CI runs and a `main` bisect
-# spent on a difference the arm's own diagnostic could not see, because that
-# diagnostic cropped to a panel starting 160 px to the right of it.
-#
-# Parking the pointer makes the position the storyboard's rather than the
-# race's: `page.mouse.move` is awaited, and the synthetic move that follows
-# reuses the position it set (12 of 12 under the same load that lost the race
-# once in twelve). Chosen in the left gutter — the page is 1040 px wide,
-# centred in a 1280 px viewport — and low, so the dot cannot overlap the
-# entropy panel, the spinner, or anything carrying a `:hover` rule.
-PARKED_POINTER = (60, 640)
+# A storyboard that never moves the pointer leaves the cursor dot at the
+# chrome's off-screen park, in every take, by construction (#361): the dot is
+# driven by pointer verbs alone, nothing listens for mouse events, and so the
+# synthetic-mousemove coin flip that cost #185 three CI runs — eleven takes
+# in twelve with an 18 px dot in the corner of the opening stills, one
+# without — has no mechanism left. The determinism storyboard therefore
+# parks nothing; what it asserts instead is that the dot really is undrawn
+# (check_undrawn_pointer), so a recorder that grew back any way of drawing
+# it without a verb fails here on every take rather than one take in twelve.
 
 # Read as a *rect*, not as the inline `left`/`top` the recorder's own mousemove
 # handler writes. Where the pixels landed is what the still comparison asks,
@@ -997,7 +986,11 @@ ALIGN_ARRIVAL_FRACTION = 0.25
 # anything. Below this the probe caption was never drawn in the video, and the
 # right answer is a failure, not a timestamp. Same per-medium reasoning (and
 # the same numbers) as MIN_CAPTION_BAND_DIFF above.
-MIN_ALIGN_BAND_DELTA = {"web": 6.0, "terminal": 1.0, "segments": 6.0}
+# Re-measured on the wrapper band (#361), same probe rect as
+# MIN_CAPTION_BAND_DIFF: the probe caption settles at 4.96-5.17 mean luma
+# over the band on healthy takes, so the web floors keep a ~2.5x margin
+# where the legacy full-frame caption gave 6.0 a wider one.
+MIN_ALIGN_BAND_DELTA = {"web": 2.0, "terminal": 1.0, "segments": 2.0}
 
 # -- review frames (frames/, issue #8) ---------------------------------------
 #
@@ -1451,6 +1444,9 @@ EVIDENCE_LIMITS_EXPECTED = {
     "scope_aria": 12_000,
     "html": 8_000,
     "screen": 12_000,
+    # The chrome's own on-screen text (#361): the caption line and any card,
+    # read out of the wrapper document — see reference/review.md.
+    "chrome": 8_000,
 }
 EVIDENCE_MARKER = "[demo-video: truncated here,"
 # The most a marker can add past a field's budget, so "cut to the cap" can be
@@ -3201,39 +3197,37 @@ def check_determinism(b: Beats, page, when: str, on: bool = True) -> dict:
     return state
 
 
-def check_parked_pointer(b: Beats, page, when: str) -> None:
-    """The recorder's cursor dot is where the storyboard parked it.
+def check_undrawn_pointer(b: Beats, page, when: str) -> None:
+    """A take that ran no pointer verb shows no cursor dot (#185, #361).
 
-    Separate from the byte comparison it protects, and not dominated by it.
-    With `PARKED_POINTER` removed the dot lands wherever Chromium's synthetic
-    mousemove leaves it, which on this machine is the same corner in eleven
-    takes out of twelve — so the still comparison notices the unpinned pointer
-    one run in twelve, while this notices every one. An intermittent assertion
-    is how issue #185 cost three CI runs.
+    Separate from the byte comparison it protects, and not dominated by it:
+    a dot drawn without a verb is exactly the class that made two takes of
+    one storyboard differ by 69 pixels (#185), and a still comparison only
+    notices it on the run where the race goes the other way. This notices
+    every one, in the DOM, on every take of the determinism pair.
 
-    Failing on a missing dot is deliberate. A recorder that stopped drawing a
-    cursor would make this check silently unable to fail, and a check that
-    cannot fail is the thing this repo's review discipline exists to catch —
-    even though the stills would, in that one case, reproduce.
+    Failing on a *missing element* is deliberate. A chrome document that
+    stopped shipping the dot would make this check silently unable to fail,
+    and a check that cannot fail is the thing this repo's review discipline
+    exists to catch — even though the stills would, in that one case,
+    reproduce. The dot's pixels when a verb DOES drive it are tests/pixel's
+    cursor-parked golden.
     """
     box = page.evaluate(_CURSOR_BOX_JS)
     if box is None:
         b.fail_if(
             True,
-            f"{when}, the recorder drew no cursor dot (#__demo_cursor is not "
-            f"in the page) — this take can no longer tell a parked pointer "
-            f"from a synthetic mousemove, which is the difference issue #185 "
-            f"turned out to be",
+            f"{when}, the chrome ships no cursor dot (#__demo_cursor is not "
+            f"in the page) — with no element there is no off-screen park to "
+            f"assert, and no dot for any take's pointer verbs to drive",
         )
         return
-    at = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     b.fail_if(
-        abs(at[0] - PARKED_POINTER[0]) > 1 or abs(at[1] - PARKED_POINTER[1]) > 1,
-        f"{when}, the cursor dot is centred at ({at[0]:.0f}, {at[1]:.0f}), not "
-        f"at the ({PARKED_POINTER[0]}, {PARKED_POINTER[1]}) this storyboard "
-        f"parked the pointer at — its position is being set by something other "
-        f"than the storyboard, and whatever that is decides whether two takes "
-        f"of this storyboard produce the same pixels",
+        box["x"] + box["width"] > 0 and box["y"] + box["height"] > 0,
+        f"{when}, the cursor dot sits at ({box['x']:.0f}, {box['y']:.0f}) "
+        f"with no pointer verb having run — a dot drawn by something other "
+        f"than the storyboard is #185's class back, and it decides whether "
+        f"two takes of this storyboard produce the same pixels",
     )
 
 
@@ -3259,12 +3253,13 @@ _TRAIL_JS = """() => {
 
 def record_web(
     out_dir: Path, base_url: str, clock: HostClock | None = None
-) -> tuple[list[str], Rect, Rect, tuple[int, int]]:
+) -> tuple[list[str], dict, tuple[int, int]]:
     """Land, read a KPI, filter the table, refresh it.
 
-    Returns the post-condition failures plus two content rects: where the app
-    sits inside the composited video, and where it sits in a still (stills are
-    captured full-bleed, before compositing).
+    Returns the post-condition failures plus the take's chrome geometry and
+    frame size. A wrapper take records the framed page itself (#358/#361),
+    so the app sits at the same rect in the video and in every still —
+    `run_web` derives one content rect from the geometry for both.
 
     A recording of a *working* app, and recorded with `strict=True` so it has
     to stay one. That is the assertion the rest of this harness structurally
@@ -3305,20 +3300,25 @@ def record_web(
         # would notice: no artifact records a navigation today.
         b.expect("goto('/') is noticed as a navigation", rec._navigated, True)
         rec.wait_for("#kpi-rev")
-        start_ticker(b, rec.page)
-        opening = check_determinism(b, rec.page, "on landing")
+        # In the app document, both of them: the ticker's opt-out control and
+        # the determinism probes are claims about what the recorder does to
+        # the *app*, and the app lives in the iframe (#358/#361). The ticker
+        # still keeps the whole page's compositor awake from in there — an
+        # iframe paint is a page paint.
+        start_ticker(b, rec.app)
+        opening = check_determinism(b, rec.app, "on landing")
         # Doubles as the run-up for the *early* timing probe: the page has
         # finished painting and the caption band does not move until the
         # first caption. See MAX_CAPTION_SKEW_S.
         rec.pause(PROBE_QUIET_S)
         b.expect(
             "goto('/'), #rows row count",
-            rec.page.locator("#rows tr").count(),
+            rec.app.locator("#rows tr").count(),
             5,
         )
         b.expect(
             "goto('/'), #status text",
-            rec.page.locator("#status").inner_text(),
+            rec.app.locator("#status").inner_text(),
             "snapshot 1 of 3",
         )
         # A stylesheet that failed to load leaves the DOM intact and the page
@@ -3326,7 +3326,7 @@ def record_web(
         # floor. This resolves that case exactly, with no pixel threshold.
         b.expect(
             "goto('/'), #refresh background (did the stylesheet apply?)",
-            rec.page.eval_on_selector("#refresh", bg),
+            rec.app.eval_on_selector("#refresh", bg),
             "rgb(235, 110, 20)",
         )
 
@@ -3337,14 +3337,14 @@ def record_web(
         rec.spotlight("#kpi-rev")
         b.expect(
             "spotlight('#kpi-rev'), computed outline-style",
-            rec.page.eval_on_selector("#kpi-rev", outline),
+            rec.app.eval_on_selector("#kpi-rev", outline),
             "solid",
         )
         rec.hold()
         rec.spotlight()
         b.expect(
             "spotlight() cleared, computed outline-style",
-            rec.page.eval_on_selector("#kpi-rev", outline),
+            rec.app.eval_on_selector("#kpi-rev", outline),
             "none",
         )
 
@@ -3354,12 +3354,12 @@ def record_web(
         rec.pause(0.8)
         b.expect(
             "type_into('#search'), field value",
-            rec.page.input_value("#search"),
+            rec.app.input_value("#search"),
             "seattle",
         )
         b.expect(
             "type_into('#search'), #rows row count",
-            rec.page.locator("#rows tr").count(),
+            rec.app.locator("#rows tr").count(),
             1,
         )
         rec.shot("02-filtered")
@@ -3371,10 +3371,13 @@ def record_web(
         # only where the cursor ends up proves nothing, because Playwright's
         # locator.click() dispatches its own mousemove to the target — that
         # measures Playwright, not move_to. Count the intermediate moves
-        # instead: a glide is many, a click is one.
-        rec.page.evaluate(_TRAIL_JS)
+        # instead: a glide is many, a click is one. Counted in the *app*
+        # document: the moves' coordinates land over the iframe (the glide
+        # runs from #search to #refresh, both inside the app rect), and no
+        # wrapper listener can hear a move whose target is inside it.
+        rec.app.evaluate(_TRAIL_JS)
         rec.move_to("#refresh")
-        trail = rec.page.evaluate("() => window.__smokeTrail.length")
+        trail = rec.app.evaluate("() => window.__smokeTrail.length")
         b.fail_if(
             trail < 10,
             f"move_to('#refresh') produced {trail} mousemove events; the glide "
@@ -3385,12 +3388,12 @@ def record_web(
         rec.pause(1.0)
         b.expect(
             "click('#refresh'), #status text",
-            rec.page.locator("#status").inner_text(),
+            rec.app.locator("#status").inner_text(),
             "snapshot 2 of 3",
         )
         b.expect(
             "click('#refresh'), #kpi-rev text",
-            rec.page.locator("#kpi-rev").inner_text(),
+            rec.app.locator("#kpi-rev").inner_text(),
             "$134,950",
         )
         rec.shot("03-refreshed")
@@ -3411,18 +3414,18 @@ def record_web(
         # sweep in wip/verified-review with a different haystack.
         b.expect(
             "before clear('#search'), #search value",
-            rec.page.input_value("#search"),
+            rec.app.input_value("#search"),
             "seattle",
         )
         rec.clear("#search")
         b.expect(
             "clear('#search'), field value",
-            rec.page.input_value("#search"),
+            rec.app.input_value("#search"),
             "",
         )
         b.expect(
             "clear('#search'), #rows row count (all four rows are back)",
-            rec.page.locator("#rows tr").count(),
+            rec.app.locator("#rows tr").count(),
             4,
         )
         # The caret stays where the viewer last saw it, which is what lets the
@@ -3431,7 +3434,7 @@ def record_web(
         # assertion meant for the other.
         b.expect(
             "clear('#search'), the focused element (the caret stays in the box)",
-            rec.page.evaluate(_FOCUSED_JS),
+            rec.app.evaluate(_FOCUSED_JS),
             "search",
         )
         rec.shot("04-cleared")
@@ -3440,19 +3443,19 @@ def record_web(
         rec.press("Enter")
         b.expect(
             "press('Enter'), #status text",
-            rec.page.locator("#status").inner_text(),
+            rec.app.locator("#status").inner_text(),
             "snapshot 3 of 3",
         )
         b.expect(
             "press('Enter'), #kpi-rev text",
-            rec.page.locator("#kpi-rev").inner_text(),
+            rec.app.locator("#kpi-rev").inner_text(),
             "$119,180",
         )
 
         rec.press("Tab")
         b.expect(
             "press('Tab'), the focused element",
-            rec.page.evaluate(_FOCUSED_JS),
+            rec.app.evaluate(_FOCUSED_JS),
             "refresh",
         )
         # ...and the half of Tab a viewer can see. `:focus-visible` in the
@@ -3460,7 +3463,7 @@ def record_web(
         # on #refresh above leaves it 'none' and this cannot pass on that.
         b.expect(
             "press('Tab'), #refresh computed outline-style (the ring)",
-            rec.page.eval_on_selector("#refresh", outline),
+            rec.app.eval_on_selector("#refresh", outline),
             "solid",
         )
 
@@ -3471,23 +3474,23 @@ def record_web(
         rec.pause(0.6)
         b.expect(
             "type_into('#search', 'harbor'), #rows row count",
-            rec.page.locator("#rows tr").count(),
+            rec.app.locator("#rows tr").count(),
             1,
         )
         rec.press("Escape")
         b.expect(
             "press('Escape'), #search value",
-            rec.page.input_value("#search"),
+            rec.app.input_value("#search"),
             "",
         )
         b.expect(
             "press('Escape'), #rows row count (all six rows are back)",
-            rec.page.locator("#rows tr").count(),
+            rec.app.locator("#rows tr").count(),
             6,
         )
         b.expect(
             "press('Escape'), the focused element (the dismiss let the box go)",
-            rec.page.evaluate(_FOCUSED_JS),
+            rec.app.evaluate(_FOCUSED_JS),
             "body",
         )
 
@@ -3509,7 +3512,7 @@ def record_web(
         # that is the one CSS animations are on. A freeze that stopped it too
         # would stop the compositor, and the recording would start losing wall
         # time again (TICKER_JS, issue #18).
-        closing = check_determinism(b, rec.page, "at the end of the take")
+        closing = check_determinism(b, rec.app, "at the end of the take")
         b.fail_if(
             closing["now"] != opening["now"],
             f"the frozen clock moved during the take: {opening['now']} at the "
@@ -3526,27 +3529,26 @@ def record_web(
         )
         rec.caption("")
 
-        # ...and again for a navigation the *storyboard did not make*, which is
-        # the harder half and the reason this is a page listener rather than a
-        # line inside goto(). A link click, a form submit, `location.href` and
-        # a meta refresh all replace the document with no verb involved, and
-        # #134 is about exactly that case leaving `self._caption` stale.
-        # `page.reload()` stands in for all of them: a real navigation, driven
-        # past the verb layer, recording no beat of its own — so this asserts
-        # the listener rather than the verb, and adds nothing to WEB_BEATS.
+        # ...and again for a navigation the *storyboard did not make* — a
+        # link click, a form submit, `location.href` all replace the app's
+        # document with no verb involved. `rec.app.goto` stands in for all
+        # of them: a real navigation of the app frame, driven past the verb
+        # layer, recording no beat of its own — so this asserts the listener
+        # rather than the verb, and adds nothing to WEB_BEATS. The wrapper
+        # page itself never navigates (#358), which is why the caption
+        # cannot be lost to any of these; the listener noticing the frame is
+        # #142's carve-out, kept.
         rec._navigated = False
-        rec.page.reload()
+        rec.app.goto(rec.app.url)
         b.expect("a navigation no verb made is noticed too", rec._navigated, True)
 
-        # Where the app lands in each medium, read off the live recorder rather
-        # than re-derived here, so a change to the window geometry carries this
+        # Where the app lands, read off the live recorder rather than
+        # re-derived here, so a change to the window geometry carries this
         # with it instead of silently scoring the wrong pixels.
-        g = rec._geom
-        video_rect: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
+        geom = dict(rec._geom)
         size = (rec._size["width"], rec._size["height"])
-        still_rect: Rect = (0, 0, size[0], size[1])
 
-    return b.problems, video_rect, still_rect, size
+    return b.problems, geom, size
 
 
 def record_terminal(
@@ -3681,7 +3683,7 @@ def record_segments(
         clock_one.rebase(rec._t0)
         rec.goto("/")
         rec.wait_for("#kpi-rev")
-        start_ticker(b, rec.page)
+        start_ticker(b, rec.app)
         # The run-up for the early timing probe: the page has finished painting
         # and nothing moves in the caption band until the caption does.
         rec.pause(PROBE_QUIET_S)
@@ -3693,7 +3695,8 @@ def record_segments(
         g = rec._geom
         video_rect: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
         size = (rec._size["width"], rec._size["height"])
-        still_rect: Rect = (0, 0, size[0], size[1])
+        # One rect for both: a wrapper still is the framed frame (#361).
+        still_rect: Rect = video_rect
     clocks.append(clock_one)
 
     with (
@@ -3701,16 +3704,18 @@ def record_segments(
         Recorder(out_dir, segment=SEGMENT_NAMES[1], **settings) as rec,
     ):
         clock_two.rebase(rec._t0)
-        # On about:blank, before anything else: the second segment's opening
-        # seconds are the ones most likely to go idle, and idle is what makes
-        # the screencast lose wall time (TICKER_JS, issue #18). The interlude
-        # card covers it while it is up — see SEGMENT_INTERLUDE_HOLD_S.
-        start_ticker(b, rec.page)
+        # Before anything else: the second segment's opening seconds are the
+        # ones most likely to go idle, and idle is what makes the screencast
+        # lose wall time (TICKER_JS, issue #18). The interlude card covers it
+        # while it is up — see SEGMENT_INTERLUDE_HOLD_S. In the app frame,
+        # which is still about:blank here — the goto below replaces that
+        # document and the ticker with it.
+        start_ticker(b, rec.app)
         rec.interlude(SEGMENT_INTERLUDE, hold=SEGMENT_INTERLUDE_HOLD_S)
         rec.goto("/")
         rec.wait_for("#kpi-rev")
         # The navigation took the first one with it.
-        start_ticker(b, rec.page)
+        start_ticker(b, rec.app)
 
         # The closing probe, in the *second* segment on purpose: its beat
         # timestamps are the ones the merge has to move, and this is where the
@@ -3728,7 +3733,9 @@ def record_segments(
     return b.problems, video_rect, still_rect, size, clocks
 
 
-def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
+def record_spotlight(
+    out_dir: Path, base_url: str, clock: HostClock | None = None
+) -> tuple[list[str], dict]:
     """A spotlight put up and taken down again, with quiet either side.
 
     Recorded with the recorder's **default** (`deterministic=False`), which no
@@ -3745,6 +3752,8 @@ def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
     with Recorder(
         out_dir, base_url=base_url, speech=False, strict=True, deterministic=False
     ) as rec:
+        if clock is not None:
+            clock.rebase(rec._t0)  # see HostClock
         rec.goto("/")
         rec.wait_for(SPOTLIGHT_TARGET)
         # The ticker, but not start_ticker(): that helper also asserts the
@@ -3752,9 +3761,9 @@ def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
         # without it. What the ticker is for here is only that the screencast
         # keeps emitting frames through the quiet stretches, so the windows
         # below sit where the beat log says they do.
-        rec.page.evaluate(TICKER_JS)
+        rec.app.evaluate(TICKER_JS)
         b.fail_if(
-            not rec.page.evaluate("() => !!document.getElementById('__smoke_ticker')"),
+            not rec.app.evaluate("() => !!document.getElementById('__smoke_ticker')"),
             "the compositor ticker did not attach — the windows this take "
             "measures its two transitions in are not trustworthy",
         )
@@ -3762,11 +3771,11 @@ def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
         # from the one before it stops meaning "the spotlight is moving".
         rec.pause(SPOTLIGHT_HOLD_S)
 
-        style_before = rec.page.locator(SPOTLIGHT_TARGET).first.evaluate(
+        style_before = rec.app.locator(SPOTLIGHT_TARGET).first.evaluate(
             "el => [el.hasAttribute('style'), el.getAttribute('style')]"
         )
         rec.spotlight(SPOTLIGHT_TARGET)
-        lit = rec.page.locator(SPOTLIGHT_TARGET).first.evaluate(
+        lit = rec.app.locator(SPOTLIGHT_TARGET).first.evaluate(
             "el => getComputedStyle(el).transform"
         )
         # Cheap, and it separates "the exit did not animate" from "the
@@ -3786,7 +3795,7 @@ def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
         # #111's second half, and the one no pixel can see: the element is
         # handed back exactly as it was found, byte for byte, including having
         # no style attribute at all when it started with none.
-        style_after = rec.page.locator(SPOTLIGHT_TARGET).first.evaluate(
+        style_after = rec.app.locator(SPOTLIGHT_TARGET).first.evaluate(
             "el => [el.hasAttribute('style'), el.getAttribute('style')]"
         )
         b.fail_if(
@@ -3812,14 +3821,18 @@ def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
         )
         rec.pause(SPOTLIGHT_HOLD_S)
 
-        box = rec.page.locator(SPOTLIGHT_TARGET).first.bounding_box()
+        box = rec.app.locator(SPOTLIGHT_TARGET).first.bounding_box()
         if box is None:
             raise SmokeFailure(
                 f"{SPOTLIGHT_TARGET} has no box — tests/fixture/index.html "
                 f"changed and this take is aimed at nothing"
             )
         pad = SPOTLIGHT_PAD_PX
-        page_rect: Rect = (
+        # `bounding_box()` answers in wrapper-page coordinates even for
+        # iframe elements, and the wrapper page is the video at true pixel
+        # size (#358/#361) — so the padded box is already the video rect,
+        # with no scale and no offset left to apply.
+        target_rect: Rect = (
             int(box["x"]) - pad,
             int(box["y"]) - pad,
             int(box["width"]) + 2 * pad,
@@ -3829,7 +3842,7 @@ def record_spotlight(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
         size = (rec._size["width"], rec._size["height"])
 
     return b.problems, {
-        "rect": to_video_rect(page_rect, geom, size),
+        "rect": target_rect,
         "app": (geom["appx"], geom["appy"], geom["appw"], geom["apph"]),
         "size": size,
     }
@@ -4038,7 +4051,7 @@ def record_overlay(
         rec.wait_for("#kpi-rev")
         # Without it the page goes idle behind the scrim, the screencast stops
         # emitting frames, and every timestamp below drifts (issue #18).
-        start_ticker(b, rec.page)
+        start_ticker(b, rec.app)
         rec.pause(OVERLAY_QUIET_S)
         rec.interlude(OVERLAY_LABEL, hold=OVERLAY_HOLD_S, style="light")
         if cleared:
@@ -4059,9 +4072,9 @@ class EntropyTake(NamedTuple):
     problems: list[str]
     out_dir: Path
     clock: str  # the wall clock the page printed, as text
-    still_rect: Rect  # where the entropy panel sits in a full-bleed still
-    video_rect: Rect  # ...and where it lands in the composited video
-    spin_rect: Rect  # just the spinning shape, in a full-bleed still
+    still_rect: Rect  # where the entropy panel sits in the framed frame
+    video_rect: Rect  # the same rect — stills and video share one geometry
+    spin_rect: Rect  # just the spinning shape, in the same coordinates
 
 
 def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> EntropyTake:
@@ -4088,15 +4101,12 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
         out_dir, base_url=base_url, speech=False, strict=True, **kwargs
     ) as rec:
         rec.goto("/?entropy=1")
-        # Park the pointer before anything is photographed. Every take of this
-        # storyboard has to agree about where the recorder's cursor dot is,
-        # and left alone that is decided by a synthetic mousemove rather than
-        # by the storyboard — see PARKED_POINTER, and issue #185. Deliberately
-        # `page.mouse.move` rather than the `move_to` verb: this is the
-        # storyboard stating a precondition, not a beat worth watching, and a
-        # sixth beat would change what every other measurement in this take is
-        # taken over.
-        rec.page.mouse.move(*PARKED_POINTER)
+        # No pointer park, deliberately, where the composite path needed one
+        # (#185): the wrapper dot is driven by pointer verbs alone (#361), no
+        # event can move it, and this storyboard runs none — so every take of
+        # this storyboard agrees the dot is at the chrome's off-screen park,
+        # by construction. check_undrawn_pointer below reads that back out of
+        # the DOM rather than taking this paragraph's word for it.
         # The worker's answer lands asynchronously and is part of what the
         # stills have to reproduce, so wait for it rather than racing it. A
         # short bound rather than the 60 s default: a Worker wrapper that
@@ -4105,7 +4115,7 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
         rec.wait_for("#entropy-worker.ready", timeout_s=15)
         rec.pause(ENTROPY_SETTLE_S)
         rec.shot(ENTROPY_SHOTS[0])
-        check_determinism(b, rec.page, f"in the {label} take", on=deterministic)
+        check_determinism(b, rec.app, f"in the {label} take", on=deterministic)
 
         # The worker line, read rather than left to the pixel comparisons.
         # They cannot see this: the fixture falls back to "worker unavailable"
@@ -4113,7 +4123,7 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
         # across takes just as happily as a frozen timestamp does. A wrapper
         # that broke every worker on the page would pass this whole phase on
         # the strength of failing consistently.
-        worker = rec.page.locator("#entropy-worker").inner_text()
+        worker = rec.app.locator("#entropy-worker").inner_text()
         b.fail_if(
             not re.fullmatch(r"worker \d+", worker),
             f"the entropy page's worker reported {worker!r}, not a timestamp — "
@@ -4133,16 +4143,16 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
         # would trip the "the escape-hatch take rendered the same clock as the
         # frozen ones" comparison below. An assertion that cannot be made to
         # fail is a comment.
-        clock = rec.page.locator("#entropy-readings").inner_text()
+        clock = rec.app.locator("#entropy-readings").inner_text()
         # A second still after long enough for the spinner to be somewhere
         # else entirely (it turns once every 1.7 s).
         rec.pause(ENTROPY_GAP_S)
         rec.shot(ENTROPY_SHOTS[1])
         # After both stills, so it grades the frames that were actually taken.
-        check_parked_pointer(b, rec.page, f"in the {label} take")
+        check_undrawn_pointer(b, rec.page, f"in the {label} take")
 
-        box = rec.page.locator("#entropy-panel").bounding_box()
-        spin = rec.page.locator("#entropy-spinner").bounding_box()
+        box = rec.app.locator("#entropy-panel").bounding_box()
+        spin = rec.app.locator("#entropy-spinner").bounding_box()
         if box is None or spin is None:
             raise SmokeFailure(
                 "#entropy-panel has no box — ?entropy=1 rendered nothing"
@@ -4164,17 +4174,11 @@ def record_entropy(out_dir: Path, base_url: str, deterministic: bool) -> Entropy
             int(spin["width"]),
             int(spin["height"]),
         )
-        # The recording is scaled into the window body, so the same panel sits
-        # somewhere else in the video. Map it rather than eyeballing a crop:
-        # this is the region both comparisons below actually look at.
-        g, size = rec._geom, (rec._size["width"], rec._size["height"])
-        scale_x, scale_y = g["appw"] / size[0], g["apph"] / size[1]
-        video_rect: Rect = (
-            g["appx"] + int(box["x"] * scale_x),
-            g["appy"] + int(box["y"] * scale_y),
-            max(2, int(box["width"] * scale_x)),
-            max(2, int(box["height"] * scale_y)),
-        )
+        # The page is the video at true pixel size (#358/#361), and
+        # `bounding_box()` answers in wrapper-page coordinates even for
+        # iframe elements — so the panel sits at the same rect in the video
+        # as in the still, with nothing left to map.
+        video_rect: Rect = still_rect
     return EntropyTake(b.problems, out_dir, clock, still_rect, video_rect, spin_rect)
 
 
@@ -4221,10 +4225,10 @@ def _check_video(
         return failures
 
     # Median, not max: one good frame must not excuse a blank video. Not min
-    # either — a *terminal* take legitimately opens on a frame or two of
-    # not-yet-painted page, and this runs on both media. A web take no longer
-    # does (issue #119), and `check_opening` grades that separately, on the one
-    # frame this median is deliberately insensitive to.
+    # either — both media legitimately open on the recorder's own furniture
+    # (the terminal's card, the web take's opening hold, #119/#360), which
+    # `check_opening_card`/`check_wrapper_opening` grade separately, on the
+    # frames this median is deliberately insensitive to.
     floor = MIN_CONTENT_STDDEV[label]
     score = statistics.median(contrast(f) for f in frames)
     if score < floor:
@@ -4373,147 +4377,28 @@ def check_content_healthy(label: str, out_dir: Path, app_rect: Rect) -> list[str
     return failures
 
 
-# -- what a web take opens on (issue #119) -----------------------------------
+# -- what a web take opens on (issue #119, then #360) -------------------------
 #
-# Chromium's screencast starts with the page, and the page is `about:blank`
-# until the first `goto()` returns — so every web take used to open on a flat
-# white app rect inside a correct-looking window frame, which reads as "the app
-# loaded blank". Measured at ~400 ms on the demo CI recorded for #117, and
-# found by a human watching it: none of this suite's numbers moved, and neither
-# did the recorder's own picture check, whose `score` is a *median* and whose
-# `static_for` saw one 0.5 s gap against a 15 s limit.
-#
-# The recorder now covers that gap with the app's first painted frame. What is
-# graded here is the only thing a viewer can see: **is there a picture at
-# t = 0**.
-#
-# Three things about how it is measured, each one deliberate:
-#
-#   * off `demo.mp4` with this file's own `gray_frames`/`contrast`, never
-#     through `opening_gap`. The recorder's `content.opening.gap` answers the
-#     same question, and a check that read it would be asking the code under
-#     test whether it worked.
-#   * against the take's **own** median rather than an absolute floor, so it
-#     carries no number tuned to this fixture, this app or this machine. The
-#     separation is not marginal: a covered opening scores the same as the rest
-#     of the take (measured 17.03 against a 17.01 median), and a blank one
-#     scores ~0.
-#   * with `held` asserted non-zero **first**. If this take had no gap to
-#     cover, frame zero shows the app whatever the recorder does, and the
-#     assertion below grades nothing — the exact shape of an environment-
-#     agreeing assertion. That case is reported as a failure of this check
-#     rather than passed over in silence.
-#
-# What is *not* asserted here, because something else in this take already
-# grades it: that no timestamp moved. The hold is an overlay switched off part
-# way through, so the video keeps its length and every frame keeps its time —
-# and `check_beat_frames` in the same phase reads each beat's `t` out of
-# timeline.json and matches the frame there against the caption that beat put
-# up. A hold that shifted the clock would land those frames on the wrong
-# captions.
+# Chromium's screencast starts with the page, before the first `goto()` has an
+# app to show — so a web take used to open on a flat white app rect inside a
+# correct-looking window frame, which reads as "the app loaded blank".
+# Measured at ~400 ms on the demo CI recorded for #117, and found by a human
+# watching it. The composite path covered the gap at encode time with an
+# ffmpeg overlay of the app's first painted frame, and a `check_opening` here
+# graded frame 0 against the take's own median. Both died with the composite
+# (#361): the wrapper take opens on the in-page hold instead — an opaque field
+# in the window's own colour, up in frame 0 and cleared by the first goto —
+# and `check_wrapper_opening` grades it on the long web take and the wrapper
+# arm alike. `check_opening_gap` below outlives the cutover: it grades
+# `opening_gap`, the measurement `content.opening` reports on every take.
 
-# How much of the take's own median contrast frame zero must reach. Nothing
-# subtle is being separated: the two populations are "the app" and "flat
-# white", so a half is far below anything a real opening frame scores and far
-# above what a blank one can.
-OPENING_FRAME0_SHARE = 0.5
-
-# How much of the file to read to get its first frame. Shorter than one frame
-# at any rate the recorder encodes, so what comes back is frame zero and at
-# most one neighbour — and it is read with `-t` rather than an `fps` filter for
-# the reason spelled out in check_opening().
+# How much of the file to read to get a take's first frame. Shorter than one
+# frame at any rate the recorder encodes, so what comes back is frame zero and
+# at most one neighbour — and it is read with `-t` rather than an `fps`
+# filter, because the filter answers with whichever frame lands nearest its
+# first slot's middle (the defect content.py's `_content_frames` docstring
+# records).
 OPENING_FIRST_FRAME_S = 0.03
-
-
-def check_opening(label: str, out_dir: Path, app_rect: Rect) -> list[str]:
-    """The first frame of a web take shows the app (issue #119).
-
-    **The acceptance criterion is about the picture, not about the mechanism**,
-    and the first version of this confused the two. It refused to grade a take
-    whose `held` was zero and reported that refusal as a failure — so a run
-    where Chromium's screencast happened to emit its first frame *after* the
-    page painted, which is a perfectly healthy recording and the outcome the
-    fix is trying to produce, went red. It did on CI, on a branch that had
-    nothing to do with the opening.
-
-    A take whose app painted before frame zero satisfies the criterion by
-    itself; one whose app did not satisfies it because the hold covered the
-    gap. Either way frame zero has to show the app, so that arm runs
-    unconditionally now.
-
-    What is lost is graded coverage of the hold *code* on a run that never
-    needed it, and the honest handling is to say so out loud rather than to
-    fail: the line below reports whether the hold was exercised, so a run whose
-    evidence is thinner announces it instead of looking identical to one that
-    proved something. Making that reliable needs a fixture that defers its
-    first paint on purpose — #126.
-    """
-    failures: list[str] = []
-    mp4 = out_dir / "demo.mp4"
-    content = content_of(out_dir) or {}
-    opening = content.get("opening")
-    held = opening.get("held") if isinstance(opening, dict) else None
-    exercised = isinstance(held, (int, float)) and held > 0
-
-    if held is None:
-        failures.append(
-            f"{label}: this take reports content.opening.held = null, which "
-            f"means the web recorder did not run its opening hold at all. "
-            f"Whatever frame zero shows, the mechanism is not wired in."
-        )
-
-    rect = keep_top(app_rect)
-    try:
-        # **Not `sample_fps=`.** The fps filter quantises to its own output
-        # slots, and at 1 fps slot zero is a whole second wide — measured, it
-        # returns a frame from around 0.5 s, which on a broken take is *after*
-        # the blank opening has ended. The first version of this check read
-        # that frame, scored 17.06 on a take whose first frame was flat white,
-        # and passed. A window cut with `-t` instead decodes from the file's
-        # own first frame, which is the only frame this assertion is about.
-        opening = gray_frames(mp4, rect, duration=OPENING_FIRST_FRAME_S)
-        body = gray_frames(mp4, rect, sample_fps=CONTENT_SAMPLE_FPS)
-    except RuntimeError as exc:
-        return [f"{label}: {exc}"]
-    if not opening or len(body) < 2:
-        return [
-            f"{label}: {len(opening)} opening frame(s) and {len(body)} sampled "
-            f"from {mp4.name}, too few to compare the opening against the take"
-        ]
-
-    first = contrast(opening[0])
-    median = statistics.median(contrast(f) for f in body)
-    floor = median * OPENING_FRAME0_SHARE
-    if first < floor:
-        failures.append(
-            f"{label}: {mp4.name} opens on a picture that is not there — its "
-            f"first frame scores {first:.2f} luma stddev over {rect}, under "
-            f"{floor:.2f} ({OPENING_FRAME0_SHARE:g} of this take's own "
-            f"{median:.2f} median). The recorder reports "
-            f"content.opening.held = {held!r}"
-            + (
-                "; whatever it composited, the app is not visible at t=0."
-                if exercised
-                else " — it saw nothing to cover, and the app is not there "
-                "either, so the opening was blank and went unnoticed."
-            )
-        )
-    if not failures:
-        # Which of the two ways this passed, every time, unasked. A reader who
-        # only ever sees "opens on the app" cannot tell a run that exercised
-        # the hold from one that never needed it.
-        how = (
-            f"over a {held:.2f}s hold"
-            if exercised
-            else "with no hold needed — the app had already painted when the "
-            "screencast started, so the hold code was not exercised this run "
-            "(#126)"
-        )
-        print(
-            f"smoke: {label} opens on the app (frame 0 scores {first:.2f} "
-            f"against a {median:.2f} median, {how})"
-        )
-    return failures
 
 
 def _synthetic_take(path: Path, painted_at: float | None, seconds: float) -> None:
@@ -4612,124 +4497,28 @@ COVERAGE_CARD = "AC-1"
 # the page" fire for a reason that has nothing to do with the card.
 COVERAGE_APP_MARKER = "Northwind Ops"
 
-# -- the window is still visible around the card, on a web take (issue #291) --
+# -- the card is the window's own colour, on a web take (issue #291) ----------
 #
-# The card `criterion()` and `interlude()` raise used to be one colour for both
-# media, and it was the terminal's: a near-black field, inside the web
-# recorder's own dark window frame with its title bar and traffic lights. A
-# human watching a demo read it as a terminal window rather than as a card over
-# the app, and **no artifact of that take was wrong** — the element, the beat,
-# the aria snapshot and the frames all said exactly what they should.
-#
-# **What the defect was not: geometry.** The card has always been `inset: 0`,
-# so the recorder's 14 px pad and its title bar have always been drawn around
-# it — the window frame was there the whole time. `#1c1a17` is 0.4 luma levels
-# from that frame *as encoded*, so the boundary existed and nobody could see it.
-#
-# Three fixes were rejected by the person who found it — warm paper (205 levels
-# off the window), black in a gutter of the window's colour (23.5), and then a
-# card declaring the window's own constant. What they asked for was the opposite
-# of a distance: *"I want the interlude to match the window, without a need for
-# a border of another colour, or an additional edge of a third colour."*
-#
-# **The third was rejected from a shipped frame, and that is what this file now
-# grades.** One declared colour painted in both layers arrives in `demo.mp4` as
-# two: the frame is a Playwright *screenshot* and the card is inside Playwright's
-# *video*, so the pad read `#171625` and the card `#181620`, five levels of blue
-# apart (issue #301). The reviewer sampled a frame and saw it. So the card
-# declares `WEB_CARD_BODY`, `WEB_WINDOW_BODY` compensated for that extra encoder
-# by measurement, and what is graded here is the thing they were looking at:
-#
-#   tests/unit   which stylesheet a recorder of each medium hands the page, that
-#                the terminal's is still the value #110's blend was tuned to,
-#                and that the frame is painted from the shared constant. It
-#                cannot grade the match: the two declarations differ on purpose,
-#                and a pin between them would be green on the build that was
-#                rejected.
-#   here         that the dispatched colour reached the encoded mp4 at all, and
-#                that **in that mp4 the card's field and the window's pad are
-#                within `CARD_WINDOW_TOLERANCE` levels per channel**. That is a
-#                reading of the artifact a viewer meets, and it is the check
-#                #297's 12-level bar was deleted to make room for.
-#
-# What is still graded nowhere: whether a viewer **reads the result as a card**
-# rather than as one flat surface. Sameness is measurable and now measured;
-# recognition is not. tests/README.md says so under Known gaps.
-
-# The two cards in decimal, hand-written. `tests/unit` pins the package's
-# stylesheets to the same two colours, so a palette changed in one place and
-# not the other is a failure rather than a check that grades nothing.
-#
-# `WEB_CARD_RGB` is `core.WEB_CARD_BODY` and **not** `WEB_WINDOW_BODY`: the
-# card is declared two levels off the window so that it lands on the window in
-# the encoded frame. The window body is read too, and graded against the card
-# below.
-WEB_CARD_RGB = (0x18, 0x17, 0x26)
-TERMINAL_CARD_RGB = (0x1C, 0x1A, 0x17)
-
-# How far a channel may sit from the card's own value before the strip is not
-# that card.
-#
-# Measured on this arm rather than chosen. A flat `#efe7d8` or `#000000` card
-# reads **2** levels off its own colour in this pipeline, and so does the
-# compensated `#181726` — it arrives at `(24, 21, 36)` against a declared
-# `(24, 23, 38)`. The previous round declared `#181825` here, which read **5**
-# off itself, and the bar was widened to 10 to hold it; with the card
-# compensated the reading is back to 2 and so is the bar.
-#
-# The two states the reading has to be told apart from, both injected and both
-# caught: **214** — the fixture app's own header strip, `(236, 237, 242)`, which
-# is what a card that never painted leaves there — and **16**, the terminal card
-# on a web take, `(25, 25, 22)`, which is #291 itself.
-#
-# Note the margins, because they are the honest part. Against a card that never
-# painted the bar is 36x clear. Against the *terminal* card it is 2.7x, restored
-# from 1.5x when this stood at 10 — the two cards are a dark blue and a dark
-# brown, and blue is the only channel that separates them.
-#
-# What this bar does **not** catch, and why the one below exists: a card that
-# drops the encoder compensation and declares `WEB_WINDOW_BODY` reads 6 off its
-# own declared colour, which this would let through at exactly the bound. It is
-# a defect a reviewer found by eye, and it is caught next door.
-CARD_RGB_TOLERANCE = 6
-
-# How far the card's field and the window's pad may sit apart, per channel, in
-# the encoded frame. **This is #291's own property, and it is the only check in
-# this repo that reads it.**
-#
-# The card and the window are one colour on screen by design (see the section
-# header), and this is what "on screen" is worth: a reading of `demo.mp4`, not
-# of the two constants, because the two constants differ on purpose and an
-# equality between them was green on the build a human rejected.
-#
-# Measured, not chosen. The shipped pair reads `(24, 21, 36)` against
-# `(23, 22, 37)` — **1** level per channel, at every instant sampled. The state
-# it has to rule out is the previous round's, one colour declared for both,
-# which reads **5** levels of blue apart. So the bar is 2: twice the healthy
-# reading, and 2.5x clear of the defect.
-#
-# **A failure here is not a flake and must not be widened away.** The card's
-# compensation is tuned to one encoder path, so this reading going red means
-# either the card was repainted, or the frame was, or Chromium/ffmpeg/the pixel
-# format changed under it. The first two are bugs; the third is a re-measurement
-# of `core.WEB_CARD_BODY`. None of the three is answered by a bigger number
-# here.
-CARD_WINDOW_TOLERANCE = 2
-
-# Where in the card's beat the frames are read, as fractions of its span. Three
-# rather than one: a card that arrives late, or leaves early, is a card a
-# viewer sees the wrong thing under, and one sample in the middle is true of
-# both.
-CARD_SAMPLE_FRACTIONS = (0.3, 0.5, 0.7)
+# The card `criterion()` and `interlude()` raise used to be one colour for
+# both media, and it was the terminal's: a near-black field a human read as a
+# terminal window rather than as a card over the app, with **no artifact of
+# that take wrong** (#291). The fix's history — the rejected candidates, the
+# #301 two-encoder compensation the composite needed, and the reviewer's own
+# sentence — is `core.WEB_WINDOW_BODY`'s note. Since the cutover (#361) the
+# card and the window declare ONE colour and ride ONE encoder, and the
+# `check_criterion_card` that graded the compensated pair died with it: the
+# coverage take's card is graded by `check_wrapper_card`, the same reading of
+# the encoded mp4 the wrapper arm makes — pixels on both sides, never
+# declarations (#297's two recorded anti-patterns).
 
 
-def record_coverage(out_dir: Path, base_url: str) -> tuple[list[str], Rect, Rect]:
+def record_coverage(out_dir: Path, base_url: str) -> tuple[list[str], dict]:
     """A take recorded against COVERAGE_CRITERIA, with one left undemonstrated.
 
-    Returns the app's rect and the window's rect in the encoded frame as well
-    as the problems: the card assertions read pixels of both — the card, and
-    the frame drawn around it — and where either lands in the composite is
-    something only the recorder knows (issue #17).
+    Returns the take's chrome geometry as well as the problems: the card
+    assertions read pixels of the card and of the window body around it, and
+    where either sits in the frame is something only the recorder knows
+    (issue #17).
     """
     from demo_recording import Recorder
 
@@ -4760,31 +4549,32 @@ def record_coverage(out_dir: Path, base_url: str) -> tuple[list[str], Rect, Rect
         # has to count them without any of them reaching `claimed`.
         rec.caption("")
 
-        g = rec._geom
-        app: Rect = (g["appx"], g["appy"], g["appw"], g["apph"])
-        win: Rect = (g["winx"], g["winy"], g["winw"], g["winh"])
-    return b.problems, app, win
+        geom = dict(rec._geom)
+    return b.problems, geom
 
 
 def _criterion_page_failures(out_dir: Path, card: dict, declared: str) -> list[str]:
-    """Was the clause on the page, and not only in the beat log? (issue #280)
+    """Was the clause on the screen, and not only in the beat log? (issue #280)
 
     Not a helper for tidiness — a different *source*. Every other assertion
     about the card reads `timeline.json`, which the recorder writes out of the
     same values it drew from; they agree by construction and would all pass on
     a verb that logged a perfect beat and evaluated nothing. The evidence
-    file's `aria` is Playwright's snapshot of the live document at the end of
-    the beat, so it is the one artifact in this take that can disagree.
+    file's `chrome` field is read out of the wrapper document's DOM at the
+    end of the beat (#361) — the card is the recorder's furniture and lives
+    there, not in the app's aria — so it is an artifact that can disagree.
 
-    **`aria` and not the file.** The evidence envelope also carries a copy of
-    the beat record, caption and all, so searching the whole document would
+    **`chrome` and not the file.** The evidence envelope also carries a copy
+    of the beat record, caption and all, so searching the whole document would
     find the clause on a take whose card never reached the browser — the
-    catalogue's wrong-scope search, in the file written to avoid it.
+    catalogue's wrong-scope search, in the file written to avoid it. The
+    `chrome` read is visibility-gated in the page (opacity, display), so a
+    card toggled to opacity 0 leaves the field without its line.
 
-    It still grades **presence, not legibility**: a card rendered off-frame, at
-    zero opacity, or under an app overlay puts exactly this text in exactly
-    this snapshot. That gap is stated in tests/README.md rather than papered
-    over.
+    It still grades **presence, not legibility**: a card rendered off-frame or
+    under an app overlay puts exactly this text in exactly this read. That
+    gap is stated in tests/README.md rather than papered over — and the
+    card's *pixels* are check_wrapper_card's, in the same arm.
     """
     path = card.get("evidence")
     if not path:
@@ -4796,7 +4586,8 @@ def _criterion_page_failures(out_dir: Path, card: dict, declared: str) -> list[s
     on_disk = out_dir / path
     if not on_disk.is_file():
         return [f"coverage: the criterion beat's evidence {path} was not written"]
-    aria = json.loads(on_disk.read_text()).get("aria")
+    doc = json.loads(on_disk.read_text())
+    aria = doc.get("aria")
     # The haystack, before anything is claimed about it. An empty or stubbed
     # snapshot makes "the clause is not in it" fire for the wrong reason and
     # "the clause is in it" impossible; the marker is a string the fixture page
@@ -4804,178 +4595,19 @@ def _criterion_page_failures(out_dir: Path, card: dict, declared: str) -> list[s
     if not isinstance(aria, str) or COVERAGE_APP_MARKER not in aria:
         return [
             f"coverage: the criterion beat's evidence ({path}) carries no "
-            f"snapshot of the fixture page, so whether the clause reached the "
-            f"browser cannot be read out of it either way"
+            f"snapshot of the fixture page, so whether the capture read a "
+            f"live screen cannot be established, and the chrome read below "
+            f"would prove nothing"
         ]
-    if declared not in aria:
+    chrome = doc.get("chrome")
+    if not isinstance(chrome, str) or declared not in chrome:
         return [
-            f"coverage: {declared!r} is not in the page snapshot the criterion "
-            f"beat recorded ({path}) — the beat log says a card carried the "
-            f"clause and the document the recorder was driving never had those "
-            f"words in it"
+            f"coverage: {declared!r} is not in the on-screen chrome text the "
+            f"criterion beat recorded ({path} carries chrome={chrome!r}) — "
+            f"the beat log says a card carried the clause and the screen the "
+            f"recorder was driving never showed those words"
         ]
     return []
-
-
-def check_criterion_card(out_dir: Path, app: Rect, win: Rect) -> list[str]:
-    """A web take's card is the window's own colour, in `demo.mp4` (#291).
-
-    Read off `demo.mp4` and not off a still: `shot()` screenshots the page,
-    which is the layer *before* the composite, and what a viewer meets is the
-    card once it is inside the recorder's window frame. That distinction is the
-    whole of this function — the two things compared below reach the file by
-    two different encoders (#301), and a still can only ever show one of them.
-
-    Two claims:
-
-      1. **the card painted, in the colour the package dispatched.** The strip
-         reads `WEB_CARD_RGB`. That separates a card from the app underneath it
-         — 36x from the state it has to rule out — and the two palettes at 16
-         levels against a bar of 6.
-
-      2. **the card and the window body are the same colour on screen.** The
-         strip and a band of the window's pad are within `CARD_WINDOW_TOLERANCE`
-         levels per channel, at every instant sampled. This is #291's own
-         property and the reason the fix has a compensated constant at all: a
-         human sampled a shipped frame, found the card and the window five
-         levels apart in blue, and rejected the build. Claim 1 cannot see that —
-         the card was exactly the colour it was dispatched in.
-
-    **Neither claim can be satisfied by reading a declaration.** #297 pinned
-    these two at least 12 luma levels *apart*, which the reviewer's decision
-    inverts, and the round after it pinned the card's declared colour equal to
-    the window's, which was green on the build that was rejected. Claim 2
-    replaces both, and grades the artifact instead.
-
-    What is still graded nowhere: whether a viewer reads the result as a
-    **card** rather than as one flat surface. tests/README.md says so under
-    Known gaps.
-
-    Three premises have to hold before the claims say anything:
-
-      * every strip decodes, at every instant sampled;
-      * the window leaves a pad wide enough to read, or claim 2 has nothing to
-        compare the card against and says so instead of passing quietly;
-      * the card's strip is **not** the card's colour at an instant when no card
-        is up. Without that, a fixture app that happened to be this dark blue
-        would satisfy the claim with no card in the recording at all.
-
-    That second one is read **after** the card, halfway between the end of its
-    beat and the end of the take, and not just before it. The beat log's clock
-    and the encoded video's are ~130 ms apart on this arm, so a sample a
-    quarter-second ahead of `t_start` lands on the card about as often as it
-    lands on the app — a premise that trips at random, on a healthy build, and
-    says the app is the wrong colour. After the card there is a wide margin to
-    aim at, and the reading proves something the earlier one did not: that the
-    strip goes back to the app when the card comes down.
-    """
-    mp4 = out_dir / "demo.mp4"
-    if not mp4.is_file():
-        return ["coverage: the take wrote no demo.mp4, so no frame carries a card"]
-    doc = json.loads((out_dir / "timeline.json").read_text())
-    cards = [b for b in doc.get("beats") or [] if b.get("verb") == "criterion"]
-    if len(cards) != 1:
-        return [
-            f"coverage: the take logged {len(cards)} criterion beats, expected "
-            f"1 — there is no card span to read the colour out of"
-        ]
-    start, end = float(cards[0]["t_start"]), float(cards[0]["t_end"])
-    strip = card_strip(app)
-    band = frame_band(app, win)
-
-    duration = float(doc.get("duration") or 0.0)
-    if duration - end < 1.0:
-        return [
-            f"coverage: the criterion beat ends at {end:.2f}s of a {duration:.2f}s "
-            f"take, so there is no stretch after it to read the app out of and "
-            f"nothing to tell the card apart from"
-        ]
-    if band is None:
-        return [
-            f"coverage: the window {win} leaves no pad around the app rect "
-            f"{app} wide enough to read, so nothing here can say whether the "
-            f"card is the window's own colour on screen — which is #291"
-        ]
-    before_at = end + (duration - end) * 0.5
-    before = strip_rgb(mp4, before_at, strip)
-    if before is None:
-        return [
-            f"coverage: {mp4.name} decodes no frame at {before_at:.2f}s over "
-            f"{strip}, so there is no no-card reading to compare with"
-        ]
-    if off_card(before, WEB_CARD_RGB) <= CARD_RGB_TOLERANCE:
-        return [
-            f"coverage: the strip at {strip} reads "
-            f"{tuple(round(v) for v in before)} at {before_at:.2f}s, with the "
-            f"card down since {end:.2f}s — that is the card's own colour "
-            f"{WEB_CARD_RGB}. Either this app cannot be told from the card, so "
-            f"the reading below would pass with no card in the recording, or the "
-            f"card was never taken down"
-        ]
-
-    failures: list[str] = []
-    read: list[tuple[tuple[float, float, float], float]] = []
-    apart: list[tuple[tuple[float, float, float], float]] = []
-    for fraction in CARD_SAMPLE_FRACTIONS:
-        at = start + (end - start) * fraction
-        got = strip_rgb(mp4, at, strip)
-        if got is None:
-            failures.append(
-                f"coverage: {mp4.name} decodes no frame at {at:.2f}s over {strip}"
-            )
-            continue
-        drift = off_card(got, WEB_CARD_RGB)
-        read.append((got, drift))
-        if drift > CARD_RGB_TOLERANCE:
-            failures.append(
-                f"coverage: {(fraction * 100):.0f}% through the criterion beat "
-                f"the card reads {tuple(round(v) for v in got)} over {strip}, "
-                f"{drift:.0f} levels off the web card's {WEB_CARD_RGB} (bar "
-                f"{CARD_RGB_TOLERANCE}). It reads "
-                f"{off_card(got, TERMINAL_CARD_RGB):.0f} off the *terminal* "
-                f"card's {TERMINAL_CARD_RGB} — a web take painting that one is "
-                f"issue #291, where the card reads as a terminal window inside "
-                f"the recorder's own window frame."
-            )
-        # Claim 2, at the same instant and out of the same frame: the pad the
-        # window leaves around the app video, which the card cannot paint.
-        chrome = strip_rgb(mp4, at, band)
-        if chrome is None:
-            failures.append(
-                f"coverage: {mp4.name} decodes no frame at {at:.2f}s over the "
-                f"window body {band}, so the card has nothing to be the colour of"
-            )
-            continue
-        gap = channels_apart(chrome, got)
-        apart.append((chrome, gap))
-        if gap > CARD_WINDOW_TOLERANCE:
-            failures.append(
-                f"coverage: {(fraction * 100):.0f}% through the criterion beat "
-                f"the card reads {tuple(round(v) for v in got)} over {strip} and "
-                f"the window body {tuple(round(v) for v in chrome)} over {band}, "
-                f"{gap:.0f} levels apart (bar {CARD_WINDOW_TOLERANCE}). #291 is "
-                f"that a viewer cannot tell a web take's card from the window it "
-                f"sits in, and this is the reading that says so — the card is "
-                f"declared {WEB_CARD_RGB} to land on the window through a "
-                f"different encoder (#301), so either that compensation is gone, "
-                f"one of the two was repainted, or the encoder moved under it."
-            )
-    if not failures:
-        worst = max(drift for _, drift in read)
-        print(
-            f"smoke: coverage card is the web palette {WEB_CARD_RGB} — strip "
-            f"{strip} reads {tuple(round(v) for v in read[0][0])} under it "
-            f"({worst:.0f} off over {len(read)} samples, bar "
-            f"{CARD_RGB_TOLERANCE}) and "
-            f"{tuple(round(v) for v in before)} once it is down "
-            f"({off_card(before, WEB_CARD_RGB):.0f} off); the window body {band} "
-            f"reads {tuple(round(v) for v in apart[0][0])}, "
-            f"{max(gap for _, gap in apart):.0f} off the card as encoded over "
-            f"{len(apart)} samples (bar {CARD_WINDOW_TOLERANCE}) — the two are "
-            f"one colour on screen, declared two levels apart so that they land "
-            f"there (#291, #301)"
-        )
-    return failures
 
 
 def check_coverage(out_dir: Path) -> list[str]:
@@ -6360,6 +5992,39 @@ def _scored_region_failures(
     return failures
 
 
+def caption_probe_band(
+    label: str, frame_size: tuple[int, int], factor: float = 1.0
+) -> Rect:
+    """Where this medium's caption paints, at `factor` times the frame size.
+
+    The terminal caption is an in-page lower-third and keeps `caption_band`'s
+    whole-width strip. A web (and segments) caption paints in the wrapper
+    chrome's reserved band below the app rect (#358/#361), and reading the
+    old full-width strip dilutes its change with ~7x of static chrome —
+    measured 2.68 mean luma over the strip for a caption whose own band
+    moves by an order of magnitude more. The arithmetic is
+    `chrome_geometry`'s, duplicated at native size (the loop-vs-suite rule:
+    policy is not imported), then scaled, because the geometry's even-pixel
+    rounding does not commute with scaling.
+    """
+    if label == "terminal":
+        width, height = frame_size
+        return caption_band((round(width * factor), round(height * factor)))
+    width, height = frame_size
+    appw = int(width * 0.80) & ~1
+    apph = int(height * 2 / 3) & ~1
+    winw = appw + 2 * 14
+    winh = 36 + 14 + apph + 96 + 14
+    winx = (width - winw) // 2
+    winy = (height - winh) // 2
+    return (
+        round((winx + 14) * factor),
+        round((winy + 36 + 14 + apph) * factor),
+        round(appw * factor),
+        round(96 * factor),
+    )
+
+
 def caption_appearance_s(
     label: str, mp4: Path, band: Rect, expect_at: float
 ) -> tuple[float | None, str]:
@@ -6677,10 +6342,30 @@ def check_timeline(
                 f"{where} ends at {t_end:.3f}s, before it starts ({t_start:.3f}s)"
             )
         if t_start < previous_end - BEAT_ORDER_SLACK_S:
-            failures.append(
-                f"{where} starts at {t_start:.3f}s, before the previous beat "
-                f"ended ({previous_end:.3f}s) — the log is not monotonic"
+            # A stitched log is allowed to run backwards at a capture seam
+            # exactly as loudly as its own artifact says (issue #263): a
+            # backward step deletes wall time from a part's video without
+            # touching its beat log, the merge lays the next part out by the
+            # real file duration, and the recorder REPORTS the overlap in
+            # `overlaps` rather than clamping timestamps to instants neither
+            # clock has. So a seam the document publishes — this beat, seam
+            # flagged, published size covering the observed one — is the
+            # documented healthy shape on a stepping host, and an overlap
+            # anywhere else, or bigger than published, still fails.
+            published = any(
+                rec.get("seam") is True
+                and rec.get("beat") == position
+                and isinstance(rec.get("overlap"), (int, float))
+                and previous_end - t_start <= rec["overlap"] + BEAT_ORDER_SLACK_S
+                for rec in doc.get("overlaps") or []
             )
+            if not published:
+                failures.append(
+                    f"{where} starts at {t_start:.3f}s, before the previous "
+                    f"beat ended ({previous_end:.3f}s) — the log is not "
+                    f"monotonic, and timeline.json publishes no seam overlap "
+                    f"covering it (#263)"
+                )
         previous_end = max(previous_end, t_end)
         if first_start is None:
             first_start = t_start
@@ -6881,7 +6566,7 @@ def check_timeline(
         shift = stepped(t_start)
         expect_at = t_start + shift
         seen_at, note = caption_appearance_s(
-            label, mp4, caption_band(frame_size), expect_at
+            label, mp4, caption_probe_band(label, frame_size), expect_at
         )
         if seen_at is None:
             failures.append(
@@ -7596,7 +7281,7 @@ def _check_frame_captions(
     # native size would crop a region the smaller picture does not have.
     width, height = frame_size
     factor = min(1024, width) / width
-    band = caption_band((round(width * factor), round(height * factor)))
+    band = caption_probe_band(label, frame_size, factor)
     stepped = clock.before if clock is not None else (lambda _t: 0.0)
     reference: bytes | None = None
     graded: list[tuple[int, str, bytes]] = []
@@ -7622,12 +7307,36 @@ def _check_frame_captions(
         # the whole interval between the two accounts of where it is clears
         # every caption change by the guard.
         at = float(frame["t"])
-        shows = at - stepped(at)
-        lo, hi = min(at, shows), max(at, shows)
-        near = min(
-            (0.0 if lo <= c <= hi else min(abs(lo - c), abs(hi - c)) for c in changes),
-            default=math.inf,
+        # Two accounts of where this frame sits, each kept on ITS OWN clock
+        # and measured against the change on that same clock: the beat's
+        # midpoint on the log's, and the cut instant on the video's (the
+        # change moved there by `before(c)`, whose argument really is a
+        # log-clock second). The previous form fed `at` — a video-clock
+        # instant since #229 — into `before()`, and on a take whose step
+        # landed inside a caption stretch the video instant read as inside
+        # the hole on the wrong axis: the corrected interval missed the
+        # change by ~1 s and a frame cut 60 ms from a caption clear was
+        # graded (measured on a --cheap run of #361: beat 4 cut at video
+        # 3.974 s = log 5.09 s, change at log 5.151 s, step -1.119 s at
+        # 3.768 s). A change the two accounts straddle is distance zero —
+        # that is the ambiguous case the guard exists for.
+        beat_record = beats.get(int(frame["beat"])) or {}
+        t_start, t_end = beat_record.get("t_start"), beat_record.get("t_end")
+        log_mid = (
+            (float(t_start) + float(t_end)) / 2
+            if isinstance(t_start, (int, float)) and isinstance(t_end, (int, float))
+            else at
         )
+        near = math.inf
+        for c in changes:
+            log_side = log_mid - c
+            video_side = at - (c + stepped(c))
+            near = min(
+                near,
+                0.0
+                if min(log_side, video_side) <= 0.0 <= max(log_side, video_side)
+                else min(abs(log_side), abs(video_side)),
+            )
         if near < FRAME_CAPTION_GUARD_S:
             continue
         try:
@@ -8194,12 +7903,20 @@ def _transition_shape(frames: list[bytes], fps: float, t_start: float) -> dict:
     return {"frames": len(window), "total": total, "mid": mid}
 
 
-def check_spotlight_transitions(out_dir: Path, info: dict) -> list[str]:
+def check_spotlight_transitions(
+    out_dir: Path, info: dict, clock: HostClock | None = None
+) -> list[str]:
     """The spotlight leaves the way it arrived (issue #111).
 
     Both spotlight beats are measured the same way, and the enter is the
     control: it eased before this change and eases after it, so a reading where
     only the exit passes through nothing is a reading about the exit.
+
+    Each window is placed at its beat's timestamp moved onto the video's
+    clock by the harness's own wall-clock watcher (#215) — the same
+    correction every other timing reading in this file applies, added here
+    after a mid-take backward step was measured sliding the exit window off
+    the fade entirely.
     """
     failures: list[str] = []
     mp4 = out_dir / "demo.mp4"
@@ -8224,6 +7941,7 @@ def check_spotlight_transitions(out_dir: Path, info: dict) -> list[str]:
     # seeks into the same file would each carry their own rounding, and the two
     # windows would then be measured on grids that do not agree.
     frames = gray_frames(mp4, rect=info["rect"])
+    stepped = clock.before if clock is not None else (lambda _t: 0.0)
     readings: dict[str, dict] = {}
     for name, beat in (("enter", enter), ("exit", clear)):
         t_start = beat.get("t_start")
@@ -8233,7 +7951,8 @@ def check_spotlight_transitions(out_dir: Path, info: dict) -> list[str]:
                 f"window cannot be placed in the video"
             )
             continue
-        readings[name] = _transition_shape(frames, fps, float(t_start))
+        at = float(t_start) + stepped(float(t_start))
+        readings[name] = _transition_shape(frames, fps, at)
     span = sum(SPOTLIGHT_WINDOW_S)
     for name, shape in readings.items():
         # Two ways the reading below can be about nothing, each with its own
@@ -8453,7 +8172,7 @@ def check_reported_opening_card(out_dir: Path, info: dict) -> list[str]:
 
     # The number against the file. Read here, off frame zero, over the
     # strip this harness worked out for itself — `-t` and no `fps` filter, for
-    # the reason check_opening() spells out.
+    # the reason OPENING_FIRST_FRAME_S spells out.
     try:
         first = gray_frames(
             out_dir / "demo.mp4", info["corner"], duration=OPENING_FIRST_FRAME_S
@@ -8597,7 +8316,8 @@ def evidence_screen_text(doc: dict) -> str:
     what the page said, not about the log quoting itself.
     """
     return "\n".join(
-        str(doc.get(field) or "") for field in ("aria", "scope_aria", "html", "screen")
+        str(doc.get(field) or "")
+        for field in ("aria", "scope_aria", "html", "screen", "chrome")
     )
 
 
@@ -8844,7 +8564,7 @@ def check_take(
             f"{CAPTION_PROBE[1]}.png were not both captured"
         )
     else:
-        band = caption_band(frame_size)
+        band = caption_probe_band(label, frame_size)
         try:
             before = gray_frames(off, band)
             after = gray_frames(on, band)
@@ -8896,11 +8616,14 @@ def run_web(out_root: Path) -> list[str]:
             # recording. demo.mp4 is on that clock and the beat log is not, so
             # every timing reading below is corrected by this (issue #215).
             with watch_wall_clock() as clock:
-                problems, video_rect, still_rect, size = record_web(
-                    out_dir, base_url, clock
-                )
+                problems, geom, size = record_web(out_dir, base_url, clock)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"web: Recorder raised {type(exc).__name__}: {exc}"]
+    # One rect for video and stills alike: the wrapper page is the recording
+    # (#358/#361), so a still is the framed frame and the app sits at the
+    # same place in both — the "stills are full-bleed, video is windowed"
+    # mismatch died with the composite.
+    app_rect: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
     return (
         problems
         + check_take(
@@ -8909,8 +8632,8 @@ def run_web(out_root: Path) -> list[str]:
             WEB_SHOTS,
             WEB_DURATION_S,
             started,
-            video_rect,
-            still_rect,
+            app_rect,
+            app_rect,
             size,
         )
         + check_capture_clock("web", out_dir, clock)
@@ -8924,10 +8647,13 @@ def run_web(out_root: Path) -> list[str]:
         # The form verbs' pacing (issue #130), read off the same beat log the
         # two checks above read for their contents.
         + check_form_pacing("web", out_dir)
-        # Here rather than in its own phase: the opening hold has to leave every
-        # beat where it was, and this is the take whose beat/frame alignment is
-        # already graded above (issue #119).
-        + check_opening("web", out_dir, video_rect)
+        # What the take opens on (#119 → #360): frame 0 must be the opening
+        # hold and the app must show later — the same claims the wrapper arm
+        # grades, on the long take whose beat/frame alignment is already
+        # graded above. The deleted composite's ffmpeg hold had its own
+        # check here; the in-page hold is graded by the same pixel reading
+        # on every path now.
+        + check_wrapper_opening(out_dir, {"geom": geom})
         # No browser and no recording — two synthesised videos, run here
         # because this is the phase whose acceptance criterion it belongs to.
         + check_opening_gap(out_root)
@@ -8940,7 +8666,14 @@ def run_spotlight(out_root: Path) -> list[str]:
     out_dir = fresh_take_dir(out_root, "spotlight")
     with fixture_server() as base_url:
         try:
-            problems, info = record_spotlight(out_dir, base_url)
+            # Watched for the same reason the web take is (#215): the two
+            # transition windows below are placed at beat timestamps, and a
+            # backward step between the enter and the exit deletes its own
+            # width of video out from under the later window — measured on
+            # this arm, a -1.07 s step at 0.789 s of a 6 s take left the exit
+            # window reading a stretch the fade had already left.
+            with watch_wall_clock() as clock:
+                problems, info = record_spotlight(out_dir, base_url, clock)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"spotlight: Recorder raised {type(exc).__name__}: {exc}"]
     mp4 = out_dir / "demo.mp4"
@@ -8949,7 +8682,7 @@ def run_spotlight(out_root: Path) -> list[str]:
     return (
         problems
         + _check_video("spotlight", mp4, SPOTLIGHT_DURATION_S, keep_top(info["app"]))
-        + check_spotlight_transitions(out_dir, info)
+        + check_spotlight_transitions(out_dir, info, clock)
         + check_healthy("spotlight", out_dir)
     )
 
@@ -9098,7 +8831,7 @@ def run_coverage(out_root: Path) -> list[str]:
     out_dir = fresh_take_dir(out_root, "coverage")
     with fixture_server() as base_url:
         try:
-            problems, app, win = record_coverage(out_dir, base_url)
+            problems, geom = record_coverage(out_dir, base_url)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
             return [f"coverage: Recorder raised {type(exc).__name__}: {exc}"]
     if not (out_dir / "timeline.json").is_file():
@@ -9106,7 +8839,9 @@ def run_coverage(out_root: Path) -> list[str]:
     return (
         problems
         + check_coverage(out_dir)
-        + check_criterion_card(out_dir, app, win)
+        # The card's colour, single-encoder (#360/#361): the same reading the
+        # wrapper arm makes, on the take that raises a criterion card anyway.
+        + check_wrapper_card(out_dir, {"geom": geom})
         + check_coverage_refusals(out_root)
         + check_coverage_merge()
     )
@@ -9131,12 +8866,15 @@ def run_web_problems(out_root: Path) -> list[str]:
 
                 # No beat is open here. Whatever this logs must come back with
                 # `beat: null` rather than the closed `wait_for` above it.
-                rec.page.evaluate(BETWEEN_BEATS_JS)
+                # In the app document: the problems have to be the app's, and
+                # page-level listeners hear an iframe's console errors and
+                # failed requests exactly as they heard the page's own.
+                rec.app.evaluate(BETWEEN_BEATS_JS)
 
                 rec.caption(LATE_BOOM_CAPTION)
                 # Armed *before* the hold, fired one second into it. Nothing
                 # else in the take reaches Playwright during that second.
-                rec.page.evaluate(LATE_BOOM_JS)
+                rec.app.evaluate(LATE_BOOM_JS)
                 rec.pause(LATE_BOOM_HOLD_S)
                 rec.caption("The caption after the boom.")
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
@@ -9339,9 +9077,11 @@ def run_strict_terminal(out_root: Path) -> list[str]:
 
 # -- the wrapper take (issues #358, #360) --------------------------------------
 #
-# The opt-in wrapper path: chrome in the recorded page, the app in an iframe
-# at true pixel size, the caption in a reserved band BELOW the app rect. Two
-# takes: one healthy — every locator verb driven through the frame, the band,
+# The wrapper path — since #361 the only web path: chrome in the recorded
+# page, the app in an iframe at true pixel size, the caption in a reserved
+# band BELOW the app rect. This arm is the fast, dedicated grading of the
+# chrome's own behaviour (the long web take exercises the same recorder
+# end-to-end). Two takes: one healthy — every locator verb driven through the frame, the band,
 # the opening hold, the criterion card and a caption surviving a real
 # mid-take goto all graded out of the pixels — and one against a fixture
 # served with X-Frame-Options: DENY, which the recorder must refuse by name
@@ -9409,17 +9149,48 @@ WRAPPER_FIRST_FRAME_S = 0.05
 
 # The card-vs-window bar (#360): on the wrapper path the criterion card and
 # the window body declare ONE colour and ride ONE encoder, so as encoded
-# they sit within this, worst channel — measured 1.0 on a healthy take.
-# There is no compensated pair here to compare declarations of, and the
-# check deliberately reads pixels rather than declarations either way
-# (#297's two recorded anti-patterns).
-WRAPPER_CARD_WINDOW_TOLERANCE = 2.0
-# Where inside the criterion beat the card is sampled, and how far past its
-# end the no-card control is read. Fractions well inside the beat because
-# the beat log's clock and the video's sit ~130 ms apart (#245); the control
-# lands in the storyboard's deliberate pause after `interlude("")`.
+# they sit within this, worst channel. **Measured 0.5-3.8 across healthy
+# runs** — x264 settles the two rects' chroma against different block
+# histories, and the blue channel wanders up to ~4 levels with the take's
+# own content, so a bar of 2.0 went red twice on healthy takes the week
+# the compensation died (#361). What this check can honestly resolve on
+# this encoder is a *repaint*, not a nudge: the planted defect is an
+# 8-level shift (reads ~9 as encoded) and the real one — the terminal
+# palette, #291 itself — reads >= 12, so the bar keeps ~1.8x to the
+# nearest planted defect while clearing its own worst healthy reading. A
+# nudge under ~5 declared levels is inside the encoder's own noise on
+# these rects and is not a claim this check makes. There is no compensated
+# pair here to compare declarations of, and the check deliberately reads
+# pixels rather than declarations either way (#297's two recorded
+# anti-patterns).
+WRAPPER_CARD_WINDOW_TOLERANCE = 5.0
+# The card is located in the video before anything is measured: the longest
+# dark stretch of the app strip that overlaps the logged criterion span
+# (`card_run`, shared with the pixel loop's golden), sampled only in its
+# interior. Beat-log fractions were how this check first shipped, and they
+# are the aliasing #245 warns about: on a stepping host the video slides
+# under the log, so a fixed fraction of the *logged* span lands on the
+# card's fade — measured on a kept take, the gap read 0.0 from 10% to 50%
+# through the logged beat, 5.6 at 60% (mid-fade) and 205 at 70% (card
+# gone). Those 5.x readings were reported as healthy encoder noise when
+# the bar was set; with the fade excluded the healthy band is 0.5-3.8.
+WRAPPER_CARD_SWEEP_FPS = 10
+# One classification bar with the opening card: at or under this mean luma
+# the strip is the card (or the hold), above ~150 it is the app.
+WRAPPER_CARD_LOCATE_MAX_LUMA = 60.0
+# Sweep frames skipped at each end of the located run before sampling. The
+# dark flag admits the first frames of the 0.45 s fade (a mid-fade frame
+# reads ~28-40 mean luma, still under the locate bar, while its colour is
+# already blended toward the app) — the kept take's 5.6 was exactly such a
+# frame.
+WRAPPER_CARD_EDGE_TRIM = 2
+# Where inside the trimmed run the card is sampled.
 WRAPPER_CARD_FRACTIONS = (0.3, 0.6)
-WRAPPER_CARD_CONTROL_AFTER_S = 1.2
+# The located run must hold at least this long AND at least half the logged
+# span, or the card flashed rather than held; and the video must go on past
+# the run long enough for a no-card control to exist.
+WRAPPER_CARD_MIN_STRETCH_S = 1.0
+WRAPPER_CARD_MIN_DOWN_S = 0.8
 # Under this separation between the no-card control and the window body, the
 # app cannot be told from the card and the readings above prove nothing.
 WRAPPER_CARD_CONTROL_MIN_GAP = 12.0
@@ -9516,7 +9287,6 @@ def record_wrapper(out_dir: Path, base_url: str) -> dict:
         speech=False,
         strict=True,
         deterministic=True,
-        wrapper=True,
         criteria={"AC-1": WRAPPER_CLAUSE},
     ) as rec:
         rec.goto("/")
@@ -9565,7 +9335,14 @@ def record_wrapper(out_dir: Path, base_url: str) -> dict:
         # (check_wrapper_caption_survives).
         rec.caption(WRAPPER_SURVIVES)
         rec.goto("/second.html")
-        rec.pause(1.0)
+        # 2.5 s, not 1.0: check_wrapper_caption_survives samples the band up
+        # to 0.8 s after the second document's pixel-located arrival, and a
+        # backward wall-clock step between the load and the clear deletes
+        # its own width of video from that gap — measured, a -1.05 s step at
+        # 28.1 s of a --cheap run pulled the caption clear to ~0.4 s after
+        # arrival and the +0.5/+0.8 samples read a dark band on a healthy
+        # take. The margin outlasts one step of this box's ~1 s cadence.
+        rec.pause(2.5)
         rec.caption("")
         rec.pause(0.6)
         geom = dict(rec._geom)
@@ -9688,10 +9465,10 @@ def wrapper_pad_band(geom: dict) -> Rect:
 
     The window's **bottom pad** — between the caption band's end and the
     window's bottom edge — because it is the one stretch of bare window body
-    a wrapper frame always shows: the pad `frame_band` reads on a composite
-    take is the caption band here, which carries a bubble whenever a line is
-    up. Inset from the pad's own edges for `frame_band`'s reasons — the
-    outermost rows blend into the drop shadow and the band above.
+    a wrapper frame always shows: the pad between the app rect and the
+    window's bottom is the caption band here, which carries a bubble
+    whenever a line is up. Inset from the pad's own edges — the outermost
+    rows blend into the drop shadow and the band above.
     """
     pad_top = geom["bandy"] + geom["bandh"]
     pad_bottom = geom["winy"] + geom["winh"]
@@ -9777,6 +9554,12 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     alternatives (pinned equal, pinned apart) as anti-patterns, and neither
     is asserted here or anywhere.
 
+    The instants are found in the video, then tied to the log by overlap
+    (`card_run`, the pixel golden's locator): a fixed fraction of the
+    *logged* span lands on the card's fade when the host's clock steps
+    (#245) — see the note over WRAPPER_CARD_SWEEP_FPS for the take that
+    proved it.
+
     The premise the readings need: after the card is down, the strip must
     read as something *other* than the window body, or an app the colour of
     the card would pass with no card in the recording at all.
@@ -9795,7 +9578,38 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     strip = card_strip(app)
     pad = wrapper_pad_band(geom)
 
-    control_at = end + WRAPPER_CARD_CONTROL_AFTER_S
+    sweep = gray_frames(mp4, rect=strip, sample_fps=WRAPPER_CARD_SWEEP_FPS)
+    dark = [sum(f) / len(f) <= WRAPPER_CARD_LOCATE_MAX_LUMA for f in sweep if len(f)]
+    media_s = len(sweep) / WRAPPER_CARD_SWEEP_FPS
+    run = card_run(dark, WRAPPER_CARD_SWEEP_FPS, (start, end))
+    if run is None:
+        return [
+            f"wrapper-card: no dark stretch of the app strip {strip} "
+            f"(<= {WRAPPER_CARD_LOCATE_MAX_LUMA:.0f} mean luma at "
+            f"{WRAPPER_CARD_SWEEP_FPS} fps, {media_s:.1f}s of video) overlaps "
+            f"the criterion beat logged at {start:.2f}-{end:.2f}s — the card "
+            f"never painted"
+        ]
+    run_start, run_len = run
+    rs = run_start / WRAPPER_CARD_SWEEP_FPS
+    re_ = (run_start + run_len) / WRAPPER_CARD_SWEEP_FPS
+    if run_len / WRAPPER_CARD_SWEEP_FPS < max(
+        WRAPPER_CARD_MIN_STRETCH_S, 0.5 * (end - start)
+    ):
+        return [
+            f"wrapper-card: the card stretch in the video is only "
+            f"{run_len / WRAPPER_CARD_SWEEP_FPS:.1f}s ({rs:.2f}-{re_:.2f}s) "
+            f"against a criterion beat logged {end - start:.1f}s long — the "
+            f"card flashed rather than held"
+        ]
+    if media_s - re_ < WRAPPER_CARD_MIN_DOWN_S:
+        return [
+            f"wrapper-card: the card stretch runs to {re_:.2f}s of a "
+            f"{media_s:.1f}s video — the card is never taken down, and there "
+            f"is no app stretch to tell it apart from"
+        ]
+
+    control_at = re_ + (media_s - re_) * 0.5
     control = strip_rgb(mp4, control_at, strip)
     control_pad = strip_rgb(mp4, control_at, pad)
     if control is None or control_pad is None:
@@ -9806,7 +9620,7 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
     control_gap = channels_apart(control, control_pad)
     if control_gap <= WRAPPER_CARD_CONTROL_MIN_GAP:
         return [
-            f"wrapper-card: with the card down since {end:.2f}s the strip "
+            f"wrapper-card: with the card down since {re_:.2f}s the strip "
             f"{strip} reads {tuple(round(v) for v in control)} at "
             f"{control_at:.2f}s, only {control_gap:.0f} levels off the window "
             f"body {tuple(round(v) for v in control_pad)} (premise bar "
@@ -9814,10 +9628,14 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
             f"from the card, or the card was never taken down"
         ]
 
+    trim = WRAPPER_CARD_EDGE_TRIM / WRAPPER_CARD_SWEEP_FPS
+    lo, hi = rs + trim, re_ - trim
+    if hi <= lo:
+        lo = hi = (rs + re_) / 2
     failures: list[str] = []
     gaps: list[float] = []
     for fraction in WRAPPER_CARD_FRACTIONS:
-        at = start + (end - start) * fraction
+        at = lo + (hi - lo) * fraction
         card = strip_rgb(mp4, at, strip)
         body = strip_rgb(mp4, at, pad)
         if card is None or body is None:
@@ -9830,20 +9648,22 @@ def check_wrapper_card(out_dir: Path, info: dict) -> list[str]:
         gaps.append(gap)
         if gap > WRAPPER_CARD_WINDOW_TOLERANCE:
             failures.append(
-                f"wrapper-card: {(fraction * 100):.0f}% through the criterion "
-                f"beat the card reads {tuple(round(v) for v in card)} over "
-                f"{strip} and the window body "
-                f"{tuple(round(v) for v in body)} over {pad}, {gap:.1f} levels "
-                f"apart, worst channel (bar {WRAPPER_CARD_WINDOW_TOLERANCE}). "
-                f"On the wrapper path the two declare one colour and ride one "
-                f"encoder (#360), so this gap means the card's field was "
-                f"repainted away from core.WEB_WINDOW_BODY — the #291 mismatch "
-                f"a human once had to spot by eye"
+                f"wrapper-card: {at:.2f}s, inside the card's own stretch of "
+                f"the video ({rs:.2f}-{re_:.2f}s), the card reads "
+                f"{tuple(round(v) for v in card)} over {strip} and the window "
+                f"body {tuple(round(v) for v in body)} over {pad}, {gap:.1f} "
+                f"levels apart, worst channel (bar "
+                f"{WRAPPER_CARD_WINDOW_TOLERANCE}). On the wrapper path the "
+                f"two declare one colour and ride one encoder (#360), so this "
+                f"gap means the card's field was repainted away from "
+                f"core.WEB_WINDOW_BODY — the #291 mismatch a human once had "
+                f"to spot by eye"
             )
     if not failures:
         print(
             f"wrapper-card: card and window body sit {max(gaps):.1f} apart, "
-            f"worst channel over {len(gaps)} samples (bar "
+            f"worst channel over {len(gaps)} samples inside the card's "
+            f"{rs:.2f}-{re_:.2f}s stretch (bar "
             f"{WRAPPER_CARD_WINDOW_TOLERANCE}); the no-card control reads "
             f"{control_gap:.0f} off the body (premise bar "
             f"{WRAPPER_CARD_CONTROL_MIN_GAP}) — one declared colour, one "
@@ -10100,7 +9920,6 @@ def run_wrapper(out_root: Path) -> list[str]:
                 base_url=base_url,
                 speech=False,
                 strict=False,
-                wrapper=True,
             ) as rec:
                 rec.goto("/")
                 rec.caption(WRAPPER_UNREACHED)
@@ -10530,7 +10349,7 @@ def check_merge_offset(
     would be the harness re-doing the recorder's arithmetic and agreeing with
     it. This reads pixels out of two videos.
     """
-    band = caption_band(frame_size)
+    band = caption_probe_band("segments", frame_size)
     demo = out_dir / "demo.mp4"
     merged_json = out_dir / "timeline.json"
     failures: list[str] = []
@@ -11093,11 +10912,11 @@ def run_evidence(out_root: Path) -> list[str]:
                 # iframe. Injected rather than added to the fixture: what is
                 # being graded is the serializer, and the fixture has no
                 # element of this shape that a spotlight can name.
-                rec.page.evaluate(EVIDENCE_SOURCE_JS, EVIDENCE_SOURCE_ID)
+                rec.app.evaluate(EVIDENCE_SOURCE_JS, EVIDENCE_SOURCE_ID)
                 rec.spotlight(f"#{EVIDENCE_SOURCE_ID}")
                 rec.pause(0.3)
                 # 3 — the caps.
-                rec.page.evaluate(EVIDENCE_BLOAT_JS, EVIDENCE_BLOAT_ITEMS)
+                rec.app.evaluate(EVIDENCE_BLOAT_JS, EVIDENCE_BLOAT_ITEMS)
                 rec.spotlight(f"#{EVIDENCE_BLOAT_ID}")
                 rec.pause(0.3)
         except Exception as exc:  # noqa: BLE001 - a raising take is a failure
@@ -13168,8 +12987,8 @@ def open_output(args: argparse.Namespace) -> tuple[Path, bool]:
 # `--cheap` is to be reachable from *nothing but* these three, which is the
 # same sentence as "this phase costs two minutes".
 #
-# What that costs is written down rather than implied: eight check functions —
-# `check_opening`, `check_opening_gap`, `check_verb_classification`,
+# What that costs is written down rather than implied: seven check functions —
+# `check_opening_gap`, `check_verb_classification`,
 # `check_content_pair`, `check_content_toured`, `check_form_pacing`,
 # `_check_occlusion` and `_check_scored_region` — are reachable only from these
 # arms, so under `--cheap` they grade on merge and not on push. Three of them

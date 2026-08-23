@@ -177,7 +177,7 @@ from demo_recording.core import (  # noqa: E402
     _DemoBase,
 )
 from demo_recording.terminal import TerminalRecorder  # noqa: E402
-from demo_recording.web import _CURSOR_JS, Recorder  # noqa: E402
+from demo_recording.web import Recorder  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Helpers — deliberately hand-written
@@ -3609,6 +3609,24 @@ class PixelChecks(unittest.TestCase):
         # A tie goes to the earliest, so the answer is deterministic.
         self.assertEqual(px.longest_run([True, False, True]), (0, 1))
 
+    def test_card_run_picks_the_overlapping_stretch_not_the_longest(self):
+        # The wrapper take's opening hold is a longer dark stretch in the
+        # same strip, deliberate and earlier (#360) — a locator that took
+        # the longest run outright would grade the hold's colour and call
+        # it the card. At 10 fps: hold frames 0-39 (0-4 s), card frames
+        # 60-79 (6-8 s), criterion beat logged 6.0-8.0 s.
+        px = self.px
+        flags = [True] * 7 + [False] * 53 + [True] * 20 + [False] * 10
+        self.assertEqual(px.card_run(flags, 10, (6.0, 8.0)), (60, 20))
+        # The 2 s leading slack the beat-tie always had (#245): a run ending
+        # up to 2 s before the logged start still counts...
+        lone = [False] * 45 + [True] * 5 + [False] * 40
+        self.assertEqual(px.card_run(lone, 10, (6.5, 8.0)), (45, 5))
+        # ...but one ending further back than the slack does not, and no
+        # overlapping run at all is None rather than the nearest one.
+        self.assertIsNone(px.card_run([True] * 10 + [False] * 80, 10, (6.0, 8.0)))
+        self.assertIsNone(px.card_run([False] * 90, 10, (6.0, 8.0)))
+
     def test_accent_like_matches_the_dot_blends_and_not_the_chrome(self):
         px = self.px
         # The dot's own colours: full accent, the .45 fill over white and
@@ -4364,10 +4382,16 @@ def first_string_parameter(cls: type, name: str) -> str | None:
 class CaptionTruth(unittest.TestCase):
     """What a beat reports was on screen, across a navigation (issue #134).
 
-    The caption bar is a DOM element (`#__demo_caption`), so a document
-    replacing the one it lives in takes it off the screen. `self._caption` is
-    a Python attribute and does not notice, and every beat that does not carry
-    its own caption is stamped with it.
+    Until #361 the web caption was a DOM element inside the app's document,
+    a full page load destroyed it, and this class graded the machinery that
+    kept the beat log honest about the loss. The wrapper cutover inverted
+    the truth to hold: the caption lives in the wrapper document (chrome.py),
+    `goto()` navigates the app *iframe*, and no way of leaving a page can
+    take the line off the screen — so a beat after a document load must keep
+    reporting it, and the recorder must not even subscribe the signal that
+    used to clear it (the structural half; `WrapperChrome` pins the
+    non-subscription, `tests/smoke --wrapper-only` reads the surviving line
+    out of the band's pixels across a real load).
     """
 
     def prepared(self):
@@ -4376,10 +4400,9 @@ class CaptionTruth(unittest.TestCase):
         rec._watch_page(rec.page)
         rec.caption(STALE_CAPTION)
         rec.pause(0)
-        # The control. Everything below is a claim about a caption going
-        # *away*, and none of it means anything unless a beat was carrying the
-        # caption in the first place — a recorder that stamped "" on every
-        # beat would satisfy the assertions and record nothing true.
+        # The control. Everything below is a claim about a caption staying
+        # *up*, and none of it means anything unless a beat was carrying the
+        # caption in the first place.
         self.assertEqual(
             rec._beats[-1]["caption"],
             STALE_CAPTION,
@@ -4388,39 +4411,31 @@ class CaptionTruth(unittest.TestCase):
         )
         return rec
 
-    def test_a_beat_after_a_document_load_reports_no_caption(self):
+    def test_a_beat_after_a_document_load_still_reports_the_line(self):
+        # The app document was replaced; the wrapper document — which holds
+        # the caption — was not. Zero handlers is the claim, not a gap: the
+        # clearing rode a `domcontentloaded` subscription, and not listening
+        # is what makes "the caption cannot be lost" a property of the code.
         rec = self.prepared()
         before = len(rec._beats)
-        self.assertGreaterEqual(
+        self.assertEqual(
             rec.page.fire("domcontentloaded", rec.page),
-            1,
-            "no handler took the document-load event, so nothing was tested",
+            0,
+            "something subscribed the document-load signal — the #134 "
+            "clearing machinery grew back, and the beat log would report a "
+            "line as lost that is still on screen",
         )
         rec.pause(0)
-        after = rec._beats[before:]
-        self.assertEqual([b["caption"] for b in after], [""])
-        # Broader than the field, deliberately: the claim is that a reader of
-        # this take's timeline cannot recover the pre-navigation line from a
-        # beat recorded after it, whichever key it might have travelled under.
-        self.assertNotIn(STALE_CAPTION, json.dumps(after))
+        self.assertEqual([b["caption"] for b in rec._beats[before:]], [STALE_CAPTION])
 
     def test_an_spa_route_change_keeps_the_caption(self):
-        # The bar survives history navigation, so clearing on every
-        # `framenavigated` — which Playwright also fires for same-document
-        # navigation — would be the same lie pointing the other way: a beat
-        # reporting no caption while one is on screen.
+        # `framenavigated` still has a listener (#142's carve-out) and it
+        # must keep changing nothing about the caption.
         rec = self.prepared()
         before = len(rec._beats)
         self.assertGreaterEqual(rec.page.fire("framenavigated", None), 1)
         rec.pause(0)
         self.assertEqual([b["caption"] for b in rec._beats[before:]], [STALE_CAPTION])
-
-    def test_a_caption_set_after_the_load_is_reported_again(self):
-        rec = self.prepared()
-        rec.page.fire("domcontentloaded", rec.page)
-        rec.caption("The order was accepted.")
-        rec.pause(0)
-        self.assertEqual(rec._beats[-1]["caption"], "The order was accepted.")
 
     def test_a_take_watches_its_page_before_the_medium_starts(self):
         # `__enter__` needs Chromium, so what is graded is that it reaches the
@@ -4440,14 +4455,7 @@ class CaptionTruth(unittest.TestCase):
 # What Chromium really sends for each way of leaving a page (issue #179)
 # --------------------------------------------------------------------------
 #
-# `CaptionTruth` above fires `domcontentloaded` itself. That grades the handler
-# and the subscription and takes the *event name* on trust — and the name is
-# the whole of the decision, because `framenavigated` fires for same-document
-# history navigation as well, so clearing there would take a caption off the
-# beat log while it is still on screen. A check that fires the event it is
-# unsure about is the catalogue's *check that shares the bug's blind spot*.
-#
-# So the streams below were **measured**. A probe served a fixture with a link,
+# The streams below were **measured**. A probe served a fixture with a link,
 # a GET form, a `location.href` button, a `history.pushState` button, an iframe
 # and a `<meta http-equiv=refresh>`, put the shipped `Recorder._watch_page`
 # subscription on a real page, and recorded the ordered page events each way of
@@ -4456,18 +4464,19 @@ class CaptionTruth(unittest.TestCase):
 #
 # **Measured on three Chromium builds, byte-identical on all three:**
 # 136.0.7103.25 (Playwright 1.52), 147.0.7727.15 (1.59) and 151.0.7922.34
-# (1.62) — the same three #202 is about, where one build disagreeing with the
-# others is exactly what this is written to notice. The probe is not committed;
-# a re-measurement lands in this table.
+# (1.62). The probe is not committed; a re-measurement lands in this table.
 #
-# What the tests do with it is replay each measured stream through the
-# production subscription and read the *beat log* — never `rec._caption`,
-# which is the field #134 was about. The table is data, not code shared with
-# `web.py`: an author who changes the event the clear hangs off has to change
-# the browser to make these agree again.
+# The table was measured for #134's clearing machinery, which #361 deleted —
+# the caption lives in the wrapper document now and no app navigation reaches
+# it. The table stays because the claim it grades survived the inversion:
+# every one of these streams is delivered to the wrapper page's subscription,
+# and none of them may touch the beat log's caption. Replaying them through
+# the production `_watch_page` and reading the *beat log* — never
+# `rec._caption` — is what holds "the caption cannot be lost" against every
+# measured way of leaving, not only the one `CaptionTruth` fires by hand.
 #
 # (name, what the storyboard did, stream, events delivered by the time the
-#  driving call returned, does the caption survive it)
+#  driving call returned, does the page's document survive it)
 _MAIN, _CHILD, _PAGE = "main", "child", None
 NAVIGATIONS = [
     (
@@ -4539,8 +4548,8 @@ NAVIGATIONS = [
         False,
     ),
     (
-        # The three that must NOT clear. The bar is still in the document, so
-        # a beat reporting no caption here is #134 pointing the other way.
+        # The three where the page's document stands still — measured as
+        # `framenavigated` with no document event.
         "spa_push_state",
         "history.pushState to a new route, no document loaded",
         [("framenavigated", _MAIN)],
@@ -4555,9 +4564,10 @@ NAVIGATIONS = [
         True,
     ),
     (
-        # The "only for the main frame" half: an iframe loading a document
-        # produces a child-frame `framenavigated` and no page-level
-        # `domcontentloaded` at all.
+        # An iframe loading a document produces a child-frame
+        # `framenavigated` and no page-level `domcontentloaded` at all —
+        # measured for #179, and since #358 it is the shape of every wrapper
+        # take's own `goto()`.
         "iframe_load",
         "an iframe loading a document while the page stands still",
         [("framenavigated", _CHILD)],
@@ -4624,273 +4634,89 @@ class MeasuredNavigations(unittest.TestCase):
     def prepared(self):
         return CaptionTruth.prepared(self)  # the same control, same reasons
 
-    def test_every_measured_document_load_takes_the_line_off_the_beat_log(self):
-        for name, did, stream, _, keeps in NAVIGATIONS:
-            if keeps:
-                continue
+    def test_no_measured_way_of_leaving_a_page_touches_the_beat_log(self):
+        # Every row, document-replacing or not: the caption is the wrapper
+        # document's and the wrapper never navigates, so every stream a real
+        # Chromium delivers must leave the next beat reporting the line and
+        # file no issue. Non-vacuous because every measured stream carries a
+        # `framenavigated` and #142's kept listener takes it — a subscription
+        # pass that attached nothing would fail the floor below.
+        for name, did, stream, _, _survives in NAVIGATIONS:
             with self.subTest(navigation=name):
                 rec = self.prepared()
                 before = len(rec._beats)
                 self.assertGreaterEqual(
                     replay(rec, stream),
                     1,
-                    f"nothing was subscribed to any event {name} delivers, so "
-                    f"this replayed a stream at nobody",
-                )
-                rec.pause(0)
-                after = rec._beats[before:]
-                self.assertEqual(
-                    [b["caption"] for b in after],
-                    [""],
-                    f"{did} replaced the document, and a beat after it still "
-                    f"reports a caption",
-                )
-                # Broader than the field on purpose: what a reader of this
-                # take's timeline can recover, whichever key it travelled in.
-                self.assertNotIn(STALE_CAPTION, json.dumps(after))
-
-    def test_every_measured_same_document_navigation_keeps_the_line(self):
-        for name, did, stream, _, keeps in NAVIGATIONS:
-            if not keeps:
-                continue
-            with self.subTest(navigation=name):
-                rec = self.prepared()
-                before = len(rec._beats)
-                self.assertGreaterEqual(
-                    replay(rec, stream),
-                    1,
-                    f"nothing took any event {name} delivers — with the whole "
-                    f"subscription gone this test would pass on silence",
+                    f"nothing took any event {name} delivers — the whole "
+                    f"subscription is gone, and this replayed a stream at "
+                    f"nobody",
                 )
                 rec.pause(0)
                 self.assertEqual(
                     [b["caption"] for b in rec._beats[before:]],
                     [STALE_CAPTION],
-                    f"{did} left the caption bar in the document, and the "
-                    f"beat log says it went away",
+                    f"{did} cannot reach the wrapper document's caption, and "
+                    f"the beat log says the line went away",
+                )
+                self.assertEqual(
+                    rec._issues,
+                    [],
+                    f"{did} left an issue behind — a loss was recorded that "
+                    f"cannot have happened on a wrapper take",
                 )
 
     def test_the_measured_table_covers_every_way_issue_179_names(self):
-        # The vacuous half of both sweeps above. Each loop is over whatever
-        # rows carry its flag, so a table that lost the SPA rows would leave
-        # "an SPA route change keeps the caption" graded over nothing at all.
+        # The vacuous half of the sweep above: a table that lost rows would
+        # leave "no way of leaving a page touches the beat log" graded over
+        # almost nothing. Spelled out rather than counted, and every stream
+        # must carry the `framenavigated` that makes the replay land on a
+        # subscribed handler.
         measured = {row[0] for row in NAVIGATIONS}
         self.assertEqual(sorted(NAVIGATIONS_REQUIRED - measured), [])
-        kept = [row[0] for row in NAVIGATIONS if row[4]]
-        replaced = [row[0] for row in NAVIGATIONS if not row[4]]
-        self.assertGreaterEqual(len(kept), 3, kept)
-        self.assertGreaterEqual(len(replaced), 5, replaced)
-        # And the streams have to disagree in the way the fix depends on:
-        # every same-document navigation is `framenavigated` with no document
-        # event, and every replacement carries one. If that stopped being
-        # true, no subscription could tell them apart and the tests above
-        # would be grading a coincidence.
-        for name, _, stream, _, keeps in NAVIGATIONS:
-            loads = [e for e, _t in stream if e == "domcontentloaded"]
-            self.assertEqual(
-                bool(loads),
-                not keeps,
-                f"{name} was measured with {len(loads)} document-load "
-                f"event(s), which does not match what it does to the page",
-            )
+        for name, _, stream, _, _survives in NAVIGATIONS:
             self.assertTrue(
                 any(e == "framenavigated" for e, _t in stream),
-                f"{name} produced no framenavigated at all, so it cannot show "
-                f"that the two signals are distinguishable",
+                f"{name} was measured with no framenavigated at all — the "
+                f"sweep above would replay it at nobody and call that green",
             )
 
-    def deferring(self):
-        """A prepared recorder on a page that holds events until it is called.
-
-        The timing a click really has (issue #214): `goto()` waits for the
-        load, so the clear has already happened when it returns, but a link
-        click, a form submit and a `location.href` button all return after
-        `framenavigated` alone — measured, all three builds — and the
-        `domcontentloaded` that takes the caption off the screen is still
-        sitting in the connection. It lands on the next round trip somebody
-        makes, and the beat that follows the click is what has to make it.
-        """
-        rec = recorder(self, page=NoisyPage())
-        rec._watch_page(rec.page)
-        rec.caption(STALE_CAPTION)
-        rec.pause(0)
-        self.assertEqual(
-            rec._beats[-1]["caption"],
-            STALE_CAPTION,
-            "the beat before the navigation does not carry the caption, so "
-            "this test is not exercising the stamping it grades",
-        )
-        return rec
-
-    def test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat(self):
-        # Issue #214's acceptance criterion, one navigation at a time:
-        # `caption(...)`, a click, `pause(3)` — and no beat after the click
-        # carrying the line the load took away.
-        #
-        # The late half of each measured stream is *queued* on the page rather
-        # than fired at the recorder, so the only thing that can deliver it is
-        # a round trip the recorder makes for itself. That is the whole claim:
-        # a beat stamps its caption when it opens, before its verb touches the
-        # browser, so unless the beat asks the page first it inherits a line
-        # that is no longer on screen.
-        for name in ("link_click", "form_submit", "location_href"):
-            with self.subTest(navigation=name):
-                row = next(r for r in NAVIGATIONS if r[0] == name)
-                _, did, stream, at_return, _ = row
-                self.assertLess(
-                    at_return,
-                    len(stream),
-                    "this navigation was measured as fully delivered before "
-                    "its verb returned, so there is no late half to grade",
-                )
-                rec = self.deferring()
-                before = len(rec._beats)
-                replay(rec, stream[:at_return])
-                # The control for the queueing: what the click itself
-                # delivered leaves the caption alone, so anything the beat
-                # below reports comes from the half that had not arrived yet.
-                self.assertEqual(
-                    rec._caption,
-                    STALE_CAPTION,
-                    f"{did} cleared the caption before its late half was "
-                    f"delivered at all, so the deferral grades nothing",
-                )
-                rec.page.queued = payloads(rec.page, stream[at_return:])
-                # As a click leaves the clock: `click()` holds for 0.4 s
-                # before it clicks, so the last pump is about a millisecond
-                # old when the next beat opens and a rate-limited pump would
-                # skip exactly this beat. Stamped rather than left to how fast
-                # this suite happens to run.
-                rec._pumped_at = time.monotonic() - rec._t0
-                # `pause(0)`, not the criterion's `pause(3)`: the hold length
-                # is not part of the claim — the caption is stamped when the
-                # beat *opens* — and three seconds times three navigations is
-                # nine seconds this suite would spend proving nothing.
-                rec.pause(0)
-                after = rec._beats[before:]
-                # One claim, with the reason in its message rather than in a
-                # second assertion: what is still queued can only be non-empty
-                # when this one fails, so asserting it separately would be a
-                # check that cannot fire on its own.
-                self.assertEqual(
-                    [b["caption"] for b in after],
-                    [""],
-                    f"{did} replaced the document, and the beat right after "
-                    f"it still reports the line the load took off the screen "
-                    f"(never delivered: {[e for e, _a in rec.page.queued]})",
-                )
-                # Broader than the field on purpose: what a reader of this
-                # take's timeline can recover, whichever key it travelled in.
-                self.assertNotIn(STALE_CAPTION, json.dumps(after))
-
 
 # --------------------------------------------------------------------------
-# What the log says about the line it dropped (issue #180)
+# The retired `caption_lost` kind (#180, ended by #358/#361)
 # --------------------------------------------------------------------------
 #
-# Clearing the caption made the timeline honest and mute. A storyboard that
-# captions, navigates and holds for eight seconds records eight seconds of
-# empty caption column and nothing naming the cause, and the recorder knew
-# both the line and the document at the moment it dropped it.
+# The issue existed because the composite path's caption died with the app's
+# document and the beat log had to say so (#134/#180). On the wrapper path
+# there is no way for the line to leave the screen, no subscription for the
+# machinery to ride, and therefore no recorder left that can file the kind.
+# What survives it: committed timelines carry the kind, so it stays
+# published; and it must never become fatal retroactively.
 
 
-class CaptionLost(unittest.TestCase):
-    """The issue a page load records for the caption it took away (#180)."""
+class CaptionLostRetired(unittest.TestCase):
+    """What remains of `caption_lost` after the cutover (#361)."""
 
-    def dropped(self, url: str = LOADED_URL):
-        """A recorder that captioned, then had its document replaced."""
-        rec = recorder(self, page=FakePage(url))
+    def test_the_kind_stays_published_for_committed_timelines(self):
+        # Timelines recorded before #361 carry the kind, reference/failures.md
+        # still documents the row for their readers, and stitch() merges old
+        # segments' issues as-is — unpublishing it would turn those artifacts
+        # into records nothing can name.
+        self.assertIn("caption_lost", ISSUE_KINDS)
+        self.assertNotIn("caption_lost", STRICT_KINDS)
+
+    def test_no_recorder_files_it_any_more(self):
+        # A caption up, the full document-load signal fired at the page: no
+        # handler takes it (the subscription is gone, not merely quiet) and
+        # no issue is recorded — the line is still on screen, in the wrapper
+        # document the load cannot reach.
+        rec = recorder(self, page=FakePage(LOADED_URL))
         rec._watch_page(rec.page)
         rec.caption(STALE_CAPTION)
-        self.assertEqual(
-            rec._issues,
-            [],
-            "something else was already recorded, so the "
-            "assertions below are not about the caption",
-        )
-        self.assertGreaterEqual(rec.page.fire("domcontentloaded", rec.page), 1)
-        return rec
-
-    def test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem(self):
-        rec = self.dropped()
-        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
-        issue = rec._issues[0]
-        self.assertEqual(issue["kind"], "caption_lost")
-        # Both facts the recorder had and neither of which reached anything
-        # before: which line, and which document took it.
-        self.assertEqual(issue["lost_caption"], STALE_CAPTION)
-        self.assertEqual(issue["url"], LOADED_URL)
-        # …and in the one field a reader of timeline.md's Issues section sees,
-        # because that list renders `message` and nothing else.
-        self.assertIn(STALE_CAPTION, issue["message"])
-        self.assertIn(LOADED_URL, issue["message"])
-
-    def test_the_kind_is_one_the_package_publishes(self):
-        # `check_issues` in tests/smoke refuses a kind outside this tuple, and
-        # a take that recorded one would fail on the artifact rather than on
-        # the defect.
-        self.assertIn("caption_lost", ISSUE_KINDS)
-
-    def test_a_load_with_no_caption_up_records_nothing(self):
-        # Every take begins with a document load and most storyboards navigate
-        # before they caption anything. An issue for each would be a log
-        # nobody reads.
-        rec = recorder(self)
-        rec._watch_page(rec.page)
-        rec.page.fire("domcontentloaded", rec.page)
-        rec.pause(0)
-        rec.page.fire("domcontentloaded", rec.page)
+        self.assertEqual(rec.page.fire("domcontentloaded", rec.page), 0)
         self.assertEqual(rec._issues, [])
         self.assertEqual(rec._issue_count, 0)
-
-    def test_a_second_load_does_not_report_the_line_a_second_time(self):
-        # The caption is gone after the first one. A recorder that logged the
-        # same lost line once per document would bury a real one under a
-        # storyboard that navigates six times.
-        rec = self.dropped()
-        rec.page.fire("domcontentloaded", rec.page)
-        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
-
-    def test_losing_a_caption_does_not_fail_a_strict_take(self):
-        # A storyboard mistake is not the app saying it is broken, and strict
-        # mode is a verdict on the app. Asserted on the counter `__exit__`
-        # reads, not on the tuple, so moving the kind into STRICT_KINDS is
-        # what this notices.
-        rec = self.dropped()
-        self.assertNotIn("caption_lost", STRICT_KINDS)
-        self.assertEqual(rec._fatal_count, 0)
-
-    def test_a_page_too_far_gone_to_name_still_reports_the_line(self):
-        # The catalogue's clean-path-only assertion. The URL is read off a
-        # page that is, by definition, in the middle of replacing itself, and
-        # a diagnostic that threw here would surface inside an unrelated
-        # Playwright call and cost the take. What must not happen is the
-        # *line* being lost with it: which caption went away is the half the
-        # recorder alone knows.
-        rec = recorder(self, page=UnreadablePage())
-        rec._watch_page(rec.page)
-        rec.caption(STALE_CAPTION)
-        rec.page.fire("domcontentloaded", rec.page)
-        self.assertEqual(len(rec._issues), 1, f"recorded {rec._issues!r}")
-        self.assertEqual(rec._issues[0]["lost_caption"], STALE_CAPTION)
-        self.assertIn(STALE_CAPTION, rec._issues[0]["message"])
-        # …and says so, rather than naming a URL it never had.
-        self.assertEqual(rec._issues[0]["url"], "(unknown)")
-        self.assertEqual(rec._caption, "", "the caption survived the load")
-
-    def test_the_lost_line_reaches_the_document_a_reviewer_reads(self):
-        # The consumer's side, end to end: the envelope a take writes, then
-        # the markdown rendered off it. Neither is asked what the recorder
-        # thinks; both are searched for the line that went missing.
-        rec = self.dropped()
-        rec.pause(0)
-        with contextlib.redirect_stderr(io.StringIO()):
-            doc = rec._timeline_doc()
-        self.assertEqual([i["kind"] for i in doc["issues"]], ["caption_lost"])
-        md = render_timeline_md(doc)
-        body = md[md.index("## Issues") :]
-        self.assertIn(STALE_CAPTION, body)
-        self.assertIn(LOADED_URL, body)
+        self.assertEqual(rec._caption, STALE_CAPTION)
 
 
 class WatchedEvents(unittest.TestCase):
@@ -4926,11 +4752,14 @@ class WatchedEvents(unittest.TestCase):
     def test_the_web_recorder_only_adds_to_what_the_base_watches(self):
         # The same claim from the other side, and the one that survives a
         # listener being renamed: the terminal recorder does not override
-        # `_watch_page`, so what it subscribes *is* the base's set.
+        # `_watch_page`, so what it subscribes *is* the base's set. The web
+        # recorder adds exactly #142's kept `framenavigated` — and nothing
+        # else, which since #361 includes *not* the `domcontentloaded` the
+        # caption-clearing machinery used to ride (see CaptionTruth).
         base = set(self.subscribed(TermRec))
         self.assertEqual(
             set(self.subscribed(WebRec)),
-            base | {"framenavigated", "domcontentloaded"},
+            base | {"framenavigated"},
         )
 
     def test_no_page_event_is_subscribed_twice(self):
@@ -5279,23 +5108,21 @@ class WrapperChrome(unittest.TestCase):
             f"unsubstituted chrome tokens reached the page: {sorted(set(leftover))}",
         )
 
-    def test_a_wrapper_take_keeps_the_base_caption_font(self):
-        # The 34px compensation exists because the composite scales the page
-        # by ~0.8; the wrapper page is recorded at true size, so inheriting
-        # it would put visibly oversized captions in the band.
-        self.assertEqual(recorder(self, wrapper=True)._caption_font_px, 26)
-        self.assertEqual(recorder(self)._caption_font_px, 34)
+    def test_a_web_take_keeps_the_base_caption_font(self):
+        # The page is recorded at true pixel size, so the caption is the
+        # declared 26px on screen. The deleted composite compensated its
+        # ~0.8 downscale with 34px (web.py's history note); a web recorder
+        # that grew that back would put visibly oversized captions in the
+        # band, and nothing else pins it.
+        self.assertEqual(recorder(self)._caption_font_px, 26)
 
-    def test_rec_app_is_the_main_frame_until_a_wrapper_take_mounts_its_iframe(self):
-        legacy = recorder(self)
-        legacy.page = types.SimpleNamespace(main_frame="the main frame")
-        self.assertEqual(legacy.app, "the main frame")
-        wrapped = recorder(self, wrapper=True)
+    def test_rec_app_refuses_until_the_take_mounts_its_iframe(self):
+        rec = recorder(self)
         with self.assertRaises(RuntimeError) as caught:
-            wrapped.app  # noqa: B018 - the property's refusal is the claim
+            rec.app  # noqa: B018 - the property's refusal is the claim
         self.assertIn("no app frame yet", str(caught.exception))
-        wrapped._app_frame = "the app frame"
-        self.assertEqual(wrapped.app, "the app frame")
+        rec._app_frame = "the app frame"
+        self.assertEqual(rec.app, "the app frame")
 
     class CaptionSurface(FakePage):
         """A page whose `__demoCaption` reports what the band could not show.
@@ -5322,7 +5149,7 @@ class WrapperChrome(unittest.TestCase):
         # a strict take stayed green — the artifact claiming a line the
         # pixels do not show. The text is deliberately not capped or
         # reflowed; the record is the fix.
-        rec = recorder(self, wrapper=True, page=self.CaptionSurface(34))
+        rec = recorder(self, page=self.CaptionSurface(34))
         rec.caption("a caption far too tall for the band")
         clipped = [i for i in rec._issues if i["kind"] == "caption_clipped"]
         self.assertEqual(len(clipped), 1, rec._issues)
@@ -5335,17 +5162,18 @@ class WrapperChrome(unittest.TestCase):
         self.assertEqual(rec._fatal_count, 0)
 
     def test_a_caption_that_fits_its_band_records_nothing(self):
-        # Both quiet answers: the wrapper surface measuring zero overflow,
-        # and the legacy overlay returning nothing at all.
-        fits = recorder(self, wrapper=True, page=self.CaptionSurface(0))
+        # Both quiet answers: the band measuring zero overflow, and a caption
+        # surface that answers nothing at all (the terminal's in-page overlay
+        # grows with its text and returns no number).
+        fits = recorder(self, page=self.CaptionSurface(0))
         fits.caption("short")
-        legacy = recorder(self)  # FakePage.evaluate returns None
-        legacy.caption("short")
+        silent = recorder(self)  # FakePage.evaluate returns None
+        silent.caption("short")
         self.assertEqual(
             [i for i in fits._issues if i["kind"] == "caption_clipped"], []
         )
         self.assertEqual(
-            [i for i in legacy._issues if i["kind"] == "caption_clipped"], []
+            [i for i in silent._issues if i["kind"] == "caption_clipped"], []
         )
 
     def test_the_card_layer_sits_on_the_slot_and_carries_card_and_scrim(self):
@@ -5413,24 +5241,16 @@ class WrapperChrome(unittest.TestCase):
             f"unsubstituted hold tokens would reach the page: {sorted(set(leftover))}",
         )
 
-    def test_a_wrapper_take_registers_the_hold_script_and_a_legacy_take_none(self):
+    def test_a_web_take_registers_the_opening_hold_script(self):
         # The hold is an init script for _OPENING_CARD_JS's reasons — it has
         # to exist on the wrapper page's initial document, before set_content
-        # — and the legacy composite path must not gain one: its opening is
-        # covered by the ffmpeg overlay, byte-untouched until #361.
-        wrapped = recorder(self, wrapper=True)
+        # replaces it. Exactly one: two registrations would be two elements
+        # racing for one id.
+        rec = recorder(self)
         context = _RecordingContext()
-        wrapped._init_context(context)
+        rec._init_context(context)
         holds = [s for s in context.scripts if "__chrome_hold" in s]
-        self.assertEqual(len(holds), 1, "the wrapper take registers no opening hold")
-        legacy = recorder(self)
-        legacy_context = _RecordingContext()
-        legacy._init_context(legacy_context)
-        self.assertEqual(
-            [s for s in legacy_context.scripts if "__chrome_hold" in s],
-            [],
-            "the legacy path gained an opening-hold init script",
-        )
+        self.assertEqual(len(holds), 1, "the web take registers no opening hold")
 
     class HoldPage(FakePage):
         """A page that remembers every script `evaluate` was handed."""
@@ -5460,7 +5280,7 @@ class WrapperChrome(unittest.TestCase):
         # clear is already down and a re-clear on every goto would be the
         # verb quietly depending on chrome state it does not own.
         page = self.HoldPage()
-        rec = recorder(self, wrapper=True, page=page)
+        rec = recorder(self, page=page)
         rec._app_frame = self.app_frame()
         rec.goto("/")
         self.assertEqual(
@@ -5472,31 +5292,63 @@ class WrapperChrome(unittest.TestCase):
         rec.goto("/second.html")
         self.assertEqual(len(self.clears(page)), 1, "a later goto re-cleared the hold")
 
-    def test_a_legacy_goto_never_touches_the_hold(self):
+    def test_every_goto_takes_the_recorders_cards_down(self):
+        # A full page load used to destroy the card with the app's document,
+        # and SKILL.md's segment pattern leans on it: interlude(...), then
+        # goto() to open on the app. The cards live in the wrapper document
+        # now, so goto clears them deliberately — every goto, because any
+        # full load took a card down on the old path. Seen red in pixels
+        # first: a segment that opened on an interlude recorded the card
+        # over the app to the end of the take (tests/smoke --segments-only,
+        # the recorder's own overlay-left-up warning firing on a take this
+        # suite grades as healthy).
         page = self.HoldPage()
-        page.goto = lambda url, timeout=None: None
-        page.wait_for_load_state = lambda *args, **kwargs: None
-        legacy = recorder(self, page=page)
-        legacy.goto("/")
-        self.assertEqual(self.clears(page), [])
+        rec = recorder(self, page=page)
+        rec._app_frame = self.app_frame()
 
-    def test_a_wrapper_take_does_not_listen_for_a_replaced_document(self):
-        # #360's beat-log honesty: the wrapper document holds the caption and
-        # never navigates, so `caption_lost` cannot happen there — and the
-        # recorder must not even subscribe the signal. Not listening is the
-        # structural form of "this issue can never fire"; a listener that
-        # merely happens never to fire would be an observation about one
-        # Chromium's event routing, one engine bump away from a false loss.
-        wrapped = recorder(self, wrapper=True)
+        def card_clears():
+            return [
+                s
+                for s in page.evaluated
+                if "__demoInterlude('')" in s and "__demoBridge('')" in s
+            ]
+
+        rec.goto("/")
+        self.assertEqual(len(card_clears()), 1, page.evaluated)
+        rec.goto("/second.html")
+        self.assertEqual(len(card_clears()), 2, "a later goto left a card up")
+
+    def test_the_hold_clearing_goto_stamps_the_instant_on_its_own_beat(self):
+        # What the review sheet's opening-hold note reads (frames.py, #361):
+        # the clear's video offset, on the beat that cleared it, and on no
+        # other — a second goto stamping it again would move the note onto
+        # frames recorded long after the hold came down.
+        page = self.HoldPage()
+        rec = recorder(self, page=page)
+        rec._app_frame = self.app_frame()
+        rec.goto("/")
+        rec.goto("/second.html")
+        stamped = [b for b in rec._beats if "opening_hold_until" in b]
+        self.assertEqual(len(stamped), 1, rec._beats)
+        self.assertEqual(stamped[0]["index"], 0)
+        until = stamped[0]["opening_hold_until"]
+        self.assertIsInstance(until, float)
+        self.assertGreaterEqual(until, stamped[0]["t_start"])
+
+    def test_a_web_take_does_not_listen_for_a_replaced_document(self):
+        # #360's beat-log honesty, unconditional since #361: the wrapper
+        # document holds the caption and never navigates, so `caption_lost`
+        # cannot happen — and the recorder must not even subscribe the
+        # signal. Not listening is the structural form of "this issue can
+        # never fire"; a listener that merely happens never to fire would be
+        # an observation about one Chromium's event routing, one engine bump
+        # away from a false loss.
+        rec = recorder(self)
         page = FakePage()
-        wrapped._watch_extra(page)
+        rec._watch_extra(page)
         self.assertNotIn("domcontentloaded", page.subscribed)
-        # #142's kept listener stays on both paths.
+        # #142's kept listener stays.
         self.assertIn("framenavigated", page.subscribed)
-        legacy = recorder(self)
-        legacy_page = FakePage()
-        legacy._watch_extra(legacy_page)
-        self.assertIn("domcontentloaded", legacy_page.subscribed)
 
 
 class VerbTarget(unittest.TestCase):
@@ -5642,6 +5494,9 @@ class ActBeat(unittest.TestCase):
         with target_env(), contextlib.redirect_stderr(io.StringIO()):
             rec = WebRec(tmp.name, speech=False, evidence=True)
         rec.page = EvidencePage()
+        # Evidence reads the app frame, not the wrapper page (#358) — wire
+        # the same surface in as the frame, the way `_start` would.
+        rec._app_frame = rec.page
         rec._t0 = time.monotonic()
         with rec.act(self.LABEL):
             rec.page.evaluate("0")
@@ -5979,54 +5834,35 @@ class CriterionHold(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# core.py — which card each medium raises (issue #291)
+# core.py — the interlude card each medium shows (issue #291, then #361)
 # --------------------------------------------------------------------------
 #
 # One stylesheet used to serve both media and it was the terminal's, so on a
-# **web** take the full-screen card was a near-black field inside the recorder's
-# own dark window frame and read as a terminal window rather than as a card over
-# the app. Found by a human watching a demo; no artifact could have said so,
-# because every artifact was right.
+# **web** take the full-screen card was a near-black field inside the
+# recorder's own dark window frame and read as a terminal window rather than
+# as a card over the app (#291) — the fix's history, including the rejected
+# candidates and the #301 encoder compensation the composite needed, is
+# `core.WEB_WINDOW_BODY`'s note. Since #361 there is no per-medium CSS
+# dispatch left to grade: the web card is an element the wrapper document
+# ships in its own card layer, painted from the same `window_body`
+# substitution as the window (`WrapperChrome` pins that wiring; `tests/smoke
+# --wrapper-only`'s check_wrapper_card reads the sameness out of demo.mp4).
+# Core's `_INTERLUDE_JS` only ever *finds* that element and toggles it —
+# the create-if-missing guard below is what keeps the terminal stylesheet it
+# still carries from ever painting on a web take.
 #
-# **The web card is the window's own body colour on screen — and that sentence
-# is about `demo.mp4`, not about these strings, which is why the match is not
-# graded in this file.** Three rounds of candidates were put in front of the
-# person who found #291, and what they asked for was *"the interlude to match
-# the window, without a need for a border of another colour, or an additional
-# edge of a third colour."*
-#
-# The round that answered it by declaring **one** constant for both was rejected
-# too, from a shipped frame: the frame is a Playwright screenshot and the card
-# is inside Playwright's video, so one declared colour arrives in `demo.mp4` as
-# two, five levels of blue apart (#301). So the card declares `WEB_CARD_BODY` —
-# `WEB_WINDOW_BODY` compensated for that extra encoder, by measurement — and
-# **the two declarations differ on purpose**. An equality pinned between them
-# here would have been green on the build the reviewer rejected, which is the
-# whole reason it is gone.
-#
-# What replaces it is a reading of the encoded video, in `tests/smoke`'s
-# `check_criterion_card`: the card's field and the window's pad within 2 levels
-# per channel in `demo.mp4`. That is the property #291 is about, and no
-# browser-free test can hold it.
-#
-# What is graded here is the dispatch and the two palettes — which card a
-# recorder of each medium hands the page, that the terminal's is the value the
-# #110 blend was tuned to, and that the frame is painted from the constant the
-# card's compensation is measured against. **Whether a card reads as a card is
-# not graded anywhere and cannot be**: the same element, text and snapshot are
-# produced either way, and the only difference is a colour a person recognises.
+# What is graded here is what remains browser-free: the terminal palette the
+# #110 blend was tuned to, the init-script/verb agreement a terminal segment
+# opens on, and the guard that makes the base stylesheet inert on a page
+# whose card already exists. **Whether a card reads as a card is not graded
+# anywhere and cannot be**: the same element, text and snapshot are produced
+# either way, and the only difference is a colour a person recognises.
 
-# The two palettes and the window body, hand-written. A bound read off the code
-# being graded agrees with that code whatever it says, and these are the numbers
-# other things were chosen against: `tests/smoke`'s opening-card sweep calls
-# anything under 60 luma "the card" (the terminal one measures 26), and the same
-# file's `WEB_CARD_RGB` is the web one in decimal.
-#
-# `WEB_CARD_PALETTE` is two levels off `WINDOW_BODY` and that is not a typo —
-# see the section header, and `core.WEB_CARD_BODY`.
+# The terminal palette, hand-written. A bound read off the code being graded
+# agrees with that code whatever it says, and this is the number other
+# things were chosen against: `tests/smoke`'s opening-card sweep calls
+# anything under 60 luma "the card", and the terminal one measures 26.
 TERMINAL_CARD_PALETTE = "background: #1c1a17; color: #f7f4ee;"
-WEB_CARD_PALETTE = "background: #181726; color: #f2f0ec;"
-WINDOW_BODY = "#181825"
 
 
 class _RecordingContext:
@@ -6078,27 +5914,31 @@ class InterludePalette(unittest.TestCase):
         """
         return card_css(recorder(self, cls=cls, **settings)._interlude_script())
 
-    def test_a_web_take_raises_the_palette_smoke_grades_in_pixels(self):
-        # The pin, in both directions. `tests/smoke`'s `check_criterion_card`
-        # compares an encoded frame against this colour in decimal, and a
-        # palette changed here and not there turns that check into a reading of
-        # nothing at all.
-        self.assertIn(WEB_CARD_PALETTE, self.css_for(WebRec))
-
-    def test_a_web_take_does_not_raise_the_terminals_card(self):
-        # The defect, exactly: the string the *page* was handed on a web take
-        # carried the terminal palette, so the card was painted the colour of
-        # the recorder's own terminal widgets.
-        self.assertNotIn(TERMINAL_CARD_PALETTE, self.css_for(WebRec))
-
     def test_a_terminal_take_still_raises_the_card_110_was_tuned_to(self):
         # The blend `eca42c5` added is load-bearing on this medium: the card is
         # what a terminal segment *opens* on, covering the recorder's own setup,
-        # and it has to be dark for the same reason the terminal is. This is the
-        # regression half of #291 — the fix is only correct if it left this one
-        # exactly where it was.
+        # and it has to be dark for the same reason the terminal is.
         self.assertIn(TERMINAL_CARD_PALETTE, self.css_for(TermRec))
-        self.assertNotIn(WEB_CARD_PALETTE, self.css_for(TermRec))
+
+    def test_the_base_stylesheet_cannot_paint_where_the_card_already_exists(self):
+        # The wiring that makes `_INTERLUDE_JS`'s terminal stylesheet inert on
+        # a web take: the script builds (and styles) the element only when the
+        # id is missing, and the wrapper document ships it in the card layer
+        # (`WrapperChrome`), so on a web page the script only ever toggles
+        # text and opacity. Drop the guard and every interlude would repaint
+        # the wrapper card as a full-viewport terminal-black field — the #291
+        # regression wearing #361's clothes.
+        script = recorder(self, cls=WebRec)._interlude_script()
+        create = script.index("createElement")
+        guard = script.index("if (!el)")
+        self.assertLess(
+            guard,
+            create,
+            "the interlude script creates its element unguarded, so the "
+            "stylesheet it carries would repaint a card the chrome document "
+            "already ships",
+        )
+        self.assertIn("getElementById", script[:guard])
 
     def test_the_card_a_terminal_segment_opens_on_is_that_same_card(self):
         # Two things build this element, and only one of them is the verb.
@@ -6115,578 +5955,130 @@ class InterludePalette(unittest.TestCase):
         )
         self.assertEqual(card_css(opening[0]), card_css(rec._interlude_script()))
 
-    def test_the_window_body_the_card_is_compensated_against_is_the_one_drawn(self):
-        # **No test in this file asserts that the card matches the window** —
-        # they are two declarations, two levels apart, and equal only after two
-        # different encoders have had them (see the section header). What this
-        # file can hold is the other half: that the window the card was measured
-        # against is still the window `_FRAME_HTML` paints, from the shared
-        # constant rather than from a literal of its own.
-        #
-        # Without it, `tests/smoke`'s card-against-window reading would still be
-        # the check — but a frame repainted from a literal would drift away from
-        # a compensation nobody re-measured, and the only thing to notice would
-        # be a 15-minute arm.
-        import inspect
-
-        import demo_recording.web as web_module
-        from demo_recording.core import WEB_WINDOW_BODY
-        from demo_recording.web import _FRAME_HTML
-
-        self.assertEqual(WEB_WINDOW_BODY, WINDOW_BODY)
-        self.assertIn("background: __WINBG__", _FRAME_HTML)
-        # ...and that the placeholder is filled from the shared constant. A
-        # frame painted from a literal would satisfy both lines above while
-        # drifting away from the card on the next edit, which is the drift the
-        # constant was introduced to close.
-        self.assertIn(
-            '.replace("__WINBG__", WEB_WINDOW_BODY)',
-            inspect.getsource(web_module),
-        )
-
-    def test_the_web_card_is_one_colour_and_draws_no_edge_of_its_own(self):
-        # The reviewer's sentence has three clauses and this is the last two:
-        # *"without a need for a border of another colour, or an additional edge
-        # of a third colour."* #297 shipped an 18 px border in the window's
-        # colour and it was rejected — measured in the encoded frame, that
-        # border and the recorder's own pad are two different colours (#301),
-        # so what reads as one gutter in the stylesheet is two bands on screen.
-        # Neither card declares a border now.
-        self.assertEqual(card_declaration(self.css_for(WebRec), "border"), "")
-        self.assertEqual(card_declaration(self.css_for(TermRec), "border"), "")
-
     def test_the_web_card_is_not_painted_like_the_skills_terminal_widgets(self):
-        # #291's own sentence, and the colour the card collided with is not only
-        # the other card's: `Recorder.terminal()` draws an on-screen terminal
-        # prop *inside a web demo*, and a card matching it reads as that widget
-        # having taken the whole screen over.
+        # #291's own sentence, held on the card the wrapper document ships:
+        # `Recorder.terminal()` draws an on-screen terminal prop *inside a web
+        # demo*, and a card matching it reads as that widget having taken the
+        # whole screen over. The wrapper card paints the window's own body —
+        # asserted here against the prop's palette, wiring-side; the
+        # sameness-with-the-window half is pixels (check_wrapper_card).
+        from demo_recording.core import WEB_WINDOW_BODY
         from demo_recording.web import _TERMINAL_JS
 
-        web = card_background(self.css_for(WebRec))
         self.assertNotIn(
-            web,
+            WEB_WINDOW_BODY,
             _TERMINAL_JS,
-            f"the web interlude card is painted {web}, which is a colour the "
-            f"web recorder's own terminal prop draws with",
+            f"the web card is painted {WEB_WINDOW_BODY}, which is a colour "
+            f"the web recorder's own terminal prop draws with",
         )
 
-    def test_both_cards_are_opaque_and_cover_the_frame_above_the_caption(self):
-        # Not decoration, and not a restatement of the CSS: reference/limits.md
-        # reasons from all three of these — a card that is translucent, inset,
-        # or under the caption bar changes what the picture check can see and
-        # what a caption swap does to it. The two other candidate fixes for #291
-        # (a scrim over the still-visible app; a card inset from the viewport
-        # edge) are ruled out here rather than in a commit message.
-        for medium, cls in (("web", WebRec), ("terminal", TermRec)):
-            with self.subTest(medium=medium):
-                css = self.css_for(cls)
-                self.assertIn("inset: 0", css)
-                self.assertIn("z-index: 2147483647", css)
-                # A flat `#rrggbb` and nothing else: `rgba(...)`, a gradient
-                # with a transparent stop, or a `background` left to the page
-                # are all ways for the app to show through.
-                self.assertRegex(card_background(css), r"^#[0-9a-f]{6}$")
-                # And no rounded corners. Neither card declares a border any
-                # more (the test above), but `border-radius` needs one of its
-                # own: it clips the *background* too, so a radius here puts the
-                # app back on screen at the four corners of the app rect while
-                # the card is up.
-                self.assertEqual(card_declaration(css, "border-radius"), "")
+    def test_the_terminal_card_is_opaque_and_covers_the_frame(self):
+        # Not decoration, and not a restatement of the CSS:
+        # reference/limits.md reasons from all three of these — a card that
+        # is translucent, inset, or under the caption bar changes what the
+        # picture check can see and what a caption swap does to it. The web
+        # card's geometry is the chrome document's card layer, pinned by
+        # `WrapperChrome`; this is the terminal's, the one still built from
+        # this stylesheet.
+        css = self.css_for(TermRec)
+        self.assertIn("inset: 0", css)
+        self.assertIn("z-index: 2147483647", css)
+        # A flat `#rrggbb` and nothing else: `rgba(...)`, a gradient with a
+        # transparent stop, or a `background` left to the page are all ways
+        # for the app to show through.
+        self.assertRegex(card_background(css), r"^#[0-9a-f]{6}$")
+        # No border and no rounded corners: a radius clips the *background*
+        # too, so it would put the app back on screen at the four corners
+        # while the card is up (#297's rejected bordered card).
+        self.assertEqual(card_declaration(css, "border"), "")
+        self.assertEqual(card_declaration(css, "border-radius"), "")
 
 
 # --------------------------------------------------------------------------
-# web.py — which mousemove moves the cursor dot (issue #186)
+# web.py — the recorder drives the cursor dot (#186/#202/#203, class retired)
 # --------------------------------------------------------------------------
 #
-# `Recorder(deterministic=True)` announces "re-recording reproduces the take",
-# and for a storyboard that never moves the pointer that was false about the
-# opening stills. Chromium dispatches one `mousemove` of its own per document,
-# at the widget's initial pointer position — `(0, 0)` on a fresh page — when it
-# recomputes hover state after the first layout. The overlay's handler
-# subscribes at `DOMContentLoaded`, because it needs `document.body`, and which
-# of the two comes first is decided by machine load: eleven takes in twelve
-# under 14-way load had an 18 px dot in the corner of the still and one did
-# not, and two stills that disagree differ in 69 of 921 600 pixels, all of them
-# inside x 0-8, y 0-8 (#185, #186, #188).
-#
-# The overlay refuses a `mousemove` that reports the pointer at the position
-# it was already known to be at. It remembers that position — seeded at
-# `(0, 0)`, where a fresh page's pointer sits and where Chromium's load-time
-# event lands — so the settle event says nothing new and is dropped, while any
-# move the storyboard makes is somewhere the pointer has not been and is drawn.
-#
-# **It reads positions rather than `movementX`/`movementY`, and that is issue
-# #202.** The rule shipped for #186 read the browser's movement delta, which
-# for the *first* mouse event in a page has no previous event to be measured
-# against, and what Chromium substitutes there is a build detail: Chromium 136
-# and 151 measure it from the origin, so a park at (60, 640) reports (60, 640),
-# and Chromium 147 measures it from the event's own position, so the same park
-# reports (0, 0) — identical to the load-time event. On 147 the movement rule
-# therefore threw away the storyboard's own park: `tests/smoke`'s determinism
-# arm went red three ways while CI, which installs whatever Chromium the newest
-# Playwright ships (151 the day this was written), stayed green.
-#
-# What is graded here is the **rule**, read out of the shipped script and run
-# over event *sequences* measured off Chromium rather than imagined. Sequences
-# rather than single events because the rule is now stateful, and because the
-# claim that matters is about a sequence: the two orders in which the load-time
-# event and a storyboard's first move can arrive have to leave the dot in the
-# same place, which is what "the dot's position does not depend on delivery
-# timing" means. A check that restated the rule in Python would agree with
-# itself while the take shipped something else, so the guard is extracted; the
-# JS-to-Python translation is hand-written and deliberately narrow, so a guard
-# written in a form it does not model fails the extraction loudly instead of
-# passing silently, and the two statements the harness *does* model (the seed
-# and the update) are pinned to the shipped text by
-# `test_nothing_moves_the_dot_except_through_the_rule`. What this suite cannot
-# grade — that Chromium's events still look like this, and that two takes
-# therefore produce the same bytes — is stated at the bottom of the file.
+# The composite path's dot was an in-page overlay following `mousemove`
+# events, and #185/#186/#188/#202/#203 were one class: an event the
+# storyboard never sent deciding where the dot is drawn. This file carried a
+# JS-extraction harness that replayed event streams measured off three
+# Chromium builds through the shipped guard. The wrapper cutover (#361)
+# removed the listener wholesale: the dot lives in the wrapper document
+# (chrome.py) and moves only when `_glide` commands it, one explicit update
+# per pointer step — nothing listens, so nothing synthetic can move it, and
+# there is no event rule left to extract. What stays gradeable without a
+# browser is the drive itself, below. The dot's *pixels* — parked where the
+# storyboard parked it, absent before the first pointer verb — are graded by
+# tests/pixel's cursor-parked and cursor-absence goldens on a recorded take.
 
 
-def event(**over: object) -> dict:
-    """One `mousemove` as Chromium delivered it, with every field a guard
-    might plausibly read.
+class CursorDrive(unittest.TestCase):
+    """The wrapper dot is exactly where the storyboard commanded (#202)."""
 
-    Measured with a Playwright probe against `tests/fixture`, not imagined:
-    the settle event arrives at (0, 0) with `movementX`/`movementY` 0,
-    `isTrusted` true, and a `pointermove` and `mouseover` beside it exactly as
-    a real move has. Nothing but the position it reports tells the two apart.
-    """
-    doc = {
-        "type": "mousemove",
-        "isTrusted": True,
-        "clientX": 0,
-        "clientY": 0,
-        "screenX": 0,
-        "screenY": 0,
-        "pageX": 0,
-        "pageY": 0,
-        "movementX": 0,
-        "movementY": 0,
-        "buttons": 0,
-        "detail": 0,
-    }
-    doc.update(over)
-    return doc
+    class PointerPage(FakePage):
+        """A page that remembers the pointer moves and the dot commands."""
 
-
-# The event the race is about, and the only one the storyboard did not ask for.
-SETTLE_EVENT = event()
-
-# Where `tests/smoke`'s determinism storyboard parks the pointer with a raw
-# `page.mouse.move`, and the position the same event reports when Chromium's
-# hover recompute arrives *after* the park instead of before it.
-PARKED = (60, 640)
-
-# The same park, as the three browsers this was measured on report it when it
-# is the first mouse event in the page. The dot has to end up at PARKED in all
-# three: what the movement fields say about a move the storyboard actually made
-# is the browser's business, and #202 is what reading them cost.
-FIRST_MOVE_SHAPES = [
-    (
-        "Chromium 136 and 151, which measure the first delta from the origin",
-        event(clientX=60, clientY=640, movementX=60, movementY=640),
-    ),
-    (
-        "Chromium 147, which measures it from the event's own position",
-        event(clientX=60, clientY=640, movementX=0, movementY=0),
-    ),
-    (
-        "an engine that implements no movementX at all",
-        event(clientX=60, clientY=640, movementX=None, movementY=None),
-    ),
-]
-
-# What a real glide is made of. The diagonal is the first step of `move_to`'s
-# 30-step move; the axis-aligned two are what a glide along a row or a column
-# produces, and they are why the rule is "the same position on *both* axes"
-# rather than "on one of them" — a guard joined with `||` would freeze the dot
-# for every horizontal drag across a toolbar.
-REAL_MOVES = [
-    (
-        "a diagonal glide step",
-        event(clientX=150, clientY=150, movementX=150, movementY=150),
-    ),
-    (
-        "a horizontal glide step",
-        event(clientX=310, clientY=150, movementX=160, movementY=0),
-    ),
-    (
-        "a vertical glide step",
-        event(clientX=310, clientY=400, movementX=0, movementY=250),
-    ),
-]
-
-# The JS the guard may be written in, translated one form at a time. `!==`
-# before `!`, or the `!=` it just produced would become `not =`.
-_JS_GUARD_RE = re.compile(r"if \((?P<cond>[^)]*(?:\([^)]*\))?[^)]*)\) return;")
-_JS_TOKEN = re.compile(
-    r"e\.[A-Za-z]+|at[XY]\b|-?\d+(?:\.\d+)?|==|!=|and\b|or\b|not\b|[()\s]"
-)
-# The remembered position, as the overlay declares it. Read rather than
-# assumed: a seed anywhere other than where the pointer starts would either
-# let the load-time event through (#186) or swallow a real move.
-_JS_SEED_RE = re.compile(r"let atX = (-?\d+), atY = (-?\d+);")
-# What the overlay puts off until the document has a `<body>` to hang the dot
-# on. Everything else in the script runs at `document_start`, and issue #203 is
-# the difference: a rule about `mousemove` grades nothing while nothing is
-# subscribed, and a move dispatched before `DOMContentLoaded` has no
-# replacement — the pointer is where it was asked to be, so the browser never
-# reports it again.
-_JS_DEFER_RE = re.compile(r"document\.addEventListener\('DOMContentLoaded', (\w+)\)")
-
-
-class _JsEvent:
-    """An event object the translated guard can read fields off."""
-
-    def __init__(self, fields: dict) -> None:
-        self.__dict__.update(fields)
-
-
-def cursor_mousemove_body() -> str:
-    """The body of the overlay's `mousemove` listener, as shipped."""
-    opening = "window.addEventListener('mousemove'"
-    if opening not in _CURSOR_JS:
-        raise AssertionError(
-            "the cursor overlay no longer subscribes to mousemove under the "
-            "name this suite looks for, so nothing below graded the rule that "
-            "decides where the dot is drawn"
-        )
-
-    start = _CURSOR_JS.index(opening)
-    return _CURSOR_JS[start : _CURSOR_JS.index("}, true);", start)]
-
-
-def cursor_guard_py() -> str:
-    """The condition the overlay refuses a `mousemove` under, in Python."""
-    found = _JS_GUARD_RE.findall(cursor_mousemove_body())
-    if len(found) != 1:
-        raise AssertionError(
-            f"the mousemove handler holds {len(found)} early-return guards, "
-            f"expected exactly 1 — with none, every event Chromium dispatches "
-            f"moves the dot, including the one it sends at load (#186)"
-        )
-    expr = found[0].replace("!==", "!=").replace("===", "==")
-    expr = re.sub(r"!(?!=)", "not ", expr)
-    expr = expr.replace("&&", " and ").replace("||", " or ")
-    residue = _JS_TOKEN.sub("", expr).strip()
-    if residue:
-        raise AssertionError(
-            f"the guard {found[0]!r} is written in a form this suite cannot "
-            f"evaluate (left over: {residue!r}). Extend the translation, or "
-            f"grade the new form in a browser — do not delete the check"
-        )
-    return expr
-
-
-def cursor_seed() -> tuple[int, int]:
-    """The pointer position the overlay starts a document believing in."""
-    found = _JS_SEED_RE.findall(_CURSOR_JS)
-    if len(found) != 1:
-        raise AssertionError(
-            f"the cursor overlay declares its remembered pointer position "
-            f"{len(found)} times, expected exactly 1 — this suite reads the "
-            f"seed out of the script rather than assuming it, because a seed "
-            f"anywhere but where the pointer starts either lets Chromium's "
-            f"load-time event through (#186) or swallows a real move (#202)"
-        )
-    return int(found[0][0]), int(found[0][1])
-
-
-def _js_block(text: str, start: int) -> str:
-    """The source between an already-opened `{` and the `}` that closes it.
-
-    Template literals are skipped whole rather than scanned: the overlay's
-    stylesheet lives in one, and a counter that read its braces would close
-    the function early and hand every assertion below a slice of CSS.
-    """
-    depth, i = 1, start
-    while i < len(text):
-        ch = text[i]
-        if ch in "'\"":
-            i += 1
-            while i < len(text) and text[i] != ch:
-                i += 2 if text[i] == "\\" else 1
-        elif ch == "`":
-            i += 1
-            while i < len(text) and text[i] != "`":
-                if text[i] == "$" and text[i + 1 : i + 2] == "{":
-                    raise AssertionError(
-                        "the cursor overlay interpolates into a template "
-                        "literal; this reader skips template literals whole "
-                        "and would mis-count the braces inside one"
-                    )
-                i += 2 if text[i] == "\\" else 1
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i]
-        i += 1
-    raise AssertionError(
-        "the cursor overlay has an unbalanced block, so nothing below could "
-        "read what it defers to DOMContentLoaded"
-    )
-
-
-def cursor_deferred_body() -> str:
-    """The part of the overlay that does not run until `DOMContentLoaded`."""
-    found = _JS_DEFER_RE.findall(_CURSOR_JS)
-    if len(found) != 1:
-        raise AssertionError(
-            f"the cursor overlay defers {len(found)} functions to "
-            f"DOMContentLoaded, expected exactly 1 — this suite reads the "
-            f"deferred region out of the script rather than assuming it, "
-            f"because what is inside it is unreachable to a pointer move "
-            f"dispatched earlier in the document (#203)"
-        )
-    opening = f"const {found[0]} = () => {{"
-    if opening not in _CURSOR_JS:
-        raise AssertionError(
-            f"the overlay defers {found[0]!r} to DOMContentLoaded but does not "
-            f"declare it as `{opening}`, so this suite cannot say what runs "
-            f"late and what runs at document_start (#203)"
-        )
-    return _js_block(_CURSOR_JS, _CURSOR_JS.index(opening) + len(opening))
-
-
-class CursorMotion(unittest.TestCase):
-    """Which `mousemove` moves the recorder's cursor dot (#186, #202)."""
-
-    def dot_trail(self, events: list[dict]) -> list[tuple[int, int] | None]:
-        """Run a document's `mousemove` stream through the shipped rule.
-
-        Returns where the dot stands after *each* event — `None` while the
-        overlay has never moved it, which is the stylesheet's off-screen park
-        and what a take that never moves the pointer has to show. Per event
-        rather than at the end: a rule that drops a glide's middle steps and
-        catches up on the last one lands the dot in the right place having
-        shown the wrong motion, and the cursor exists to be watched moving.
-        """
-        expr = cursor_guard_py()
-        at_x, at_y = cursor_seed()
-        drawn: tuple[int, int] | None = None
-        trail: list[tuple[int, int] | None] = []
-        for fields in events:
-            scope = {"e": _JsEvent(fields), "atX": at_x, "atY": at_y}
-            try:
-                refused = bool(eval(expr, {"__builtins__": {}}, scope))
-            except AttributeError as exc:
-                self.fail(
-                    f"the guard {expr!r} reads an event field this suite does "
-                    f"not model ({exc}) — add it to `event()` with the value "
-                    f"Chromium measured, rather than dropping the assertion"
-                )
-            if not refused:
-                # The two statements the shipped handler runs next, and the
-                # only part of it this harness restates. `test_nothing_moves_
-                # the_dot_except_through_the_rule` pins them to the script's
-                # own text.
-                at_x, at_y = fields["clientX"], fields["clientY"]
-                drawn = (at_x, at_y)
-            trail.append(drawn)
-        return trail
-
-    def test_the_rule_is_one_condition_that_reads_the_event(self):
-        # The control. Every assertion below is "the dot ended up at X after
-        # this stream", and all of them are satisfied by a guard that says
-        # nothing about the event — so what the guard is, and that it reads
-        # both the event and the position the overlay remembers, is graded
-        # first and separately.
-        expr = cursor_guard_py()
-        self.assertIn(
-            "e.",
-            expr,
-            f"the guard {expr!r} never reads the event, so which mousemove "
-            f"moves the dot is not decided by the mousemove",
-        )
-        self.assertTrue(
-            "atX" in expr or "atY" in expr,
-            f"the guard {expr!r} never reads the position the overlay "
-            f"remembers, so it cannot be telling an event that reports a new "
-            f"position from one that repeats the old one (#186, #202)",
-        )
-
-    def test_what_the_overlay_defers_to_domcontentloaded_is_the_insertion(self):
-        # The control for the assertion below, which is "X is *not* in this
-        # string" and would be satisfied just as happily by an extraction that
-        # returned an empty one. What is legitimately late is putting the dot
-        # and its stylesheet in the document, because neither can happen
-        # before there is a `<body>` and a `<head>` to put them in.
-        deferred = cursor_deferred_body()
-        for statement in (
-            "document.head.appendChild(style);",
-            "document.body.appendChild(dot);",
-        ):
-            self.assertIn(
-                statement,
-                deferred,
-                f"the overlay never runs `{statement}` at DOMContentLoaded, so "
-                f"either the dot is never put on the page — no cursor in any "
-                f"take — or this suite is reading the wrong region and the "
-                f"assertion below grades nothing (#203)",
+        def __init__(self) -> None:
+            super().__init__()
+            self.pointer: list[tuple[float, float]] = []
+            self.dot: list[tuple[float, float]] = []
+            self.squeezed: list[str] = []
+            self.mouse = types.SimpleNamespace(
+                move=lambda x, y, steps=1: self.pointer.append((x, y))
             )
 
-    def test_the_pointer_is_listened_for_before_the_document_has_loaded(self):
-        # #203. `attach` cannot run before `document.body` exists, so a
-        # `mousemove` dispatched earlier in the document is delivered to
-        # whatever was subscribed *then* — and with the subscription inside
-        # `attach` that was nothing at all. Nothing replaces it either: the
-        # pointer is already where the storyboard put it, so the browser has
-        # no reason to report it again, and the dot sits at the stylesheet's
-        # off-screen park for the rest of the document. Reachable only by
-        # combining `goto(..., wait_until="commit")` with a raw
-        # `page.mouse.move`, and neither of those two is documented — what
-        # SKILL.md documents is `rec.page` itself, as the escape hatch. #202's
-        # determinism arm uses the raw move but parks *after* `Recorder.goto()`,
-        # which waits for `load`, so that arm never reaches this.
-        #
-        # So the subscription is established while the init script is
-        # evaluated, and the element it writes to is created there too; only
-        # the insertion waits. A detached div keeps the inline `left`/`top` a
-        # handler wrote on it, so the dot enters the document already standing
-        # where the pointer went.
-        deferred = cursor_deferred_body()
-        self.assertNotIn(
-            "addEventListener(",
-            deferred,
-            "the overlay subscribes to pointer events inside the function it "
-            "defers to DOMContentLoaded, so a move dispatched before the "
-            "document finished loading is delivered to no handler and no later "
-            "event replaces it — the dot stays off screen for the whole take "
-            "(#203)",
-        )
+        def evaluate(self, script, *args):
+            text = str(script)
+            if "__demoChromeCursor(" in text and args:
+                self.dot.append(tuple(args[0]))
+            elif "__demoChromeCursorDown" in text:
+                self.squeezed.append("down")
+            elif "__demoChromeCursorUp" in text:
+                self.squeezed.append("up")
+            return None
 
-    def test_chromiums_load_time_hover_event_does_not_move_the_dot(self):
-        self.assertEqual(
-            self.dot_trail([SETTLE_EVENT]),
-            [None],
-            "the overlay draws the dot for the mousemove Chromium dispatches "
-            "at load, at the position the pointer already had, so whether an "
-            "18 px dot is burned into the corner of a take's opening stills is "
-            "decided by machine load and not by the storyboard (#186)",
-        )
+    def glided(self, *to, steps):
+        page = self.PointerPage()
+        rec = recorder(self, page=page)
+        for target in to:
+            rec._glide(*target, steps=steps)
+        return rec, page
 
-    def test_the_storyboards_own_park_moves_the_dot_on_every_engine(self):
-        # #202. A raw `page.mouse.move` — the documented escape hatch, and what
-        # smoke's determinism arm uses — is often the first mouse event in the
-        # page, and what the browser reports for its movement is a build
-        # detail. Whether the cursor appears in the recording at all must not
-        # be.
-        #
-        # The second shape is the same event a park *after a navigation*
-        # produces on every build: the pointer is already where the storyboard
-        # is putting it, so nothing moves, but the new document's dot is a new
-        # element parked off screen that nothing else will ever place. There is
-        # no separate test for it because the overlay sees the same event, and
-        # an assertion that cannot fail independently is decoration; it was
-        # measured in a browser instead — Chromium 151, movement rule, dot off
-        # screen in 4 takes of 4.
-        for engine, park in FIRST_MOVE_SHAPES:
-            with self.subTest(engine):
-                self.assertEqual(
-                    self.dot_trail([park]),
-                    [PARKED],
-                    f"on {engine}, the overlay drops the storyboard's own park "
-                    f"at {PARKED} because of what that engine reports about "
-                    f"it — so every take driving page.mouse directly records "
-                    f"no cursor at all (#202)",
-                )
+    def test_the_dot_rides_every_pointer_step_and_ends_at_the_target(self):
+        # One dot command per pointer step, at the same coordinate — the dot
+        # cannot trail the pointer or jump ahead of it, because the recorder
+        # is the only writer of both.
+        rec, page = self.glided((60, 640), steps=4)
+        self.assertEqual(len(page.pointer), 4)
+        self.assertEqual(page.dot, page.pointer)
+        self.assertEqual(page.dot[-1], (60.0, 640.0))
+        self.assertEqual(rec._cursor_at, (60.0, 640.0))
 
-    def test_both_orders_of_the_load_event_leave_the_dot_in_one_place(self):
-        # The determinism claim in the rule's own terms, and the reason the
-        # race is *removed* rather than made less likely: Chromium's hover
-        # recompute can land before the park (at the origin) or after it (at
-        # the position the park moved the pointer to), and the storyboard
-        # cannot control which. Both have to end at the parked position.
-        _, park = FIRST_MOVE_SHAPES[1]
-        settled_after = event(clientX=60, clientY=640, movementX=0, movementY=0)
-        for order, stream in (
-            ("the settle event first", [SETTLE_EVENT, park]),
-            ("the park first", [park, settled_after]),
-        ):
-            with self.subTest(order):
-                self.assertEqual(
-                    self.dot_trail(stream)[-1],
-                    PARKED,
-                    f"with {order}, the dot ends up somewhere other than the "
-                    f"{PARKED} the storyboard parked the pointer at — so which "
-                    f"of the two arrives first decides what the take shows, "
-                    f"which is the race itself (#186, #202)",
-                )
+    def test_a_second_glide_starts_from_the_last_commanded_position(self):
+        # `_cursor_at` is the seed: a glide that forgot it would sweep in
+        # from the origin on every move, which is motion the storyboard
+        # never asked for.
+        rec, page = self.glided((60.0, 640.0), (100.0, 640.0), steps=2)
+        self.assertEqual(page.dot[-2], (80.0, 640.0))
+        self.assertEqual(page.dot[-1], (100.0, 640.0))
 
-    def test_every_real_move_moves_the_dot(self):
-        # A glide as one stream, graded step by step: a rule that dropped the
-        # steps along a row would leave the dot in the right final place having
-        # skipped half the motion, and the cursor exists to be watched moving.
-        self.assertEqual(
-            self.dot_trail([fields for _, fields in REAL_MOVES]),
-            [(f["clientX"], f["clientY"]) for _, f in REAL_MOVES],
-            "the overlay drops steps of a glide "
-            f"({', '.join(what for what, _ in REAL_MOVES)}), so the cursor "
-            f"stops following the pointer it exists to stand in for",
-        )
+    def test_nothing_but_a_glide_moves_the_dot(self):
+        # The structural end of the #186 class: with no glide commanded, no
+        # dot command reaches the page whatever events the browser delivers —
+        # there is no subscription for them to land in.
+        page = self.PointerPage()
+        rec = recorder(self, page=page)
+        rec._watch_page(page)
+        page.fire("framenavigated", FakeFrame())
+        self.assertEqual(page.dot, [])
+        self.assertEqual(rec._cursor_at, (0.0, 0.0))
 
-    def test_the_remembered_position_is_where_the_pointer_starts(self):
-        # The seed is the whole of why the load-time event is ignorable. At
-        # anything else, either that event reports a "new" position and the
-        # dot lands in the corner (#186), or a real move to the seed is
-        # swallowed.
-        self.assertEqual(
-            cursor_seed(),
-            (0, 0),
-            f"the overlay starts a document believing the pointer is at "
-            f"{cursor_seed()}, but a fresh page's pointer is at (0, 0) and "
-            f"that is where Chromium's load-time mousemove reports it (#186)",
-        )
-
-    def test_nothing_moves_the_dot_except_through_the_rule(self):
-        # A second positioning path — a `pointermove` listener added beside
-        # this one, a `mouseover` that snaps the dot into place — would restore
-        # the race while every assertion above stayed green. The update of the
-        # remembered position is pinned here too, because `dot_trail` models
-        # it: if the script stopped doing it, the harness would keep simulating
-        # a rule the take no longer ships.
-        body = cursor_mousemove_body()
-        for statement in ("atX = e.clientX;", "atY = e.clientY;"):
-            self.assertIn(
-                statement,
-                body,
-                f"the mousemove handler never runs `{statement}`, so the "
-                f"position it compares the next event against is not the "
-                f"position this event reported — the rule this suite "
-                f"evaluates is not the rule the take ships (#202)",
-            )
-            self.assertLess(
-                body.index("return;"),
-                body.index(statement),
-                f"`{statement}` runs before the rule decides whether this "
-                f"event should move the dot, so an ignored event still "
-                f"rewrites the position every later event is compared to",
-            )
-        for property_ in ("dot.style.left", "dot.style.top"):
-            self.assertEqual(
-                _CURSOR_JS.count(property_),
-                1,
-                f"{property_} is written in {_CURSOR_JS.count(property_)} "
-                f"places in the cursor overlay; only the guarded mousemove "
-                f"handler may position the dot (#186)",
-            )
-            self.assertIn(property_, body)
-            self.assertIn(
-                "return;",
-                body,
-                "the mousemove handler positions the dot with no early return "
-                "in front of it, so every event Chromium dispatches moves it — "
-                "including the one it sends at load (#186)",
-            )
-            self.assertLess(
-                body.index("return;"),
-                body.index(property_),
-                "the dot is positioned before the rule that decides whether "
-                "this event should move it, so the rule changes nothing",
-            )
+    def test_the_dot_squeezes_on_press_and_releases_after(self):
+        page = self.PointerPage()
+        rec = recorder(self, page=page)
+        rec._cursor_pressed(True)
+        rec._cursor_pressed(False)
+        self.assertEqual(page.squeezed, ["down", "up"])
 
 
 # --------------------------------------------------------------------------
@@ -7381,6 +6773,50 @@ def reader_correction(doc: dict, beat: dict) -> float:
         for step in record.get("steps") or []
         if step.get("segment") == beat.get("segment") and step["t"] <= beat["t_start"]
     )
+
+
+class StitchedHold(unittest.TestCase):
+    """The hold-clear instant rides the merge with its beat (#361).
+
+    `opening_hold_until` is a video offset like `t_start`, and the review
+    sheet's opening-hold note reads it (frames.py) — a merged timeline that
+    kept it on the segment's own clock would name part one's frames as
+    sitting under part two's hold.
+    """
+
+    def test_the_hold_instant_is_shifted_with_its_beat(self):
+        names = ["part1", "part2"]
+        docs = [
+            {
+                "recorder": "Recorder",
+                "segment": name,
+                "beats": [
+                    {
+                        "index": 0,
+                        "segment": name,
+                        "verb": "goto",
+                        "t_start": 0.2,
+                        "t_end": 1.4,
+                        "opening_hold_until": 1.4,
+                    }
+                ],
+            }
+            for name in names
+        ]
+        doc = _merged_timeline(
+            names,
+            [Path(f"{name}.seg.mp4") for name in names],
+            docs,
+            [10.0, 8.0],
+            Path("demo.mp4"),
+        )
+        stamped = [b for b in doc["beats"] if "opening_hold_until" in b]
+        self.assertEqual(
+            [(b["segment"], b["opening_hold_until"]) for b in stamped],
+            [("part1", 1.4), ("part2", 11.4)],
+        )
+        # …and on the same clock as the beat that carries it.
+        self.assertEqual(stamped[1]["t_end"], 11.4)
 
 
 class MergedCaptureClock(unittest.TestCase):
@@ -8609,6 +8045,126 @@ class FrameDedupe(unittest.TestCase):
         self.assertEqual(len(argv), 1)
         self.assertIn("scale='min(1024,iw)':-1", argv[0])
         self.assertEqual(argv[0][argv[0].index("scale='min(1024,iw)':-1") - 1], "-vf")
+
+
+class OpeningHoldOnTheSheet(unittest.TestCase):
+    """The sheet names the frames cut inside the wrapper's opening hold (#361).
+
+    A web take's first `goto()` clears the opening hold at its end and stamps
+    `opening_hold_until` on its own beat (web.py), so that beat's mid-point
+    review frame shows a flat field in the window's colour where the app will
+    be. A sheet that leaves that to the reader reads as a failed load — the
+    #367 review met exactly that frame. Same named-not-counted style as
+    `scene_search_skipped`: the reader's question is which frame is the hold,
+    and a count does not answer it.
+    """
+
+    def sheet(self, doc: dict) -> dict:
+        def extract(mp4: Path, at: float, path: Path) -> bool:
+            path.write_bytes(path.name.encode())
+            return True
+
+        out_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        (out_dir / "demo.mp4").write_bytes(b"a stand-in for a recording")
+        was = (
+            frames_module._extract,
+            frames_module.scene_times,
+            frames_module._frame_mse,
+        )
+        frames_module._extract = extract
+        frames_module.scene_times = lambda *a, **k: []
+        frames_module._frame_mse = lambda kept, candidate: 1e6
+        try:
+            return beat_frames(out_dir, doc)
+        finally:
+            (
+                frames_module._extract,
+                frames_module.scene_times,
+                frames_module._frame_mse,
+            ) = was
+
+    def test_the_frames_cut_inside_the_hold_are_named_on_the_sheet(self):
+        # The goto runs 0.2-3.0s and clears the hold at its end; its mid-point
+        # frame (1.6s) is inside the hold, the later caption's is not.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record(),
+            beats=[
+                beat(0, "goto", 0.2, t_end=3.0, opening_hold_until=3.0),
+                beat(1, "caption", 5.0),
+            ],
+        )
+        manifest = self.sheet(doc)
+        self.assertEqual(
+            manifest["opening_hold"],
+            [{"until": 3.0, "frames": ["beat-00.png"]}],
+        )
+        text = render_frames_md(manifest)
+        self.assertIn("`beat-00.png`", text)
+        self.assertIn("opening hold", text)
+        self.assertIn("until 3.00s", text)
+        # Named, not counted — the caption's frame is not swept into it.
+        hold_line = next(line for line in text.splitlines() if "opening hold" in line)
+        self.assertNotIn("beat-01.png", hold_line)
+
+    def test_a_take_with_no_hold_says_nothing(self):
+        # The healthy silence: a note on every sheet is a note nobody reads.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record(),
+            beats=[beat(0, "goto", 0.2), beat(1, "caption", 5.0)],
+        )
+        manifest = self.sheet(doc)
+        self.assertEqual(manifest["opening_hold"], [])
+        self.assertNotIn("opening hold", render_frames_md(manifest))
+
+    def test_a_frame_after_the_hold_cleared_is_not_flagged(self):
+        # The goto's own frame lands after the clear (mid-point 2.0s, hold
+        # gone by 1.5s): nothing on the sheet is inside the hold, and a note
+        # naming no frame would be the confident wrong caption in miniature.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record(),
+            beats=[
+                beat(0, "goto", 1.5, t_end=2.5, opening_hold_until=1.5),
+                beat(1, "caption", 5.0),
+            ],
+        )
+        manifest = self.sheet(doc)
+        self.assertEqual(manifest["opening_hold"], [])
+
+    def test_a_merged_sheet_scopes_each_hold_to_its_own_segment(self):
+        # stitch() shifts opening_hold_until with the beat, so part2's hold
+        # ends at 12.0s of the joined video — and part1's 5.0s frame, though
+        # earlier than that instant, was never under part2's hold.
+        doc = envelope(
+            duration=20.0,
+            capture_clock=clock_record(),
+            beats=[
+                beat(
+                    0, "goto", 0.2, t_end=1.0, opening_hold_until=1.0, segment="part1"
+                ),
+                beat(1, "caption", 5.0, segment="part1"),
+                beat(
+                    2,
+                    "goto",
+                    10.5,
+                    t_end=12.0,
+                    opening_hold_until=12.0,
+                    segment="part2",
+                ),
+                beat(3, "caption", 14.0, segment="part2"),
+            ],
+        )
+        manifest = self.sheet(doc)
+        self.assertEqual(
+            manifest["opening_hold"],
+            [
+                {"until": 1.0, "frames": ["beat-00.png"]},
+                {"until": 12.0, "frames": ["beat-02.png"]},
+            ],
+        )
 
 
 class TimelineClockNote(unittest.TestCase):
@@ -11394,73 +10950,6 @@ class ExitStatus(_GradeCase):
 
 # --------------------------------------------------------------------------
 
-# Issue #203, as the overlay shipped before it was fixed and after it was.
-# Nothing below is rewritten by hand: the two are the same region of
-# `_CURSOR_JS` — from the dot's creation to its insertion — in the two orders,
-# and swapping them puts the pointer subscriptions back inside the function
-# that cannot run until `document.body` exists. A `mousemove` dispatched
-# before that is then delivered to no handler, and no later event replaces it:
-# measured against `tests/fixture` with `goto(wait_until="commit")` and a raw
-# `page.mouse.move`, Chromium 147 placed the dot in 2 takes of 4 and left it
-# off screen in the other 2.
-#
-# Written out in full rather than as a one-line edit because there is no
-# one-line version: the fix *is* the order, and an injection that only looked
-# like it would leave the suite grading a script nobody ships.
-_CURSOR_LISTENS_AT_DOCUMENT_START = """\
-  const dot = document.createElement('div');
-  dot.id = '__demo_cursor';
-  let atX = 0, atY = 0;
-  window.addEventListener('mousemove', (e) => {
-    if (e.clientX === atX && e.clientY === atY) return;
-    atX = e.clientX;
-    atY = e.clientY;
-    dot.style.left = e.clientX + 'px';
-    dot.style.top = e.clientY + 'px';
-  }, true);
-  window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
-  window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);
-  const attach = () => {
-    if (document.getElementById('__demo_cursor')) return;
-    const style = document.createElement('style');
-    style.textContent = `
-      #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;
-        height: 18px; border-radius: 50%; background: rgba(__ACCENT__,.45);
-        border: 2px solid rgba(__ACCENT__,.95); pointer-events: none;
-        z-index: 2147483647; transform: translate(-50%,-50%);
-        transition: width .1s, height .1s; }
-      #__demo_cursor.__down { width: 12px; height: 12px; }
-    `;
-    document.head.appendChild(style);
-    document.body.appendChild(dot);"""
-
-_CURSOR_LISTENS_AT_DOMCONTENTLOADED = """\
-  const attach = () => {
-    if (document.getElementById('__demo_cursor')) return;
-    const style = document.createElement('style');
-    style.textContent = `
-      #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;
-        height: 18px; border-radius: 50%; background: rgba(__ACCENT__,.45);
-        border: 2px solid rgba(__ACCENT__,.95); pointer-events: none;
-        z-index: 2147483647; transform: translate(-50%,-50%);
-        transition: width .1s, height .1s; }
-      #__demo_cursor.__down { width: 12px; height: 12px; }
-    `;
-    document.head.appendChild(style);
-    const dot = document.createElement('div');
-    dot.id = '__demo_cursor';
-    document.body.appendChild(dot);
-    let atX = 0, atY = 0;
-    window.addEventListener('mousemove', (e) => {
-      if (e.clientX === atX && e.clientY === atY) return;
-      atX = e.clientX;
-      atY = e.clientY;
-      dot.style.left = e.clientX + 'px';
-      dot.style.top = e.clientY + 'px';
-    }, true);
-    window.addEventListener('mousedown', () => dot.classList.add('__down'), true);
-    window.addEventListener('mouseup', () => dot.classList.remove('__down'), true);"""
-
 # (name, module, exact text to replace, replacement, tests that must then fail)
 INJECTIONS = [
     # -- the pixel loop's cache key (tests/pixel, #350) -----------------------
@@ -13959,121 +13448,24 @@ INJECTIONS = [
         ],
     ),
     (
-        # Issue #134: the caption bar dies with the document, the recorder's
-        # copy of it does not, and every later beat reports a line that is not
-        # on screen into a committed timeline.
-        "a document load stops invalidating the caption",
+        # #134's clearing machinery grown back: a document-load subscription
+        # that clears the recorder's caption again. On the wrapper path the
+        # line is still on screen — the wrapper document never navigated —
+        # so every beat after the load would report an empty caption over
+        # pixels that show one, which is the old lie pointing the other way
+        # (#361).
+        "the caption-clearing document-load subscription grows back",
         "web.py",
-        '        lost, self._caption = self._caption, ""',
-        "        lost = self._caption  # the recorder keeps what the document took",
+        '        page.on("framenavigated", self._note_navigation)',
+        '        page.on("framenavigated", self._note_navigation)\n'
+        "        page.on(\n"
+        '            "domcontentloaded",\n'
+        '            lambda page: setattr(self, "_caption", ""),\n'
+        "        )",
         [
-            "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
-            "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
-            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat",
-        ],
-    ),
-    (
-        # Issue #214: the clear is right and lands one beat too late. A click
-        # returns after `framenavigated` alone, so the beat that follows it
-        # inherits a caption the document event — still in the connection —
-        # is about to take away.
-        "a beat stops asking the page before it stamps the line it inherited",
-        "core.py",
-        "            self._pump_events(force=True)\n"
-        '            record["caption"] = self._caption\n',
-        "            pass  # the beat keeps whatever line it inherited\n",
-        [
-            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat"
-        ],
-    ),
-    (
-        # The `force` on its own, which is the whole difference between the
-        # pump landing and not: `click()` holds for 0.4 s before it clicks, so
-        # the interval `_idle` pumps on is a millisecond old when the next
-        # beat opens and would skip exactly the beat that needed it.
-        "the pump at beat open goes back to being rate-limited",
-        "core.py",
-        "            self._pump_events(force=True)",
-        "            self._pump_events()",
-        [
-            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat"
-        ],
-    ),
-    (
-        # The measured fact the whole of #214 rests on, graded from its own
-        # side: a click returns *before* the document event. A table that said
-        # otherwise would leave the deferral in the test delivering nothing
-        # late, and "the beat after the click is clean" would be graded
-        # against a caption that was already gone when the beat opened.
-        "a click is filed as having delivered the document event before it returned",
-        "tests/unit",
-        '        "link_click",\n'
-        "        'click(\"#link\") on an <a href> to another document',\n"
-        '        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],\n'
-        "        1,\n",
-        '        "link_click",\n'
-        "        'click(\"#link\") on an <a href> to another document',\n"
-        '        [("framenavigated", _MAIN), ("domcontentloaded", _PAGE), ("load", _PAGE)],\n'
-        "        2,\n",
-        [
-            "MeasuredNavigations.test_a_load_the_verb_did_not_wait_for_reaches_the_log_in_the_same_beat"
-        ],
-    ),
-    (
-        # The handler can be right and reachable by nothing.
-        "nothing subscribes to the document being replaced",
-        "web.py",
-        '        page.on("domcontentloaded", self._note_document_replaced)',
-        "        pass  # no subscription",
-        # Not the same-document sweep: `framenavigated` is still subscribed,
-        # so its control (`replay` reached a handler) still holds and the
-        # caption still survives. Listing it here would be a claim this
-        # injection does not support.
-        [
-            "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
-            "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
-        ],
-    ),
-    (
-        # **Issue #179's injection.** The event name is the whole decision,
-        # and until the streams in `NAVIGATIONS` were measured off a browser
-        # nothing here could tell the two apart: `CaptionTruth` fires the
-        # event it is unsure about, so it goes green against either name.
-        # This is caught now because a real Chromium sends `framenavigated`
-        # for a pushState route change and no document event at all, so the
-        # clear lands on a caption still on screen.
-        "the caption clear hangs off the navigation signal, not the document one",
-        "web.py",
-        '        page.on("domcontentloaded", self._note_document_replaced)',
-        '        page.on("framenavigated", self._note_document_replaced)',
-        # Deliberately *not* the document-load sweep: every stream that
-        # replaces a document carries a `framenavigated` too, so the caption
-        # still clears there and that sweep stays green. Only the
-        # same-document half can tell the two names apart, which is the whole
-        # reason it had to be measured.
-        [
-            "MeasuredNavigations.test_every_measured_same_document_navigation_keeps_the_line",
+            "CaptionTruth.test_a_beat_after_a_document_load_still_reports_the_line",
+            "MeasuredNavigations.test_no_measured_way_of_leaving_a_page_touches_the_beat_log",
             "WatchedEvents.test_the_web_recorder_only_adds_to_what_the_base_watches",
-        ],
-    ),
-    (
-        # The measured table graded from its own side. Each sweep loops over
-        # whichever rows carry its flag, so a row that changed sides would
-        # quietly move out of one sweep and into the other — and the SPA rows
-        # are the half that decides the event name.
-        "a same-document route change is filed as a document replacement",
-        "tests/unit",
-        '        "history.pushState to a new route, no document loaded",\n'
-        '        [("framenavigated", _MAIN)],\n'
-        "        1,\n"
-        "        True,",
-        '        "history.pushState to a new route, no document loaded",\n'
-        '        [("framenavigated", _MAIN)],\n'
-        "        1,\n"
-        "        False,",
-        [
-            "MeasuredNavigations.test_every_measured_document_load_takes_the_line_off_the_beat_log",
-            "MeasuredNavigations.test_the_measured_table_covers_every_way_issue_179_names",
         ],
     ),
     (
@@ -14092,82 +13484,25 @@ INJECTIONS = [
     ),
     # -- the line the load took away (issue #180) --------------------------
     (
-        # #180 itself: the clear on its own leaves a true, mute timeline.
-        "a caption lost to a page load goes unrecorded",
-        "web.py",
-        '        self._note_issue(\n            "caption_lost",',
-        '        return\n        self._note_issue(\n            "caption_lost",',
-        [
-            "CaptionLost.test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem",
-            "CaptionLost.test_the_lost_line_reaches_the_document_a_reviewer_reads",
-        ],
-    ),
-    (
-        # The other direction: every take opens with a document load, so a
-        # recorder that logged one per load buries the real one.
-        "every document load records a lost caption, including the ones with none",
-        "web.py",
-        "        if not lost:\n",
-        "        if False:\n",
-        [
-            "CaptionLost.test_a_load_with_no_caption_up_records_nothing",
-            "CaptionLost.test_a_second_load_does_not_report_the_line_a_second_time",
-        ],
-    ),
-    (
-        # The Issues section renders `message` and nothing else, so an issue
-        # whose extra keys carry the line and whose message does not is one a
-        # reviewer reading timeline.md cannot act on.
-        "the recorded problem stops naming the line that was lost",
-        "web.py",
-        '            f"{lost!r}, so the line left the screen — every beat after this "',
-        '            f"so the line left the screen — every beat after this "',
-        [
-            "CaptionLost.test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem",
-            "CaptionLost.test_the_lost_line_reaches_the_document_a_reviewer_reads",
-        ],
-    ),
-    (
-        "the recorded problem stops naming the document that replaced it",
-        "web.py",
-        '            f"a new document at {url} replaced the one holding the caption "',
-        '            f"a new document replaced the one holding the caption "',
-        [
-            "CaptionLost.test_the_line_a_load_took_off_the_screen_is_recorded_as_a_problem",
-            "CaptionLost.test_the_lost_line_reaches_the_document_a_reviewer_reads",
-        ],
-    ),
-    (
-        # The exception path, which is where a guard usually is not tested:
-        # the URL is read off a page in the middle of replacing itself, and a
-        # diagnostic that threw there would surface inside an unrelated
-        # Playwright call and take the whole recording with it.
-        "reading the new document's URL is allowed to throw out of the callback",
-        "web.py",
-        "        try:\n"
-        "            url = page.url\n"
-        "        except Exception:  # noqa: BLE001 - a page dying still lost the caption\n"
-        '            url = "(unknown)"\n',
-        "        url = page.url\n",
-        ["CaptionLost.test_a_page_too_far_gone_to_name_still_reports_the_line"],
-    ),
-    (
-        # A kind the package does not publish fails `check_issues` on the
-        # artifact instead of on the defect, which is a worse bug report.
-        "the new kind is not one the timeline contract declares",
+        # A committed timeline's vocabulary unpublished out from under it:
+        # `check_issues` in tests/smoke refuses a kind outside the tuple, so
+        # a pre-#361 timeline carrying the kind would fail on the artifact
+        # instead of reading as the record it is.
+        "the retired kind is unpublished out from under committed timelines",
         "timeline.py",
         '    "caption_lost",     # a page load took the caption bar off the screen\n',
         "",
-        ["CaptionLost.test_the_kind_is_one_the_package_publishes"],
+        ["CaptionLostRetired.test_the_kind_stays_published_for_committed_timelines"],
     ),
     (
-        # A storyboard mistake made into a verdict on the app: every demo that
-        # navigates away from a captioned screen stops recording under strict.
+        # A storyboard-era mistake made into a verdict on the app,
+        # retroactively: stitch() carries old segments' issues into merged
+        # demos, and strict reads the kind tuple.
         "losing a caption becomes something strict mode refuses a take over",
         "timeline.py",
         'STRICT_KINDS = ("console_error", "page_error", "nonzero_exit")',
         'STRICT_KINDS = ("console_error", "page_error", "nonzero_exit", "caption_lost")',
-        ["CaptionLost.test_losing_a_caption_does_not_fail_a_strict_take"],
+        ["CaptionLostRetired.test_the_kind_stays_published_for_committed_timelines"],
     ),
     (
         # …and the subscription can be right and never made, because
@@ -14189,7 +13524,7 @@ INJECTIONS = [
         "        pass  # the medium's own subscriptions never happen",
         [
             "WatchedEvents.test_the_web_recorder_only_adds_to_what_the_base_watches",
-            "CaptionTruth.test_a_beat_after_a_document_load_reports_no_caption",
+            "MeasuredNavigations.test_no_measured_way_of_leaving_a_page_touches_the_beat_log",
         ],
     ),
     (
@@ -14321,100 +13656,50 @@ INJECTIONS = [
         '        self._navigated = True\n        self._caption = ""',
         [
             "CaptionTruth.test_an_spa_route_change_keeps_the_caption",
-            "MeasuredNavigations.test_every_measured_same_document_navigation_keeps_the_line",
+            "MeasuredNavigations.test_no_measured_way_of_leaving_a_page_touches_the_beat_log",
         ],
     ),
     (
-        # Issue #186 exactly as it shipped before it was fixed: every mousemove
-        # moves the dot, including the one Chromium dispatches at load, so a
-        # deterministic take's opening stills are a coin flip.
-        "the cursor dot follows every mousemove again",
+        # The dot left behind by the glide: the pointer moves through
+        # Playwright and the wrapper document's dot is never told. Every take
+        # then shows a parked dot while the pointer clicks elsewhere — the
+        # pixel form is tests/pixel's cursor-parked golden; this is the
+        # browser-free half of the same drive.
+        "the glide moves the pointer and never the dot",
         "web.py",
-        "    if (e.clientX === atX && e.clientY === atY) return;\n",
-        "",
-        [
-            "CursorMotion.test_the_rule_is_one_condition_that_reads_the_event",
-            "CursorMotion.test_chromiums_load_time_hover_event_does_not_move_the_dot",
-            "CursorMotion.test_nothing_moves_the_dot_except_through_the_rule",
-        ],
+        "            self.page.evaluate(\n"
+        '                "([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi]\n'
+        "            )",
+        "            pass  # the dot is never told",
+        ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
     ),
     (
-        # Issue #202: the rule as #194 wrote it, reading the browser's movement
-        # delta. Green on the Chromium CI installs, and on Chromium 147 it
-        # throws away the storyboard's own park — so a take recorded there has
-        # no cursor in it at all, which no still comparison notices because it
-        # makes every take agree.
-        "the cursor rule reads the browser's movement delta again",
+        # The dot commanded somewhere the pointer is not — #202's class with
+        # the event machinery gone: the recorder is the only writer of both,
+        # so an offset here is the one way left for them to disagree.
+        "the dot is commanded off the pointer's own path",
         "web.py",
-        "if (e.clientX === atX && e.clientY === atY) return;",
-        "if (e.movementX === 0 && e.movementY === 0) return;",
-        [
-            "CursorMotion.test_the_rule_is_one_condition_that_reads_the_event",
-            "CursorMotion.test_the_storyboards_own_park_moves_the_dot_on_every_engine",
-            "CursorMotion.test_both_orders_of_the_load_event_leave_the_dot_in_one_place",
-        ],
+        '                "([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi]',
+        '                "([x, y]) => window.__demoChromeCursor(x, y)", [xi + 30, yi]',
+        ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
     ),
     (
-        # The rule pointing the other way, and the reason it is `&&`: a guard
-        # that drops a move repeating *either* coordinate freezes the dot for
-        # every horizontal glide, which no still comparison would ever notice
-        # because it makes takes agree.
-        "the cursor rule drops a move that is along one axis",
+        # The seed forgotten: every glide sweeps in from the origin, which is
+        # motion the storyboard never asked for, on every move of every take.
+        "a glide forgets where the pointer last was",
         "web.py",
-        "if (e.clientX === atX && e.clientY === atY) return;",
-        "if (e.clientX === atX || e.clientY === atY) return;",
-        ["CursorMotion.test_every_real_move_moves_the_dot"],
+        "        sx, sy = self._cursor_at",
+        "        sx, sy = (0.0, 0.0)",
+        ["CursorDrive.test_a_second_glide_starts_from_the_last_commanded_position"],
     ),
     (
-        # The seed, which is the whole of why the load-time event can be
-        # ignored: at any position other than where the pointer starts, that
-        # event reports a "new" position and #186 is back.
-        "the overlay starts out believing the pointer is somewhere else",
+        # The squeeze inverted: the dot enlarges on press and shrinks at
+        # rest, so every click reads backwards.
+        "the press squeeze runs backwards",
         "web.py",
-        "  let atX = 0, atY = 0;",
-        "  let atX = -1, atY = -1;",
-        [
-            "CursorMotion.test_chromiums_load_time_hover_event_does_not_move_the_dot",
-            "CursorMotion.test_the_remembered_position_is_where_the_pointer_starts",
-        ],
-    ),
-    (
-        # Issue #203: the overlay does not start listening until the document
-        # has a body, so the pointer move a storyboard makes before that is
-        # heard by nothing. Silent everywhere else — the rule is unchanged, the
-        # seed is unchanged, and a take recorded this way looks exactly like a
-        # take whose storyboard never moved the pointer.
-        "the cursor overlay waits for the document before it listens",
-        "web.py",
-        _CURSOR_LISTENS_AT_DOCUMENT_START,
-        _CURSOR_LISTENS_AT_DOMCONTENTLOADED,
-        [
-            "CursorMotion.test_the_pointer_is_listened_for_before_the_document_has_loaded",
-        ],
-    ),
-    (
-        # The control under the assertion above, and a real defect on its own:
-        # a dot that is built and positioned but never inserted is no cursor at
-        # all, in every take. It is also what an extraction that returned the
-        # wrong slice of the script would look like.
-        "the dot is built and positioned but never put on the page",
-        "web.py",
-        "    document.body.appendChild(dot);\n",
-        "",
-        [
-            "CursorMotion.test_what_the_overlay_defers_to_domcontentloaded_is_the_insertion",
-        ],
-    ),
-    (
-        # The state update, which the harness models rather than extracts: if
-        # the script stopped running it, `dot_trail` would go on simulating a
-        # rule the take no longer ships, and every assertion above would grade
-        # a fiction.
-        "the overlay never records where it last saw the pointer",
-        "web.py",
-        "    atX = e.clientX;\n    atY = e.clientY;\n",
-        "",
-        ["CursorMotion.test_nothing_moves_the_dot_except_through_the_rule"],
+        '        fn = "__demoChromeCursorDown" if down else "__demoChromeCursorUp"',
+        '        fn = "__demoChromeCursorUp" if down else "__demoChromeCursorDown"',
+        ["CursorDrive.test_the_dot_squeezes_on_press_and_releases_after"],
     ),
     # -- the scored region (issue #135) ------------------------------------
     #
@@ -15133,51 +14418,20 @@ INJECTIONS = [
         ["CriterionHold.test_the_criterion_beat_covers_the_whole_spoken_line"],
     ),
     (
-        # **Issue #291, restored.** The web recorder takes the card the terminal
-        # recorder needs, and every artifact of the take stays correct: the
-        # element, the beat, the aria snapshot and the coverage row are all
-        # right, and the video shows what a viewer read as a terminal window.
-        # Injected at the import rather than at the assignment, so the module
-        # still imports: a `NameError` would fail every test that builds a web
-        # recorder, and the entry would be graded by an exception instead of by
-        # the assertions it names.
-        "a web take is given the terminal's card",
-        "web.py",
-        "from .core import (\n"
-        "    INTERLUDE_CSS_WEB,\n"
-        "    WEB_WINDOW_BODY,\n"
-        "    _beat_verb,\n"
-        "    _DemoBase,\n"
-        "    _env,\n"
-        "    _env_flag,\n"
-        ")",
-        "from .core import (  # noqa: I001\n"
-        "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
-        "    WEB_WINDOW_BODY,\n"
-        "    _beat_verb,\n"
-        "    _DemoBase,\n"
-        "    _env,\n"
-        "    _env_flag,\n"
-        ")",
-        [
-            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
-            "InterludePalette.test_a_web_take_does_not_raise_the_terminals_card",
-            "InterludePalette."
-            "test_the_web_card_is_not_painted_like_the_skills_terminal_widgets",
-        ],
-    ),
-    (
-        # The dispatch removed while both palettes stay in the file: the fix
-        # looks present at every site a reader would check, and no take reaches
-        # the web one. This is what makes the medium tests above readings about
-        # a recorder rather than about a constant.
-        "the card is chosen once for every medium instead of per take",
+        # **#291 wearing #361's clothes.** The wrapper document ships the
+        # card element, so core's `_INTERLUDE_JS` — which still carries the
+        # terminal stylesheet — must only ever find and toggle it. Drop the
+        # ask-the-page half and the script styles a fresh full-viewport
+        # element on every interlude: the web card repaints as a
+        # terminal-black field over the whole chrome.
+        "the interlude script stops asking the page before it builds a card",
         "core.py",
-        '            "__CSS__", self._interlude_css',
-        '            "__CSS__", INTERLUDE_CSS_TERMINAL',
+        "window.__demoInterlude = (text) => {\n"
+        "  let el = document.getElementById('__ID__');",
+        "window.__demoInterlude = (text) => {\n  let el = null;",
         [
-            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
-            "InterludePalette.test_a_web_take_does_not_raise_the_terminals_card",
+            "InterludePalette."
+            "test_the_base_stylesheet_cannot_paint_where_the_card_already_exists",
         ],
     ),
     (
@@ -15209,94 +14463,44 @@ INJECTIONS = [
         ],
     ),
     (
-        # **The card's compensation moved by one level, and every layer of the
-        # render still agrees.** `#181727` arrives in `demo.mp4` at
-        # `(24, 21, 38)` where `#181726` arrives at `(24, 21, 36)`, so both are
-        # inside `tests/smoke`'s bar against the window and the pixel check
-        # cannot see the difference. What can is the hand-written palette in
-        # this file — and that is the whole job of the pin, now that the value
-        # it holds is a measured constant rather than a colour anyone can
-        # re-derive by reading the window's.
-        "the card's compensated colour moves by one level",
-        "core.py",
-        'WEB_CARD_BODY = "#181726"',
-        'WEB_CARD_BODY = "#181727"',
-        [
-            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
-        ],
-    ),
-    (
-        # **The window is repainted and the card's compensation is left
-        # behind.** The card no longer follows this constant — it is measured
-        # against it — so this moves one of the two and not both. `tests/smoke`
-        # catches it in pixels, at 32 levels; what catches it here, in 0.2 s, is
-        # that `WEB_WINDOW_BODY` is pinned to a `WINDOW_BODY` written out by
-        # hand. Without that pin the compensated card would sit in the file
-        # looking deliberate while the thing it compensates for had moved.
-        "the window body is repainted out from under the card's compensation",
-        "core.py",
-        'WEB_WINDOW_BODY = "#181825"',
-        'WEB_WINDOW_BODY = "#050505"',
-        [
-            "InterludePalette.test_the_window_body_the_card_is_compensated_against_is_the_one_drawn",
-        ],
-    ),
-    (
-        # The window painted from a literal again, with the shared constant
-        # left in the file and still correct. Every value a reader would check
-        # agrees; the two are simply no longer the same value, which is how
-        # they drifted apart in the first place.
-        "the window frame is painted from a literal, not the shared constant",
-        "web.py",
-        '            .replace("__WINBG__", WEB_WINDOW_BODY)',
-        '            .replace("__WINBG__", "#181825")',
-        [
-            "InterludePalette.test_the_window_body_the_card_is_compensated_against_is_the_one_drawn",
-        ],
-    ),
-    (
         # A border put back on the card. This is #297's second rejected
-        # candidate: the field matches the window, the dispatch is right, and
-        # the card draws an edge of its own between itself and the recorder's
-        # pad — the "additional edge of a third colour" the reviewer refused.
-        "the card draws an edge of its own around the field",
+        # candidate: the field matches the window, and the card draws an edge
+        # of its own between itself and the recorder's pad — the "additional
+        # edge of a third colour" the reviewer refused.
+        "the terminal card draws an edge of its own around the field",
         "core.py",
-        '    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"',
-        '    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"\n'
+        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"',
+        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"\n'
         '    + " border: 18px solid #b45309;"',
         [
-            "InterludePalette.test_the_web_card_is_one_colour_and_draws_no_edge_of_its_own",
+            "InterludePalette.test_the_terminal_card_is_opaque_and_covers_the_frame",
         ],
     ),
     (
-        # A card that lets the app show through. The colour is right, the
-        # dispatch is right, and reference/limits.md's account of what the
-        # picture check can see — which rests on this card being opaque — stops
-        # being true of a web take.
-        "the web card is a scrim over the app rather than a card",
+        # A card that lets the app show through. The colour is right, and
+        # reference/limits.md's account of what the picture check can see —
+        # which rests on this card being opaque — stops being true of a
+        # terminal take.
+        "the terminal card is a scrim over the app rather than a card",
         "core.py",
-        '    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"',
-        '    _INTERLUDE_LAYOUT + " background: rgba(24,23,38,.72); color: #f2f0ec;"',
+        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"',
+        '    _INTERLUDE_LAYOUT + " background: rgba(28,26,23,.72); color: #f7f4ee;"',
         [
-            "InterludePalette."
-            "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",
-            "InterludePalette.test_a_web_take_raises_the_palette_smoke_grades_in_pixels",
+            "InterludePalette.test_the_terminal_card_is_opaque_and_covers_the_frame",
         ],
     ),
     (
-        # The card's corners rounded off the app rect. `border-radius` clips the
-        # background of an `inset: 0` element, so the four corners of the app
-        # rect stop being painted and the app shows through them while the card
-        # is up — full-bleed lost to a styling flourish, with the colour and the
-        # dispatch both correct.
-        "the card's outer corners are rounded off the app rect",
+        # The card's corners rounded off the frame. `border-radius` clips the
+        # background of an `inset: 0` element, so the four corners stop being
+        # painted and the app shows through them while the card is up —
+        # full-bleed lost to a styling flourish, with the colour correct.
+        "the terminal card's outer corners are rounded off the frame",
         "core.py",
-        '    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"',
-        '    _INTERLUDE_LAYOUT + f" background: {WEB_CARD_BODY}; color: #f2f0ec;"\n'
+        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"',
+        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"\n'
         '    + " border-radius: 14px;"',
         [
-            "InterludePalette."
-            "test_both_cards_are_opaque_and_cover_the_frame_above_the_caption",
+            "InterludePalette.test_the_terminal_card_is_opaque_and_covers_the_frame",
         ],
     ),
     (
@@ -15905,16 +15109,15 @@ INJECTIONS = [
         ],
     ),
     (
-        # The composite's caption compensation inherited by the path that has
-        # no composite: a wrapper take is recorded at true pixel size, so
-        # 34px in the band is visibly oversized, and nothing else pins it.
-        "a wrapper take inherits the composite's 34px caption compensation",
+        # The deleted composite's caption compensation grown back: the page
+        # is recorded at true pixel size, so 34px in the band is visibly
+        # oversized, and nothing else pins it.
+        "the web take grows the composite's 34px caption compensation back",
         "web.py",
-        "        if not self._wrapper:\n"
-        "            # The recording is composited into a window and scaled down\n",
-        "        if True:\n"
-        "            # The recording is composited into a window and scaled down\n",
-        ["WrapperChrome.test_a_wrapper_take_keeps_the_base_caption_font"],
+        "        # What spotlight() is currently pointing at, which is what a beat's",
+        "        self._caption_font_px = 34\n"
+        "        # What spotlight() is currently pointing at, which is what a beat's",
+        ["WrapperChrome.test_a_web_take_keeps_the_base_caption_font"],
     ),
     (
         # The PR #366 review's blocking finding, restored: the band shaves a
@@ -15982,14 +15185,11 @@ INJECTIONS = [
         # The hold never registered: the wrapper take opens on the slot's
         # white canvas. The pixel form is smoke's check_wrapper_opening; this
         # is the browser-free half of the same seam.
-        "the wrapper take registers no opening-hold init script",
+        "the web take registers no opening-hold init script",
         "web.py",
-        "            context.add_init_script(\n                opening_hold_script(",
-        "            _unused = (\n                opening_hold_script(",
-        [
-            "WrapperChrome."
-            "test_a_wrapper_take_registers_the_hold_script_and_a_legacy_take_none"
-        ],
+        "        context.add_init_script(\n            opening_hold_script(",
+        "        _unused = (\n            opening_hold_script(",
+        ["WrapperChrome.test_a_web_take_registers_the_opening_hold_script"],
     ),
     (
         # The reveal never runs: the first content beat lands and the viewer
@@ -15997,47 +15197,111 @@ INJECTIONS = [
         # opening cover.
         "no goto ever clears the opening hold",
         "web.py",
-        "        if self._wrapper and not self._hold_cleared:",
-        "        if self._wrapper and False:",
+        "        if not self._hold_cleared:",
+        "        if False:",
         [
             "WrapperChrome."
             "test_the_first_goto_clears_the_opening_hold_and_only_the_first"
         ],
     ),
     (
-        # The once-guard dropped: every wrapper goto re-clears chrome state
-        # it does not own, and a legacy-shaped reading of the same line —
-        # `if not self._hold_cleared:` alone — would clear it on the
-        # composite path too.
+        # The once-guard dropped: every goto re-clears chrome state it does
+        # not own, and re-stamps the hold-clear instant onto beats recorded
+        # long after the hold came down — which would move the review
+        # sheet's opening-hold note onto frames that show the app.
         "every goto re-clears the opening hold",
         "web.py",
-        "        if self._wrapper and not self._hold_cleared:",
-        "        if self._wrapper:",
+        "        if not self._hold_cleared:",
+        "        if True:",
         [
             "WrapperChrome."
-            "test_the_first_goto_clears_the_opening_hold_and_only_the_first"
+            "test_the_first_goto_clears_the_opening_hold_and_only_the_first",
+            "WrapperChrome."
+            "test_the_hold_clearing_goto_stamps_the_instant_on_its_own_beat",
         ],
     ),
     (
-        # ...and the other half of the same line: the wrapper guard dropped,
-        # so a legacy goto evaluates wrapper chrome that is not in its page.
-        "a legacy goto clears a hold its page never had",
+        # The segment pattern's card left over the app: SKILL.md says
+        # interlude(...) then goto(), and a full load used to destroy the
+        # card with the app's document. Drop the deliberate clear and every
+        # such take records the card over the app to its end, with only an
+        # end-of-take warning to say so.
+        "a goto leaves the recorder's cards up over the app",
         "web.py",
-        "        if self._wrapper and not self._hold_cleared:",
-        "        if not self._hold_cleared:",
-        ["WrapperChrome.test_a_legacy_goto_never_touches_the_hold"],
+        "        self.page.evaluate(\n"
+        "            \"() => { window.__demoInterlude(''); "
+        "window.__demoBridge(''); }\"\n"
+        "        )",
+        "        pass  # the cards stay up over the app",
+        ["WrapperChrome.test_every_goto_takes_the_recorders_cards_down"],
     ),
     (
-        # The #134 listener re-subscribed on the wrapper path: one engine
-        # bump in event routing away from recording a caption_lost that
-        # cannot happen — the timeline claiming a loss the band's pixels
-        # disprove (#360).
-        "the wrapper take listens for a document replacement again",
+        # The sheet's note reads the instant off the beat (frames.py, #361);
+        # a goto that clears the hold and writes nothing down leaves the
+        # first review frame a flat dark window with nothing anywhere saying
+        # it is deliberate — the confusion the note exists to end.
+        "the hold-clearing goto stops writing the instant on its beat",
         "web.py",
-        "        if not self._wrapper:\n"
-        '            page.on("domcontentloaded", self._note_document_replaced)',
-        '        page.on("domcontentloaded", self._note_document_replaced)',
-        ["WrapperChrome.test_a_wrapper_take_does_not_listen_for_a_replaced_document"],
+        '                self._beats[-1]["opening_hold_until"] = round(',
+        "                _unwritten = round(",
+        [
+            "WrapperChrome."
+            "test_the_hold_clearing_goto_stamps_the_instant_on_its_own_beat",
+        ],
+    ),
+    (
+        # The #134 listener re-subscribed: one engine bump in event routing
+        # away from clearing a caption that is still on screen — the
+        # timeline claiming a loss the band's pixels disprove (#360).
+        "the web take listens for a document replacement again",
+        "web.py",
+        '        page.on("framenavigated", self._note_navigation)',
+        '        page.on("framenavigated", self._note_navigation)\n'
+        '        page.on("domcontentloaded", self._note_navigation)',
+        ["WrapperChrome.test_a_web_take_does_not_listen_for_a_replaced_document"],
+    ),
+    # -- the review sheet's opening-hold note (#361) -------------------------
+    (
+        # The note dropped whole: the manifest stops carrying the hold and
+        # the sheet stops naming the frames cut inside it, so the first
+        # goto's flat dark frame reads as a failed load again.
+        "the sheet stops naming the frames cut inside the opening hold",
+        "frames.py",
+        '    manifest["opening_hold"] = holds',
+        '    manifest["opening_hold"] = []',
+        [
+            "OpeningHoldOnTheSheet."
+            "test_the_frames_cut_inside_the_hold_are_named_on_the_sheet",
+            "OpeningHoldOnTheSheet."
+            "test_a_merged_sheet_scopes_each_hold_to_its_own_segment",
+        ],
+    ),
+    (
+        # The over-reporting direction: every kept frame swept into the note
+        # whatever its segment, so a merged sheet names part one's frames as
+        # under part two's hold — a confident wrong caption in miniature.
+        "the hold note sweeps in frames from other segments",
+        "frames.py",
+        '            and by_index.get(int(frame["beat"]), {}).get("segment")\n'
+        '            == hold_beat.get("segment")',
+        "            and True",
+        [
+            "OpeningHoldOnTheSheet."
+            "test_a_merged_sheet_scopes_each_hold_to_its_own_segment",
+        ],
+    ),
+    (
+        # stitch() forgetting to shift the instant with its beat: part two's
+        # hold note then points at the merged video's opening seconds, which
+        # are part one's frames.
+        "a merged timeline keeps the hold instant on the segment's own clock",
+        "stitching.py",
+        '            if "opening_hold_until" in merged:\n'
+        '                merged["opening_hold_until"] = _shift(\n'
+        '                    beat.get("opening_hold_until"), offset\n'
+        "                )",
+        "            pass",
+        ["StitchedHold.test_the_hold_instant_is_shifted_with_its_beat"],
     ),
 ]
 

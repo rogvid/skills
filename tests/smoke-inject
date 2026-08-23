@@ -375,7 +375,7 @@ INJECTIONS = [
         sites=("check_coverage",),
         must_contain=(
             "The card reads the criteria map so that a second wording",
-            "the document the recorder was driving never had those",
+            "the screen the recorder was driving never showed those words",
         ),
     ),
     Injection(
@@ -389,7 +389,7 @@ INJECTIONS = [
         new="            pass",
         arm="--coverage-only",
         sites=("check_coverage",),
-        must_contain=("the document the recorder was driving never had those",),
+        must_contain=("the screen the recorder was driving never showed those words",),
     ),
     Injection(
         name="the card claims nothing, so coverage never lists the clause it showed",
@@ -441,110 +441,50 @@ INJECTIONS = [
         must_contain=("states a finding about unclaimed criteria",),
     ),
     # -- the card is the window's own colour, in demo.mp4 (issue #291) --------
-    #
-    # Four entries against the two claims in the one assertion here that reads
-    # *pixels* out of the encoded frame. `tests/unit` grades the dispatch —
-    # which stylesheet each medium hands the page — at 0.2 s an injection; what
-    # it cannot see is what the composite did with it, which is the half a
-    # viewer meets, and after #301 it is the *only* half that can say whether
-    # the card and the window are one colour on screen.
-    #
-    # The first entry is the defect as it shipped: a terminal card on a web
-    # take, caught as a wrong *colour* at 16 levels against a bar of 6. The
-    # second is a card dispatched perfectly and never painted, at 214. The last
-    # two carry the claim that the card and the window body agree in the
-    # encoded frame, one from each side — the frame repainted under a card that
-    # is exactly what it should be, and the card's encoder compensation
-    # removed. Note what the second of those means for the bar next door: the
-    # uncompensated card is 6 levels off its own declared colour, which
-    # `CARD_RGB_TOLERANCE` lets through at exactly the bound, so the entry is
-    # caught by the window reading and by nothing else.
+    # *pixels* out of the encoded frame. `tests/unit` grades the wiring — the
+    # card's rule painting from the `window_body` substitution, the base
+    # stylesheet unable to paint where the chrome ships the element — at
+    # 0.2 s an injection; what it cannot see is what the encoder did with it,
+    # which is the half a viewer meets. Since #361 the card and the window
+    # declare ONE colour on ONE encoder, so the compensated-pair entries died
+    # with `check_criterion_card`: a window repaint carries the card with it
+    # now, deliberately, and is not a defect anything should catch. What is
+    # left to break is the card's own field (a literal instead of the
+    # substitution) and a card that never shows — both read out of demo.mp4
+    # by `check_wrapper_card` on the coverage take.
     Injection(
-        # #291 restored. Injected at the import so the module still loads: a
-        # `NameError` here would fail the arm before it recorded anything, and
-        # the entry would be graded by an exception rather than by the pixels.
-        name="a web take is painted the terminal's card",
-        module="web.py",
-        old="from .core import (\n"
-        "    INTERLUDE_CSS_WEB,\n"
-        "    WEB_WINDOW_BODY,\n"
-        "    _beat_verb,\n"
-        "    _DemoBase,\n"
-        "    _env,\n"
-        "    _env_flag,\n"
-        ")",
-        new="from .core import (  # noqa: I001\n"
-        "    INTERLUDE_CSS_TERMINAL as INTERLUDE_CSS_WEB,\n"
-        "    WEB_WINDOW_BODY,\n"
-        "    _beat_verb,\n"
-        "    _DemoBase,\n"
-        "    _env,\n"
-        "    _env_flag,\n"
-        ")",
+        # #291 wearing new clothes: the card's field repainted off the window
+        # body it must equal — the single declaration replaced by a second,
+        # slightly different one. The same defect the wrapper arm plants; here
+        # it is caught on the coverage take, whose card is the one a real
+        # storyboard raises (#280).
+        name="the coverage take's card is repainted off the window body",
+        module="chrome.py",
+        old="    background: __WINBG__; color: #f2f0ec; z-index: 3; }",
+        new="    background: #202030; color: #f2f0ec; z-index: 3; }",
         arm="--coverage-only",
-        sites=("check_criterion_card",),
-        must_contain=("off the *terminal* card's",),
+        sites=("check_wrapper_card",),
+        must_contain=("the card's field was repainted away from core.WEB_WINDOW_BODY",),
     ),
     Injection(
         # The card raised at zero opacity: the element is in the tree with the
         # right text and the right stylesheet, so the aria snapshot, the beat
         # log and the coverage table are all exactly as they should be, and the
-        # app is what a viewer sees. Every other assertion in this arm passes.
+        # app is what a viewer sees. Injected into the chrome document's own
+        # `__demoInterlude` — the one a wrapper take's criterion() reaches
+        # (chrome.py). Since the check learned to locate the card in the video
+        # before measuring it (the #245 fade-aliasing fix), an invisible card
+        # is caught one step earlier: the only dark stretch overlapping the
+        # logged beat is the 0.6 s opening hold, and the length gate names it
+        # a card that never held. The colour comparison is unreachable — there
+        # is nothing to read the colour of, which is the defect.
         name="the card is built with the right colour and never shown",
-        module="core.py",
-        # The card's own two lines and not the caption bar's: `__demoCaption`
-        # ends in the same pair, so a shorter search string matches twice and
-        # the harness refuses the entry.
-        old="    el.style.cssText = '__CSS__';\n"
-        "    document.body.appendChild(el);\n"
-        "  }\n"
-        "  el.textContent = text;\n"
-        "  el.style.opacity = text ? '1' : '0';",
-        new="    el.style.cssText = '__CSS__';\n"
-        "    document.body.appendChild(el);\n"
-        "  }\n"
-        "  el.textContent = text;\n"
-        "  el.style.opacity = '0';",
+        module="chrome.py",
+        old="    card.style.opacity = text ? '1' : '0';",
+        new="    card.style.opacity = '0';",
         arm="--coverage-only",
-        sites=("check_criterion_card",),
-        must_contain=(" levels off the web card's ",),
-    ),
-    Injection(
-        # **The window is repainted under a card that is exactly right.** This
-        # is the entry #297 had and the round after it deleted with the check it
-        # existed for. It is back because there is a check again: the card's own
-        # colour claim passes here — the strip really is `WEB_CARD_RGB` — and
-        # the *only* thing that fires is the reading that says the card and the
-        # window body are one colour on screen, which is #291's own property.
-        name="the window frame is repainted out from under the card",
-        module="core.py",
-        old='WEB_WINDOW_BODY = "#181825"',
-        new='WEB_WINDOW_BODY = "#050505"',
-        arm="--coverage-only",
-        sites=("check_criterion_card",),
-        must_contain=(
-            "levels apart (bar",
-            "that a viewer cannot tell a web take's card",
-        ),
-    ),
-    Injection(
-        # **The compensation is removed**, which is the third rejected fix
-        # restored: one declared colour for both, the thing a reader expects
-        # "the card is the window's colour" to mean. Every stylesheet is
-        # consistent, `tests/unit` is green, and the card lands 5 levels of blue
-        # off the window in `demo.mp4` because it went through Chromium's VP8
-        # and the window did not (#301). A human found this by sampling a
-        # shipped frame; this is the entry that says a machine can now find it.
-        name="the card drops its encoder compensation and declares the window's colour",
-        module="core.py",
-        old='WEB_CARD_BODY = "#181726"',
-        new='WEB_CARD_BODY = "#181825"',
-        arm="--coverage-only",
-        sites=("check_criterion_card",),
-        must_contain=(
-            "levels apart (bar",
-            "that a viewer cannot tell a web take's card",
-        ),
+        sites=("check_wrapper_card",),
+        must_contain=("the card flashed rather than held",),
     ),
     # -- what strict=True refuses (issue #3), 21 s an entry -------------------
     #
@@ -582,19 +522,19 @@ INJECTIONS = [
     # for the difference it was describing, and 1.07 and 0.98 for the two real
     # breaks below. A number that cannot separate those three grades nothing.
     Injection(
-        # The cause of #185. The recorder's cursor dot follows the pointer, and
-        # a storyboard that never places the pointer gets whatever Chromium's
-        # synthetic mousemove leaves — the origin, eleven takes in twelve under
-        # load, and off-screen the twelfth. The still comparison sees that one
-        # take in twelve; this assertion sees every one of them, which is the
-        # difference between a check and a coin.
-        name="the storyboard leaves the pointer where the race puts it",
-        module="tests/smoke",
-        old="        rec.page.mouse.move(*PARKED_POINTER)",
-        new="        pass  # the pointer is left to the synthetic mousemove",
+        # #185's class, in the only form left to it: the chrome's off-screen
+        # park moved on-screen, so a dot no verb commanded ships in every
+        # still of a storyboard that never touched the pointer. The event
+        # race that used to produce this one take in twelve is structurally
+        # gone (#361 — nothing listens); the DOM check sees a park defect on
+        # every take, which is the difference between a check and a coin.
+        name="the chrome parks the cursor dot on-screen",
+        module="chrome.py",
+        old="  #__demo_cursor { position: fixed; top: -40px; left: -40px; width: 18px;",
+        new="  #__demo_cursor { position: fixed; top: 8px; left: 8px; width: 18px;",
         arm="--determinism-only",
-        sites=("check_parked_pointer",),
-        must_contain=("this storyboard parked the pointer at",),
+        sites=("check_undrawn_pointer",),
+        must_contain=("with no pointer verb having run",),
     ),
     Injection(
         # The claim the byte comparison exists for: a frozen clock. Both takes
@@ -1120,14 +1060,12 @@ INJECTIONS = [
         name="a frame-refused app fails with an error naming no header",
         module="web.py",
         old=(
-            "                if self._wrapper and "
-            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            '                if "ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
             "                    raise RuntimeError(self._frame_refusal(url)) "
             "from exc"
         ),
         new=(
-            "                if self._wrapper and "
-            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            '                if "ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
             "                    pass"
         ),
         arm="--wrapper-only",
@@ -1175,16 +1113,19 @@ INJECTIONS = [
         must_contain=("was not opaque in frame 0",),
     ),
     Injection(
-        # #360's colour claim: the wrapper card's field nudged four levels off
-        # the window body it must equal — the single declared colour replaced
-        # by a second, slightly different one, which is the #291 mismatch a
-        # human once had to spot by eye in a shipped frame. Read out of the
-        # encoded mp4, card strip against window pad, never out of the
-        # declarations (#297's anti-patterns).
-        name="the wrapper card's palette is nudged four levels off the window",
+        # #360's colour claim: the wrapper card's field repainted eight levels
+        # off the window body it must equal — the single declared colour
+        # replaced by a second one, which is the #291 mismatch a human once
+        # had to spot by eye in a shipped frame. Eight levels rather than the
+        # four this entry used to plant: the healthy pair encodes up to 3.8
+        # apart on this box (the bar's own comment has the band), so a
+        # 4-level nudge is inside the encoder's noise and no honest bar can
+        # resolve it. Read out of the encoded mp4, card strip against window
+        # pad, never out of the declarations (#297's anti-patterns).
+        name="the wrapper card's palette is repainted eight levels off the window",
         module="chrome.py",
         old="    background: __WINBG__; color: #f2f0ec; z-index: 3; }",
-        new="    background: #1c1c29; color: #f2f0ec; z-index: 3; }",
+        new="    background: #202030; color: #f2f0ec; z-index: 3; }",
         arm="--wrapper-only",
         sites=("check_wrapper_card",),
         must_contain=("the card's field was repainted away from core.WEB_WINDOW_BODY",),
@@ -1196,11 +1137,10 @@ INJECTIONS = [
         # only the band's pixels across the load can say it left the screen.
         name="a mid-take goto kills the caption band",
         module="web.py",
-        old="        if self._wrapper and not self._hold_cleared:",
+        old="        if not self._hold_cleared:",
         new=(
-            "        if self._wrapper:\n"
-            "            self.page.evaluate(\"() => window.__demoCaption('')\")\n"
-            "        if self._wrapper and not self._hold_cleared:"
+            "        self.page.evaluate(\"() => window.__demoCaption('')\")\n"
+            "        if not self._hold_cleared:"
         ),
         arm="--wrapper-only",
         sites=("check_wrapper_caption_survives",),
@@ -1213,15 +1153,13 @@ INJECTIONS = [
         name="a frame-refused app is recorded as a silently blank demo",
         module="web.py",
         old=(
-            "                if self._wrapper and "
-            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            '                if "ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
             "                    raise RuntimeError(self._frame_refusal(url)) "
             "from exc\n"
             "                if attempt == 2:"
         ),
         new=(
-            "                if self._wrapper and "
-            '"ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
+            '                if "ERR_BLOCKED_BY_RESPONSE" in str(exc):\n'
             "                    break\n"
             "                if attempt == 2:"
         ),

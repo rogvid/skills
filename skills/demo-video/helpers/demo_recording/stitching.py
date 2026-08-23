@@ -484,6 +484,14 @@ def _merged_timeline(
             merged["index"] = len(beats)
             merged["t_start"] = _shift(beat.get("t_start"), offset)
             merged["t_end"] = _shift(beat.get("t_end"), offset)
+            # A wrapper segment's hold-clear instant is a video offset like
+            # the two above, and the merged sheet's opening-hold note reads
+            # it (frames.py) — left unshifted it would name part one's
+            # frames as under part two's hold.
+            if "opening_hold_until" in merged:
+                merged["opening_hold_until"] = _shift(
+                    beat.get("opening_hold_until"), offset
+                )
             beats.append(merged)
         for issue in doc.get("issues") or []:
             moved = dict(issue)

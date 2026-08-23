@@ -126,26 +126,13 @@ no matter what this section does:
   screencast's frame timing is not either. Two takes match in what they *show*,
   not in their checksums — compare the stills, which are lossless PNGs and do
   reproduce exactly. The recorder's own cursor dot used to be the exception
-  ([#186](https://github.com/rogvid/skills/issues/186)): it followed the
-  movement-free `mousemove` Chromium dispatches at load, so a storyboard that
-  never touched the pointer got an 18 px dot in the corner of about half its
-  takes. It is now drawn only once the pointer is somewhere it has not been:
-  the overlay remembers the position it was last told about, starting from
-  `(0, 0)` where a fresh page's pointer sits, and ignores an event that repeats
-  it. One consequence worth knowing: a pointer verb that lands on exactly
-  `(0, 0)` draws no cursor, because "moved to the origin" and "never moved" are
-  the same state as far as the page can tell — move somewhere else first.
-- **Whether a pointer move issued before the document has loaded arrives at
-  all.** The rule above decides *where* the dot is drawn; this decides whether
-  the take has a cursor. Reaching the case takes two `rec.page` escape-hatch
-  calls in combination — `rec.page.goto(url, wait_until="commit")`, and then a
-  raw `rec.page.mouse.move(...)` before that document loads — and Chromium may
-  swallow the move outright: not delivered late, not delivered at the wrong
-  position, never delivered. No rule in the overlay can place a dot for an
-  event the page never sees, so the take records no cursor for its whole
-  length. [#230](https://github.com/rogvid/skills/issues/230) measured 12
-  `Recorder` takes per build against this repo's `tests/fixture` app: the move never reached
-  the document in 3 of 12 takes on Chromium 136, 4 of 12 on 147, 2 of 12 on 149
-  and 7 of 12 on 151. The recorder's own verbs do not reach this — `rec.goto()`
-  waits for `load` before it returns, so `move_to`, `click` and `scroll_to` are
-  never dispatched into a document that is still loading.
+  ([#186](https://github.com/rogvid/skills/issues/186)): it was an in-page
+  overlay following `mousemove` events, and the movement-free one Chromium
+  dispatches at load put an 18 px dot in the corner of about half the takes
+  of a storyboard that never touched the pointer. The class is structurally
+  gone ([#361](https://github.com/rogvid/skills/issues/361)): the dot lives
+  in the recorder's own framed page and moves only when a pointer verb
+  commands it — no listener, so no event the storyboard never sent can move
+  it. The consequence to know: raw `rec.page.mouse` work moves the pointer
+  and not the dot — wrap pointer motion in the verbs (`move_to`, `click`),
+  or accept a take whose pointer acts off-screen.

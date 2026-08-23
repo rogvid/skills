@@ -503,6 +503,37 @@ def beat_frames(out_dir: Path | str, doc: dict | None = None) -> dict:
     manifest["frames"] = kept
     manifest["deduped"] = deduped
     manifest["scene_search_skipped"] = skipped_scenes
+    # The frames cut inside a wrapper take's opening hold (#360, #361). The
+    # web recorder stamps `opening_hold_until` on the beat whose goto cleared
+    # the hold, so any kept frame earlier than that instant shows an opaque
+    # field in the window's own colour where the app will be — most often the
+    # first goto's own mid-point frame. Named on the sheet, because a flat
+    # dark window under a heading that says `goto` reads as a failed load to
+    # anyone not told otherwise. Scoped per segment: a merged sheet carries
+    # one hold per wrapper segment, each shifted with its beat by stitch(),
+    # and a frame from another segment is never under it. The clear instant
+    # rides the same clock correction the frames did.
+    by_index = {
+        int(b["index"]): b
+        for b in beats
+        if isinstance(b.get("index"), int) and not isinstance(b.get("index"), bool)
+    }
+    holds: list[dict] = []
+    for hold_beat in beats:
+        until = hold_beat.get("opening_hold_until")
+        if not isinstance(until, (int, float)) or isinstance(until, bool):
+            continue
+        cleared_at = place(hold_beat, float(until)).at
+        named = [
+            str(frame["file"])
+            for frame in kept
+            if float(frame["t"]) < cleared_at
+            and by_index.get(int(frame["beat"]), {}).get("segment")
+            == hold_beat.get("segment")
+        ]
+        if named:
+            holds.append({"until": round(cleared_at, 3), "frames": named})
+    manifest["opening_hold"] = holds
     # How far the video is *known* to have slid under the beat log, as a floor
     # rather than a correction: a beat that ends after the video does is wall
     # time that never reached the file (issue #18). Measured against the last
@@ -716,6 +747,22 @@ def render_frames_md(manifest: dict) -> str:
             f"frames were looked for**. The sheet is that much thinner than it "
             f"would be on a steady host; nothing is missing from the beat's "
             f"own frame above.",
+            "",
+        ]
+    # The frames cut inside an opening hold — named like everything else this
+    # sheet qualifies, one line per hold. The reader's question is which
+    # frame's flat dark window is deliberate, and a count does not answer it.
+    for hold in manifest.get("opening_hold") or []:
+        named = hold.get("frames") or []
+        names = ", ".join(f"`{_md_cell(name)}`" for name in named)
+        out += [
+            f"{names} {'was' if len(named) == 1 else 'were'} cut inside the "
+            f"take's opening hold: until {float(hold.get('until')):.2f}s the "
+            f"app rect is an opaque field in the window's own colour, up from "
+            f"frame 0 and cleared when the first `goto` had an app to reveal. "
+            f"A flat dark window under "
+            f"{'this heading' if len(named) == 1 else 'these headings'} is "
+            f"the hold, not an app that failed to load.",
             "",
         ]
     # One line per dropped frame, named like everything else this sheet

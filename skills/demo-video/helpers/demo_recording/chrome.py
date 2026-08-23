@@ -16,10 +16,10 @@ band.** `interlude()`, `criterion()` and the `light` bridge scrim render in
 it, so a card replaces the *app's* content and nothing else: the window
 frame and the narration line are the recorder's own furniture, and taking
 them down to show a recorder-authored card would be the chrome hiding from
-itself. The legacy composite path cannot make that distinction — its card is
-an element inside the app page, so full-bleed there means the whole page —
-which is why its card sits above the caption bar and this one sits beside
-it. The decorative terminal prop (`Recorder.terminal()`) is deliberately
+itself. The deleted composite path could not make that distinction — its
+card was an element inside the app page, so full-bleed there meant the whole
+page — which is why its card sat above the caption bar and this one sits
+beside it. The decorative terminal prop (`Recorder.terminal()`) is deliberately
 **not** here: it is content, a styled element inside the demo's story that
 rides over the app the way an app dialog would, and the card layer stays
 reserved for the recorder's own furniture — #362 mounts a *real* terminal in
@@ -28,25 +28,23 @@ the slot, and a prop living on the chrome layer would blur exactly that line.
 **The wrapper card declares the window's own colour — no compensation.** The
 card and the window body reach `demo.mp4` through one encoder on this path,
 so both paint the `window_body` the document was built with
-(`core.WEB_WINDOW_BODY` for the web recorder). The compensated
-`core.WEB_CARD_BODY` (#291/#301) exists because the legacy composite sends
-the card and the window through two different encoders; it stays legacy-only
-until #361 deletes it, and nothing here reads it.
+(`core.WEB_WINDOW_BODY` for the web recorder). The compensated pair the
+deleted composite needed (#291/#301) is recorded in that constant's history
+note; #361 deleted it with the composite.
 
-Every other visual constant here is ported from `web._FRAME_HTML` and
-`terminal._TERM_HOST_JS`, which stay untouched while the legacy composite
-path exists; #361 and #362 retire those copies.
+The visual constants here were ported from the composite's window frame
+(retired with it in #361) and from `terminal._TERM_HOST_JS`, whose copy
+stays until #362 mounts the terminal in this chrome too.
 """
 
 from __future__ import annotations
 
-# The pastel gradient behind the window. The same string web.py and
-# terminal.py paint today (`_WEB_BG`, `_TERM_BG`); this copy is the one the
-# wrapper path reads, and the one that survives #361/#362.
+# The pastel gradient behind the window. terminal.py still paints its own
+# copy (`_TERM_BG`) until #362; this one is the web recorder's since #361.
 CHROME_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
 
 # Title bar: height, fill and text colour, and the three traffic lights —
-# ported from `_FRAME_HTML` (web) which `_TERM_HOST_JS` (terminal) matches.
+# the frame both media share; `_TERM_HOST_JS` (terminal) still matches it.
 CHROME_BAR_PX = 36
 CHROME_BAR_BG = "#232334"
 CHROME_BAR_FG = "#9399b2"
@@ -63,19 +61,19 @@ CHROME_PAD_PX = 14
 # point of the band is that the app never shares a pixel with the caption.
 CAPTION_BAND_PX = 96
 
-# The wrapper caption's font size. The composite path renders captions at
-# 34px because ffmpeg scales the page by ~0.8 into the window (~27px on
-# screen); the wrapper page is recorded at true pixel size, so the caption
-# uses the base 26px directly — the same effective size the terminal
-# recorder's captions have. No compensation, because there is no scale.
+# The wrapper caption's font size: the base 26px, as declared, because the
+# page is recorded at true pixel size — the same effective size the terminal
+# recorder's captions have. (The deleted composite rendered captions at 34px
+# to survive its ~0.8 downscale; web.py's history note has the story.)
 CAPTION_FONT_PX = 26
 
 # Element ids. The slot is what a medium fills; the band holds the caption
 # element; the card layer holds the interlude/criterion card and the bridge
 # scrim (#360). The caption element deliberately keeps the id
 # `core._CAPTION_JS` uses, so "the caption element" is one selector whichever
-# path drew it. The cursor dot keeps `web._CURSOR_JS`'s id, and the card and
-# scrim keep `core.INTERLUDE_ID`/`core.BRIDGE_ID` — that is what lets
+# medium drew it. The cursor dot keeps the id the composite path's overlay
+# used (`__demo_cursor`, so committed selectors keep working), and the card
+# and scrim keep `core.INTERLUDE_ID`/`core.BRIDGE_ID` — that is what lets
 # `interlude("")` and core's end-of-take overlay probe (`_OVERLAY_PROBE_JS`,
 # issue #163) find them with no wrapper-specific dispatch.
 SLOT_ID = "__chrome_slot"
@@ -145,8 +143,8 @@ def chrome_geometry(
     }
 
 
-# The wrapper document. Substitutions are literal tokens, same pattern as
-# `web._FRAME_HTML`. The inline <script> runs after the recorder's context
+# The wrapper document. Substitutions are literal tokens (replaced by
+# `chrome_html`). The inline <script> runs after the recorder's context
 # init scripts (init scripts run at document_start), so the band-aware
 # `__demoCaption` below is the one `caption()` reaches in this document —
 # core's fixed-bottom overlay version never paints here.

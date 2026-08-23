@@ -424,6 +424,13 @@ EVIDENCE_LIMITS = {
     "scope_aria": EVIDENCE_MAX_ARIA,
     "html": EVIDENCE_MAX_HTML,
     "screen": EVIDENCE_MAX_SCREEN,
+    # The recorder's own chrome text — the caption line and any card, read
+    # out of the wrapper document's DOM at capture time (#361). Its own
+    # field because the app's aria cannot carry it any more: the caption
+    # left the app's document when the band did (#358), and evidence that
+    # silently stopped saying which line was on screen would fail #9's
+    # criterion while every remaining field stayed plausible.
+    "chrome": EVIDENCE_MAX_HTML,
 }
 EVIDENCE_TRUNCATED = "\n…[demo-video: truncated here, {n} more characters]"
 

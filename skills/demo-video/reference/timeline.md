@@ -118,7 +118,7 @@ the encoded frame, and writes down what it found:
              "static_for": 21.5, "static_from": 3.5, "static_limit": 15.0,
              "static_beats": [{ "index": 6, "verb": "caption", "acting": false },
                               { "index": 7, "verb": "hold", "acting": false }],
-             "opening": { "gap": 0.0, "held": 0.4, "limit": 1.5, "note": null,
+             "opening": { "gap": 0.7, "held": null, "limit": 1.5, "note": null,
                           "card": null },
              "warnings": [] }
 ```
@@ -136,11 +136,10 @@ the encoded frame, and writes down what it found:
   from the frames at all — see *An overlay the recorder left up* below.
 - `measured` is `false`, with `note` saying why, when the check could not run.
   `content` itself is `null` only when the take encoded no mp4.
-- `opening` says what the take opened on — and, on a web take, what the
-  recorder did about it. Read the next section: `held` above zero means the
-  first frames of your video are not frames the recording captured. On a
-  terminal take `opening.card` says whether the segment's first frame was its
-  title card or a bare terminal.
+- `opening` says what the take opened on. Read the next section: on a web
+  take a short featureless `gap` is the wrapper's own opening hold, which is
+  deliberate. On a terminal take `opening.card` says whether the segment's
+  first frame was its title card or a bare terminal.
 
 **What the take says out loud, and on which stream.** Which line the take
 prints decides the stream: **anything wrong — a warning, or the note that the
@@ -152,48 +151,36 @@ nothing here at all. So capturing one stream in a script never gives you half a
 summary; it gives you the whole summary of one kind of take and silence for
 the other, which is the thing to know before redirecting either.
 
-### `opening` — the first frames of a web take are a hold
+### `opening` — a web take opens on the wrapper hold, on purpose
 
-Chromium starts recording when the page is created, and the page is
-`about:blank` until your first `goto()` returns. `about:blank` paints white, so
-a web take's recording genuinely begins with a few hundred milliseconds of flat
-white inside a correct-looking window frame — which reads as *the app loaded
-blank*, and is the most plausible-looking way a demo can misrepresent an app.
+Chromium starts recording when the page is created, before your first
+`goto()` has an app to show. A recorder that did nothing about that would
+open every demo on a flat white app rect inside a correct-looking window —
+which reads as *the app loaded blank*, and is the most plausible-looking way
+a demo can misrepresent an app.
 
-The recorder covers that gap: it finds the first frame that differs from the one
-the take opened on, and composites **that** frame over the app area for the
-seconds before it. So a web demo opens on the application, as you would want it
-to.
+So a web take's frame 0 is the **opening hold**: an opaque field in the
+window's own colour over the app rect, up before anything else paints and
+faded out by the first `goto()` — the moment there is an app to reveal. It
+is chrome the recording really captured, not a composited still, so nothing
+about the video is retouched: the duration, the audio and every beat
+timestamp are exactly what they were. The review sheet names the frames
+that were cut inside it (`frames.md`), so a flat dark window under a `goto`
+heading is documented as the hold rather than left to read as a failed
+load.
 
-**Two things follow, and neither is hidden from you:**
+`gap` is measured afterwards, off the encoded mp4: on a healthy web take it
+is the hold's own featureless stretch (a few hundred milliseconds to a
+second), and it is a description, not a warning. `held` is how many seconds
+a take's *encode* covered with a composited still; no current recorder does
+that (the exit-time composite that did went with #361), so `held` is `null`
+on every take and `limit` keeps the scale the numbers were tuned against.
+Only a recorder that claims to cover can warn about a gap it failed to
+cover.
 
-- Those opening frames show the app slightly before it painted. `held` is how
-  many seconds were covered, and it is in `timeline.json` on every take that
-  measured one. Spoken, it is a clause of the healthy `shows a picture` line —
-  **stdout**, and the only place the recorder ever says it. A take that warned
-  does not print that line, so on a take with warnings `held` is in this file
-  and nowhere else — and a take whose `held` is `0.0` gets no clause either,
-  because the clause says what was covered and nothing was, so a healthy line
-  carrying no hold is a take that opened on a painted app rather than a take
-  that hid one. Nothing else in the video is touched — the duration,
-  the audio and every beat timestamp are exactly what they were, because the
-  hold is an overlay switched off rather than a trim.
-- The video is therefore not a measurement of your app's load time, and was
-  never a good one: the gap it covers is the recorder's own startup as much as
-  the app's.
-
-`gap` is measured **afterwards**, off the encoded mp4 — so on a healthy web take
-it reads `0.0` *because* the hold landed, and a hold that silently did nothing
-shows up here as a non-zero number and a warning.
-
-Past `limit` (1.5s) nothing is held and the take warns instead. An app that
-takes that long to paint is telling the viewer something true about itself, and
-covering seconds of it would be inventing a demo rather than repairing one.
-
-`held` is `null` on a terminal take. The terminal recorder draws its own window
-inside the page, so it has no equivalent gap; open a terminal segment on a title
-card if you want its first frame to be deliberate (see *Opening a terminal
-segment on a title card*).
+On a terminal take the equivalent is the opening card; open a terminal
+segment on one if you want its first frame to be deliberate (see *Opening a
+terminal segment on a title card*).
 
 ### `opening.card` — what a terminal segment's first frame showed
 
