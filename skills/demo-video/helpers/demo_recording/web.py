@@ -696,6 +696,39 @@ class Recorder(_DemoBase):
     @_beat_verb("goto")
     def goto(self, path: str = "") -> None:
         url = path if path.startswith("http") else self.base_url + path
+        # **The storyboard's own argument, classified (issue #268).** The
+        # construction-time guard runs over `DEMO_VIDEO_BASE_URL` and the
+        # resolved `base_url` and over nothing else, so until now
+        # `rec.goto("https://app.acme.com/")` recorded production on a take
+        # whose `base_url` was loopback — and the guard is the reason a
+        # storyboard author believes that cannot happen. A storyboard is the
+        # thing an agent writes, so the argument it passes is exactly the
+        # input that needs classifying.
+        #
+        # **The built URL, not the absolute branch of it**, and that is not
+        # belt-and-braces. A *relative* path can change the host too: `path`
+        # is concatenated, not joined, so `goto("@evil.com/")` builds
+        # `http://127.0.0.1:8901@evil.com/`, in which the declared base is
+        # **userinfo** and the host is `evil.com`. Measured against two local
+        # servers: Chromium lands on the second one and the declared app is
+        # never asked for anything. Issue #268 reasoned that only the absolute
+        # branch could escape; it is the branch that escapes *visibly*.
+        #
+        # Nothing legitimate is refused by classifying the join, because the
+        # join keeps `base_url`'s host in every case that is not this one, and
+        # that host was accepted at construction — `goto("/orders")` and
+        # `goto("about:blank")` both come back loopback on a loopback take.
+        #
+        # **`self._allow_private`, never the environment.** Re-reading
+        # `DEMO_VIDEO_ALLOW_PRIVATE` here would let a take permitted at
+        # construction be refused at beat 12 because something changed the
+        # environment mid-run — a refusal at the worst possible moment, with
+        # the browser open and the artifacts half-written. The flag this take
+        # was built with is the flag that decides.
+        #
+        # Before the retry loop and before Playwright: a refused URL must not
+        # reach the network even once.
+        guard_target(url, self._allow_private, source="this goto()'s argument")
         # The *iframe* navigates; the wrapper document — which holds the
         # caption, the cursor and the chrome — never does, so a mid-take
         # goto cannot take the caption off the screen (see `_watch_extra`).
