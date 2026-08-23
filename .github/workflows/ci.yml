@@ -199,10 +199,19 @@ jobs:
         with:
           enable-cache: true
 
+      # Through `tests/typecheck`, not by hand, for the reason the ruff step
+      # above gives: the script reads MYPY_VERSION out of this file as text,
+      # so a contributor's local run is this step at this version. A `run:`
+      # line invoking mypy directly would carry its own — `tests/typecheck
+      # --self-test` refuses one.
+      #
       # Settings live in mypy.ini and are deliberately permissive — see the
       # comments there for what to ratchet up and when.
+      - name: tests/typecheck --self-test
+        run: tests/typecheck --self-test
+
       - name: mypy
-        run: uv run --with "mypy==$MYPY_VERSION" --with playwright mypy skills/demo-video/helpers/
+        run: tests/typecheck
 
   secrets:
     name: secrets (gitleaks)

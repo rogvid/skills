@@ -1,0 +1,167 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""mypy at exactly the version CI pins, over exactly what CI checks.
+
+    tests/typecheck            # what ci.yml's `typecheck` job runs
+    tests/typecheck --self-test  # prove the pin is live rather than decorative
+
+`tests/lint` exists because a local `uvx ruff` and CI's pinned ruff answered
+different questions (#189). mypy had the same shape and no such script: the
+version lives on the `MYPY_VERSION:` line of `.github/workflows/ci.yml` and
+the only way to run CI's mypy locally was to retype that job's command, pin
+included. This reads the pin out of that file as text, so there is one pin and
+one command, exactly as for ruff.
+
+Settings are `mypy.ini`'s and are deliberately permissive — that file's
+comments say what to ratchet and when. Nothing here adds a flag CI does not
+pass; a local run that is stricter than the gate is a local run people learn
+to ignore.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CI = REPO / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = REPO / ".github" / "workflows"
+
+# Anchored to the key, for `tests/lint`'s reason: a `mypy==` written anywhere
+# else in the file must not be able to stand in for the pin.
+PIN = re.compile(r'^\s*MYPY_VERSION:\s*"([^"]+)"\s*$', re.MULTILINE)
+
+# A workflow step running mypy by hand instead of through this script: such a
+# step carries its own version, which is the drift the pin exists to prevent.
+# `tests/lint` holds the same line for ruff (INLINE_RUFF) and this is its
+# counterpart — without it, CI could stop using this script and nothing would
+# say so.
+INLINE_MYPY = re.compile(r"^\s*run:.*\bmypy\b.*$", re.MULTILINE)
+
+# What a `run:` line is allowed to say while still naming mypy: this script.
+ALLOWED_RUN = re.compile(r"^\s*run:\s*tests/typecheck(\s+--self-test)?\s*$")
+
+# What CI type-checks. One path today; a list so adding one is a one-line
+# change here and in ci.yml rather than a rewrite.
+TARGETS = ("skills/demo-video/helpers/",)
+
+
+class Refused(Exception):
+    """The pin cannot be read, or has stopped being the only one."""
+
+
+def pinned_version(text: str) -> str:
+    """The mypy version the workflow pins. Exactly one line may say so."""
+    found = PIN.findall(text)
+    if len(found) != 1:
+        raise Refused(
+            f"{len(found)} `MYPY_VERSION:` lines in the workflow, expected "
+            f"exactly 1 — with none there is no pin, and with two the local "
+            f"command and CI can run different mypys."
+        )
+    version = found[0]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise Refused(f"MYPY_VERSION is {version!r}, which is not a pinned version")
+    return version
+
+
+def mypy(version: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """mypy, resolved by uv at `version`, run from the repository root.
+
+    `--with playwright` because the recorder imports it and mypy reads the
+    installed package for its types; without it every `page.` attribute is
+    `Any` and the check quietly stops asking most of its questions.
+    """
+    return subprocess.run(
+        [
+            "uv",
+            "run",
+            "--with",
+            f"mypy=={version}",
+            "--with",
+            "playwright",
+            "mypy",
+            *args,
+        ],
+        cwd=REPO,
+        text=True,
+    )
+
+
+def self_test() -> int:
+    """The pin is read, and changing it changes what this script runs."""
+    text = CI.read_text(encoding="utf-8")
+    version = pinned_version(text)
+    print(f"OK       the pin is {version}, read out of .github/workflows/ci.yml")
+
+    # Behavioural, not a string comparison: a ci.yml pinning a version that
+    # does not exist must make this script fail to resolve one. Otherwise the
+    # version in ci.yml is decorative and the two can drift apart again.
+    bogus = text.replace(f'MYPY_VERSION: "{version}"', 'MYPY_VERSION: "9.9.9"')
+    got = pinned_version(bogus)
+    if got != "9.9.9":
+        print(f"DEAD PIN a ci.yml pinning 9.9.9 still resolved to {got!r}")
+        return 1
+    print("OK       changing MYPY_VERSION changes the version this script runs")
+
+    stray = []
+    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+        for line in INLINE_MYPY.findall(workflow.read_text(encoding="utf-8")):
+            if not ALLOWED_RUN.match(line):
+                stray.append(f"{workflow.name}: {line.strip()}")
+    if stray:
+        print("INLINE   a workflow runs mypy without this script, so it can")
+        print("         carry its own version:")
+        for line in stray:
+            print(f"           {line}")
+        return 1
+    print(
+        f"OK       no workflow reaches mypy any other way "
+        f"({len(list(WORKFLOWS.glob('*.yml')))} checked)"
+    )
+
+    for name, replacement in (
+        ("no MYPY_VERSION line at all", 'env:\n  RUFF_VERSION: "0.16.1"\n'),
+        (
+            "two MYPY_VERSION lines",
+            '  MYPY_VERSION: "1.0.0"\n  MYPY_VERSION: "2.0.0"\n',
+        ),
+        ("a version that is not pinned", '  MYPY_VERSION: "latest"\n'),
+    ):
+        broken = PIN.sub(replacement.rstrip("\n"), text, count=1)
+        try:
+            pinned_version(broken)
+        except Refused:
+            print(f"OK       refuses {name}")
+        else:
+            print(f"ACCEPTED {name} — the pin guard is decorative")
+            return 1
+    print("\nOne pin, one command: tests/typecheck runs exactly what CI runs.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="typecheck")
+    parser.add_argument(
+        "--self-test", action="store_true", help="prove the pin is live"
+    )
+    args = parser.parse_args()
+    try:
+        version = pinned_version(CI.read_text(encoding="utf-8"))
+    except Refused as exc:
+        print(f"typecheck: refusing — {exc}", file=sys.stderr)
+        return 2
+    if args.self_test:
+        return self_test()
+    print(f"typecheck: mypy {version}, pinned by .github/workflows/ci.yml")
+    return mypy(version, *TARGETS).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

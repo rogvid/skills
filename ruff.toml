@@ -21,6 +21,7 @@ extend-include = [
     "tests/unit",
     "tests/lint",
     "tests/pixel",
+    "tests/typecheck",
     "tests/eval-grader",
     ".github/scripts/*",   # the CI workflow's PEP 723 executables
     "skills/*/scripts/*",  # every skill's PEP 723 executables

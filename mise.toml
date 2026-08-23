@@ -1,0 +1,58 @@
+# Tooling and task front door for this repo.
+#
+#     mise install && mise run setup      # once per clone
+#     mise run check                      # the fast gate, ~6 s
+#
+# **Deliberately not pinned here: ruff and mypy.** CI pins both on the
+# `RUFF_VERSION:` / `MYPY_VERSION:` lines of `.github/workflows/ci.yml`, and
+# `tests/lint` reads that file as text so there is one pin and one command. A
+# version in this file would be a second pin, which is the defect issue #189
+# already cost a cycle: a local `uvx ruff` and CI's pinned ruff disagreed on 33
+# files, in the direction where the local run demands reformatting CI is happy
+# with. Same reasoning for shellcheck and actionlint — the tasks below reach
+# them through `uv run --with …`, exactly as ci.yml does, so a contributor runs
+# the same binary the runner does.
+#
+# What IS here is only what has no version opinion: the runner (uv), the hook
+# runner (prek) and the secret scanner.
+
+[tools]
+uv = "latest"
+prek = "latest"
+# CI scans with `gitleaks/gitleaks-action@v2`, which pins its own binary. This
+# one is a pre-filter on staged content, not a replica of that job — it exists
+# so a credential is caught before it is committed rather than after it is
+# pushed. Both read `.gitleaks.toml`.
+gitleaks = "latest"
+
+[tasks.setup]
+description = "Install the git hooks (pre-commit and pre-push)"
+run = "prek install"
+
+[tasks.lint]
+description = "ruff, doc fences and shipped pointers, at CI's pinned version"
+run = "tests/lint"
+
+[tasks.typecheck]
+description = "mypy over the recorder, at CI's pinned version"
+run = "tests/typecheck"
+
+[tasks.test]
+description = "The browser-free suites: the recorder's and the CI helpers'"
+run = ["tests/unit", "tests/ci-unit"]
+
+[tasks.check]
+description = "Everything a commit is gated on — the same set the pre-commit hook runs"
+depends = ["lint", "typecheck", "test"]
+
+[tasks.pixel]
+description = "The chrome reference loop — cached takes, no lock (#324)"
+run = "tests/pixel"
+
+[tasks.smoke]
+description = "The cheap smoke arms; the expensive ones are --web-only/--terminal-only/--content-only"
+run = "tests/smoke --cheap"
+
+[tasks.budget]
+description = "What SKILL.md costs a caller on every invocation"
+run = "tests/unit --budget"
