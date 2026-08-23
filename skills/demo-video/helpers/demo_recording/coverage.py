@@ -175,6 +175,53 @@ def _ac_field(claims: list[str]) -> dict:
     return {"ac": claims} if claims else {}
 
 
+#: What a beat's `ac=` tag says about the clause it names. `MET` is the
+#: default and is **never written down**: every `ac=` tag before #374 meant
+#: it, so writing it now would change every timeline this skill has produced
+#: and hand a reader `shows: "met"` to interpret on a beat that always meant
+#: exactly that. `UNMET` is the whole signal — the #24 rule, as `error`,
+#: `failure` and `mode` all follow it.
+MET = "met"
+UNMET = "unmet"
+SHOWS = (MET, UNMET)
+
+
+def _checked_shows(shows: object, claims: list[str], where: str) -> str:
+    """Which way this beat's claim points, refused at the call if it is neither.
+
+    **`shows="unmet"` with no `ac=` is refused**, and that is the important
+    half. Unmet *what*? A beat marked as evidence against nothing in
+    particular is a storyboard author's slip, and letting it through produces
+    the one artifact this feature must not produce: a take that reads as
+    reporting a problem while naming no clause anybody can check.
+    """
+    if shows is None:
+        return MET
+    if shows not in SHOWS:
+        raise ValueError(
+            f"{where} was given shows={shows!r}: it is one of "
+            f"{', '.join(repr(s) for s in SHOWS)}. "
+            f"{MET!r} is the default and needs no saying."
+        )
+    if shows == UNMET and not claims:
+        raise ValueError(
+            f"{where} was given shows={UNMET!r} with no ac=. A beat marked as "
+            f"evidence a criterion is not met has to name the criterion — "
+            f"without one it reports a problem nobody can check. Add "
+            f"ac=\"AC-n\", or drop shows=."
+        )
+    return str(shows)
+
+
+def _shows_field(shows: str) -> dict:
+    """`{"shows": "unmet"}` on a beat that claims the opposite, `{}` otherwise.
+
+    See `MET`. Absent-rather-than-default, so a take recorded before this key
+    existed reads exactly as it always did.
+    """
+    return {"shows": shows} if shows == UNMET else {}
+
+
 def _claim_row(beat: dict) -> dict:
     """One row of `claimed[id]`: where the claim was made, and whether it held.
 
@@ -197,6 +244,13 @@ def _claim_row(beat: dict) -> dict:
         "t_start": beat.get("t_start"),
         "still": beat.get("still"),
     }
+    # Which way this claim points (#374), copied here for the same reason
+    # `error` is: every renderer of this report reads the row and never the
+    # beat, and a row that does not carry the polarity renders a beat saying
+    # "this clause is not met" identically to one saying it is. Absent on an
+    # ordinary claim.
+    if beat.get("shows") == UNMET:
+        row["shows"] = UNMET
     error = beat.get("error")
     if isinstance(error, dict):
         # `type` and `message`, not the beat's dict by reference: a renderer
@@ -238,6 +292,23 @@ def coverage_report(criteria: dict[str, str], beats: list[dict]) -> dict | None:
         # than only its demonstrated half.
         "claimed": claimed,
         "unclaimed": [key for key, beats_ in claimed.items() if not beats_],
+        # The clauses at least one beat marks as **not** met (#374). A
+        # roll-up rather than something every consumer derives by walking the
+        # rows: "which clauses does this take say are broken" is the first
+        # question a reviewer has, and a derived answer is one each renderer
+        # can get subtly differently.
+        #
+        # Separate from `unclaimed`, and the two mean different things. A
+        # clause here was claimed — a storyboard author pointed a frame at it
+        # and said it does not hold. A clause in `unclaimed` had no beat at
+        # all. Merging them would report "nobody showed this" for the case
+        # where somebody showed it failing, which is the more useful evidence
+        # of the two.
+        "unmet": [
+            key
+            for key, rows in claimed.items()
+            if any(row.get("shows") == UNMET for row in rows)
+        ],
         "tagged_beats": tagged,
         "untagged_beats": len(beats) - tagged,
     }

@@ -477,6 +477,15 @@ def render_coverage(
         return []
     claimed = doc.get("claimed") or {}
     unclaimed = [key for key in criteria if not (claimed.get(key) or [])]
+    # Derived from the rows rather than read out of the manifest's own
+    # `unmet`, for the same reason `unclaimed` is: the headline and the table
+    # under it must be two renderings of one pass, not two answers about the
+    # same take.
+    unmet = [
+        key
+        for key in criteria
+        if any(row.get("shows") == "unmet" for row in (claimed.get(key) or []))
+    ]
     total, covered = len(criteria), len(criteria) - len(unclaimed)
     pictures = {
         key: _picture(
@@ -495,6 +504,26 @@ def render_coverage(
     gap: list[str] = []
     if isinstance(failure, dict):
         gap += _failure_lead(failure, criteria, claimed)
+    if unmet:
+        # Ahead of every other gap except the take not finishing (#374). A
+        # clause nobody claimed is a hole in the demo; a clause the storyboard
+        # points at and says does *not* hold is a statement about the branch,
+        # and it is the one a reviewer must not scroll past.
+        #
+        # Attribution, not a verdict, and the wording carries the whole
+        # difference: "the storyboard marks" rather than "AC-2 failed". CI has
+        # no model and read no ticket. `tests/ci-unit`'s word sweep refuses
+        # the verdict spellings of this sentence, #374's four included.
+        ids = _and_list([f"`{_cell(key)}`" for key in unmet])
+        gap += [
+            f"**The storyboard marks {ids} as unmet.** It points a beat at "
+            f"{_plural(len(unmet), 'that clause', 'those clauses')} as "
+            f"evidence against "
+            f"{_plural(len(unmet), 'it', 'them')}, not for "
+            f"{_plural(len(unmet), 'it', 'them')}. That is its author's "
+            f"assertion; nothing here read the ticket.",
+            "",
+        ]
     if unclaimed:
         ids = _and_list([f"`{_cell(key)}`" for key in unclaimed])
         gap += [
@@ -536,6 +565,11 @@ def render_coverage(
     for key, text in criteria.items():
         rows = claimed.get(key) or []
         where = _claim_label(rows) if rows else "*nothing claims this*"
+        # On the row too, not only in the headline: a reader scanning the
+        # table meets rows, and a row claiming a clause does not hold must
+        # not look like one claiming it does (#374).
+        if key in unmet:
+            where += " — **claimed unmet**"
         table.append(
             f"| **{_cell(key)}** — {_cell(str(text))} | {where} "
             f"| {pictures[key].cell} |"
@@ -688,13 +722,14 @@ def render_demo(
             else "between beats"
         )
         lines.append(
-            f"> **Failed at {where}:** `{failure.get('type')}` — {_cell(failure.get('message') or '')}"
+            f"> **Did not finish at {where}:** `{failure.get('type')}` — "
+            f"{_cell(failure.get('message') or '')}"
         )
         lines.append(">")
         lines.append(
             "> The caption table below lists the beats it got through. "
             "`failure/` in the artifacts has the last frame, the page text "
-            "and the failing beat in full."
+            "and the beat it died on, in full."
         )
         lines.append("")
 
@@ -755,7 +790,12 @@ def render(
 ) -> str:
     failed = any(t.get("failure") for _, t in demos)
     lines = [MARKER, ""]
-    lines.append("## Demo video" + (" — the take failed" if failed else ""))
+    # "did not finish", not "failed" (#374). This comment now also carries
+    # sentences about a *clause* a storyboard marks as not met, and
+    # "the take failed" one heading away from "AC-2 failed" is two different
+    # statements a skimming reviewer reads as one. The rest of this file
+    # already preferred the longer phrase; this was the last holdout.
+    lines.append("## Demo video" + (" — the take did not finish" if failed else ""))
     lines.append("")
     if not demos:
         lines.append("No storyboard on this branch needed re-recording.")

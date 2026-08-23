@@ -738,7 +738,7 @@ class Render(unittest.TestCase):
             "message": "waiting for .queue-empty",
         }
         body = self.body(broken)
-        self.assertIn("the take failed", body)
+        self.assertIn("the take did not finish", body)
         self.assertIn("beat 12", body)
         self.assertIn("wait_for", body)
         self.assertIn("waiting for .queue-empty", body)
@@ -1008,6 +1008,26 @@ VERDICT_WORDS = (
     "met",
     "✓",
     "☑",
+    # -- the other direction (#374) -----------------------------------------
+    #
+    # `shows="unmet"` lets a storyboard point a beat at a clause as evidence
+    # *against* it, and the renderers now have sentences about that. The risk
+    # is the mirror image of the one above and is worse: a tool that prints
+    # "AC-2 failed" has made a judgement nobody asked it for, about a branch
+    # somebody is deciding whether to merge. What a renderer may say is who
+    # claimed what — "the storyboard marks AC-2 as not met" — and these are
+    # the words that would turn that into the tool's own finding.
+    #
+    # `bug` and `defect` are not here, and that is a scope line rather than an
+    # oversight: they are what a *ticket* is about, and a clause quoting one
+    # is quoted text. The four below are all verdict verbs.
+    "failed",
+    "fails",
+    "failing",
+    "broken",
+    "regression",
+    "violates",
+    "violated",
 )
 
 
@@ -1017,6 +1037,13 @@ VERDICT_WORDS = (
 # reddening the sweep rather than merely listed above.
 VERDICT_SENTENCES = {
     "shown": "Each was shown on video.",
+    "failed": "AC-2 failed.",
+    "fails": "The branch fails AC-2.",
+    "failing": "One failing clause.",
+    "broken": "AC-2 is broken on this branch.",
+    "regression": "This is a regression against AC-2.",
+    "violates": "The branch violates AC-2.",
+    "violated": "AC-2 is violated here.",
     "proved": "Each has been proved on video.",
     "verify": "We verify each clause.",
     "verification": "This section is a verification.",
@@ -2247,12 +2274,31 @@ class VerdictAlphabet(unittest.TestCase):
             self.assertIn(word, VERDICT_WORDS)
         for tick in ("✓", "☑", "✔", "✅"):
             self.assertIn(tick, VERDICT_WORDS)
+        # #374's four, same treatment: an edit that narrows the list back has
+        # to delete this line to do it.
+        for word in ("failed", "broken", "regression", "violates"):
+            self.assertIn(word, VERDICT_WORDS)
 
     def test_an_ordinary_word_that_merely_contains_one_is_not_a_verdict(self):
         # Why the alphabetic entries are whole words. Each of these is a word
         # the comment or a ticket could plausibly carry, and each contains a
         # verdict word as a substring.
-        for innocent in ("metadata", "parameter", "improved", "bypassed", "kilometre"):
+        for innocent in (
+            "metadata",
+            "parameter",
+            "improved",
+            "bypassed",
+            "kilometre",
+            # #374's four, and the words that contain them. `failed` inside
+            # `unfailed` is not a word anybody writes, but `failing` inside
+            # `failingly` and `broken` inside `unbroken` and `heartbroken`
+            # are, and a list that cried wolf on those would be narrowed by
+            # the next author — which is how the hole got there the first
+            # time.
+            "unbroken",
+            "heartbroken",
+            "brokenness",
+        ):
             self.assertEqual(_verdict_hits(innocent), [], innocent)
         # The control: the stem entry still fires on the suffixes it exists for.
         self.assertEqual(_verdict_hits("demonstration"), ["demonstrat*"])
@@ -2319,7 +2365,7 @@ class CommentCli(unittest.TestCase):
             )
             self.assertEqual(done.returncode, 0, done.stderr)
             body = out.read_text()
-            self.assertIn("the take failed", body)
+            self.assertIn("the take did not finish", body)
             self.assertIn("published no timeline.json", body)
 
     def test_a_staged_still_is_linked_from_the_command_line_end_to_end(self):
@@ -3099,7 +3145,174 @@ class ShotsBlock(unittest.TestCase):
         self.assertEqual(out, "")
 
 
+class UnmetInTheBlock(unittest.TestCase):
+    """`demo-shots` renders a clause the storyboard marks unmet first (#374)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.demo = self.root / "demos" / "x"
+
+    def block(self, *unmet_names: str) -> str:
+        beats = [
+            dict(beat, shows="unmet") if beat.get("selector") in unmet_names else beat
+            for beat in SHOTS_BEATS
+        ]
+        (self.demo / "images").mkdir(parents=True)
+        for beat in beats:
+            if beat.get("still"):
+                (self.demo / beat["still"]).write_bytes(b"\x89PNG")
+        (self.demo / "timeline.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "beats": beats,
+                    "coverage": {"criteria": SHOTS_CRITERIA, "claimed": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = shots.main([str(self.demo)])
+        self.assertEqual(code, 0, err.getvalue())
+        return out.getvalue()
+
+    def test_the_unmet_still_comes_before_every_other_one(self):
+        # `03-c` is the third `shot()` the storyboard took and the first thing
+        # in the block. A reviewer who reads one screen has to meet the
+        # disagreement; a chronological walk buries it wherever it happened.
+        body = self.block("03-c")
+        self.assertLess(
+            body.index("images/03-c.png"), body.index("images/01-a.png"), body
+        )
+        self.assertIn("### The storyboard marks `AC-1`, `AC-2` as unmet", body)
+        self.assertIn("### The rest, in the order they were taken", body)
+
+    def test_the_order_sentence_matches_the_order(self):
+        # Both ways. A block that leads with the disagreement while its own
+        # first paragraph says "in the order they were taken" is a small lie
+        # in the one sentence a reader trusts to say how to read the rest.
+        self.assertIn("marks unmet first", self.block("03-c"))
+        self.setUp()
+        plain = self.block()
+        self.assertIn("in the order they were taken", plain)
+        self.assertNotIn("unmet first", plain)
+        self.assertNotIn("claimed unmet", plain)
+
+    def test_the_row_says_so_as_well_as_the_heading(self):
+        # A reader scanning the block meets rows. One claiming a clause does
+        # not hold must not look like one claiming it does.
+        self.assertIn("**— claimed unmet**", self.block("03-c"))
+
+    def test_the_block_attributes_the_claim_and_never_makes_it(self):
+        # The whole risk of this feature. Every sentence the renderer writes
+        # about an unmet clause is swept, #374's four included; the caption
+        # and the clause are quoted through and are not the renderer's words.
+        self.assertEqual(_verdict_hits(self.block("03-c")), [])
+
+
+class UnmetInTheComment(unittest.TestCase):
+    """The CI comment says who marked a clause unmet, and never that it failed."""
+
+    def coverage(self, *unmet: str) -> dict:
+        claimed = {
+            key: [{"index": 3, "t_start": 3.0, "still": None}]
+            for key in COVERAGE["criteria"]
+        }
+        for key in unmet:
+            claimed[key] = [dict(row, shows="unmet") for row in claimed[key]]
+        return {**COVERAGE, "claimed": claimed, "unclaimed": []}
+
+    def rendered(self, *unmet: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return "\n".join(
+            comment.render_coverage(
+                self.coverage(*unmet),
+                demo="demos/x",
+                directory=Path(tmp.name),
+                repo_url=None,
+                sha=None,
+            )
+        )
+
+    def test_the_unmet_clause_leads_the_section_and_the_row_repeats_it(self):
+        body = self.rendered("AC-2")
+        self.assertIn("**The storyboard marks `AC-2` as unmet.**", body)
+        self.assertLess(body.index("marks `AC-2` as unmet"), body.index("| clause"))
+        self.assertIn("— **claimed unmet**", body)
+
+    def test_a_take_with_nothing_unmet_says_none_of_it(self):
+        body = self.rendered()
+        self.assertNotIn("unmet", body)
+
+    def test_the_comment_attributes_the_claim_and_never_makes_it(self):
+        self.assertEqual(_verdict_hits(self.rendered("AC-2")), [])
+
+
 INJECTIONS = [
+    # -- a clause the storyboard marks unmet (issue #374) --------------------
+    (
+        # The disagreement rendered in take order, wherever it happened to
+        # occur. The block still says it — in a row two screens down — and
+        # the reader who read one screen has not met it.
+        "the stills block buries the unmet still in take order",
+        "scripts/demo-shots",
+        "    against = [shot for shot in found if shot.unmet]",
+        "    against = []",
+        [
+            "UnmetInTheBlock.test_the_unmet_still_comes_before_every_other_one",
+            "UnmetInTheBlock.test_the_order_sentence_matches_the_order",
+        ],
+    ),
+    (
+        # The order changes and the sentence describing it does not: the block
+        # leads with the disagreement while its first paragraph says the
+        # stills are in the order they were taken.
+        "the block's order sentence stops matching its order",
+        "scripts/demo-shots",
+        '        else "the ones the storyboard marks unmet first, the rest in the "\n'
+        '        "order they were taken"',
+        '        else "in the order they were taken"',
+        ["UnmetInTheBlock.test_the_order_sentence_matches_the_order"],
+    ),
+    (
+        # The row loses its mark. The heading above still names the clause, so
+        # a reader who read it knows — and one scanning rows sees a picture
+        # that looks like every other picture in the block.
+        "an unmet still's row reads like any other",
+        "scripts/demo-shots",
+        '        head += " **— claimed unmet**"',
+        "        pass",
+        ["UnmetInTheBlock.test_the_row_says_so_as_well_as_the_heading"],
+    ),
+    (
+        # The comment stops leading with it. The row still carries the mark,
+        # below the gap block and the diff limit — which is where a reviewer
+        # has already started forming a view.
+        "the CI comment does not lead with the clause marked unmet",
+        "demo-comment",
+        "    unmet = [\n        key\n        for key in criteria\n"
+        '        if any(row.get("shows") == "unmet" for row in (claimed.get(key) or []))\n'
+        "    ]",
+        "    unmet = []",
+        [
+            "UnmetInTheComment."
+            "test_the_unmet_clause_leads_the_section_and_the_row_repeats_it"
+        ],
+    ),
+    (
+        # The renderer makes the judgement. One sentence, of the sort an
+        # author would reasonably write, in the artifact a reviewer is
+        # guaranteed to read — about a branch somebody is deciding to merge.
+        "the CI comment says the branch failed the clause",
+        "demo-comment",
+        '            f"**The storyboard marks {ids} as unmet.** It points a beat at "',
+        '            f"**{ids} failed on this branch.** It points a beat at "',
+        ["UnmetInTheComment.test_the_comment_attributes_the_claim_and_never_makes_it"],
+    ),
     # -- demo-shots: the take's own pictures, as a block (issue #373) --------
     (
         # The block walks `coverage.claimed` instead of the beat log: a still
