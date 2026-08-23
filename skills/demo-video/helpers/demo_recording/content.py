@@ -267,6 +267,10 @@ CONTENT_STATIC_WARN_S = 15.0
 # is how a dead member reached a shipped document in the first place.
 CONTENT_ACTING_VERBS = frozenset(
     {
+        # `act` is the escape-hatch block (#344): the storyboard drives the
+        # app with raw Playwright inside it, so by construction it changed
+        # the picture — the verb exists because that work was invisible.
+        "act",
         "clear",
         "click",
         "click_fast",
@@ -517,20 +521,20 @@ def opening_report(
 # it. A demo directory commits `record.py`, `timeline.json`, `timeline.md` and
 # `images/`; it does not commit `demo.mp4` or the `.seg.mp4` parts, so no
 # committed artifact carries the frame the question is about. `tests/smoke`'s
-# `check_opening_card` sweeps this same corner and grades a take that suite
+# `check_opening_card` sweeps this same strip and grades a take that suite
 # records itself, which is a claim about the *recorder* rather than about
 # anything anybody ships.
 #
 # So the recorder reads it, at the one moment the video exists: after the
-# segment is encoded, off that segment's own first frame, over a strip of the
-# background beside the terminal window. Outside the window on purpose —
-# inside it the card and the terminal are both dark and telling them apart
-# means reading text, which is not a robust thing to measure. Outside it the
-# two are an order of magnitude apart, and neither number is a threshold
-# anybody tuned; they are two constants in the recorder's own styling:
+# segment is encoded, off that segment's own first frame, over a strip of
+# the app rect (`terminal.OPENING_STRIP` — until #362 it was a strip of
+# background beside the recorder's bespoke window, which the shared chrome's
+# app-rect-only card layer made blind). The two states of frame 0 are an
+# order of magnitude apart there, and neither number is a threshold anybody
+# tuned; they are two constants in the recorder's own styling:
 #
-#   the card         a full-bleed #1c1a17 rectangle          luma ~26
-#   bare terminal    the _TERM_BG pastel gradient            luma ~226
+#   covered   the opening hold / clause card, the window's own body   luma ~26
+#   bare      the unheld slot canvas or chrome background             luma ~225+
 #
 # **Reported, never enforced**, and the measurement behind that decision is
 # [#128]: one CI run in nine read **128** and 0.00 s of cover on a loaded
@@ -586,9 +590,11 @@ def opening_card_report(
 ) -> dict:
     """`content.opening.card`: what this segment's **first frame** showed.
 
-    `rect` is the strip beside the terminal window, in video pixels; `raised`
-    is whether this take asked the recorder for an opening card at all, which
-    is what tells a reader whether `"bare"` is the defect or the arrangement.
+    `rect` is the strip of the app rect the cover paints (#362 moved it
+    inside the window — see the section header), in video pixels; `raised`
+    is whether this take asked the recorder for an opening card at all.
+    Since the opening hold is unconditional, `"bare"` is the defect either
+    way; `raised` says whether a clause was on the cover.
 
     `state` is derived from the **rounded** `luma` this dict publishes, so the
     number and the word can never disagree with each other.

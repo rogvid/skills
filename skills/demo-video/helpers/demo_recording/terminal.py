@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import codecs
 import fcntl
-import json
 import os
 import pty
 import re
@@ -35,13 +34,17 @@ import time
 from collections import deque
 from pathlib import Path
 
+from .chrome import chrome_geometry, chrome_html, opening_hold_script
 from .content import content_rect, opening_card_report
-from .core import INTERLUDE_ID, _beat_verb, _DemoBase, _env
+from .core import _beat_verb, _DemoBase, _env
 
 _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
 
 # Terminal window theme (Catppuccin Mocha) — a cohesive, well-loved palette
-# that reads as a polished dev terminal rather than a bare console.
+# that reads as a polished dev terminal rather than a bare console. This is
+# the *content's* colour, a parameter of the chrome's slot, not chrome
+# (#355's design record): the window frame around it comes from chrome.py,
+# shared with the web recorder since #362.
 _TERM_THEME = {
     "background": "#181825", "foreground": "#cdd6f4",
     "cursorAccent": "#181825",
@@ -55,44 +58,38 @@ _TERM_THEME = {
     "brightWhite": "#a6adc8",
 }
 
-# Host page: render the terminal inside a floating, rounded window with a
-# title bar and traffic-light buttons, centered on a soft pastel gradient so
-# the eye has an obvious frame to follow (full-bleed is hard to read). The
-# fit addon derives cols/rows from the window's inner size; they are read
-# back to size the PTY so TUIs lay out correctly.
-_TERM_HOST_JS = """
+# The terminal window's body — the fill the shared chrome paints the window,
+# the opening hold and the card layer with on a terminal take, and the
+# xterm.js slot content's own background. One name so the four cannot drift:
+# it is the theme's background on purpose, because the old bespoke window
+# (`_TERM_HOST_JS`, retired by #362) painted its body from the theme too and
+# the seam between window pad and terminal screen is invisible only while
+# the two agree. Numerically equal to `core.WEB_WINDOW_BODY` today; kept as
+# its own name because it is the *theme's* colour, a content parameter.
+TERM_WINDOW_BODY = _TERM_THEME["background"]
+
+# Mounts xterm.js in the shared chrome's content slot (#362) — the same
+# `#__chrome_slot` the web recorder mounts its app iframe into. The window
+# around it (background, title bar, pads, caption band, card layer) is
+# chrome.py's; this script only fills the slot. The host div keeps the id
+# `__term_host` so every geometry consumer that reads the live element
+# (issue #97) reads the same one it always has. The fit addon derives
+# cols/rows from the slot's size; they are read back to size the PTY so
+# TUIs lay out correctly.
+#
+# History: until #362 this file carried `_TERM_HOST_JS`, a second
+# hand-maintained copy of the window chrome (bar 40 px against the shared
+# 36, radius 12 against 14, its own gradient and shadow, fixed 70/74 insets
+# against computed pads). #355's addendum retired it: one chrome, two
+# mounts.
+_TERM_MOUNT_JS = """
 window.__demoTermInit = (opts) => {
-  document.documentElement.style.height = '100%';
-  document.body.style.cssText =
-    'margin:0; height:100%; overflow:hidden; background:' + opts.bg + ';';
-
-  const win = document.createElement('div');
-  win.id = '__term_win';
-  win.style.cssText = `
-    position: fixed; top: 70px; left: 74px; right: 74px; bottom: 70px;
-    display: flex; flex-direction: column; border-radius: 12px;
-    overflow: hidden; background: ${opts.theme.background};
-    box-shadow: 0 30px 80px rgba(20,16,40,.38), 0 6px 18px rgba(20,16,40,.28);
-  `;
-  const bar = document.createElement('div');
-  bar.style.cssText = `
-    display: flex; align-items: center; gap: 8px; height: 40px;
-    padding: 0 14px; background: #232334; flex: 0 0 auto;
-    font: 13px/1 ui-monospace, monospace; color: #9399b2;
-  `;
-  const dot = (c) => `<span style="width:12px;height:12px;border-radius:50%;
-    display:inline-block;background:${c}"></span>`;
-  bar.innerHTML =
-    dot('#ff5f57') + dot('#febc2e') + dot('#28c840') +
-    `<span style="flex:1;text-align:center;letter-spacing:.02em">${opts.title}</span>` +
-    `<span style="width:44px"></span>`;
-  win.appendChild(bar);
-
+  const slot = document.getElementById('__chrome_slot');
   const host = document.createElement('div');
   host.id = '__term_host';
-  host.style.cssText = 'flex: 1 1 auto; min-height: 0; padding: 12px 14px;';
-  win.appendChild(host);
-  document.body.appendChild(win);
+  host.style.cssText = 'position: absolute; inset: 0; padding: 12px 14px;'
+    + ' box-sizing: border-box; background: ' + opts.theme.background + ';';
+  slot.appendChild(host);
 
   const term = new Terminal({
     fontSize: opts.fontSize,
@@ -121,94 +118,56 @@ window.__demoTermInit = (opts) => {
 };
 """
 
-# Soft, low-saturation pastel gradient behind the window — present enough to
-# frame the terminal, calm enough not to pull focus.
-_TERM_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
-
-# -- opening on a card (issue #110) ------------------------------------------
+# -- opening on a card (issue #110, re-based on the shared chrome by #362) ----
 #
 # A terminal segment that opens with `interlude()` shows a flash of bare
 # terminal first, and it is structural rather than a pacing mistake:
 # `__enter__` starts Chromium's screencast when it creates the page, and a
 # storyboard cannot paint anything before its own first statement. Measured on
 # the reference demo: six frames — ~0.30 s — of an empty window with a lone
-# prompt at the head of part2. The web recorder does not show it only because
-# it has nothing on screen until `goto()` — there is no "before" to flash.
+# prompt at the head of part2 (#110, #207).
 #
-# Measured in *frames*, and not in the timeline, which is where #110 first
-# wrote it down (part2's offset at 37.76 s against the interlude beat at
-# 38.05 s). That gap is this recorder's own setup cost — `_t0` is set before
-# `_start()`, which goes to about:blank, injects xterm.js, opens the PTY and
-# waits for the first prompt before `_open_on_card` runs — so it survives the
-# fix: 0.358 s before and 0.365 s after, on the same storyboard one line
-# apart, while the first part2 frame went 226.5 (bare) to 25.8 (card). See
-# issue #207. A beat's timestamp says when the card was *logged*; only the
-# pixels say when it was up.
+# What covers that gap since #362 is the chrome's **opening hold**
+# (chrome.OPENING_HOLD_JS): an opaque field in the window's own colour over
+# the app rect, up in frame 0 from an init script — earlier than any Python
+# statement can reach, earlier than `pty.openpty()`, earlier than xterm.js is
+# injected — exactly the web recorder's #360 pattern, one implementation for
+# both media. The whole of the recorder's setup happens behind it, and the
+# hold is cleared when the terminal has something to show (the shell's first
+# prompt), the same contract as the web path's first `goto()`.
 #
-# So the card stops being something a storyboard has to remember to do first
-# and becomes a property of the recorder: `TerminalRecorder(interlude="…")`
-# paints it from an **init script**, which runs before the page's own scripts
-# on every document including Chromium's initial one. That is earlier than any
-# Python statement can reach — earlier than `pty.openpty()`, earlier than
-# xterm.js is injected — so the card is up in the recording's first frame and
-# the whole of the recorder's own setup happens behind it.
+# `TerminalRecorder(interlude="…")` still opens the segment on intent rather
+# than on a covered pause: the clause is raised in the chrome's card layer
+# (`__demoInterlude`, over the hold — chrome.py's stacking puts the card
+# above it) as the first thing `_start()` does after the chrome document is
+# up, so its 450 ms fade runs over the hold's flat field, never over the
+# recorder's setup. The card renders on the app rect in the window's own
+# body colour — the shared card layer, not the full-bleed `#1c1a17` field
+# the retired `_OPENING_CARD_JS` init script used to build (#362 states the
+# visual change; #291's palette history is on `core.WEB_WINDOW_BODY`).
 #
-# It is also the answer to the *other* end of the same seam. #91 was this card
-# left up for the rest of a take, because a storyboard remembered
-# `interlude(text)` and not `interlude("")`. A card the recorder raises is a
-# card the recorder clears — see `_open_on_card`.
-#
-# It builds the element rather than calling `__demoInterlude`, and the whole
-# difference is one line: the card is appended **already opaque**.
-# `__demoInterlude` creates it at `opacity: 0` and raises it, which is a 450 ms
-# fade — and a card that fades in over the recorder's setup is showing exactly
-# what it exists to cover. An element whose computed opacity has been 1 since
-# it entered the tree has no transition to run, so that is structural here
-# rather than a flag somebody could turn off. Everything else about it — the
-# id, the styling — is core's, so `interlude("")` finds this element and fades
-# it out like any other.
-#
-# (What the suite can say about that last point is limited, and tests/README.md
-# says where: on this box the fade-in variant is invisible in the recording
-# too, because injecting xterm.js takes longer than 450 ms and Chromium's
-# screencast has emitted nothing by then. Being opaque by construction is what
-# keeps that from being the thing holding the fix up.)
-_OPENING_CARD_JS = """
-(() => {
-  const build = () => {
-    // `document.body` is null on Chromium's initial empty document, where init
-    // scripts first run — the same guard the background paint above needs, and
-    // for the same reason (issue #25).
-    if (!document.body || document.getElementById('__ID__')) return;
-    const el = document.createElement('div');
-    el.id = '__ID__';
-    el.style.cssText = '__CSS__';
-    el.style.opacity = '1';
-    el.textContent = __TEXT__;
-    document.body.appendChild(el);
-  };
-  if (document.body) build();
-  else addEventListener('DOMContentLoaded', build);
-})();
-"""
-
-# How long the opening card is held before it fades, when nothing says
-# otherwise. The same default `interlude()` uses, because it is the same card
-# doing the same job.
+# The other end of the seam is unchanged: #91 was this card left up for the
+# rest of a take. A card the recorder raises is a card the recorder clears —
+# see `_open_on_card`.
 OPENING_CARD_HOLD_S = 2.8
 
-# Where the card is read back off the finished video (issue #235): a strip of
-# the background beside the terminal window, in the top corner opposite the
-# caption bar. See `_opening_card_rect`, and "the frame a terminal segment
-# opens on" in `content` for why it is outside the window rather than in it.
+# Where the opening frame is read back off the finished video (issue #235):
+# a strip of the **app rect**, as fractions of it. A band across the top,
+# where a shell's first rows land, starting near the left edge — terminal
+# text hugs the left column, and a strip inset the way the web card strip
+# is (`tests/_pixels.CARD_STRIP`) was measured missing every glyph of a
+# short command (travel 0.01 against frame 0 on a healthy take). Inset a
+# slot-padding's worth from the left and top so the strip never reads the
+# slot's own edge blend, and kept above the centred clause card's text.
 #
-# The margin clears the window's rounded corner and the near side of its drop
-# shadow; the height keeps the strip well above the window's top inset (70 px),
-# so nothing but the background — or whatever is covering it — is in the read.
-# `_TERM_HOST_JS` insets the window by 74 px, so this is a 58x50 strip on the
-# stock geometry, and that is the rect `tests/smoke` has swept since #110.
-OPENING_CARD_MARGIN_PX = 8
-OPENING_CARD_STRIP_PX = 50
+# Inside the app rect, where until #362 it was a strip of background beside
+# the bespoke window: the shared chrome's card layer covers the app rect and
+# nothing else, so the background beside the window never changes and can no
+# longer say what the take opened on. What frame 0 shows there now is the
+# opening hold (or the clause card over it) — the window's own dark body —
+# against the defect's reading: the slot's white canvas, or the unheld
+# pastel background, both an order of magnitude of luma away.
+OPENING_STRIP = (0.01, 0.04, 0.90, 0.16)  # x, y, w, h as fractions of the app rect
 
 # Named keys -> the bytes a terminal program expects. Ctrl-<letter> is
 # handled generically (C-a..C-z -> 0x01..0x1a).
@@ -275,11 +234,13 @@ class TerminalRecorder(_DemoBase):
     fit addon; the resulting cols/rows are pushed to the PTY winsize so TUIs
     render correctly. `font_size` tunes how much fits on screen.
 
-    `interlude="…"` opens the segment on a full-screen title card, raised
-    before capture starts and cleared by the recorder when `interlude_hold`
-    seconds are up. Use it instead of an `interlude()` as the storyboard's
-    first statement: the storyboard's first statement is already ~290 ms too
-    late, and the viewer sees an empty terminal before the card (issue #110).
+    `interlude="…"` opens the segment on a title card in the chrome's card
+    layer, raised over the opening hold before any storyboard statement runs
+    and cleared by the recorder when `interlude_hold` seconds are up. Use it
+    instead of an `interlude()` as the storyboard's first statement: the
+    storyboard's first statement is already ~290 ms too late (issue #110).
+    Either way the take opens covered — the hold is up in frame 0 (#360's
+    pattern, shared since #362) — so a bare terminal is never on screen.
     """
 
     def __init__(
@@ -320,11 +281,6 @@ class TerminalRecorder(_DemoBase):
             timezone_id=timezone_id, locale=locale, evidence=evidence,
             criteria=criteria, ticket=ticket, allow_private=allow_private,
         )
-        # Match the web recorder's effective caption height. Web composites
-        # its page into a scaled, centered window, lifting its bottom:44px
-        # caption to ~89px in the final frame; the terminal isn't composited,
-        # so raise its caption to the same height for uniform placement.
-        self._caption_bottom_px = 88
         self._shell = shell or _env("TERMINAL_SHELL") or "/bin/bash"
         fs = font_size
         if fs is None:
@@ -346,57 +302,60 @@ class TerminalRecorder(_DemoBase):
         self._exit_tail = ""
         # When the PTY last produced a byte.
         self._last_data_at = time.monotonic()
-        # The card this segment opens on, if it opens on one. See
-        # _OPENING_CARD_JS.
+        # The card this segment opens on, if it opens on one. See the
+        # "opening on a card" section header above.
         self._opening = interlude
         self._opening_hold = interlude_hold
         # Where the xterm.js screen sits in the frame, read off the live
         # element once the terminal exists (issue #97). See `_content_rect`.
         self._host_box: tuple[int, int, int, int] | None = None
-        # Where the window's right edge is, which is what says where the
-        # background stops being the window (issue #235). See
-        # `_opening_card_rect`.
-        self._win_right: int | None = None
 
     # -- setup / teardown ---------------------------------------------------
 
     def _init_context(self, context) -> None:
-        # Paint the background from the very first frame, so the brief
-        # about:blank + xterm-injection period isn't a white flash (it would
-        # otherwise show between a preceding segment and the terminal).
-        # `documentElement` is null on Chromium's initial empty document, where
-        # init scripts first run — dereferencing it there threw an uncaught
-        # TypeError on every single take, and took the background paint this
-        # exists to apply down with it (issue #25). Guarded like `body` below
-        # it, and applied again once the document is real.
+        # The shared chrome's opening hold (#360, mounted here by #362): it
+        # paints the chrome background on the initial document — the #25
+        # white-flash guard, now one script for both media — and holds an
+        # opaque field in the window's own colour over the app rect from
+        # frame 0, so the whole of this recorder's setup (the PTY, the
+        # xterm.js injection, the shell's first prompt) happens behind it.
+        # An init script because that runs on Chromium's initial empty
+        # document, earlier than any Python statement can reach.
         context.add_init_script(
-            "(() => { const bg = '__BG__';"
-            " const paint = (el) => { if (el) el.style.background = bg; };"
-            " paint(document.documentElement);"
-            " const b = () => { paint(document.documentElement); paint(document.body); };"
-            " if (document.body) b(); else addEventListener('DOMContentLoaded', b); })();"
-            .replace("__BG__", _TERM_BG)
-        )
-        # After the background paint and before anything else: the card is
-        # opaque and covers the whole viewport, so what is behind it only has
-        # to be the right colour for the fade *out*. Registered here rather
-        # than evaluated in `_start()` because `_start()` navigates
-        # (`goto("about:blank")`), and an init script is the only thing that
-        # survives a navigation and precedes the first paint of what follows
-        # it.
-        if self._opening is not None:
-            context.add_init_script(
-                _OPENING_CARD_JS.replace("__ID__", INTERLUDE_ID)
-                # `self._interlude_css`, not the constant it defaults to: the
-                # opening card and the card `interlude()` raises later in the
-                # same take are the same element, and reading them off one
-                # attribute is what keeps a per-medium palette (#291) from
-                # arriving in one of the two places.
-                .replace("__CSS__", self._interlude_css)
-                .replace("__TEXT__", json.dumps(self._opening))
+            opening_hold_script(
+                chrome_geometry(self._size["width"], self._size["height"]),
+                window_body=TERM_WINDOW_BODY,
             )
+        )
 
     def _start(self) -> None:
+        # The chrome document first, so the recorded pixels are the shared
+        # window from the earliest paint after frame 0's hold. `self._geom`
+        # is `chrome_geometry`'s dict — the one shape every geometry consumer
+        # reads, web and terminal alike (#362).
+        self._geom = chrome_geometry(self._size["width"], self._size["height"])
+        self.page.set_content(
+            chrome_html(
+                self._geom,
+                title=self._terminal_title,
+                window_body=TERM_WINDOW_BODY,
+                accent=self._accent,
+                caption_font_px=self._caption_font_px,
+            )
+        )
+        # `set_content` wrote a new document, which took the motion rule with
+        # it — and this medium's content lives in that document. See
+        # `_freeze_motion_here`.
+        self._freeze_motion_here()
+        if self._opening is not None:
+            # The clause, in the chrome's card layer, raised before anything
+            # else this method does: its fade runs over the opening hold's
+            # flat field (the card layer stacks above the hold), never over
+            # the recorder's setup — #110's point, on #360's machinery.
+            self.page.evaluate(
+                "t => window.__demoInterlude(t)", self._opening
+            )
+
         master, slave = pty.openpty()
         self._fd = master
         env = os.environ.copy()
@@ -421,8 +380,7 @@ class TerminalRecorder(_DemoBase):
         flags = fcntl.fcntl(master, fcntl.F_GETFL)
         fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-        # Build the xterm.js terminal in the page and read back its geometry.
-        self.page.goto("about:blank")
+        # Mount xterm.js in the chrome's content slot and read back its grid.
         self.page.add_style_tag(content=(_ASSETS / "xterm.css").read_text())
         self.page.add_script_tag(content=(_ASSETS / "xterm.js").read_text())
         self.page.add_script_tag(content=(_ASSETS / "addon-fit.js").read_text())
@@ -435,34 +393,38 @@ class TerminalRecorder(_DemoBase):
         # take, and a reader of this method reasonably assumed it did something.
         # A serialized dump of the buffer beside `timeline.json` is a feature
         # somebody can propose on its own; it was never this.
-        self.page.add_script_tag(content=_TERM_HOST_JS)
+        self.page.add_script_tag(content=_TERM_MOUNT_JS)
         dims = self.page.evaluate(
             "o => window.__demoTermInit(o)",
-            {"bg": _TERM_BG, "theme": _TERM_THEME,
-             "title": self._terminal_title,
+            {"theme": _TERM_THEME,
              "cursor": f"rgb({self._accent})",
              "fontSize": self._font_size},
         )
         self._set_winsize(int(dims["rows"]), int(dims["cols"]))
         self._read_host_box()
-        self._read_win_edge()
-        # Just enough to catch the shell's first prompt. It used to be kept
-        # short so a segment opening on a transition would not dwell on a bare
-        # terminal; with `interlude=` that dwell happens behind the card, and
-        # without it there is no card for the length of this to matter to.
+        # Just enough to catch the shell's first prompt. The dwell happens
+        # behind the opening hold (and the clause card, when there is one),
+        # so nothing bare is on screen for the length of this to matter to.
         self._idle(0.15)
         if self._opening is not None:
             self._open_on_card()
+        else:
+            # The terminal has something to show — the shell's prompt — so
+            # the opening hold comes down, exactly as the web recorder's
+            # first goto() clears it: the hold is up from frame 0 and the
+            # medium's first content is what takes it down (#360, #362).
+            self.page.evaluate("() => window.__demoChromeHoldClear()")
 
     def _read_host_box(self) -> None:
         """Remember where `#__term_host` is, for the picture check (issue #97).
 
-        Read here, off the live element, rather than derived from the window
-        CSS: `_TERM_HOST_JS` positions the window with fixed insets and the
-        xterm.js fit addon decides the rest, so a change to either would
-        silently move the rect a hardcoded copy claimed to describe. Read
-        **once**, at `_start()`, because nothing after this resizes it and the
-        page is gone by the time the mp4 exists.
+        Read here, off the live element, rather than derived from
+        `chrome_geometry`: the host fills the chrome's content slot, but its
+        own padding and the slot's placement both live in stylesheets, so a
+        change to either would silently move the rect a hardcoded copy
+        claimed to describe. Read **once**, at `_start()`, because nothing
+        after this resizes it and the page is gone by the time the mp4
+        exists.
 
         Failure is not fatal and not silent: `content_report` says the picture
         was not measured, which is a truthful artifact. Refusing a take because
@@ -485,80 +447,51 @@ class TerminalRecorder(_DemoBase):
                 int(box["width"]), int(box["height"]),
             )
 
-    def _read_win_edge(self) -> None:
-        """Remember where `#__term_win` ends, for the opening card (#235).
-
-        Read off the live element for the reason `_read_host_box` is: the
-        window's insets are in `_TERM_HOST_JS` and the strip beside it is
-        derived from them, so a hardcoded copy would go on describing a
-        geometry somebody had already changed. Read **once**, here, because
-        nothing after this moves the window and the page is gone by the time
-        there is an mp4 to measure.
-
-        **`int(x + width)`, not `int(x) + int(width)`.** Two truncations of a
-        fractional box land a column apart from one truncation of their sum,
-        and this rect is compared against `tests/smoke`'s own reading of the
-        same strip. One column out of 58 moves the mean by a fraction of a
-        luma level — not enough to change the answer, easily enough to be a
-        latent flake in an agreement check with a 1.0 bar. So the two derive
-        the edge the same way, and the harness's way is the truer one.
-
-        Not fatal and not silent, again like `_read_host_box`: without it the
-        card report says it could not be measured, which is a truthful
-        artifact. Losing a recording over a strip of background would be the
-        measurement costing somebody the thing it exists to describe.
-        """
-        try:
-            box = self.page.locator("#__term_win").bounding_box()
-        except Exception as exc:  # noqa: BLE001 - a measurement is not a take
-            print(
-                f"demo-video: WARNING — could not read the terminal window's "
-                f"box ({type(exc).__name__}: {exc}), so this take's timeline "
-                f"will say the opening frame was not measured.",
-                file=sys.stderr,
-            )
-            return
-        if box:
-            self._win_right = int(box["x"] + box["width"])
-
     def _opening_card_rect(self) -> tuple[int, int, int, int] | None:
-        """The strip of background the opening card is read off (issue #235).
+        """The strip of the app rect the opening frame is read off (#235).
 
-        Beside the window, not inside it: an opening card and a bare terminal
-        are both dark inside the window and are told apart there by their text.
-        Outside it they are the card's flat `#1c1a17` against the pastel
-        `_TERM_BG`, which is an order of magnitude of luma and needs no
-        threshold anybody had to choose.
+        `OPENING_STRIP` of `chrome_geometry`'s app rect — inside the window,
+        where until #362 it was a strip of background beside the bespoke
+        one. The section header over `OPENING_STRIP` says why it moved: the
+        shared chrome's card layer covers the app rect and nothing else, so
+        the background outside the window never changes and frame 0 is told
+        apart *here* — the hold or the clause card (the window's own dark
+        body) against the slot's unheld canvas, an order of magnitude of
+        luma away.
 
-        None when the window's edge was never read, or when the geometry
-        leaves no strip worth reading — a take whose window fills the frame has
-        no background to measure, and inventing a rect there would produce a
-        confident number about the wrong pixels.
+        None when the chrome geometry was never built — a take that died
+        before `_start()` has no frame worth describing, and inventing a
+        rect there would produce a confident number about the wrong pixels.
         """
-        if self._win_right is None:
+        geom = getattr(self, "_geom", None)
+        if not geom:
             return None
-        left = self._win_right + OPENING_CARD_MARGIN_PX
-        width = self._size["width"] - left - OPENING_CARD_MARGIN_PX
-        if left < 0 or width < OPENING_CARD_MARGIN_PX:
-            return None
-        return (left, 0, width, OPENING_CARD_STRIP_PX)
+        fx, fy, fw, fh = OPENING_STRIP
+        return (
+            geom["appx"] + int(geom["appw"] * fx),
+            geom["appy"] + int(geom["apph"] * fy),
+            max(8, int(geom["appw"] * fw)),
+            max(8, int(geom["apph"] * fh)),
+        )
 
     def _opening_card(self) -> dict | None:
         """What this segment's first frame showed (issue #235).
 
         The medium's half of `_DemoBase._opening_card`, and the reason the
-        hook exists here rather than in the base: the strip it reads is
-        defined by *this* recorder's window, and the card it looks for is this
-        recorder's own opening. A web take has neither.
+        hook exists here rather than in the base: the opening this take
+        reads is its own — the hold, or the clause card the constructor's
+        `interlude=` raised over it. The web recorder answers None; its
+        opening hold is graded by this repository's `tests/smoke
+        --wrapper-only` instead.
 
         Reported and not enforced — nothing here appends to `warnings`, raises
         or refuses. See "the frame a terminal segment opens on" in `content`
         for the loaded-runner reading that decided that.
 
         Answered on **every** terminal take, not only one opened with
-        `interlude=`: a segment that opens on a bare prompt is exactly what
-        three people reported by watching, and `raised` is what tells a reader
-        whether `"bare"` is the defect or the arrangement.
+        `interlude=`: since #362 both arrangements open dark (the hold is
+        unconditional), so `"bare"` here is always the defect — a hold that
+        never painted — and `raised` says whether a clause was on it.
         """
         return opening_card_report(
             self._media_path(),
@@ -581,17 +514,22 @@ class TerminalRecorder(_DemoBase):
         return content_rect(self._host_box)
 
     def _open_on_card(self) -> None:
-        """Hold the card the init script raised, then take it down.
+        """Hold the card `_start()` raised, then take it down.
 
-        Everything before this ran behind it — the PTY, the xterm.js
-        injection, the shell's first prompt — which is the point: the segment
-        opens on intent rather than on an empty window (issue #110).
+        Everything before this ran behind the opening hold and the clause
+        card over it — the PTY, the xterm.js injection, the shell's first
+        prompt — which is the point: the segment opens on intent rather than
+        on an empty window (issue #110).
 
         Taking it down is the other half of the same seam. #91 was this card
         left up for the rest of a take because a storyboard remembered
         `interlude(text)` and not `interlude("")`; a card the recorder raises
         is a card the recorder clears, and there is no ordering left for a
         storyboard to get wrong.
+
+        The hold beneath goes down in the same breath — invisible under the
+        opaque card, so the card's fade reveals the terminal rather than a
+        second flat field a viewer would read as a stuck screen.
 
         It records an ordinary `interlude` beat, so a merged timeline reads the
         same whether the card came from here or from the verb.
@@ -601,7 +539,10 @@ class TerminalRecorder(_DemoBase):
         with self._beat("interlude", selector="card", caption=text):
             self._start_line(clip)
             self.pause(self._opening_hold)
-            self.page.evaluate("() => window.__demoInterlude('')")
+            self.page.evaluate(
+                "() => { window.__demoChromeHoldClear();"
+                " window.__demoInterlude(''); }"
+            )
             self.pause(0.6)
 
     def _stop(self) -> None:

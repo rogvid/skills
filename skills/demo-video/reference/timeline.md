@@ -188,27 +188,27 @@ A terminal take reads its own frame zero after the encode and writes down what
 was there:
 
 ```json
-"card": { "luma": 25.8, "state": "card", "raised": true,
-          "rect": [1214, 0, 58, 50],
+"card": { "luma": 24.0, "state": "card", "raised": true,
+          "rect": [138, 109, 921, 76],
           "card_max": 60.0, "bare_min": 150.0, "note": null }
 ```
 
-- `luma` is the mean luma of a strip of background **beside** the terminal
-  window on the segment's first frame. Outside the window on purpose: inside
-  it a title card and a terminal are both dark and telling them apart means
-  reading text. Outside it the card (`#1c1a17`, full bleed) reads ~26 and the
-  recorder's pastel background reads ~226.
+- `luma` is the mean luma of a strip **inside the window**, across the top of
+  the app rect, on the segment's first frame. The cover — the opening hold, or
+  the clause card over it — paints the window's own dark body and reads ~26
+  there. Uncovered, the strip reads the terminal slot's white canvas at ~255.
+  Two constants in the recorder's own styling, an order of magnitude apart.
 - `state` is that number as a word: `"card"`, `"bare"`, or `"between"`. The gap
   between the two bars is wide and deliberately empty — a frame that lands in
-  it is a card still becoming opaque, and calling that either thing would be
+  it is a cover still becoming opaque, and calling that either thing would be
   this file claiming something nobody measured.
-- `raised` says whether the take asked for an opening card
-  (`TerminalRecorder(interlude=…)`). It is what makes `"bare"` readable: on a
-  take that asked, `"bare"` is the flash issue #110 is about; on a take that
-  did not, it is simply what the segment opens on.
+- `raised` says whether the take asked for an opening clause
+  (`TerminalRecorder(interlude=…)`). The hold is unconditional, so `"bare"` is
+  the defect either way; `raised` only says whether a sentence was on the cover.
 - `note` says why when there is no reading. `luma` and `state` are then `null`
   rather than a guess.
-- `card` itself is `null` on a web take — there is no window to read beside.
+- `card` itself is `null` on a web take. Its hold is graded from the pixels by
+  this repository's `tests/smoke --wrapper-only`, not claimed in the artifact.
 
 **Nothing enforces it.** No warning, no refusal, no failed take: one CI run in
 nine has read a value in the empty band on a loaded runner, and a bar that
@@ -258,7 +258,7 @@ inside the stretch?**
 | beats inside the held stretch | verdict |
 |---|---|
 | `caption`, `criterion`, `hold`, `interlude`, `pause`, `shot`, `wait_for`, `wait_for_prompt`, `wait_for_text` | narrated hold — silent |
-| `clear`, `click`, `click_fast`, `goto`, `key`, `move_to`, `press`, `run`, `scroll_to`, `send`, `spotlight`, `terminal`, `terminal_close`, `terminal_output`, `type_into` | worth looking at — warns |
+| `act`, `clear`, `click`, `click_fast`, `goto`, `key`, `move_to`, `press`, `run`, `scroll_to`, `send`, `spotlight`, `terminal`, `terminal_close`, `terminal_output`, `type_into` | worth looking at — warns |
 
 Both rows are the whole of `content.py`'s `CONTENT_PASSIVE_VERBS` and
 `CONTENT_ACTING_VERBS`, written out name by name rather than summarised. This

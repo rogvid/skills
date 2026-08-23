@@ -171,7 +171,6 @@ from demo_recording.chrome import (  # noqa: E402
 from demo_recording.core import (  # noqa: E402
     CRITERION_HOLD_MAX_S,
     CRITERION_HOLD_MIN_S,
-    INTERLUDE_ID,
     _beat_verb,
     _CaptureClock,
     _DemoBase,
@@ -3578,15 +3577,6 @@ class PixelChecks(unittest.TestCase):
         self.assertEqual(px.opening_kind(px.OPENING_BARE_MIN_LUMA - 0.1), "between")
         self.assertEqual(px.opening_kind(px.OPENING_BARE_MIN_LUMA), "bare")
 
-    def test_card_prefix_ends_at_the_first_frame_that_is_not_card(self):
-        px = self.px
-        self.assertEqual(px.card_prefix([10.0, 20.0, 30.0]), 3)
-        # A mid-fade frame (`between`) ends the prefix — it is not "before the
-        # card" by any reading, which is #128's flake made a rule.
-        self.assertEqual(px.card_prefix([10.0, 80.0, 10.0]), 1)
-        self.assertEqual(px.card_prefix([226.0, 10.0]), 0)
-        self.assertEqual(px.card_prefix([]), 0)
-
     def test_beat_spans_returns_wellformed_beats_of_that_verb_only(self):
         doc = {
             "beats": [
@@ -4969,10 +4959,9 @@ class OpeningCardOnATake(unittest.TestCase):
     class Boxes(FakePage):
         """A page whose element boxes are the ones a test wrote down.
 
-        Keyed by selector, so a recorder reaching for `#__term_host` where it
-        means `#__term_win` reads `None` here rather than the other element's
-        box, and says it could not measure instead of measuring the wrong
-        thing.
+        Keyed by selector, so a recorder reaching for a selector it does not
+        mean reads `None` here rather than another element's box, and says it
+        could not measure instead of measuring the wrong thing.
         """
 
         def __init__(self, boxes: dict) -> None:
@@ -4983,32 +4972,36 @@ class OpeningCardOnATake(unittest.TestCase):
             box = self.boxes.get(selector)
             return types.SimpleNamespace(bounding_box=lambda: box)
 
-    def test_the_strip_starts_from_the_windows_unrounded_right_edge(self):
-        # `int(x) + int(w)` and `int(x + w)` are a column apart on a
-        # fractional box: 100.6 + 57.6 is 158.2, so the edge is 158 and the
-        # strip starts at 166 — two truncations give 157 and start it at 165.
-        # One column out of 58 is a fraction of a luma level and would never
-        # change the verdict; what it can do is drift the recorder's number
-        # away from tests/smoke's independent reading of the same strip, which
-        # is graded with a 1.0 bar. The two derive the edge the same way.
-        rec = recorder(
-            self,
-            cls=TermRec,
-            page=self.Boxes(
-                {"#__term_win": {"x": 100.6, "y": 70.0, "width": 57.6, "height": 400.0}}
+    def test_the_strip_is_the_shared_geometrys_arithmetic_exactly(self):
+        # The recorder's strip and the harnesses' (tests/smoke's, and
+        # tests/pixel's) are the same OPENING_STRIP fractions of the same
+        # `chrome_geometry` app rect, each side computing it for itself —
+        # and the agreement check between the recorder's reading and the
+        # harness's has a 1.0-luma bar, so the two derivations must land on
+        # the same integers. This pins the recorder's half to the
+        # arithmetic, digit for digit, at the stock viewport.
+        from demo_recording.terminal import OPENING_STRIP
+
+        rec = recorder(self, cls=TermRec, page=self.Boxes({}))
+        rec._geom = chrome_geometry(1280, 720)
+        geom = rec._geom
+        fx, fy, fw, fh = OPENING_STRIP
+        self.assertEqual(
+            rec._opening_card_rect(),
+            (
+                geom["appx"] + int(geom["appw"] * fx),
+                geom["appy"] + int(geom["apph"] * fy),
+                int(geom["appw"] * fw),
+                int(geom["apph"] * fh),
             ),
         )
-        rec._read_win_edge()
-        rect = rec._opening_card_rect()
-        self.assertIsNotNone(rect, "the window's box was read and gave no strip")
-        self.assertEqual(rect[0], 166)
 
     def test_a_take_that_lost_its_app_rect_still_reports_its_opening_frame(self):
         """The catalogue's clean-path-only assertion, on this field's guard.
 
         `_content_rect` raising nulls the whole `content.opening` block — so a
-        terminal take that could read `#__term_win` and not `#__term_host`
-        used to say nothing whatsoever about the frame it opened on, with
+        terminal take that had its chrome geometry and not its `#__term_host`
+        box used to say nothing whatsoever about the frame it opened on, with
         nothing anywhere saying why. The opening card is not measured over the
         app rect, so it has no reason to be lost with it.
         """
@@ -5242,8 +5235,9 @@ class WrapperChrome(unittest.TestCase):
         )
 
     def test_a_web_take_registers_the_opening_hold_script(self):
-        # The hold is an init script for _OPENING_CARD_JS's reasons — it has
-        # to exist on the wrapper page's initial document, before set_content
+        # The hold is an init script for the reasons the terminal's retired
+        # `_OPENING_CARD_JS` was one (#362 left this its only successor): it
+        # has to exist on the page's initial document, before set_content
         # replaces it. Exactly one: two registrations would be two elements
         # racing for one id.
         rec = recorder(self)
@@ -5349,6 +5343,40 @@ class WrapperChrome(unittest.TestCase):
         self.assertNotIn("domcontentloaded", page.subscribed)
         # #142's kept listener stays.
         self.assertIn("framenavigated", page.subscribed)
+
+    def test_the_motion_rule_is_reattached_to_the_written_chrome_document(self):
+        # `set_content` writes a new document and the context init script does
+        # not run again, so the motion rule's <style> goes with the old one.
+        # Measured red before #362 fixed it: every animation probe in
+        # tests/smoke --terminal-only read its authored duration, 2 s against
+        # the 1 ms the rule declares. Opt-in either way — a take that did not
+        # ask for determinism must not get the rule by this door.
+        for deterministic, expected in ((True, 1), (False, 0)):
+            for cls in (WebRec, TermRec):
+                with self.subTest(cls=cls.__name__, deterministic=deterministic):
+                    page = self.HoldPage()
+                    rec = recorder(
+                        self, cls=cls, page=page, deterministic=deterministic
+                    )
+                    rec._freeze_motion_here()
+                    rules = [s for s in page.evaluated if "__demo_motion" in s]
+                    self.assertEqual(len(rules), expected, page.evaluated)
+
+    def test_both_media_reattach_the_motion_rule_where_they_write_the_chrome(self):
+        # The call has to be in `_start`, after the `set_content` that wiped
+        # the rule — a re-attach that ran before the write would be undone by
+        # it, and the test above cannot see ordering.
+        for cls in (WebRec, TermRec):
+            with self.subTest(cls=cls.__name__):
+                source = inspect.getsource(cls._start)
+                self.assertIn("set_content", source)
+                self.assertIn("_freeze_motion_here()", source)
+                self.assertLess(
+                    source.index("set_content"),
+                    source.index("_freeze_motion_here()"),
+                    f"{cls.__name__}._start re-attaches the motion rule before "
+                    f"set_content writes the document that drops it",
+                )
 
 
 class VerbTarget(unittest.TestCase):
@@ -5834,35 +5862,26 @@ class CriterionHold(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# core.py — the interlude card each medium shows (issue #291, then #361)
+# terminal.py — the terminal mounts the shared chrome (#291, #361, then #362)
 # --------------------------------------------------------------------------
 #
-# One stylesheet used to serve both media and it was the terminal's, so on a
-# **web** take the full-screen card was a near-black field inside the
-# recorder's own dark window frame and read as a terminal window rather than
-# as a card over the app (#291) — the fix's history, including the rejected
-# candidates and the #301 encoder compensation the composite needed, is
-# `core.WEB_WINDOW_BODY`'s note. Since #361 there is no per-medium CSS
-# dispatch left to grade: the web card is an element the wrapper document
-# ships in its own card layer, painted from the same `window_body`
-# substitution as the window (`WrapperChrome` pins that wiring; `tests/smoke
-# --wrapper-only`'s check_wrapper_card reads the sameness out of demo.mp4).
-# Core's `_INTERLUDE_JS` only ever *finds* that element and toggles it —
-# the create-if-missing guard below is what keeps the terminal stylesheet it
-# still carries from ever painting on a web take.
+# One stylesheet used to serve both media's interlude card and it was the
+# terminal's, so on a **web** take the card read as a terminal window (#291)
+# — the fix's history is `core.WEB_WINDOW_BODY`'s note. #361 moved the web
+# card into the wrapper document's card layer, and #362 retired the last of
+# the per-medium chrome: the terminal records the same wrapper document,
+# xterm.js mounted in the chrome's content slot, so the card, the caption
+# band and the opening hold are one implementation (`WrapperChrome` pins the
+# document's wiring; `tests/smoke` and `tests/pixel` read the pixels). The
+# in-page overlay path — `_CAPTION_JS`, `_INTERLUDE_JS`'s builder and its
+# `INTERLUDE_CSS_TERMINAL` stylesheet — went with its last consumer; see
+# core's history note over `INTERLUDE_ID`.
 #
-# What is graded here is what remains browser-free: the terminal palette the
-# #110 blend was tuned to, the init-script/verb agreement a terminal segment
-# opens on, and the guard that makes the base stylesheet inert on a page
-# whose card already exists. **Whether a card reads as a card is not graded
-# anywhere and cannot be**: the same element, text and snapshot are produced
-# either way, and the only difference is a colour a person recognises.
-
-# The terminal palette, hand-written. A bound read off the code being graded
-# agrees with that code whatever it says, and this is the number other
-# things were chosen against: `tests/smoke`'s opening-card sweep calls
-# anything under 60 luma "the card", and the terminal one measures 26.
-TERMINAL_CARD_PALETTE = "background: #1c1a17; color: #f7f4ee;"
+# What is graded here is what remains browser-free: the terminal's half of
+# the chrome mount — the opening hold registered with the terminal's own
+# window body, the xterm mount targeting the chrome slot, the opening strip
+# deriving from the shared geometry, and the recorder clearing the covers it
+# raised.
 
 
 class _RecordingContext:
@@ -5880,80 +5899,105 @@ class _RecordingContext:
         self.scripts.append(script)
 
 
-def card_css(script: str) -> str:
-    """The stylesheet the card element is given, out of the script that builds
-    it — read the way the browser would, from the assignment it executes."""
-    match = re.search(r"style\.cssText = '([^']*)'", script)
-    return match.group(1) if match else ""
+class TerminalChrome(unittest.TestCase):
+    """The terminal's half of the shared chrome mount (#362), browser-free."""
 
-
-def card_declaration(css: str, want: str) -> str:
-    """One declaration out of a card's inline stylesheet, or `""`.
-
-    Hand-parsed rather than imported from the recorder: a helper shared with
-    the code under test agrees with that code's bugs by construction.
-    """
-    for declaration in css.split(";"):
-        name, _, value = declaration.partition(":")
-        if name.strip() == want:
-            return value.strip()
-    return ""
-
-
-def card_background(css: str) -> str:
-    """The `background:` declaration out of a card's inline stylesheet."""
-    return card_declaration(css, "background")
-
-
-class InterludePalette(unittest.TestCase):
-    def css_for(self, cls, **settings) -> str:
-        """The stylesheet a take of this medium gives its card.
-
-        Off `_interlude_script()`, which is the string `__enter__` registers on
-        the context, so every assertion below reads what the page would run.
-        """
-        return card_css(recorder(self, cls=cls, **settings)._interlude_script())
-
-    def test_a_terminal_take_still_raises_the_card_110_was_tuned_to(self):
-        # The blend `eca42c5` added is load-bearing on this medium: the card is
-        # what a terminal segment *opens* on, covering the recorder's own setup,
-        # and it has to be dark for the same reason the terminal is.
-        self.assertIn(TERMINAL_CARD_PALETTE, self.css_for(TermRec))
-
-    def test_the_base_stylesheet_cannot_paint_where_the_card_already_exists(self):
-        # The wiring that makes `_INTERLUDE_JS`'s terminal stylesheet inert on
-        # a web take: the script builds (and styles) the element only when the
-        # id is missing, and the wrapper document ships it in the card layer
-        # (`WrapperChrome`), so on a web page the script only ever toggles
-        # text and opacity. Drop the guard and every interlude would repaint
-        # the wrapper card as a full-viewport terminal-black field — the #291
-        # regression wearing #361's clothes.
-        script = recorder(self, cls=WebRec)._interlude_script()
-        create = script.index("createElement")
-        guard = script.index("if (!el)")
-        self.assertLess(
-            guard,
-            create,
-            "the interlude script creates its element unguarded, so the "
-            "stylesheet it carries would repaint a card the chrome document "
-            "already ships",
-        )
-        self.assertIn("getElementById", script[:guard])
-
-    def test_the_card_a_terminal_segment_opens_on_is_that_same_card(self):
-        # Two things build this element, and only one of them is the verb.
-        # `TerminalRecorder(interlude=…)` paints it from an init script before
-        # the page has painted at all (#110) — so a palette that arrived in
-        # `interlude()` alone would leave a segment opening on the other one,
-        # which is a card that changes colour mid-fade.
-        rec = recorder(self, cls=TermRec, interlude="…a few minutes later.")
+    def hold_scripts(self, **settings) -> list[str]:
+        rec = recorder(self, cls=TermRec, **settings)
         context = _RecordingContext()
         rec._init_context(context)
-        opening = [s for s in context.scripts if INTERLUDE_ID in s]
-        self.assertEqual(
-            len(opening), 1, "the opening card is not registered on the context"
+        return [s for s in context.scripts if "__chrome_hold" in s]
+
+    def test_a_terminal_take_registers_the_opening_hold_and_only_one(self):
+        # Frame 0 of a terminal take is the hold, whatever the storyboard
+        # does — an init script, because that runs on Chromium's initial
+        # empty document, earlier than any Python statement (#110's fix on
+        # #360's machinery). Exactly one: two registrations would be two
+        # elements racing for one id.
+        holds = self.hold_scripts()
+        self.assertEqual(len(holds), 1, "the terminal take registers no opening hold")
+
+    def test_the_hold_carries_the_terminal_window_body_and_the_app_rect(self):
+        # The hold, the window and the card are one declared colour on a
+        # terminal take — TERM_WINDOW_BODY, the theme's own background — and
+        # the hold sits on the shared geometry's app rect. A hold painted
+        # another colour is a visible flash at the card's fade; a hold
+        # placed off the app rect covers chrome and leaves the slot bare.
+        from demo_recording.terminal import _TERM_THEME, TERM_WINDOW_BODY
+
+        self.assertEqual(TERM_WINDOW_BODY, _TERM_THEME["background"])
+        geom = chrome_geometry(1280, 720)
+        hold = self.hold_scripts()[0]
+        self.assertIn(TERM_WINDOW_BODY, hold)
+        self.assertIn(f"left: {geom['appx']}px", hold)
+        self.assertIn(f"top: {geom['appy']}px", hold)
+
+    def test_the_xterm_mount_targets_the_chrome_slot(self):
+        # The one-chrome claim's wiring half: xterm.js goes into
+        # `#__chrome_slot`, where the web recorder mounts its app iframe,
+        # and keeps the `__term_host` id every geometry consumer reads
+        # (issue #97). The pixel half — the slot really shows a terminal —
+        # is tests/smoke --terminal-only's.
+        from demo_recording.terminal import _TERM_MOUNT_JS
+
+        self.assertIn("getElementById('__chrome_slot')", _TERM_MOUNT_JS)
+        self.assertIn("__term_host", _TERM_MOUNT_JS)
+
+    def test_the_opening_strip_reads_the_app_rect_and_never_the_band(self):
+        # #235's reading, re-based by #362: the strip is inside the app rect
+        # (the shared card layer covers the app rect only, so the old strip
+        # of background beside the window can no longer say what the take
+        # opened on) and clear of the caption band below it.
+        rec = recorder(self, cls=TermRec)
+        self.assertIsNone(
+            rec._opening_card_rect(),
+            "a take that never built its chrome claims a strip anyway",
         )
-        self.assertEqual(card_css(opening[0]), card_css(rec._interlude_script()))
+        rec._geom = chrome_geometry(1280, 720)
+        rect = rec._opening_card_rect()
+        self.assertIsNotNone(rect)
+        x, y, w, h = rect
+        geom = rec._geom
+        self.assertGreaterEqual(x, geom["appx"])
+        self.assertGreaterEqual(y, geom["appy"])
+        self.assertLessEqual(x + w, geom["appx"] + geom["appw"])
+        self.assertLessEqual(y + h, geom["appy"] + geom["apph"])
+        self.assertLess(y + h, geom["bandy"])
+
+    class ChromePage(FakePage):
+        """A page that remembers every script `evaluate` was handed."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.evaluated: list[str] = []
+
+        def evaluate(self, script, *args):
+            self.evaluated.append(str(script))
+            return None
+
+    def test_open_on_card_takes_down_the_card_and_the_hold_it_covered(self):
+        # #91's half of the seam, plus #362's: a card the recorder raises is
+        # a card the recorder clears, and the hold beneath goes down in the
+        # same breath — under the opaque card, so the card's fade reveals
+        # the terminal rather than a second flat field.
+        page = self.ChromePage()
+        rec = recorder(self, cls=TermRec, interlude="…a few minutes later.")
+        rec.page = page
+        rec._open_on_card()
+        downs = [
+            s
+            for s in page.evaluated
+            if "__demoChromeHoldClear" in s and "__demoInterlude('')" in s
+        ]
+        self.assertEqual(
+            len(downs),
+            1,
+            f"the opening card's clear does not take the card and the hold "
+            f"down together (scripts: {page.evaluated!r})",
+        )
+        beat = rec._beats[-1]
+        self.assertEqual(beat["verb"], "interlude")
+        self.assertEqual(beat["caption"], "…a few minutes later.")
 
     def test_the_web_card_is_not_painted_like_the_skills_terminal_widgets(self):
         # #291's own sentence, held on the card the wrapper document ships:
@@ -5971,27 +6015,6 @@ class InterludePalette(unittest.TestCase):
             f"the web card is painted {WEB_WINDOW_BODY}, which is a colour "
             f"the web recorder's own terminal prop draws with",
         )
-
-    def test_the_terminal_card_is_opaque_and_covers_the_frame(self):
-        # Not decoration, and not a restatement of the CSS:
-        # reference/limits.md reasons from all three of these — a card that
-        # is translucent, inset, or under the caption bar changes what the
-        # picture check can see and what a caption swap does to it. The web
-        # card's geometry is the chrome document's card layer, pinned by
-        # `WrapperChrome`; this is the terminal's, the one still built from
-        # this stylesheet.
-        css = self.css_for(TermRec)
-        self.assertIn("inset: 0", css)
-        self.assertIn("z-index: 2147483647", css)
-        # A flat `#rrggbb` and nothing else: `rgba(...)`, a gradient with a
-        # transparent stop, or a `background` left to the page are all ways
-        # for the app to show through.
-        self.assertRegex(card_background(css), r"^#[0-9a-f]{6}$")
-        # No border and no rounded corners: a radius clips the *background*
-        # too, so it would put the app back on screen at the four corners
-        # while the card is up (#297's rejected bordered card).
-        self.assertEqual(card_declaration(css, "border"), "")
-        self.assertEqual(card_declaration(css, "border-radius"), "")
 
 
 # --------------------------------------------------------------------------
@@ -10997,15 +11020,6 @@ INJECTIONS = [
         ["PixelChecks.test_opening_kind_grades_both_bars_at_the_boundary"],
     ),
     (
-        # The prefix counter calls a mid-fade frame 'still the card' — #128's
-        # flake reinstated: a card that fades in reads as up from frame 0.
-        "the opening-card prefix counts a mid-fade frame as card",
-        "tests/pixel",
-        '    while prefix < len(luma) and opening_kind(luma[prefix]) == "card":',
-        '    while prefix < len(luma) and opening_kind(luma[prefix]) != "bare":',
-        ["PixelChecks.test_card_prefix_ends_at_the_first_frame_that_is_not_card"],
-    ),
-    (
         # The card locator returns the first dark stretch instead of the
         # longest, so a dark flash before the card would be graded as it.
         "the card-stretch locator stops preferring the longest run",
@@ -12672,8 +12686,8 @@ INJECTIONS = [
         # The exception path as it shipped in the first draft of #235: the app
         # rect could not be worked out, so the whole `opening` block went null
         # and the frame the segment opened on went with it — a measurement
-        # that needs only `#__term_win`, lost because `#__term_host` was
-        # unreadable, with nothing saying so.
+        # that needs only the chrome geometry, lost because `#__term_host`
+        # was unreadable, with nothing saying so.
         "a take that lost its app rect reports nothing about its opening",
         "core.py",
         '            self._content["opening"] = opening_report(\n'
@@ -12691,16 +12705,18 @@ INJECTIONS = [
         ],
     ),
     (
-        # Two truncations instead of one. Invisible on an integral box, a
-        # column adrift on a fractional one — and the column is on the side
-        # tests/smoke's agreement check reads.
-        "the strip is measured from a twice-rounded window edge",
+        # The strip loses the app-rect offset, so the recorder reads its
+        # opening frame off the chrome to the window's upper-left — a
+        # confident number about the wrong pixels, and a drift tests/smoke's
+        # 1.0-luma agreement check would blame on the harness.
+        "the opening strip is measured without the app rect's offset",
         "terminal.py",
-        '            self._win_right = int(box["x"] + box["width"])',
-        '            self._win_right = int(box["x"]) + int(box["width"])',
+        '            geom["appx"] + int(geom["appw"] * fx),\n'
+        '            geom["appy"] + int(geom["apph"] * fy),',
+        '            int(geom["appw"] * fx),\n            int(geom["apph"] * fy),',
         [
             "OpeningCardOnATake."
-            "test_the_strip_starts_from_the_windows_unrounded_right_edge"
+            "test_the_strip_is_the_shared_geometrys_arithmetic_exactly"
         ],
     ),
     (
@@ -14418,89 +14434,71 @@ INJECTIONS = [
         ["CriterionHold.test_the_criterion_beat_covers_the_whole_spoken_line"],
     ),
     (
-        # **#291 wearing #361's clothes.** The wrapper document ships the
-        # card element, so core's `_INTERLUDE_JS` — which still carries the
-        # terminal stylesheet — must only ever find and toggle it. Drop the
-        # ask-the-page half and the script styles a fresh full-viewport
-        # element on every interlude: the web card repaints as a
-        # terminal-black field over the whole chrome.
-        "the interlude script stops asking the page before it builds a card",
-        "core.py",
-        "window.__demoInterlude = (text) => {\n"
-        "  let el = document.getElementById('__ID__');",
-        "window.__demoInterlude = (text) => {\n  let el = null;",
-        [
-            "InterludePalette."
-            "test_the_base_stylesheet_cannot_paint_where_the_card_already_exists",
-        ],
-    ),
-    (
-        # The web palette moved onto the terminal, which is #110's fix undone:
-        # a terminal segment then opens on a light field and fades it into a
-        # dark terminal, which is the flash that card exists to cover, brighter.
-        "the terminal's card is repainted in the web palette",
-        "core.py",
-        'INTERLUDE_CSS_TERMINAL = (\n    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"\n)',
-        'INTERLUDE_CSS_TERMINAL = (\n    _INTERLUDE_LAYOUT + " background: #efe7d8; color: #1c1a17;"\n)',
-        # Not `test_the_card_a_terminal_segment_opens_on_is_that_same_card`:
-        # that one grades the two builders of this element against **each
-        # other**, and both move together under a palette change. It is graded
-        # by the injection below, which is the fault it exists for.
-        [
-            "InterludePalette.test_a_terminal_take_still_raises_the_card_110_was_tuned_to",
-        ],
-    ),
-    (
-        # The palette fixed in `interlude()` and not in the init script that
-        # raises the opening card — the half of this element a storyboard never
-        # touches. The segment would open on one colour and fade out another.
-        "the card a terminal segment opens on keeps its own palette",
+        # The terminal take loses its opening hold: frame 0 is then the
+        # slot's white canvas until xterm.js paints — #110's flash, brighter,
+        # on the shared chrome. The pixel half is tests/pixel's terminal
+        # opening check; this is the wiring half, and it has to fail without
+        # a browser.
+        "the terminal stops registering the shared opening hold",
         "terminal.py",
-        '                .replace("__CSS__", self._interlude_css)',
-        '                .replace("__CSS__", "background: #efe7d8; color: #1c1a17;")',
+        "        context.add_init_script(\n"
+        "            opening_hold_script(\n"
+        '                chrome_geometry(self._size["width"], self._size["height"]),\n'
+        "                window_body=TERM_WINDOW_BODY,\n"
+        "            )\n"
+        "        )",
+        "        pass",
         [
-            "InterludePalette.test_the_card_a_terminal_segment_opens_on_is_that_same_card",
+            "TerminalChrome."
+            "test_a_terminal_take_registers_the_opening_hold_and_only_one",
         ],
     ),
     (
-        # A border put back on the card. This is #297's second rejected
-        # candidate: the field matches the window, and the card draws an edge
-        # of its own between itself and the recorder's pad — the "additional
-        # edge of a third colour" the reviewer refused.
-        "the terminal card draws an edge of its own around the field",
-        "core.py",
-        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"',
-        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"\n'
-        '    + " border: 18px solid #b45309;"',
+        # The hold painted in a colour that is not the terminal window's own
+        # body — the retired `#1c1a17` card palette, say. The card's fade
+        # then reveals a second flat field in a different dark, which reads
+        # as a stuck screen, and the one-declaration rule (#360) is broken
+        # on the medium it just reached.
+        "the terminal's hold is painted away from its window body",
+        "terminal.py",
+        # The `chrome_geometry(...)` line above it, because `_start`'s
+        # `chrome_html(...)` call passes the same keyword and a bare
+        # `window_body=` line matches twice (#362 gave the terminal two
+        # consumers of one colour, which is the point of the constant).
+        '                chrome_geometry(self._size["width"], self._size["height"]),\n'
+        "                window_body=TERM_WINDOW_BODY,",
+        '                chrome_geometry(self._size["width"], self._size["height"]),\n'
+        '                window_body="#1c1a17",',
         [
-            "InterludePalette.test_the_terminal_card_is_opaque_and_covers_the_frame",
+            "TerminalChrome."
+            "test_the_hold_carries_the_terminal_window_body_and_the_app_rect",
         ],
     ),
     (
-        # A card that lets the app show through. The colour is right, and
-        # reference/limits.md's account of what the picture check can see —
-        # which rests on this card being opaque — stops being true of a
-        # terminal take.
-        "the terminal card is a scrim over the app rather than a card",
-        "core.py",
-        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"',
-        '    _INTERLUDE_LAYOUT + " background: rgba(28,26,23,.72); color: #f7f4ee;"',
+        # xterm.js mounted beside the chrome instead of in its content slot:
+        # the window shows its white slot canvas forever while a live
+        # terminal renders behind the chrome document's window — the
+        # one-chrome claim broken at the mount point.
+        "xterm mounts on the body instead of in the chrome slot",
+        "terminal.py",
+        "  const slot = document.getElementById('__chrome_slot');",
+        "  const slot = document.body;",
         [
-            "InterludePalette.test_the_terminal_card_is_opaque_and_covers_the_frame",
+            "TerminalChrome.test_the_xterm_mount_targets_the_chrome_slot",
         ],
     ),
     (
-        # The card's corners rounded off the frame. `border-radius` clips the
-        # background of an `inset: 0` element, so the four corners stop being
-        # painted and the app shows through them while the card is up —
-        # full-bleed lost to a styling flourish, with the colour correct.
-        "the terminal card's outer corners are rounded off the frame",
-        "core.py",
-        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"',
-        '    _INTERLUDE_LAYOUT + " background: #1c1a17; color: #f7f4ee;"\n'
-        '    + " border-radius: 14px;"',
+        # The opening card's clear takes the card down and leaves the hold
+        # up beneath it — the take then shows the window's flat body to its
+        # last frame, #91's shape with the recorder's own furniture.
+        "the opening card's clear leaves the hold standing",
+        "terminal.py",
+        '                "() => { window.__demoChromeHoldClear();"\n'
+        "                \" window.__demoInterlude(''); }\"",
+        "                \"() => { window.__demoInterlude(''); }\"",
         [
-            "InterludePalette.test_the_terminal_card_is_opaque_and_covers_the_frame",
+            "TerminalChrome."
+            "test_open_on_card_takes_down_the_card_and_the_hold_it_covered",
         ],
     ),
     (

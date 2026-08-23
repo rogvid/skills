@@ -3,8 +3,9 @@
 Issue #358 (design record: #355). A wrapper take records a recorder-owned
 page carrying the window chrome: the pastel background, the dark rounded
 window with its title bar and traffic lights, a **content slot** the medium
-fills (the web recorder mounts the app iframe in it; #362 mounts xterm.js in
-the same slot), a **caption band** reserved BELOW the slot, and a **card
+fills (the web recorder mounts the app iframe in it; the terminal recorder
+mounts xterm.js in the same slot, #362), a **caption band** reserved BELOW
+the slot, and a **card
 layer** over the slot (#360). By construction the slot and the band share no
 pixels — `chrome_geometry` is the arithmetic behind that sentence. This
 repository's `tests/unit` (not shipped with the installed skill) grades it,
@@ -22,29 +23,31 @@ page — which is why its card sat above the caption bar and this one sits
 beside it. The decorative terminal prop (`Recorder.terminal()`) is deliberately
 **not** here: it is content, a styled element inside the demo's story that
 rides over the app the way an app dialog would, and the card layer stays
-reserved for the recorder's own furniture — #362 mounts a *real* terminal in
+reserved for the recorder's own furniture — #362 mounted a *real* terminal in
 the slot, and a prop living on the chrome layer would blur exactly that line.
 
 **The wrapper card declares the window's own colour — no compensation.** The
 card and the window body reach `demo.mp4` through one encoder on this path,
 so both paint the `window_body` the document was built with
-(`core.WEB_WINDOW_BODY` for the web recorder). The compensated pair the
-deleted composite needed (#291/#301) is recorded in that constant's history
-note; #361 deleted it with the composite.
+(`core.WEB_WINDOW_BODY` for the web recorder, `terminal.TERM_WINDOW_BODY` —
+the Catppuccin theme's own background — for the terminal). The compensated
+pair the deleted composite needed (#291/#301) is recorded in
+`core.WEB_WINDOW_BODY`'s history note; #361 deleted it with the composite.
 
 The visual constants here were ported from the composite's window frame
-(retired with it in #361) and from `terminal._TERM_HOST_JS`, whose copy
-stays until #362 mounts the terminal in this chrome too.
+(retired with it in #361) and from `terminal._TERM_HOST_JS`, the second
+hand-maintained copy of this window, retired when #362 mounted the terminal
+in this chrome too.
 """
 
 from __future__ import annotations
 
-# The pastel gradient behind the window. terminal.py still paints its own
-# copy (`_TERM_BG`) until #362; this one is the web recorder's since #361.
+# The pastel gradient behind the window — both media's, since #362 retired
+# terminal.py's own copy (`_TERM_BG`).
 CHROME_BG = "linear-gradient(135deg, #f6d5f0 0%, #d7e3fb 52%, #cdeede 100%)"
 
 # Title bar: height, fill and text colour, and the three traffic lights —
-# the frame both media share; `_TERM_HOST_JS` (terminal) still matches it.
+# the frame both media share.
 CHROME_BAR_PX = 36
 CHROME_BAR_BG = "#232334"
 CHROME_BAR_FG = "#9399b2"
@@ -69,13 +72,14 @@ CAPTION_FONT_PX = 26
 
 # Element ids. The slot is what a medium fills; the band holds the caption
 # element; the card layer holds the interlude/criterion card and the bridge
-# scrim (#360). The caption element deliberately keeps the id
-# `core._CAPTION_JS` uses, so "the caption element" is one selector whichever
-# medium drew it. The cursor dot keeps the id the composite path's overlay
-# used (`__demo_cursor`, so committed selectors keep working), and the card
-# and scrim keep `core.INTERLUDE_ID`/`core.BRIDGE_ID` — that is what lets
-# `interlude("")` and core's end-of-take overlay probe (`_OVERLAY_PROBE_JS`,
-# issue #163) find them with no wrapper-specific dispatch.
+# scrim (#360). The caption element keeps the id the retired in-page overlay
+# used (see core's history note over INTERLUDE_ID), so "the caption element"
+# is one selector in committed timelines old and new. The cursor dot keeps
+# the id the composite path's overlay used (`__demo_cursor`, so committed
+# selectors keep working), and the card and scrim keep
+# `core.INTERLUDE_ID`/`core.BRIDGE_ID` — that is what lets `interlude("")`
+# and core's end-of-take overlay probe (`_OVERLAY_PROBE_JS`, issue #163)
+# find them with no wrapper-specific dispatch.
 SLOT_ID = "__chrome_slot"
 BAND_ID = "__chrome_band"
 CARD_ID = "__chrome_card"
@@ -361,7 +365,8 @@ def chrome_html(
 # blank opening behind, so the blank opening is never on screen instead.
 #
 # An **init script**, and appended **already opaque** — both halves are
-# `terminal._OPENING_CARD_JS`'s pattern, kept for its reasons: an init script
+# the retired `terminal._OPENING_CARD_JS`'s pattern, kept for its reasons
+# (and since #362 this script is that card's one successor): an init script
 # runs on the wrapper page's *initial empty document*, which is earlier than
 # any Python statement or `set_content` can reach; and an element whose
 # computed opacity has been 1 since it entered the tree has no fade-in to run
@@ -378,9 +383,10 @@ def chrome_html(
 # iframe painting a copy of the hold over its own content would be the hold
 # covering the thing it exists to reveal.
 #
-# The pastel paint on the document element is `terminal._init_context`'s
-# issue-#25 guard, for the same white flash: the initial document is up
-# before the chrome document replaces it, and an unpainted document is white.
+# The pastel paint on the document element is the issue-#25 guard (born in
+# the terminal recorder's own init script, now living only here), for the
+# same white flash: the initial document is up before the chrome document
+# replaces it, and an unpainted document is white.
 OPENING_HOLD_JS = """
 (() => {
   if (window !== window.top) return;
