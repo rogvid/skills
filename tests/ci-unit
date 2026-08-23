@@ -40,6 +40,7 @@ import unittest
 import urllib.error
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / ".github" / "scripts"
@@ -801,6 +802,7 @@ def claim(
     still: str | None = None,
     segment: str | None = None,
     raised: str | None = None,
+    shows: str | None = None,
 ) -> dict:
     """One row of `coverage.claimed[id]`, shaped as `coverage_report` writes it.
 
@@ -818,6 +820,11 @@ def claim(
     }
     if raised is not None:
         row["error"] = {"type": raised, "message": "no such locator"}
+    # Absent unless asked for, the same way the recorder writes it (#374): a
+    # fixture that always carried `shows` would let a renderer that reads it
+    # pass on the take where nothing points against a clause.
+    if shows is not None:
+        row["shows"] = shows
     return row
 
 
@@ -1789,6 +1796,251 @@ class Coverage(unittest.TestCase):
             },
         )
         self.assertEqual(self.cell(self.body(stitched), "AC-1"), "beat 6 (`part2`)")
+
+
+class StillLinks(unittest.TestCase):
+    """Five ways the one linked still was plausible and wrong (#300).
+
+    All five were found by an independent review that fetched the emitted URLs
+    against real GitHub rather than reasoning about their shape, and none was
+    reachable in this repository's configuration on the day. That is what makes
+    them worth assertions: a link that resolves to the wrong thing is worse for
+    a reviewer than no link, because nothing about it looks wrong.
+
+    **The fifth is the one a reviewer was actually misled by**, and it needed a
+    decision rather than a guard — see `test_the_frame_linked_is_the_one_that
+    _shows_the_clause`.
+    """
+
+    SHA = "abcdef1234567890abcdef1234567890abcdef12"
+    REPO_URL = "https://github.com/o/r"
+    #: A committed file whose *name* closes the link's visible text and opens
+    #: a target of its own. No slash in it — a real filename cannot hold one —
+    #: which does not weaken the forgery: `[x](evil)` is a link either way,
+    #: and a relative target resolves against the repository just as well.
+    FORGED = "x](evil).png"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.images = self.root / "demos/x/images"
+        self.images.mkdir(parents=True)
+        for name in ("01-pre.png", "02-shows-it.png", "03-third.png", self.FORGED):
+            (self.images / name).write_bytes(b"\x89PNG")
+        (self.root / "leaked.png").write_bytes(b"\x89PNG")
+
+    def picture(self, rows, **kw):
+        opts = dict(
+            demo="demos/x",
+            directory=self.root / "demos/x",
+            repo_url=self.REPO_URL,
+            sha=self.SHA,
+        )
+        opts.update(kw)
+        return comment._picture(rows, **opts)
+
+    def body(self, coverage, **kw):
+        opts = dict(
+            artifact_url=None,
+            artifact_bytes=None,
+            retention_days=30,
+            evidence_retention_days=None,
+            failure_artifact_url=None,
+            run_url=None,
+            sha=self.SHA,
+            repo_url=self.REPO_URL,
+            demo_root=str(self.root),
+            path_prefix="",
+        )
+        opts.update(kw)
+        return comment.render([("demos/x", dict(TIMELINE, coverage=coverage))], **opts)
+
+    # -- 1. the prefix escapes without complaint -----------------------------
+
+    def test_a_path_prefix_that_is_not_a_plain_relative_path_is_refused(self):
+        # Measured in the issue: `../up` came back joined, and `/abs` came back
+        # with the leading slash silently dropped — a different path, linked
+        # with no complaint.
+        for bad in ("../up", "/abs", "a\\b", "up/../../out"):
+            self.assertIsNone(
+                comment.repo_path(bad, "demos/x"),
+                f"{bad!r} is not a plain relative path and must not build a URL",
+            )
+
+    def test_an_ordinary_prefix_is_still_joined(self):
+        # The control. A guard that refused everything would pass every case
+        # above and break the workflow this repository actually runs.
+        self.assertEqual(
+            comment.repo_path("examples/ticket-queue", "demos/x"),
+            "examples/ticket-queue/demos/x",
+        )
+        self.assertEqual(comment.repo_path("", "demos/x"), "demos/x")
+        self.assertEqual(comment.repo_path("./a", "demos/x"), "a/demos/x")
+
+    def test_the_command_refuses_a_bad_prefix_instead_of_rendering_it(self):
+        # The prefix is configuration, not data: one bad value makes *every*
+        # still link in the comment wrong, so it is said once and loudly rather
+        # than fallen back on per still.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "stage"
+            (root / "demos/x").mkdir(parents=True)
+            (root / "demos/x/timeline.json").write_text(json.dumps(TIMELINE))
+            out = Path(tmp) / "body.md"
+            done = subprocess.run(
+                [
+                    sys.executable,
+                    str(_DIR / "demo-comment"),
+                    "--demo",
+                    "demos/x",
+                    "--demo-root",
+                    str(root),
+                    "--retention-days",
+                    "30",
+                    "--out",
+                    str(out),
+                    "--path-prefix",
+                    "../up",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+            self.assertIn("--path-prefix", done.stderr)
+            self.assertFalse(out.exists(), "a refused run must write no comment")
+
+    # -- 2. a missing server URL invents a host ------------------------------
+
+    def test_a_missing_server_url_names_the_still_rather_than_guessing_a_host(self):
+        # Both variables are always set together in Actions, so this is the
+        # Enterprise-runner path rather than a live one — and the failure mode
+        # is a link to github.com for blobs that only ever lived elsewhere.
+        # Everything around it already prefers refusing.
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "o/r"}, clear=True):
+            self.assertEqual(comment._default_repo_url(), "")
+
+    def test_both_variables_present_still_build_the_host(self):
+        # The control: refusing unconditionally would take the links out of
+        # every real Actions run, which is the whole feature.
+        with mock.patch.dict(
+            os.environ,
+            {"GITHUB_SERVER_URL": "https://ghe.acme.com", "GITHUB_REPOSITORY": "o/r"},
+            clear=True,
+        ):
+            self.assertEqual(comment._default_repo_url(), "https://ghe.acme.com/o/r")
+
+    # -- 3. markdown label injection through a basename ----------------------
+
+    def test_a_committed_basename_cannot_forge_the_link_it_is_labelling(self):
+        cell = self.picture([claim(3, f"images/{self.FORGED}")]).cell
+        # Counted rather than searched for, because the forged text is
+        # *supposed* to still be in the label — the file really is called that.
+        # What must not survive is a second thing markdown reads as a link, so
+        # the escaped brackets come out and what is left is counted: exactly
+        # one `](`, the real one. Unfixed this cell holds two.
+        unescaped = re.sub(r"\\[\[\]]", "", cell)
+        self.assertEqual(
+            unescaped.count("]("),
+            1,
+            f"a basename opened a second link target: {cell!r}",
+        )
+        self.assertIn("\\]", cell)
+        # And the real target is still there, which is what makes the cell
+        # useful rather than merely safe.
+        self.assertIn(f"{self.SHA}/demos/x/images/", cell)
+
+    def test_an_ordinary_basename_is_not_mangled(self):
+        cell = self.picture([claim(3, "images/01-pre.png")]).cell
+        self.assertIn("[01-pre.png]", cell)
+        self.assertNotIn("\\", cell)
+
+    # -- 4. the gap headline is false for one branch -------------------------
+
+    def outside_coverage(self):
+        return {
+            "criteria": {"AC-1": "A clause whose still sits outside the demo."},
+            "claimed": {"AC-1": [claim(3, "../../leaked.png")]},
+            "unclaimed": [],
+            "tagged_beats": 1,
+            "untagged_beats": 0,
+        }
+
+    def test_a_still_published_outside_the_demo_is_not_called_unpublished(self):
+        # It *was* published — the file is on disk, and the cell two lines
+        # below says which path it is. The headline said the opposite.
+        body = self.body(self.outside_coverage())
+        self.assertNotIn("no still was published", body)
+        self.assertIn("outside this demo's directory", body)
+
+    def test_a_still_that_really_was_never_written_still_says_so(self):
+        # The control, and the branch the headline was written for. Without
+        # this, item 4's fix is satisfied by deleting the sentence.
+        body = self.body(
+            {
+                "criteria": {"AC-1": "A clause whose still was never written."},
+                "claimed": {"AC-1": [claim(3, "images/99-never.png")]},
+                "unclaimed": [],
+                "tagged_beats": 1,
+                "untagged_beats": 0,
+            }
+        )
+        self.assertIn("no still was published", body)
+
+    # -- 5. the linked frame is the pre-state --------------------------------
+
+    def test_the_frame_linked_is_the_one_that_shows_the_clause(self):
+        # The failure this repository shipped, in its own take: `AC-1` linked
+        # `01-queue.png` (beat 4, the queue before anything was typed) while
+        # `02-invoice.png` (beat 12) is the frame that shows the clause
+        # satisfied. The link worked, resolved, and showed the wrong moment.
+        #
+        # A storyboard builds to a clause, so the *last* still that claims it
+        # is the demonstration and the first is usually the setup.
+        cell = self.picture(
+            [
+                claim(3, "images/01-pre.png"),
+                claim(7),  # a caption beat, no still — must not win by being last
+                claim(9, "images/02-shows-it.png"),
+            ]
+        ).cell
+        self.assertIn("[02-shows-it.png]", cell)
+        self.assertNotIn("01-pre.png", cell)
+
+    def test_a_beat_pointed_against_the_clause_wins_over_the_last_one(self):
+        # #374's polarity outranks recency: a storyboard saying a clause does
+        # *not* hold is pointing at the frame a reviewer must not be steered
+        # away from, and "last" would steer them to whatever came after it.
+        cell = self.picture(
+            [
+                claim(3, "images/01-pre.png"),
+                claim(5, "images/02-shows-it.png", shows="unmet"),
+                claim(9, "images/03-third.png"),
+            ]
+        ).cell
+        self.assertIn("[02-shows-it.png]", cell)
+
+    def test_the_earliest_unmet_frame_wins_when_there_are_two(self):
+        cell = self.picture(
+            [
+                claim(3, "images/01-pre.png", shows="unmet"),
+                claim(9, "images/03-third.png", shows="unmet"),
+            ]
+        ).cell
+        self.assertIn("[01-pre.png]", cell)
+
+    def test_a_still_that_was_never_published_cannot_win_by_being_last(self):
+        # The rule picks among stills this take *published*, not among the
+        # names the manifest holds. A "last" that counted a missing file would
+        # report no picture for a clause that has one.
+        cell = self.picture(
+            [claim(3, "images/01-pre.png"), claim(9, "images/99-never.png")]
+        ).cell
+        self.assertIn("[01-pre.png]", cell)
+
+    def test_a_clause_with_one_still_is_unchanged(self):
+        # The control on the whole rule: the common case must not move.
+        cell = self.picture([claim(3, "images/01-pre.png")]).cell
+        self.assertIn("[01-pre.png]", cell)
 
 
 class Ticket(unittest.TestCase):
@@ -3253,6 +3505,103 @@ class UnmetInTheComment(unittest.TestCase):
 
 
 INJECTIONS = [
+    # -- five ways the still link was plausible and wrong (issue #300) -------
+    (
+        # The prefix goes back to being joined without discipline. Measured:
+        # `repo_path("../up", "demos/x")` gave `../up/demos/x`, and `/abs` came
+        # back as `abs/...` with the leading slash silently dropped. Every
+        # still link in the comment then points somewhere nobody asked for,
+        # and each one looks exactly like a working link.
+        "the path prefix is joined without checking it stays inside the tree",
+        "demo-comment",
+        '    if prefix.startswith("/") or "\\\\" in prefix:\n        return None',
+        "    if False:\n        return None",
+        [
+            "StillLinks.test_a_path_prefix_that_is_not_a_plain_relative_path_is_refused",
+            "StillLinks.test_the_command_refuses_a_bad_prefix_instead_of_rendering_it",
+        ],
+    ),
+    (
+        # The other half of the same rule: a `..` in the middle. `up/../../out`
+        # normalises out of the tree without ever starting with one.
+        "a prefix may climb out of the tree with a .. in the middle",
+        "demo-comment",
+        '    if ".." in parts:\n        return None',
+        "    if False:\n        return None",
+        ["StillLinks.test_a_path_prefix_that_is_not_a_plain_relative_path_is_refused"],
+    ),
+    (
+        # The command renders a comment full of broken links instead of saying
+        # once that its configuration is wrong.
+        "a bad prefix is rendered rather than refused",
+        "demo-comment",
+        '    if repo_path(args.path_prefix, "probe") is None:',
+        "    if False:",
+        ["StillLinks.test_the_command_refuses_a_bad_prefix_instead_of_rendering_it"],
+    ),
+    (
+        # github.com invented for an Enterprise runner. Both variables are
+        # always set together in Actions, so this never fires on a live path —
+        # and when it does it is a link to a host that has never held these
+        # blobs, for somebody else's repository or for nothing.
+        "a missing server URL is filled in with github.com",
+        "demo-comment",
+        '    server = (os.environ.get("GITHUB_SERVER_URL") or "").rstrip("/")\n'
+        '    repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip("/")\n'
+        '    return f"{server}/{repo}" if server and repo else ""',
+        '    server = (os.environ.get("GITHUB_SERVER_URL") or "https://github.com").rstrip(\n'
+        '        "/"\n'
+        "    )\n"
+        '    repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip("/")\n'
+        '    return f"{server}/{repo}" if repo else ""',
+        [
+            "StillLinks.test_a_missing_server_url_names_the_still_rather_than_guessing_a_host"
+        ],
+    ),
+    (
+        # The label goes back through `_cell`, which escapes `|` and `\` and
+        # not the two brackets that end a link's visible text. A committed file
+        # named `x](evil).png` then renders a link whose text and target
+        # disagree — in the one cell the comment invites a reviewer to click.
+        "a committed basename can forge the link that labels it",
+        "demo-comment",
+        '        label = _label(rel.rsplit("/", 1)[-1])',
+        '        label = _cell(rel.rsplit("/", 1)[-1])',
+        ["StillLinks.test_a_committed_basename_cannot_forge_the_link_it_is_labelling"],
+    ),
+    (
+        # The headline goes back to covering the outside-the-demo branch, where
+        # it is false: that still exists and this take published it. The cell
+        # says so two lines below, so the comment contradicts itself.
+        "a still published outside the demo is called unpublished",
+        "demo-comment",
+        '        and pictures[key].reason != "outside"',
+        "        and True",
+        [
+            "StillLinks.test_a_still_published_outside_the_demo_is_not_called_unpublished"
+        ],
+    ),
+    (
+        # The pre-state is linked again — the failure a reviewer actually acts
+        # on. In this repository's own take `AC-1` linked the queue *before*
+        # anything was typed, while the frame that shows the clause satisfied
+        # was eight beats later. The link works, resolves, and shows the wrong
+        # moment.
+        "the first still is linked instead of the one that shows the clause",
+        "demo-comment",
+        "        rel = next((r for against, r in usable if against), usable[-1][1])",
+        "        rel = next((r for against, r in usable if against), usable[0][1])",
+        ["StillLinks.test_the_frame_linked_is_the_one_that_shows_the_clause"],
+    ),
+    (
+        # Polarity stops outranking recency, so a storyboard saying a clause
+        # does *not* hold has the reviewer steered to whatever came after it.
+        "a beat pointed against a clause loses to a later one",
+        "demo-comment",
+        "        rel = next((r for against, r in usable if against), usable[-1][1])",
+        "        rel = usable[-1][1]",
+        ["StillLinks.test_a_beat_pointed_against_the_clause_wins_over_the_last_one"],
+    ),
     # -- a clause the storyboard marks unmet (issue #374) --------------------
     (
         # The disagreement rendered in take order, wherever it happened to
@@ -3610,16 +3959,7 @@ INJECTIONS = [
         # be perfect and never be called.
         "render_demo stops rendering the coverage section",
         "demo-comment",
-        '    lines += render_coverage(\n        timeline.get("coverage"),\n'
-        "        demo=repo_path(path_prefix, name),\n"
-        "        directory=demo_dir(demo_root, name),\n"
-        "        repo_url=repo_url,\n        sha=sha,\n"
-        "        # Without this the section renders a crashed take's claims "
-        "exactly like\n"
-        "        # a clean take's, five lines above a block that says the take "
-        "failed\n"
-        "        # (issue #278).\n"
-        "        failure=failure,",
+        '    lines += render_coverage(\n        timeline.get("coverage"),',
         "    lines += [] and render_coverage(\n        None,",
         [
             "Coverage.test_the_gap_is_stated_before_anything_that_was_claimed",
@@ -3972,7 +4312,7 @@ INJECTIONS = [
         # not, and every other assertion about the href passes.
         "the still link forgets the directory the storyboards are rooted at",
         "demo-comment",
-        "        demo=repo_path(path_prefix, name),",
+        '        demo=repo_path(path_prefix, name) or "",',
         "        demo=name,",
         ["Coverage.test_a_demo_below_the_repository_root_is_linked_where_git_holds_it"],
     ),
@@ -4075,9 +4415,8 @@ INJECTIONS = [
         # a picture right there in the row.
         "the no-picture finding names every claimed clause",
         "demo-comment",
-        "        key for key in criteria if key not in unclaimed "
-        + "and not pictures[key].found",
-        "        key for key in criteria if key not in unclaimed",
+        "        and not pictures[key].found\n",
+        "        and True\n",
         [
             "Coverage.test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture",
             "Coverage.test_a_take_whose_clauses_all_have_a_picture_prints_neither_gap",
@@ -4089,8 +4428,8 @@ INJECTIONS = [
         # said the true one.
         "a clause nothing claims is reported as a claim with no still",
         "demo-comment",
-        '        return _Picture("—", False)',
-        '        return _Picture("*no still*", False)',
+        '        return _Picture("—", False, "none")',
+        '        return _Picture("*no still*", False, "none")',
         [
             "Coverage.test_a_clause_claimed_only_by_a_caption_is_named_as_having_no_picture"
         ],

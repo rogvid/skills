@@ -423,6 +423,30 @@ in `unmet` was claimed — somebody pointed a frame at it and said it does not
 hold. A clause in `unclaimed` had no beat at all. Reporting the first as the
 second would file the more useful evidence under "nobody showed this".
 
+### Which still the CI comment links, when a clause has several
+
+The comment's acceptance table is **one picture per clause**, so when a clause
+is claimed by several beats it has to choose. The rule:
+
+1. **A beat marked `shows="unmet"` wins**, earliest first. The storyboard is
+   pointing at that frame as evidence the clause does *not* hold, and that is
+   the frame a reviewer must not be steered away from.
+2. **Otherwise the last published still** among the clause's claims.
+
+Last, not first, and the reason is worth knowing when you write a storyboard: a
+demo builds *to* a clause, so the first shot that claims one is usually the
+**pre-state**. This repo's own `2026-08-11-criterion-card` take linked
+`01-queue.png` for `AC-1` — the queue before anything was typed — while
+`02-invoice.png`, eight beats later, is the frame that shows the clause
+satisfied. The link worked, resolved, and showed the wrong moment.
+
+**The limit.** "Last" is a heuristic. A clause shown mid-take and then
+navigated away from links its final frame, which may no longer show it. Nothing
+in CI reads the pixels, so no rule at that layer can do better — take the shot
+that demonstrates a clause **last** among that clause's shots, and the comment
+picks it. When one picture is not enough, `scripts/demo-shots` renders every
+still the take published.
+
 **A clause claimed both ways is in `unmet`.** One beat says it holds and
 another says it does not; the second is the one a reviewer has to look at, and
 a rule that needed every beat to agree would hide it.
