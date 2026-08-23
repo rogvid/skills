@@ -92,3 +92,6 @@ tests/.pixel-cache/
 # them: tests/lint read 657 files here against CI's 13, and a red run pointed
 # at files on other branches (#219).
 .claude/
+
+# prek/pre-commit caches
+.prek-cache/

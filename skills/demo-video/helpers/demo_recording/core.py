@@ -1096,10 +1096,10 @@ class _DemoBase:
         its style element is gone. Globals survive (same realm), which is
         why the frozen clock needs nothing here and this does.
 
-        It went unnoticed until #362, because until then the only document
-        either medium wrote its chrome into was the web wrapper, whose app
-        is an iframe with a document of its own where the init script does
-        run. The terminal's content is *in* the written document, so every
+        It went unnoticed while the only document either medium wrote its
+        chrome into was the web wrapper, whose app is an iframe with a
+        document of its own where the init script does run. #362 put the
+        terminal's content *in* the written document, so every
         animation probe in this repository's `tests/smoke --terminal-only`
         read its authored duration — 2 s where the rule says 1 ms.
 

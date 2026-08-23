@@ -1374,10 +1374,10 @@ MIN_SPOTLIGHT_CLEAR_S = 0.45
 # transparent, and it says nothing about a card painted late, because a beat's
 # timestamp is when the recorder logged the card, not when a viewer saw it.
 #
-# The discriminator is a strip of the app rect, re-based when #362 mounted
-# the terminal in the shared chrome (until then it was a corner of
+# The discriminator is a strip of the app rect. #362 re-based it there when
+# it mounted the terminal in the shared chrome: it had been a corner of
 # background beside the bespoke window, which the shared card layer — app
-# rect only — made blind):
+# rect only — made blind. Two states:
 #
 #   the cover     the opening hold / clause card, window body    luma ~24
 #   the defect    the slot's unheld white canvas                 luma ~255

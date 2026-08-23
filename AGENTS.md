@@ -213,6 +213,32 @@ with no expected misses is not a measurement, and the requirement is not met by
 editing an `expected.json` until it agrees with a result — a corpus that can
 only agree with itself measures nothing.
 
+## Setting up, and the checks that run before a commit
+
+```sh
+mise install        # uv, prek, gitleaks
+mise run setup      # installs the git hooks
+```
+
+`prek` runs the hooks. **Every one of them shells out to the command CI runs**
+— `tests/lint`, `tests/typecheck`, `tests/unit`, `tests/ci-unit`, and the
+shellcheck / actionlint invocations `ci.yml` spells out. None re-implements a
+check and none names a tool version, because the repo has exactly one pin per
+tool and the scripts read it out of `ci.yml` as text (#189). A hook that called
+`ruff` or `mypy` itself would be the second pin; `tests/lint --self-test` and
+`tests/typecheck --self-test` refuse one.
+
+The pre-commit set measures **~6 s** over the whole tree. What needs the
+network runs on pre-push instead (`tests/lint --issues`), and what needs a
+browser (`tests/smoke`, `tests/pixel`) is not a hook at all — a hook people
+disable is worse than no hook.
+
+`mise run check` is the same set by hand. `mise tasks` lists the rest
+(`pixel`, `smoke`, `budget`).
+
+Bypassing a hook is `git commit --no-verify`; if you do, say so in the pull
+request, because CI will ask the same question a few minutes later.
+
 ## Housekeeping
 
 - Never commit `node_modules/`, `dist/`, `build/`, `__pycache__/`, `.tts/`, or
