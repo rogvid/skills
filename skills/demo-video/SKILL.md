@@ -466,6 +466,25 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    what it is for. What every field in `timeline.json` means, and what its
    `content` warnings do and do not claim, is
    [reference/timeline.md](reference/timeline.md).
+
+   **5.5. Run the caption lint — for free, before anyone reads frames.**
+
+   ```sh
+   <skill dir>/scripts/demo-caption-lint <demo folder>
+   ```
+
+   Each caption's numbers and quoted UI strings are checked against the
+   evidence text of its beat plus a window of neighbours (#356) — both of
+   the field run's round-1 caption contradictions were findable this way
+   without a model, before the blind round spent an agent run. Three states
+   per claim: **matched**; **NOT FOUND** (check the app first — a screen not
+   doing what the caption says is a bug the demo caught, and softening the
+   caption launders it); **not checkable**, with the reason (prose-only
+   claims nothing token-shaped to carry; unreadable evidence). It grades
+   tokens, not meaning — a paraphrase sharing no token is a named limit,
+   not a pass — and it is advisory: exit 0 either way. Step 6 still runs;
+   this is the filter in front of it.
+
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you. The
    recorder has already written what they need: `frames/`, a PNG per beat
@@ -645,7 +664,8 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 
 The skill is self-contained: this file, the `reference/` directory it links
 into, the `helpers/demo_recording/` package, `ensure.sh` at the skill root,
-`scripts/demo-rehearse` (the step-2.5 gate), `scripts/demo-grade` (step 6b),
+`scripts/demo-rehearse` (the step-2.5 gate), `scripts/demo-caption-lint`
+(the step-5.5 caption check), `scripts/demo-grade` (step 6b),
 `scripts/demo-shots` (the stills block) and
 `scripts/demo-target-guard` (the target classifier), the vendored `helpers/assets/xterm/` terminal assets, and
 `README.md`. Install it with the `skills` CLI — into the current project:

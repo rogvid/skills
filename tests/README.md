@@ -1281,9 +1281,11 @@ So the assertions were **written rather than trimmed**, and there are three:
   under every icon wrapper on a real page. There is one per visibility guard,
   because `display:none` trips both and would otherwise leave either deletable
   in silence — the fixture carries a clipped box for the zero-size test and a
-  `visibility:hidden` box for the computed-style one. The caption-claims lint
-  that will read this field is tracked in
-  [#356](https://github.com/rogvid/skills/issues/356).
+  `visibility:hidden` box for the computed-style one. The caption-claims
+  lint reads this field: `scripts/demo-caption-lint`
+  ([#356](https://github.com/rogvid/skills/issues/356)) treats a claim found
+  only here as matched — on screen — and reserves *not checkable* for text
+  nothing measured.
 
 Plus the two that never touched masking: a previous take's evidence is cleared
 from the directory on a re-record while another *segment's* files survive, and
@@ -3364,6 +3366,13 @@ knows is missing is worse than one that is openly absent.
   [#233](https://github.com/rogvid/skills/issues/233), which names the entries
   that would have closed it and was itself closed as *recorded, not planned* in
   the 2026-08-13 triage above.
+- **The classes of defect that reach a viewer only through the encoded
+  pixels** — chrome a harness measures correctly and a person reads wrong,
+  #291's card among them — remain unwatched for now; a focused pass over
+  them remains open:
+  [#325](https://github.com/rogvid/skills/issues/325). Everything above this
+  line is graded per push; what that pass owns is the part only watching
+  grades.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
   fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
