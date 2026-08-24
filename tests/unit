@@ -1615,6 +1615,33 @@ class VerbClassification(unittest.TestCase):
         # depends on which set is consulted first.
         self.assertEqual(sorted(CONTENT_ACTING_VERBS & CONTENT_PASSIVE_VERBS), [])
 
+    def test_every_logged_verb_is_classified(self):
+        # **The direction that cost main 33 hours of red** (#392): `act`
+        # shipped recording beats while sitting in neither set, and an
+        # unclassified verb silently counts as passive — so the held-picture
+        # arm stopped noticing a whole class of demo without anything saying
+        # so. It lived here only as a recorded-take assertion behind the
+        # expensive arms, which run post-merge; nine full-suite runs paid for
+        # what this test grades in microseconds.
+        logged = logged_verbs()
+        # The vacuous-sweep control first: an empty scrape satisfies
+        # "everything logged is classified" over nothing at all.
+        self.assertGreaterEqual(
+            len(logged),
+            CONTENT_VERB_FLOOR,
+            f"only {len(logged)} verbs were scraped out of the package "
+            f"({sorted(logged)}) — the scrape is broken, not the sets",
+        )
+        unclassified = sorted(logged - (CONTENT_ACTING_VERBS | CONTENT_PASSIVE_VERBS))
+        self.assertEqual(
+            unclassified,
+            [],
+            f"{unclassified} record beats but are in neither "
+            f"CONTENT_ACTING_VERBS nor CONTENT_PASSIVE_VERBS. An unclassified "
+            f"verb counts as passive, so a held picture spanning it never "
+            f"warns — decide which it is rather than letting it default",
+        )
+
 
 class ContentSummaryStreams(unittest.TestCase):
     """Which stream each half of the summary goes to (issue #169).
@@ -14762,6 +14789,18 @@ INJECTIONS = [
         'CONTENT_PASSIVE_VERBS = frozenset(\n    {\n        "caption",',
         'CONTENT_PASSIVE_VERBS = frozenset(\n    {\n        "click",\n        "caption",',
         ["VerbClassification.test_no_verb_is_both_acting_and_passive"],
+    ),
+    (
+        # #392 verbatim, and the direction the smoke-side sweep could only
+        # grade post-merge: `act` recorded beats from inside `CONTENT_ACTING_
+        # VERBS`'s own comment block while sitting in neither set. Deleting it
+        # here is what main looked like for 33 hours — nine ten-minute runs,
+        # every one red on exactly this.
+        "a logged verb is left sitting in neither classification set",
+        "content.py",
+        '        "act",\n        "clear",',
+        '        "clear",',
+        ["VerbClassification.test_every_logged_verb_is_classified"],
     ),
     (
         # The half of #169 that cost an assertion: with the healthy line on
