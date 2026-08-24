@@ -57,6 +57,19 @@ repo-shaped path a shipped document names must resolve inside the installed
 skill, unless the sentence naming it says it is in this repository.
 `check_issue_refs()` is the half that needs the network, hence `--issues`
 rather than a step of the ordinary run.
+
+**And it grades the moment a reader will read, not the moment it runs (#390).**
+A sentence presenting an issue as pending can be true on the branch and false
+on main within one merge: closing that issue is what the merge *does*. The
+pre-push hook passed truthfully both times; the tracker changed underneath it,
+and only CI — after the merge — could see the lie. So on a pull request
+(`GITHUB_EVENT_NAME`/`GITHUB_EVENT_PATH`, set by Actions) this script also
+reads the close keywords in the pull request's title, body and commit
+messages, and grades those numbers as already closed: the stale sentence goes
+red before the review instead of after the merge. Outside a pull request the
+projection returns nothing, which leaves an inherent residual gap — a pre-push
+hook cannot know its merge message yet — stated here rather than pretended
+away.
 """
 
 from __future__ import annotations
@@ -65,6 +78,7 @@ import argparse
 import ast
 import functools
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -739,6 +753,104 @@ PENDING = re.compile(
 # either, and the check would be trivially avoidable if it read only one.
 ISSUE_REF = re.compile(r"#(\d{1,5})\b|/issues/(\d{1,5})\b")
 
+# GitHub's own close vocabulary, in the forms a pull request title, body or
+# commit message uses to close an issue on merge: close/closes/closed,
+# fix/fixes/fixed, resolve/resolves/resolved, each followed by #N or by a
+# full issues URL (a colon between keyword and number is accepted too —
+# "Fixes: #12" is idiomatic). This is the *projection* half of the check
+# below: how a pull request says what the tracker will say about it after
+# the merge.
+CLOSE_REF = re.compile(
+    r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*"
+    r"(?:#(?P<short>\d{1,5})\b|https?://\S+/issues/(?P<long>\d{1,5})\b)"
+)
+
+# The events whose payload carries the pull request this run is grading. On
+# anything else — a push to main, a local pre-push hook — there is nothing to
+# project and the check grades the tracker exactly as it finds it.
+PR_EVENTS = frozenset({"pull_request", "pull_request_target"})
+
+
+def _closed_numbers(*texts: str) -> set[int]:
+    """The issue numbers the GitHub close vocabulary names across `texts`."""
+    found: set[int] = set()
+    for text in texts:
+        for hit in CLOSE_REF.finditer(text):
+            found.add(int(hit.group("short") or hit.group("long")))
+    return found
+
+
+def projected_closes() -> frozenset[int]:
+    """Issues the pull request under review will close when it merges (#390).
+
+    The race this closes: prose may present an issue as pending work while a
+    branch is open — truthfully, and so green through every local hook — and
+    the merge of that same branch closes the issue out from under the sentence.
+    Main's CI then re-reads it against post-merge state and goes red where no
+    hook can reach. Grading a pull request against what its own merge will do
+    turns that red into a pre-merge one, naming the sentence while its author
+    can still reword it to past tense.
+
+    Reads the Actions event payload (`GITHUB_EVENT_PATH`); outside one — a
+    push to main, a developer's machine — returns nothing and the check grades
+    real state only. **That residual gap is inherent**: a pre-push hook cannot
+    know its merge message yet. It is stated here rather than pretended away.
+
+    Every way reading the context can fail raises `Refused`, for the reason
+    `issue_states()` gives: a silent empty answer would be read as "nothing
+    will close".
+    """
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
+    path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not path:
+        if event in PR_EVENTS:
+            raise Refused(
+                "GITHUB_EVENT_NAME says a pull request ran this, but "
+                "GITHUB_EVENT_PATH is not set, so the issues it closes cannot "
+                "be projected and the pending-prose check would grade the "
+                "wrong moment"
+            )
+        return frozenset()
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Refused(
+            f"the GitHub event payload at {path} could not be read ({exc}), so "
+            "the issues this pull request closes cannot be projected"
+        ) from exc
+    pr = payload.get("pull_request") or {}
+    number = pr.get("number") or payload.get("number")
+    repo = (payload.get("repository") or {}).get("full_name")
+    if event not in PR_EVENTS or not number or not repo:
+        return frozenset()
+    done = subprocess.run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            str(repo),
+            "--json",
+            "title,body,commits",
+        ],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+    )
+    if done.returncode != 0:
+        raise Refused(
+            f"`gh pr view {number}` failed, so the issues this pull request "
+            f"closes cannot be projected: {done.stderr.strip()[:200]}"
+        )
+    data = json.loads(done.stdout)
+    texts = [str(data.get("title") or ""), str(data.get("body") or "")]
+    for commit in data.get("commits") or []:
+        texts.append(str(commit.get("messageHeadline") or ""))
+        texts.append(str(commit.get("messageBody") or ""))
+    return frozenset(_closed_numbers(*texts))
+
+
 # Sweeping every tracked document, not only the shipped ones: this repo's own
 # `tests/README.md` held ten of the twelve, and a contributor reading a closed
 # issue as open wastes the same afternoon a consumer would.
@@ -814,14 +926,26 @@ def issue_states() -> dict[int, str]:
     return states
 
 
-def stale_refs(text: str, states: dict[int, str]) -> list[tuple[int, str, list[int]]]:
+def stale_refs(
+    text: str, states: dict[int, str], closing: frozenset[int] = frozenset()
+) -> list[tuple[int, str, list[int]]]:
     """(line, sentence, the closed issues) for each pointer presented as pending.
 
-    A sentence is only reported when **every** issue it names is closed. One
-    naming an open issue beside a closed one is a history, not a dead pointer,
-    and a number the list does not carry at all is a pull request — neither is
-    graded here, and both are counted by the caller.
+    A number counts as dead when the tracker says CLOSED **or** when it is in
+    `closing` — the set this run's own pull request will close on merge (#390).
+    Grading a pull request against its own future is what turns a red main
+    into a red pull request.
+
+    A sentence is only reported when **every** issue it names ends up closed.
+    One naming an issue that survives the merge beside a dead one is a
+    history, not a dead pointer, and a number the list does not carry at all
+    is a pull request — neither is graded here, and both are counted by the
+    caller.
     """
+
+    def dead(number: int) -> bool:
+        return states[number] == "CLOSED" or number in closing
+
     found: list[tuple[int, str, list[int]]] = []
     for first, block in blocks(text):
         for hit in PENDING.finditer(block):
@@ -829,7 +953,7 @@ def stale_refs(text: str, states: dict[int, str]) -> list[tuple[int, str, list[i
             numbers = sorted(
                 {int(a or b) for a, b in ISSUE_REF.findall(sentence)} & states.keys()
             )
-            if not numbers or any(states[n] == "OPEN" for n in numbers):
+            if not numbers or any(not dead(n) for n in numbers):
                 continue
             line = first + block[: hit.start()].count("\n")
             found.append((line, " ".join(sentence.split())[:160], numbers))
@@ -837,8 +961,16 @@ def stale_refs(text: str, states: dict[int, str]) -> list[tuple[int, str, list[i
 
 
 def check_issue_refs(github: bool = False) -> int:
-    """Every issue a document presents as pending work is an issue that is open."""
+    """Every issue a document presents as pending work ends up closed (#390).
+
+    "Ends up", not "is": on a pull request the grading includes what its own
+    merge will close, so a sentence that is only waiting for this very branch
+    reddens here — before the review, where it can be reworded — instead of
+    after it, on main, where the pre-push hook that passed truthfully can no
+    longer help.
+    """
     states = issue_states()
+    closing = projected_closes()
     problems: list[tuple[str, int, str]] = []
     refs = 0
     docs = 0
@@ -852,14 +984,23 @@ def check_issue_refs(github: bool = False) -> int:
         text = path.read_text(encoding="utf-8", errors="replace")
         docs += 1
         refs += len(ISSUE_REF.findall(text))
-        for line, sentence, numbers in stale_refs(text, states):
-            closed = ", ".join(f"#{n}" for n in numbers)
+        for line, sentence, numbers in stale_refs(text, states, closing):
+            by_merge = sorted(n for n in numbers if n in closing)
+            already = sorted(n for n in numbers if n not in closing)
+            parts = []
+            if already:
+                parts.append(", ".join(f"#{n}" for n in already) + " is closed")
+            if by_merge:
+                parts.append(
+                    ", ".join(f"#{n}" for n in by_merge)
+                    + (" is" if len(by_merge) == 1 else " are")
+                    + " closed by this very pull request"
+                )
             problems.append(
                 (
                     rel,
                     line,
-                    f"presented as pending work, but {closed} "
-                    f"{'is' if len(numbers) == 1 else 'are'} closed: {sentence!r}",
+                    f"presented as pending work, but {'; '.join(parts)}: {sentence!r}",
                 )
             )
 
@@ -890,6 +1031,11 @@ def check_issue_refs(github: bool = False) -> int:
     print(
         f"issues: {refs} reference(s) across {docs} file(s), against "
         f"{len(states)} issue(s) on the tracker"
+        + (
+            f"; grading as closed the {len(closing)} this pull request merges"
+            if closing
+            else ""
+        )
     )
     for rel, line, message in problems:
         if github:
@@ -1231,6 +1377,54 @@ def issue_guard() -> int:
         else:
             bad += 1
             print(f"BLIND    {what}: {found} finding(s), expected {expect}")
+
+    # The projection half (#390): a pull request is graded against what its
+    # own merge will close. Rows 1 and 2 are the same sentence with and
+    # without the projection — the race stated as data.
+    projection_cases = (
+        (
+            "an open issue this pull request will close",
+            "Until then, see #9002.",
+            True,
+            1,
+        ),
+        (
+            "the same sentence with no projection behind it",
+            "Until then, see #9002.",
+            False,
+            0,
+        ),
+        (
+            "a closed issue beside one this pull request will close",
+            "Tracked in #9000 and #9002.",
+            True,
+            1,
+        ),
+    )
+    for what, document, use_projection, expect in projection_cases:
+        closing = frozenset({9002}) if use_projection else frozenset()
+        found = len(stale_refs(document, states, closing))
+        if found == expect:
+            print(f"{'CATCHES ' if expect else 'ALLOWS  '} {what}")
+        else:
+            bad += 1
+            print(f"BLIND    {what}: {found} finding(s), expected {expect}")
+
+    # And the close vocabulary itself: what a title, body or commit message
+    # says in GitHub's own dialect must all land, and prose that merely cites
+    # an issue must not count as closing it.
+    parsed = _closed_numbers(
+        "Fixes #9000",
+        "closes https://github.com/rogvid/skills/issues/9002",
+        "This resolves #9004 and fixes: #9005",
+        "Mentions #9006 but fixes nothing",
+        "prefix fix #9007",
+    )
+    if parsed == {9000, 9002, 9004, 9005, 9007}:
+        print("OK       the close vocabulary parses titles, bodies and commits")
+    else:
+        bad += 1
+        print(f"BLIND    close vocabulary parsed {sorted(parsed)}")
 
     # The control the table cannot give: that the vocabulary above still
     # matches this repository's prose at all. A `PENDING` that stopped matching
