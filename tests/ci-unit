@@ -3801,8 +3801,8 @@ INJECTIONS = [
         # assertions must go red for the break to count as noticed.
         "the caption lint calls every miss a match",
         "scripts/demo-caption-lint",
-        '                     "NOT FOUND — no nearby evidence carries it")',
-        '                     "matched")',
+        '                        "NOT FOUND — no nearby evidence carries it",',
+        '                        "matched",',
         [
             "CaptionLint.test_a_quoted_string_no_nearby_evidence_says_is_not_found",
             "CaptionLint.test_a_number_nothing_nearby_carries_is_not_found",
