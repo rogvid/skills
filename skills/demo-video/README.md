@@ -78,6 +78,12 @@ and a real terminal session (voice on):
   strict about console errors, failed requests and non-zero exits. A feature
   that does not work fails there and no video of it is made. CI runs the same
   command before spending encoder minutes on a take.
+- **A free check on what captions claim** — `scripts/demo-caption-lint`
+  checks each caption's numbers and quoted UI strings against the per-beat
+  evidence text around it (matched / not found / not checkable), catching
+  the "caption written from what the author knew" class for zero tokens
+  before the blind review round. Advisory by design; grades tokens, not
+  meaning, and says so.
 - **Spoken narration (optional)** — with `ELEVENLABS_API_KEY` set, every
   caption line is synthesized via ElevenLabs and mixed onto the mp4 at the
   moment it appears. Clips are cached; pacing self-adjusts so speech is
@@ -160,6 +166,8 @@ demo-video/
 ├── scripts/
 │   ├── demo-rehearse              # the functional gate: storyboard, fast and
 │   │                              #   strict, before anything is recorded
+│   ├── demo-caption-lint          # captions' numbers and quoted strings,
+│   │                              #   checked against evidence, for free
 │   ├── demo-grade                 # the blind reader's brief, and the verdict
 │   │                              #   comparing it with the ac= tags (step 6b)
 │   ├── demo-shots                 # the take's stills as one pasteable block,

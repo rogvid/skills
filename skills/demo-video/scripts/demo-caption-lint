@@ -1,0 +1,261 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Check each caption's checkable claims against the evidence of its beat.
+
+    <skill-dir>/scripts/demo-caption-lint <demo folder>
+
+The cheap pre-filter over Process step 5 (#356): `evidence/beat-NN.json`
+holds the per-beat text of what was on screen and the timeline holds each
+beat's caption, so a caption claiming something no nearby screen ever said
+is findable without a model, for zero tokens, before the blind review round
+spends an agent run. Both of the field run's round-1 contradictions were
+this shape.
+
+What it grades: **tokens, not meaning** — the numbers a caption states and
+the UI strings it puts in quotes, against the evidence of its own beat plus
+a window of neighbours (one back, three forward, because a caption is
+written to lead the action it introduces). A claim that paraphrases the
+screen shares no token with it; this lint cannot see that, and says so
+rather than passing silently. The blind round stays; this is the filter in
+front of it, not the review.
+
+Three states per claim, the `demo-ticket-check` shape:
+
+- **matched** — the token appears in the window's evidence. Evidence the
+  snapshot structurally cannot carry counts too (`aria_omits`, #353): that
+  text was measured on screen.
+- **not found** — nothing in the window said it. This is the finding the
+  lint exists for, and it may be the app's fault, the storyboard's, or a
+  caption written from what the author knew instead of what the frame shows.
+- **not checkable** — with the reason: prose-only (no number, no quote —
+  nothing a token lint could carry), or no readable evidence beside the
+  beat (missing file, or an `aria_format` that says why).
+
+**Advisory by design**: exit 0 on every path a take can produce, however
+many findings — a lint that reddens on aria quirks trains people to delete
+it. Exit 2 is usage only. Findings are for the author to read before step 6,
+not a gate behind them.
+
+Reads committed working files only (`timeline.json`, `evidence/`); it
+writes nothing and grades nothing but text-to-text correspondence.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+# Caption leads action: one beat back, three forward (review.md's "a caption
+# normally appears a frame or two ahead of the picture that evidences it").
+WINDOW_BACK, WINDOW_FORWARD = 1, 3
+
+NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+QUOTED = re.compile(r"\"([^\"]{2,})\"|“([^”]{2,})”|'([^']{2,})'|‘([^’]{2,})’")
+DIGITS = re.compile(r"\d+")
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def digit_runs(token: str) -> list[str]:
+    """`"1,200"` -> ["1200"], `"0.2s"` -> ["0", "2"] — comparable across
+    separators the caption and the app spell differently."""
+    return DIGITS.findall(token.replace(",", "").replace(".", ""))
+
+
+def claims(caption: str) -> tuple[list[str], list[str]]:
+    """(numbers, quoted strings) a caption stakes on the screen."""
+    numbers = [m.group(0) for m in NUMBER.finditer(caption)]
+    quotes = [
+        next(g for g in m.groups() if g is not None) for m in QUOTED.finditer(caption)
+    ]
+    return numbers, quotes
+
+
+def evidence_texts(
+    directory: Path, index: int, segment: str | None
+) -> tuple[str | None, str | None]:
+    """(joined text, why-not) for one beat's evidence file."""
+    name = f"{segment + '.seg.' if segment else ''}beat-{index:02d}.json"
+    path = directory / name
+    if not path.is_file():
+        return None, f"no evidence file {name}"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"{name} unreadable ({exc})"
+    parts = [doc.get(k) or "" for k in ("aria", "scope_aria", "chrome", "html")]
+    # On-screen text the snapshot structurally cannot carry (#353). It was
+    # measured off the live DOM, so a claim found here *is* on screen —
+    # matched, not excused.
+    parts += doc.get("aria_omits") or []
+    fmt = doc.get("aria_format") or ""
+    if not any(parts) and "unavailable" in fmt:
+        return None, f"{name}: aria_format says {fmt}"
+    return _norm(" ".join(str(p) for p in parts)), None
+
+
+def window_text(
+    directory: Path,
+    beats: list[dict],
+    position: int,
+) -> tuple[str | None, list[str]]:
+    """Evidence text across the beat's window; (None, reasons) if none read."""
+    texts: list[str] = []
+    reasons: list[str] = []
+    segment = beats[position].get("segment")
+    positions = [b.get("segment_index", b["index"]) for b in beats]
+    here = positions[position]
+    for other, pos in enumerate(positions):
+        if beats[other].get("segment") != segment:
+            continue
+        if not (here - WINDOW_BACK <= pos <= here + WINDOW_FORWARD):
+            continue
+        text, why = evidence_texts(directory, beats[other]["index"], segment)
+        if text is not None:
+            texts.append(text)
+        elif why:
+            reasons.append(why)
+    if texts:
+        return " ".join(texts), []
+    return None, reasons or ["no evidence in the window"]
+
+
+def lint(demo_dir: Path) -> list[tuple[int, str, str, str]]:
+    """(beat index, caption excerpt, claim, verdict+reason) for each finding.
+
+    Every captioned beat produces at least one line: its claims' states, or
+    the single not-checkable line that says the caption stakes nothing this
+    lint can carry.
+    """
+    timeline = demo_dir / "timeline.json"
+    doc = json.loads(timeline.read_text(encoding="utf-8"))
+    beats = [b for b in doc.get("beats", []) if b.get("caption")]
+    evidence_dir = demo_dir / "evidence"
+    out: list[tuple[int, str, str, str]] = []
+    for position, beat in enumerate(beats):
+        caption = beat["caption"]
+        numbers, quotes = claims(caption)
+        excerpt = _norm(caption)[:80]
+        if not numbers and not quotes:
+            out.append(
+                (
+                    beat["index"],
+                    excerpt,
+                    "-",
+                    "not checkable — prose only: no number or quoted string "
+                    "for a token lint to carry (a paraphrase of the screen "
+                    "would look exactly like this)",
+                )
+            )
+            continue
+        text, reasons = window_text(evidence_dir, beats, position)
+        for token in numbers:
+            runs = digit_runs(token)
+            if text is None:
+                out.append(
+                    (
+                        beat["index"],
+                        excerpt,
+                        token,
+                        "not checkable — " + "; ".join(reasons),
+                    )
+                )
+            elif all(run in text for run in runs):
+                out.append((beat["index"], excerpt, token, "matched"))
+            else:
+                out.append(
+                    (
+                        beat["index"],
+                        excerpt,
+                        token,
+                        "NOT FOUND — no nearby evidence carries it",
+                    )
+                )
+        for quote in quotes:
+            needle = _norm(quote)
+            if text is None:
+                out.append(
+                    (
+                        beat["index"],
+                        excerpt,
+                        quote,
+                        "not checkable — " + "; ".join(reasons),
+                    )
+                )
+            elif needle in text:
+                out.append((beat["index"], excerpt, quote, "matched"))
+            else:
+                out.append(
+                    (
+                        beat["index"],
+                        excerpt,
+                        quote,
+                        "NOT FOUND — no nearby evidence says it",
+                    )
+                )
+    return out
+
+
+def main(argv: list[str]) -> int:
+    paths = [a for a in argv if a not in ("-h", "--help")]
+    if len(paths) != 1 or len(paths) != len(argv):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    demo_dir = Path(paths[0])
+    if not (demo_dir / "timeline.json").is_file():
+        print(f"demo-caption-lint: no timeline.json in {demo_dir}", file=sys.stderr)
+        return 2
+    findings = lint(demo_dir)
+    flagged = 0
+    collapsed = 0
+    for position, (index, excerpt, claim, verdict) in enumerate(findings):
+        marked = verdict.startswith(("NOT FOUND", "not checkable"))
+        flagged += verdict.startswith("NOT FOUND")
+        mark = "!!" if marked else "  "
+        # Captions persist across beats, so a prose-only stretch repeats its
+        # line once per beat. A run of identical not-checkables collapses to
+        # one line and a count — the state is still stated, the reader keeps
+        # the signal.
+        if (
+            claim == "-"
+            and findings[position - 1][1] == excerpt
+            and findings[position - 1][2] == "-"
+            and position
+        ):
+            collapsed += 1
+            continue
+        if collapsed:
+            print(f"     (+ {collapsed} more beat(s), same)")
+            collapsed = 0
+        print(f"{mark} beat {index:02d} [{claim}] {verdict}\n     {excerpt!r}")
+    if collapsed:
+        print(f"     (+ {collapsed} more beat(s), same)")
+    counts: dict[str, int] = {}
+    for _, _, _, verdict in findings:
+        state = verdict.split(" — ")[0]
+        counts[state] = counts.get(state, 0) + 1
+    tally = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+    print(
+        f"demo-caption-lint: {len(findings)} claim(s) — {tally}. "
+        f"This grades tokens, not meaning: 'not found' is where to look, "
+        "'not checkable' is a named limit, and neither blocks anything."
+    )
+    if flagged:
+        print(
+            f"demo-caption-lint: {flagged} claim(s) NOT FOUND — check the "
+            "app first, then the caption. A caption overstating the screen "
+            "is a storyboard fix; a screen not doing what the caption says "
+            "is a bug, and the demo caught it."
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

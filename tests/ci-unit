@@ -3461,6 +3461,119 @@ class ShotsBlock(unittest.TestCase):
         self.assertEqual(out, "")
 
 
+# --------------------------------------------------------------------------
+# demo-caption-lint — what a caption stakes on the screen, checked for free
+# --------------------------------------------------------------------------
+
+
+caption_lint = load("demo-caption-lint", _SKILL / "scripts")
+
+
+class CaptionLint(unittest.TestCase):
+    """Numbers and quoted UI strings must appear near their beat (#356).
+
+    The fixture reconstructs the field run's shape — timeline beats with
+    captions beside per-beat evidence files — and holds four claims against
+    the three states: a quoted string and a number nothing nearby says (the
+    field run's "machinery" class, the whole reason this exists), a number
+    its own beat's evidence carries, an on-screen string only `aria_omits`
+    carries (#353's marker, which is why not-found and not-checkable can be
+    told apart at all), and the expected miss: a paraphrase with no shared
+    token, reported as not checkable rather than passed in silence. A lint
+    whose fixture has no expected miss is measuring its fixtures.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="caption-lint-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        demo = self.root / "demo"
+        evidence = demo / "evidence"
+        evidence.mkdir(parents=True)
+        self.demo = demo
+        beats = []
+        docs = {}
+        for index, caption in enumerate(
+            [
+                "",
+                'The "Refine machinery" filter narrows the queue to 12 rows.',
+                "The queue holds 5 tickets.",
+                "Filtering is instant.",
+                'Status is "Escalated only".',
+            ]
+        ):
+            beats.append({"index": index, "verb": "caption", "caption": caption})
+            docs[index] = caption
+        (demo / "timeline.json").write_text(json.dumps({"beats": beats}))
+        for index, aria in {
+            1: '- button "Search"\n- textbox "Search"',
+            2: '- row "5 tickets"',
+            3: '- text "instant"',
+            4: '- heading "Queue"',
+        }.items():
+            doc = {"aria_format": "aria-yaml", "aria": aria}
+            if index == 4:
+                # On screen, structurally invisible to the snapshot (#353).
+                doc["aria_omits"] = ['- textbox "Status": Escalated only']
+            (evidence / f"beat-{index:02d}.json").write_text(json.dumps(doc))
+        # Beat 0 is uncaptioned and writes no evidence of its own; the window
+        # around beat 1 must survive that hole.
+
+    def findings(self):
+        return {(f[0], f[2]): f[3] for f in caption_lint.lint(self.demo)}
+
+    def test_a_quoted_string_no_nearby_evidence_says_is_not_found(self):
+        verdict = self.findings()[(1, "Refine machinery")]
+        self.assertTrue(verdict.startswith("NOT FOUND"), verdict)
+
+    def test_a_number_nothing_nearby_carries_is_not_found(self):
+        verdict = self.findings()[(1, "12")]
+        self.assertTrue(verdict.startswith("NOT FOUND"), verdict)
+
+    def test_a_number_its_own_beat_says_is_matched(self):
+        self.assertEqual(self.findings()[(2, "5")], "matched")
+
+    def test_on_screen_text_the_snapshot_cannot_carry_is_matched(self):
+        # Via `aria_omits`, not excused: #353 measured that text off the live
+        # DOM, so it was on screen and the caption may claim it.
+        self.assertEqual(self.findings()[(4, "Escalated only")], "matched")
+
+    def test_a_paraphrase_with_no_shared_token_is_not_checkable(self):
+        # The expected miss. "Instant" paraphrases whatever the app showed;
+        # no token carries it, so the honest answer is a named limit, not a
+        # pass and not a finding.
+        verdict = self.findings()[(3, "-")]
+        self.assertTrue(verdict.startswith("not checkable"), verdict)
+
+    def test_missing_evidence_is_not_checkable_and_says_why(self):
+        # A hole one neighbour covers is still checkable through it — the
+        # window exists for exactly that — so this takes the whole directory.
+        shutil.rmtree(self.demo / "evidence")
+        verdict = self.findings()[(2, "5")]
+        self.assertIn("no evidence file", verdict)
+
+    def test_the_cli_is_advisory_and_names_its_limit(self):
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(_SKILL / "scripts" / "demo-caption-lint"),
+                str(self.demo),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("tokens, not meaning", done.stdout)
+        self.assertIn("NOT FOUND", done.stdout)
+
+    def test_usage_error_exits_2(self):
+        done = subprocess.run(
+            [sys.executable, str(_SKILL / "scripts" / "demo-caption-lint")],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 2)
+
+
 class UnmetInTheBlock(unittest.TestCase):
     """`demo-shots` renders a clause the storyboard marks unmet first (#374)."""
 
@@ -3678,6 +3791,21 @@ INJECTIONS = [
         [
             "UnmetInTheBlock.test_the_unmet_still_comes_before_every_other_one",
             "UnmetInTheBlock.test_the_order_sentence_matches_the_order",
+        ],
+    ),
+    (
+        # #356's whole reason to exist, broken in the one direction that is
+        # safe to break silently: a lint that reports every miss as matched
+        # still exits 0, still prints a tidy summary, and flags nothing. The
+        # fixture holds a claim nothing on screen says, so both not-found
+        # assertions must go red for the break to count as noticed.
+        "the caption lint calls every miss a match",
+        "scripts/demo-caption-lint",
+        '                     "NOT FOUND — no nearby evidence carries it")',
+        '                     "matched")',
+        [
+            "CaptionLint.test_a_quoted_string_no_nearby_evidence_says_is_not_found",
+            "CaptionLint.test_a_number_nothing_nearby_carries_is_not_found",
         ],
     ),
     (
