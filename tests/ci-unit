@@ -633,7 +633,7 @@ class RehearseGate(unittest.TestCase):
     """
 
     def setUp(self):
-        text = WORKFLOW.read_text(encoding="utf-8")
+        text = _WORKFLOW.read_text(encoding="utf-8")
         self.text = text
         self.steps = workflow_steps(text)
         for name in (REHEARSE_STEP, RECORD_STEP):
@@ -4231,19 +4231,48 @@ INJECTIONS = [
         # The regression itself, as it shipped: the guard step permits a
         # private host and the Record step never tells the recorder. Green CI
         # both before and after, because nothing read this file.
+        #
+        # The anchor carries the comment line above it because the same env
+        # line is exported twice now — the Rehearse step (#387) passes the
+        # same facts to the same classifier — and an anchor that matched both
+        # would abort rather than land. The Rehearse side of this pairing has
+        # its own injection below.
         "the Record step stops passing the private opt-in to the recorder",
         "demo-video.yml",
+        "          # keeps the two steps saying the same thing.\n"
         "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}\n",
-        "",
+        "          # keeps the two steps saying the same thing.\n",
         ["WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder"],
+    ),
+    (
+        # The rehearsal is a second consumer of the same fact: it drives the
+        # recorder that classifies at construction, before any take. Drop its
+        # export alone and the rehearsal can rehearse against a target the
+        # guard never permitted while Record stays correct — which is why
+        # RehearseGate grades the pairing per step and not once for the job.
+        "the Rehearse step stops passing the private opt-in to the recorder",
+        "demo-video.yml",
+        "          SKILL: ${{ steps.helpers.outputs.skill }}\n"
+        "          DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}\n"
+        "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}\n",
+        "          SKILL: ${{ steps.helpers.outputs.skill }}\n"
+        "          DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}\n",
+        [
+            "RehearseGate.test_every_target_fact_record_exports_rehearse_exports_too",
+        ],
     ),
     (
         # The same disagreement written the other way, and the one a reviewer
         # is likelier to wave through: the variable is there, so the two gates
         # look coupled, and it is pinned to a constant the input cannot move.
+        # Anchored to the Record step's own comment block — the line is
+        # exported twice now (Rehearse passes it too), and this break must
+        # hardcode Record's copy, not Rehearse's.
         "the Record step hardcodes the opt-in instead of reading the input",
         "demo-video.yml",
+        "          # keeps the two steps saying the same thing.\n"
         "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}",
+        "          # keeps the two steps saying the same thing.\n"
         '          DEMO_VIDEO_ALLOW_PRIVATE: "false"',
         ["WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder"],
     ),
