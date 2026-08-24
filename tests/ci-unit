@@ -617,6 +617,70 @@ class WorkflowGates(unittest.TestCase):
         )
 
 
+REHEARSE_STEP = "Rehearse"
+
+
+class RehearseGate(unittest.TestCase):
+    """Nothing is recorded until it rehearsed green.
+
+    The rehearsal (#385/#387) exists so a broken feature costs seconds instead
+    of an encode — which makes the *ordering* and the *fact passthrough* the
+    two things a refactor can quietly break. A Rehearse step moved after
+    Record rehearses nothing that matters; one missing `DEMO_VIDEO_BASE_URL`
+    has the recorder classify a default target the guard never saw. Both
+    happened to the guard/record pair once (#418's comment above), which is
+    why this reads the file rather than trusting the YAML.
+    """
+
+    def setUp(self):
+        text = _WORKFLOW.read_text(encoding="utf-8")
+        self.text = text
+        self.steps = workflow_steps(text)
+        for name in (REHEARSE_STEP, RECORD_STEP):
+            self.assertIn(name, self.steps, f"no {name!r} step in {WORKFLOW}")
+        self.rehearse = step_env(self.steps[REHEARSE_STEP])
+        self.record = step_env(self.steps[RECORD_STEP])
+        # The haystack control: SKILL plus two target facts plus speech off.
+        self.assertGreaterEqual(len(self.rehearse), 4, self.rehearse)
+
+    def test_rehearse_runs_before_record(self):
+        self.assertLess(
+            self.text.index(f"name: {REHEARSE_STEP}"),
+            self.text.index(f"name: {RECORD_STEP}"),
+            "the Rehearse step must run before Record, or it gates nothing",
+        )
+
+    def test_record_is_gated_on_the_rehearsal(self):
+        condition = re.search(r"- name: Record\n\s+if: (.+)", self.text)
+        self.assertIsNotNone(condition, "Record has no `if:` condition")
+        self.assertIn(
+            "steps.rehearse.outputs.status == 'ok'",
+            condition.group(1),
+            "Record does not read the rehearsal's verdict, so a storyboard "
+            "that failed rehearsal would be recorded anyway",
+        )
+
+    def test_every_target_fact_record_exports_rehearse_exports_too(self):
+        wrong = []
+        for env_name in GUARD_FACT_TO_RECORDER_ENV.values():
+            exported = self.record.get(env_name)
+            if exported is None:
+                continue  # WorkflowGates owns the record side of this pairing
+            rehearsed = self.rehearse.get(env_name)
+            if rehearsed is None:
+                wrong.append(
+                    f"Record exports {env_name} but Rehearse does not, so the "
+                    f"rehearsal drives a target the take never will"
+                )
+            elif rehearsed != exported:
+                wrong.append(
+                    f"{env_name} differs between Rehearse ({rehearsed!r}) and "
+                    f"Record ({exported!r}) — the gate and the take can be "
+                    f"given different apps"
+                )
+        self.assertEqual(wrong, [], "\n  - ".join([""] + wrong))
+
+
 # --------------------------------------------------------------------------
 # demo-comment — what the pull request says
 # --------------------------------------------------------------------------
@@ -4167,19 +4231,48 @@ INJECTIONS = [
         # The regression itself, as it shipped: the guard step permits a
         # private host and the Record step never tells the recorder. Green CI
         # both before and after, because nothing read this file.
+        #
+        # The anchor carries the comment line above it because the same env
+        # line is exported twice now — the Rehearse step (#387) passes the
+        # same facts to the same classifier — and an anchor that matched both
+        # would abort rather than land. The Rehearse side of this pairing has
+        # its own injection below.
         "the Record step stops passing the private opt-in to the recorder",
         "demo-video.yml",
+        "          # keeps the two steps saying the same thing.\n"
         "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}\n",
-        "",
+        "          # keeps the two steps saying the same thing.\n",
         ["WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder"],
+    ),
+    (
+        # The rehearsal is a second consumer of the same fact: it drives the
+        # recorder that classifies at construction, before any take. Drop its
+        # export alone and the rehearsal can rehearse against a target the
+        # guard never permitted while Record stays correct — which is why
+        # RehearseGate grades the pairing per step and not once for the job.
+        "the Rehearse step stops passing the private opt-in to the recorder",
+        "demo-video.yml",
+        "          SKILL: ${{ steps.helpers.outputs.skill }}\n"
+        "          DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}\n"
+        "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}\n",
+        "          SKILL: ${{ steps.helpers.outputs.skill }}\n"
+        "          DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}\n",
+        [
+            "RehearseGate.test_every_target_fact_record_exports_rehearse_exports_too",
+        ],
     ),
     (
         # The same disagreement written the other way, and the one a reviewer
         # is likelier to wave through: the variable is there, so the two gates
         # look coupled, and it is pinned to a constant the input cannot move.
+        # Anchored to the Record step's own comment block — the line is
+        # exported twice now (Rehearse passes it too), and this break must
+        # hardcode Record's copy, not Rehearse's.
         "the Record step hardcodes the opt-in instead of reading the input",
         "demo-video.yml",
+        "          # keeps the two steps saying the same thing.\n"
         "          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}",
+        "          # keeps the two steps saying the same thing.\n"
         '          DEMO_VIDEO_ALLOW_PRIVATE: "false"',
         ["WorkflowGates.test_every_fact_the_guard_classifies_on_reaches_the_recorder"],
     ),

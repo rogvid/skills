@@ -1,0 +1,88 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Rehearse a storyboard before anything is polished or recorded.
+
+    <skill-dir>/scripts/demo-rehearse <demo folder>/record.py [more.py ...]
+
+The functional gate of this skill: the same storyboard, driven end to end in
+seconds — pacing zeroed, no screencast, no encode — with `strict=True`, so
+a console error, an uncaught page exception, a failed request, an HTTP >= 400
+or a non-zero exit is a failing verdict rather than a note in a timeline.
+
+A demo of a feature that does not work is not made. Rehearse first; record
+only what rehearsed green ([#385](https://github.com/rogvid/skills/issues/385)).
+
+How it works: there is no third mode. This composes two existing ones —
+`DEMO_VIDEO_STILLS_ONLY=1` (reference/stills.md) and `DEMO_VIDEO_STRICT=1` —
+and execs `uv run` on each storyboard. Everything the recorder already
+guarantees about a stills run holds here: wait timeouts are unchanged, the
+target guard still classifies the target before a browser opens, and the run
+drives the real app and mutates real state.
+
+**An explicit override in the environment is refused**, before anything runs:
+`DEMO_VIDEO_STILLS_ONLY=0` or `DEMO_VIDEO_STRICT=false` passed into this
+script would silently route around the gate while its output still claimed to
+be a rehearsal. Unset the variable instead. (A storyboard that pins
+`stills_only=False` or `strict=False` as a constructor argument wins over any
+environment — the recorder's documented precedence — and this wrapper cannot
+see inside the file. That is the author's assertion to make, and the take's
+own stderr says which mode ran.)
+
+Exit status: 0 when every storyboard rehearsed green; 1 when one failed (the
+first failure stops the run — a broken feature usually fails everywhere, and
+the seconds saved are the point); 2 for a usage error.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+GATE = {
+    "DEMO_VIDEO_STILLS_ONLY": "1",
+    "DEMO_VIDEO_STRICT": "1",
+}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def main(argv: list[str]) -> int:
+    storyboards = [a for a in argv if a not in ("-h", "--help")]
+    if len(storyboards) != len(argv) or not storyboards:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    for name in GATE:
+        current = os.environ.get(name, "").strip().lower()
+        if current in _FALSE:
+            print(
+                f"demo-rehearse: {name}={current!r} in the environment would "
+                f"route this rehearsal around the gate it exists to be. Unset "
+                f"{name} and run it again.",
+                file=sys.stderr,
+            )
+            return 2
+    env = {**os.environ, **GATE}
+    for path in storyboards:
+        print(f"demo-rehearse: {path}", flush=True)
+        taken = subprocess.run(["uv", "run", path], env=env)
+        if taken.returncode != 0:
+            print(
+                f"demo-rehearse: FAILED — {path} did not rehearse green "
+                f"(exit {taken.returncode}). The feature does not work as the "
+                f"storyboard drives it: read the issues above, fix the app or "
+                f"the storyboard, and re-run. Do not record a take.",
+                file=sys.stderr,
+            )
+            return 1
+    print(
+        f"demo-rehearse: {len(storyboards)} storyboard(s) rehearsed green — "
+        f"cleared to caption, polish and record."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

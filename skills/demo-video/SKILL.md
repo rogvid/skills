@@ -379,15 +379,21 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    `TerminalRecorder(interlude="…")` instead — see
    [reference/terminal.md](reference/terminal.md).
 
-   **1.5. Smoke each state transition the storyboard will wait on** —
-   outside the browser (`curl` the API path), before writing any beat. In
-   the run that earned this step, the check would have surfaced a real app
-   bug in 20 seconds; instead it surfaced as a 25 s Playwright timeout four
-   minutes into a take.
+    **1.5. Smoke each state transition the storyboard will wait on** —
+    outside the browser (`curl` the API path), before writing any beat. In
+    the run that earned this step, the check would have surfaced a real app
+    bug in 20 seconds; instead it surfaced as a 25 s Playwright timeout four
+    minutes into a take.
 2. **Write `record.py`** in the demo folder as a short storyboard. Capture
    a still (`rec.shot("NN-name")`) at each moment a written guide would
    narrate. Make retakes idempotent — clean up state earlier takes created,
    and vary generated content if the app dedupes identical inputs.
+   - **Assert every transition you will narrate.** A caption promises what
+     the app *did*, so each state change a caption will narrate gets a
+     `wait_for` / `wait_for_text` / `wait_for_prompt` on its outcome — the
+     row exists, the flag appears, "done". A storyboard that only performs
+     actions rehearses green over a feature that does nothing: these
+     assertions are the gate's teeth, and they cost one line each.
    - **Show, don't assert.** An event the script triggers outside the
      browser (dropping a file, calling an API) is invisible — put it on
      screen with `rec.terminal(...)`, perform the real action right after,
@@ -395,6 +401,24 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    - **Point at the evidence.** Set the caption first, then
      `rec.spotlight(selector)` on the element it talks about, so viewers
      never see a highlight belonging to the previous line.
+
+2.5. **Rehearse — the gate nothing downstream passes red.** Run
+
+    ```sh
+    bash <skill dir>/ensure.sh        # once per session
+    <skill dir>/scripts/demo-rehearse <demo folder>/record.py
+    ```
+
+    The same storyboard driven end to end in seconds — pacing zeroed, no
+    video encoded ([reference/stills.md](reference/stills.md)) — under
+    `strict=True`, so a console error, a failed request or a non-zero exit
+    fails the run and names itself. **A demo of something that does not work
+    is not made**: until this exits 0, do not polish captions, do not set
+    spotlights, and do not record a take. Polish invested before this line is
+    polish thrown away when the app turns out to be broken, and the broken
+    app is discovered here for seconds instead of in fresh-agent review after
+    minutes of encoding (a rehearsal may rewrite `images/`; that is fine —
+    commit only after the real take).
 3. **Caption every beat.** A fresh caption before each thing the viewer
    should understand, `caption("")` to end clean. The caption lives in the
    recorder's own band and survives every navigation — full loads and SPA
@@ -418,12 +442,15 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
      stale caption. Best: spend the wait touring what's already on screen;
      failing that, swap in a caption saying what is being waited for.
    - End with a closing line that sums up the story, then `caption("")`.
-4. **Record:** `uv run <demo folder>/record.py` (with the project's env
+4. **Record** (step 2.5 rehearsed green — if it did not, stop here):
+   `uv run <demo folder>/record.py` (with the project's env
    loaded if it configures DEMO_VIDEO_* or the ElevenLabs key:
    `set -a; source .env; set +a`). Aim for 30–60 s. **While the storyboard
    is still wrong, run it with `DEMO_VIDEO_STILLS_ONLY=1`** — same verbs and
    the same stills in seconds, no video ([reference/stills.md](reference/stills.md));
-   record the take once the pictures are right.
+   record the take once the pictures are right. Rehearse again whenever the
+   app changed under a committed storyboard — it is the cheap half of the
+   check CI runs before recording anything (#387).
 5. **Verify by looking, not by exit code:** read the `images/*.png` stills
    to confirm the story is actually visible; check `ffprobe` duration. Read
    `timeline.md` too — it is the take's own account of what ran and when, so
@@ -618,7 +645,8 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 
 The skill is self-contained: this file, the `reference/` directory it links
 into, the `helpers/demo_recording/` package, `ensure.sh` at the skill root,
-`scripts/demo-grade` (step 6b), `scripts/demo-shots` (the stills block) and
+`scripts/demo-rehearse` (the step-2.5 gate), `scripts/demo-grade` (step 6b),
+`scripts/demo-shots` (the stills block) and
 `scripts/demo-target-guard` (the target classifier), the vendored `helpers/assets/xterm/` terminal assets, and
 `README.md`. Install it with the `skills` CLI — into the current project:
 
