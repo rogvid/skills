@@ -1545,6 +1545,21 @@ EVIDENCE_DIR_NAME = "evidence"
 # that code whatever it says. check_evidence_caps() asserts the package's own
 # constants equal these, so widening a cap has to be done on purpose.
 EVIDENCE_SCHEMA_EXPECTED = 1
+# The three shapes `?evidence=1` renders for #353: text the ARIA snapshot
+# structurally cannot carry, and one control that is not on screen at all.
+EVIDENCE_RICH_TEXT = "zz-rich-00000000"
+EVIDENCE_HIDDEN_TEXT = "zz-painted-00000000"
+EVIDENCE_UNPAINTED_TEXT = "zz-unpainted-00000000"
+# The second unpainted shape. `display:none` trips both of the probe's
+# visibility guards, so breaking either alone leaves the other holding and the
+# control cannot tell them apart; a box clipped to no height is caught by the
+# zero-size test only.
+EVIDENCE_CLIPPED_TEXT = "zz-clipped-00000000"
+# The third, and the only shape the computed-style test alone catches: a box
+# with real width and height that is not painted. `display:none` is 0x0 as
+# well, so without this the style test could be deleted and nothing would say.
+EVIDENCE_INVISIBLE_TEXT = "zz-invisible-00000000"
+
 EVIDENCE_LIMITS_EXPECTED = {
     "aria": 12_000,
     "scope_aria": 12_000,
@@ -1553,6 +1568,8 @@ EVIDENCE_LIMITS_EXPECTED = {
     # The chrome's own on-screen text (#361): the caption line and any card,
     # read out of the wrapper document — see reference/review.md.
     "chrome": 8_000,
+    # On-screen text the ARIA snapshot structurally cannot carry (#353).
+    "aria_omits": 12_000,
 }
 EVIDENCE_MARKER = "[demo-video: truncated here,"
 # The most a marker can add past a field's budget, so "cut to the cap" can be
@@ -11148,6 +11165,68 @@ def run_segments(out_root: Path) -> list[str]:
     )
 
 
+def check_evidence_omissions(
+    label: str, index: int, doc: dict, aria: str | None
+) -> list[str]:
+    """Does this beat's evidence say what its ARIA snapshot could not carry?
+
+    **Evidence claims to describe what the beat showed** (#9), and two shapes
+    of visible text never reach `aria_snapshot()` at all: the contents of a
+    rich-text editor (`contenteditable` with `role="textbox"`, whose
+    accessible value is read off a `value` property a `div` does not have) and
+    anything under `aria-hidden="true"`, which the attribute removes from the
+    accessibility tree by definition while the pixels stay on screen. Until
+    issue #353 they left no trace, so the file read as a complete account of a
+    screen it had only partly seen.
+
+    Read off the **unspotlit** beat: this is a property of the page, not of a
+    scope.
+
+    Both directions are graded, because the field can be wrong twice. Silence
+    is the defect #353 is about. A probe that reports *everything* is the same
+    artifact lie pointing the other way, and it is the one that gets the field
+    ignored — `aria-hidden` sits on an icon wrapper somewhere on nearly every
+    real page, and reporting those buries the two that matter.
+    """
+    failures: list[str] = []
+    omits = str(doc.get("aria_omits") or "")
+    aria_text = aria if isinstance(aria, str) else ""
+    for what, needle in (
+        ("a rich-text editor's contents", EVIDENCE_RICH_TEXT),
+        ("a painted aria-hidden subtree", EVIDENCE_HIDDEN_TEXT),
+    ):
+        # The control first, and it is the whole reason this can be graded: if
+        # the snapshot *did* carry it, `aria_omits` would be reporting an
+        # omission that did not happen, and the assertion below would be
+        # measuring the fixture rather than the recorder.
+        if needle in aria_text:
+            failures.append(
+                f"{label}: {needle!r} is in beat {index}'s ARIA tree, so "
+                f"{what} is not omitted after all — this fixture no longer "
+                f"reproduces issue #353 and `aria_omits` is being graded "
+                f"against a page that does not need it"
+            )
+        elif needle not in omits:
+            failures.append(
+                f"{label}: beat {index} shows {what} on screen and neither "
+                f"`aria` nor `aria_omits` contains {needle!r}. Evidence that "
+                f"omits on-screen text without saying so is an artifact "
+                f"describing a screen it only partly saw (issue #353)"
+            )
+    for needle, why in (
+        (EVIDENCE_UNPAINTED_TEXT, "`display:none`, so it was never painted"),
+        (EVIDENCE_CLIPPED_TEXT, "clipped to no height, so it was never painted"),
+        (EVIDENCE_INVISIBLE_TEXT, "`visibility:hidden`, so it was never painted"),
+    ):
+        if needle in omits:
+            failures.append(
+                f"{label}: beat {index}'s `aria_omits` names {needle!r}, "
+                f"which is {why} — nothing was on screen, so nothing was "
+                f"omitted"
+            )
+    return failures
+
+
 def run_evidence(out_root: Path) -> list[str]:
     """The evidence take: what a beat's page text carries, and what it caps.
 
@@ -11350,6 +11429,8 @@ def run_evidence(out_root: Path) -> list[str]:
                 f"{label}: beat {plain_i} carries `{field}` with no spotlight "
                 f"up, and it is the spotlight target's or nothing"
             )
+
+    failures += check_evidence_omissions(label, plain_i, plain, aria)
 
     # -- markup: what was never on screen is not in it ------------------------
     if attrs.get("scope") != EVIDENCE_ATTR_TARGET:

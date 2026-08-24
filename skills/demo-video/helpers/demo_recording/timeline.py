@@ -463,6 +463,11 @@ EVIDENCE_LIMITS = {
     # silently stopped saying which line was on screen would fail #9's
     # criterion while every remaining field stayed plausible.
     "chrome": EVIDENCE_MAX_HTML,
+    # On-screen text `aria_snapshot()` structurally cannot carry — a
+    # rich-text editor's contents, an `aria-hidden` subtree that is still
+    # painted (#353). Absent when the page held none, so it is capped only
+    # when it is there, and `limits` names it only then.
+    "aria_omits": EVIDENCE_MAX_ARIA,
 }
 EVIDENCE_TRUNCATED = "\n…[demo-video: truncated here, {n} more characters]"
 

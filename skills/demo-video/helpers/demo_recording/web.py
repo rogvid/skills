@@ -267,6 +267,88 @@ _CHROME_TEXT_JS = """() => {
   ].filter(Boolean).join('\\n');
 }"""
 
+# On-screen text the ARIA snapshot structurally cannot carry (issue #353).
+#
+# **Evidence claims to describe what the beat showed.** Two shapes of visible
+# text never reach `aria_snapshot()`, and until this field they left no trace
+# at all — the file read as a complete account of a screen it had only
+# partly seen. Measured against Playwright 1.62.0, one page, seven input
+# shapes filled and read back out of one `body` snapshot:
+#
+#   | shape                                   | in the snapshot |
+#   |-----------------------------------------|-----------------|
+#   | `contenteditable` with `role="textbox"` | **absent**      |
+#   | subtree under `aria-hidden="true"`      | **absent**      |
+#   | `contenteditable`, no role              | present         |
+#   | `<input type="number">`                 | present         |
+#   | `<input type="password">`               | present         |
+#   | `readonly` input                        | present         |
+#   | input under `role="presentation"`       | present         |
+#   | input inside a shadow root              | present         |
+#   | textbox inside `<dialog aria-modal>`    | present         |
+#
+# The last row is why this field exists in the shape it does. #353 was filed
+# saying dialogs drop typed values; they do not, and an assertion written to
+# that could never have failed. The real classes are the first two, and both
+# are **structural**: a `textbox`'s accessible value is read off a `value`
+# property a `div` does not have, and `aria-hidden` removes a subtree from the
+# accessibility tree by definition while the pixels stay on screen.
+#
+# **Absent when there is nothing to say** (#24's rule), so every take that has
+# no such element on screen writes exactly the evidence it wrote before.
+#
+# Written in the snapshot's own `- role "name": value` idiom rather than as
+# JSON: the reader already knows how to read that, and a lint tokenising
+# `aria` can tokenise this with the same code (#356).
+_ARIA_OMITS_JS = r"""() => {
+  const MAX_ENTRIES = 40, MAX_TEXT = 500;
+  const out = [];
+  const clip = (s) => {
+    const t = (s || '').replace(/\s+/g, ' ').trim();
+    return t.length > MAX_TEXT ? t.slice(0, MAX_TEXT) + '…' : t;
+  };
+  // The recorder's own furniture, if any of it ever lands in this document.
+  // It is chrome rather than app, and `chrome` is the field that carries it.
+  const ours = (el) => (el.id || '').startsWith('__demo')
+    || (el.id || '').startsWith('__chrome');
+
+  // 1. A rich-text editor. `role="textbox"` promises the tree an accessible
+  //    *value*, which for a div is read off a property it does not have, so
+  //    the node renders as `- textbox "Name"` with nothing after the colon.
+  for (const el of document.querySelectorAll('[contenteditable]')) {
+    if (out.length >= MAX_ENTRIES) break;
+    const editable = el.getAttribute('contenteditable');
+    if (editable === 'false') continue;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (!['textbox', 'searchbox', 'combobox'].includes(role)) continue;
+    if (ours(el)) continue;
+    const text = clip(el.innerText);
+    if (!text) continue;
+    const name = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+    out.push('- ' + role + ' ' + JSON.stringify(name) + ': ' + text);
+  }
+
+  // 2. An `aria-hidden` subtree that is nonetheless painted. Outermost only —
+  //    a nested one is already inside the text reported for its ancestor —
+  //    and painted only, because the overwhelmingly common use of the
+  //    attribute is on something already invisible, which is not an omission.
+  for (const el of document.querySelectorAll('[aria-hidden="true"]')) {
+    if (out.length >= MAX_ENTRIES) break;
+    const parent = el.parentElement;
+    if (parent && parent.closest('[aria-hidden="true"]')) continue;
+    if (ours(el)) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width === 0 || box.height === 0) continue;
+    const style = getComputedStyle(el);
+    if (style.visibility === 'hidden' || style.display === 'none') continue;
+    if (parseFloat(style.opacity || '1') <= 0) continue;
+    const text = clip(el.innerText || el.textContent);
+    if (!text) continue;
+    out.push('- aria-hidden: ' + text);
+  }
+  return out.join('\n');
+}"""
+
 # The spotlight target's markup, cleaned, from a *clone* — nothing here may
 # touch the live page, which is being recorded.
 #
@@ -664,6 +746,12 @@ class Recorder(_DemoBase):
             # furniture (see _CHROME_TEXT_JS).
             "chrome": self.page.evaluate(_CHROME_TEXT_JS),
         }
+        # What the snapshot above structurally could not carry (#353). The key
+        # is written only when there is something to say, so a page with no
+        # such element on screen produces exactly the document it always did.
+        omits = doc.evaluate(_ARIA_OMITS_JS)
+        if omits:
+            payload["aria_omits"] = omits
         if self._spotlit:
             target = doc.locator(self._spotlit).first
             payload["scope_aria"] = self._aria(target)[0]

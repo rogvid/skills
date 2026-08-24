@@ -283,6 +283,7 @@ off.
 |---|---|
 | `aria` | **`Recorder`**: the app document's ARIA snapshot — a compact YAML tree of roles and accessible names, the same thing `expect(...).toMatchAriaSnapshot` compares. Semantic, ~10× smaller than the markup, and stable across restyling, which is why it is preferred over raw HTML |
 | `scope` / `scope_aria` / `html` | the current `spotlight()` target: its selector, its own ARIA tree, and its `outerHTML` with every value-bearing attribute stripped. All three are null when no spotlight is up |
+| `aria_omits` | **`Recorder`**, and **absent unless there is something to say**: on-screen text the ARIA snapshot structurally cannot carry, in the snapshot's own idiom. Two shapes reach it — a rich-text editor (`contenteditable` with `role="textbox"`, whose accessible *value* is read off a `value` property a `div` does not have) and a painted `aria-hidden` subtree, which the attribute removes from the accessibility tree by definition while the pixels stay. Nothing that was never painted is listed |
 | `chrome` | **`Recorder`**: what the recorder's own chrome shows on screen — the visible caption line, and any card or bridge label that is up. Read out of the wrapper document's DOM at capture time, never copied from the beat log: the caption lives in the chrome's reserved band, not in the app document the `aria` describes, so without this field no evidence file could say which narration line the frame showed |
 | `screen` | **`TerminalRecorder`**: the rendered screen, ANSI resolved by xterm.js, scrollback included — the same text `wait_for_text()` matches against |
 | `truncated` / `limits` | which fields were cut, and at what budget. A cut field also says so inline where it stops |
@@ -314,6 +315,16 @@ Two things are dropped, and neither is a security control:
 Both are statements about what belongs in a text dump of an element, and this
 repo's `tests/smoke` grades them directly: its evidence take injects an element
 holding a `<script>` and a `srcdoc` and requires neither in the markup.
+
+**Two shapes of on-screen text the ARIA tree cannot hold are named rather than
+dropped.** A rich-text editor's contents and a painted `aria-hidden` subtree
+are both invisible to `aria_snapshot()` — structurally, not by accident — so
+they go in `aria_omits` (see the table above). Before that they left no trace
+and the file read as a complete account of a screen it had only partly seen.
+
+Measured on one page with seven input shapes filled: the other five come
+through the snapshot normally, **dialogs included**. If you are reading this
+because a value is missing from evidence, the dialog is not the reason.
 
 **Fields are capped** — 12 000 characters of ARIA or screen text, 8 000 of
 markup — and truncation is **marked, never silent**. A TUI's scrollback is
