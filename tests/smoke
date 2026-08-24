@@ -5276,62 +5276,6 @@ def check_opening_gap(out_root: Path) -> list[str]:
     return failures
 
 
-def declared_verbs() -> set[str]:
-    """Every verb name the recorders record a beat under.
-
-    Scraped from the package source rather than imported, on purpose: the point
-    is to catch a verb that exists and is in *neither* of the recorder's two
-    classification sets, and asking the recorder which verbs it has would let
-    the same omission hide on both sides.
-    """
-    found: set[str] = set()
-    for path in (HELPERS_DIR / "demo_recording").glob("*.py"):
-        source = path.read_text()
-        found |= set(re.findall(r'@_beat_verb\(\s*"([a-z_]+)"', source))
-        found |= set(re.findall(r'self\._beat\(\s*"([a-z_]+)"', source))
-    return found
-
-
-def check_verb_classification() -> list[str]:
-    """Every storyboard verb must be classified acting or passive (issue #97).
-
-    The held-picture arm only warns when an *acting* verb ran inside the
-    stretch — that is the whole difference between a detector and a timer. A
-    verb added later and left out of both sets silently becomes passive, and
-    the arm quietly stops noticing a whole class of demo. Free to check, and it
-    needs no recording.
-    """
-    from demo_recording.content import CONTENT_ACTING_VERBS, CONTENT_PASSIVE_VERBS
-
-    declared = declared_verbs()
-    if len(declared) < 15:
-        return [
-            f"content: only {len(declared)} storyboard verbs were found in the "
-            f"package source ({sorted(declared)}) — the scrape is broken, so "
-            f"the classification below is being checked against almost nothing"
-        ]
-    classified = CONTENT_ACTING_VERBS | CONTENT_PASSIVE_VERBS
-    failures = []
-    missing = sorted(declared - classified)
-    if missing:
-        failures.append(
-            f"content: {missing} record beats but are in neither "
-            f"CONTENT_ACTING_VERBS nor CONTENT_PASSIVE_VERBS. An unclassified "
-            f"verb counts as passive, so a held picture spanning it never "
-            f"warns — decide which it is rather than letting it default"
-        )
-    both = sorted(CONTENT_ACTING_VERBS & CONTENT_PASSIVE_VERBS)
-    if both:
-        failures.append(f"content: {both} are classified as both acting and passive")
-    if not failures:
-        print(
-            f"smoke: all {len(declared)} storyboard verbs are classified "
-            f"({len(CONTENT_ACTING_VERBS & declared)} acting, "
-            f"{len(CONTENT_PASSIVE_VERBS & declared)} passive)"
-        )
-    return failures
-
-
 def blanked_copy(mp4: Path, rect: Rect, out: Path) -> bool:
     """`mp4` with `rect` painted flat black — a real recording, blank where the
     app was.
@@ -9049,12 +8993,11 @@ def run_content(out_root: Path) -> list[str]:
         os.chdir(previous)
     if problems:
         return problems
-    return (
-        check_verb_classification()
-        + check_content_pair(takes)
-        + check_content_toured(
-            toured["out_dir"], toured["stderr"], toured["info"]["app"]
-        )
+    # `check_verb_classification()` used to sit in this chain; it moved to
+    # tests/unit (#392) — a static scrape graded microseconds faster on every
+    # push than post-merge behind these arms.
+    return check_content_pair(takes) + check_content_toured(
+        toured["out_dir"], toured["stderr"], toured["info"]["app"]
     )
 
 
@@ -13452,13 +13395,16 @@ def open_output(args: argparse.Namespace) -> tuple[Path, bool]:
 # `--cheap` is to be reachable from *nothing but* these three, which is the
 # same sentence as "this phase costs two minutes".
 #
-# What that costs is written down rather than implied: seven check functions —
-# `check_opening_gap`, `check_verb_classification`,
-# `check_content_pair`, `check_content_toured`, `check_form_pacing`,
-# `_check_occlusion` and `_check_scored_region` — are reachable only from these
-# arms, so under `--cheap` they grade on merge and not on push. Three of them
-# have no `tests/smoke-inject` entry either. `tests/README.md` carries the
-# roster; `tests/unit`'s `CheapArm` is what keeps this comment honest.
+# What that costs is written down rather than implied: six check functions —
+# `check_opening_gap`, `check_content_pair`, `check_content_toured`,
+# `check_form_pacing`, `_check_occlusion` and `_check_scored_region` — are
+# reachable only from these arms, so under `--cheap` they grade on merge and
+# not on push. (`check_verb_classification` was the seventh until #392 moved it
+# to tests/unit: a static scrape graded microseconds faster on every push than
+# post-merge behind these arms — which is how an unclassified verb reddened
+# main for 33 hours before anyone could see why.) Three of them have no
+# `tests/smoke-inject` entry either. `tests/README.md` carries the roster;
+# `tests/unit`'s `CheapArm` is what keeps this comment honest.
 EXPENSIVE_ARMS = ("--web-only", "--content-only", "--terminal-only")
 
 

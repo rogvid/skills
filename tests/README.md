@@ -608,13 +608,20 @@ Four phases — `run_web`, `run_terminal`, `run_content` and `run_terminal_race`
 - `_check_scored_region` — content/terminal; covered by the content entries
 - `_check_occlusion` — content/terminal; no entry, and none before this either
 - `check_opening_gap` — web; **no entry**
-- `check_verb_classification` — content/terminal; **no entry**
 
-The last two are the real cost of the split and are written up under *Known
-gaps*: no injection and no per-push take means nothing exercises them between a
-pull request opening and its merge, and `check_verb_classification` is the
-guard that caught `clear`/`press` going unclassified in #130.
-[#233](https://github.com/rogvid/skills/issues/233) is the entries that would
+(`check_verb_classification` was on this list until
+[#392](https://github.com/rogvid/skills/issues/392) moved it to `tests/unit`:
+the assertion is a static scrape against two frozensets, and grading it
+post-merge behind these arms is how an unclassified `act` reddened main for 33
+hours across nine full-suite runs before anyone could see why. It now runs on
+every push as `VerbClassification.test_every_logged_verb_is_classified`, with
+its own fault-injection entry.)
+
+That last one is the real cost of the split and is written up under *Known
+gaps*: no injection and no per-push take means nothing exercises it between a
+pull request opening and its merge. It is also the guard that caught
+`clear`/`press` going unclassified in #130.
+[#233](https://github.com/rogvid/skills/issues/233) is the entry that would
 close it. (`check_opening` was on this list until #361 retired it with the
 composite hold it graded; the wrapper opening is `check_wrapper_opening`'s,
 which `--wrapper-only` reaches per push.)
@@ -2111,13 +2118,18 @@ region was measured. A warning that blames an overlay is wrong on three of this
 suite's own healthy takes, and a confidently wrong artifact is the thing #97
 exists to remove — the detector must not become an instance of it.
 
-**Every storyboard verb must be classified.** `check_verb_classification()`
-scrapes `@_beat_verb("…")` and `self._beat("…")` out of the package source —
-scraped rather than imported, so an omission cannot hide on both sides — and
-requires each of the 22 verbs to be in exactly one of the recorder's two sets.
-An unclassified verb silently counts as passive, which would quietly switch the
+**Every storyboard verb must be classified.** That assertion lives in
+`tests/unit` since [#392](https://github.com/rogvid/skills/issues/392) —
+`VerbClassification.test_every_logged_verb_is_classified`, which scrapes
+`@_beat_verb("…")` and `self._beat("…")` out of the package source — scraped
+rather than imported, so an omission cannot hide on both sides — and requires
+each verb to be in exactly one of the recorder's two sets, on every push. An
+unclassified verb silently counts as passive, which would quietly switch the
 arm off for a whole class of demo. It aborts if the scrape finds fewer than 15
 verbs, so a broken regex reports itself instead of passing on an empty set.
+It was a smoke-side check until an unclassified `act` proved the point the
+expensive way: nine red full-suite runs on main over 33 hours, because the
+only arms that reached it run post-merge.
 
 Finally, `check_content_healthy()` hangs off *every* graded take — web,
 terminal and the stitched segments demo — asserting that each reports a
@@ -2344,7 +2356,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **17 of `tests/smoke`'s 52 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 51 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 
@@ -2367,7 +2379,6 @@ paragraph whose job is to say what this manifest does not cover.
   | `check_take` | `ContentRect` — the rect the picture half is scored over, exactly, on all four numbers (#135/#195). The artifact half — the files exist, are this run's, and are not repeats of one another — is genuinely ungraded |
   | `check_content_healthy` | `ContentRect`, same six tests: the trim reaches the caption bar on both media, does not eat the app, and never comes back zero-sized |
   | `check_caption` | genuinely ungraded as a *picture*. `CaptionTruth` grades which caption a beat is stamped with across a navigation (#134), never that the bar was drawn |
-  | `check_verb_classification` | `VerbClassification` — every classified verb is one a recorder logs, and every verb a recorder logs is classified, with the set size asserted first so neither holds vacuously. **Merge-only since #61**: the only arms that reach it are `--content-only` and `--terminal-only`, so nothing runs it on a pull request |
   | `check_determinism` | genuinely ungraded. It reads the clock, the locale and the motion setting *out of the page*, which is the whole point of it — a constructor that stored the flag and never wired it up satisfies anything asserted on the Python side |
   | `check_merge_offset` | genuinely ungraded as timing. `MergeContent` grades the merge of the content *report* (#121); the per-segment caption timing this measures against two mp4s has no browser-free half. One claim of it is graded: `LogEarlyCause` reads the AST and requires its positive-skew message to come from `log_early_causes()` rather than from its own copy of a verdict (#257) — the wording, not the measurement |
   | `check_opening_gap` | `OpeningWarning` — `held: null` against `held: 0.0`, and the blank floor that keeps the warning readable. **Merge-only since #61**: `--web-only` is the only arm that reaches it |
@@ -2381,14 +2392,14 @@ paragraph whose job is to say what this manifest does not cover.
   | `_check_scene_fallback` | genuinely ungraded — measured straight off `demo.mp4`, because no beat in either storyboard is long enough to provoke it |
   | `_check_unstated_holes` | `HostClockHole` — the whole of it, on a scripted `HostClock`: the complaint, the marker that silences it, the steady-host control and both edge guards (#256). Genuinely ungraded *as a check that runs*: a host that does not step its wall clock produces no hole for it to find, so no arm has ever reached its failure |
 
-  **Two rows above are worse off than the rest, and #61 is why.**
-  `check_opening_gap` and `check_verb_classification` are
+  **One row above is worse off than the rest, and #61 is why.**
+  `check_opening_gap` is
   ungraded by this manifest *and* reachable only from the three arms that no
   longer run per push, so between a pull request opening and its merge nothing
-  exercises them at all. The others in this table are either reached by an arm
+  exercises it at all. The others in this table are either reached by an arm
   `--cheap` still runs or covered by a `tests/unit` class that runs in a
   second. This is the one real cost of the split, it was measured before the
-  split was made, and closing it means giving those two an entry — see
+  split was made, and closing it means giving it an entry — see
   **When each take runs** near the top of this file, and the *Known gaps*
   entry at the bottom.
 
@@ -2416,12 +2427,14 @@ paragraph whose job is to say what this manifest does not cover.
     [#241](https://github.com/rogvid/skills/issues/241), which supersedes
     [#200](https://github.com/rogvid/skills/issues/200) — that issue counted
     two of these eight.
-  - **The three that really are expensive** —
-    `check_opening_gap` on `--web-only` (123 s), `check_verb_classification`
-    and `_check_occlusion` on `--content-only` (148 s).
-    [#233](https://github.com/rogvid/skills/issues/233) covers the first
-    two; `_check_occlusion` is PSNR between two moments of a recording and
-    has neither an issue nor a cheaper arm. (The composite-opening check was
+  - **The two that really are expensive** —
+    `check_opening_gap` on `--web-only` (123 s) and
+    `_check_occlusion` on `--content-only` (148 s).
+    [#233](https://github.com/rogvid/skills/issues/233) covers the first;
+    `_check_occlusion` is PSNR between two moments of a recording and
+    has neither an issue nor a cheaper arm. (The verb-classification sweep
+    was the third until #392 moved it to `tests/unit`, where the same
+    assertion costs microseconds per push. The composite-opening check was
     the fourth, retired with the ffmpeg hold it graded — #361; the wrapper
     opening has entries of its own, reached per push by `--wrapper-only`.)
 
@@ -3334,14 +3347,17 @@ knows is missing is worse than one that is openly absent.
   `DEMO_VIDEO_EVIDENCE=0` env var behind it, are exercised nowhere — every
   take here writes evidence
   ([#48](https://github.com/rogvid/skills/issues/48)).
-- **Two checks are exercised by nothing between a pull request and its
+- **One check is exercised by nothing between a pull request and its
   merge.** `--cheap` is what CI records per push since
   [#61](https://github.com/rogvid/skills/issues/61), and
-  `check_opening_gap` and `check_verb_classification` are reachable only from
+  `check_opening_gap` is reachable only from
   `--web-only`, `--content-only` and `--terminal-only`, which now run on merge.
-  They also have no `tests/smoke-inject` entry, so nightly injection does not
-  cover them either — the merge run is the whole of their exercise, and a
-  reviewer looking at a green pull request has not seen them pass. Five other
+  It also has no `tests/smoke-inject` entry, so nightly injection does not
+  cover it either — the merge run is the whole of its exercise, and a
+  reviewer looking at a green pull request has not seen it pass. (A second,
+  `check_verb_classification`, was in this sentence until #392 moved it to
+  `tests/unit` — the same gap, closed by giving the assertion a home where the
+  per-push cost is microseconds. Five other
   check functions moved to merge-only with them; those five do have injections
   and are exercised nightly. Measured before the split rather than found after
   it, and recorded in

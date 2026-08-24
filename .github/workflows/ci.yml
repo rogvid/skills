@@ -250,11 +250,13 @@ jobs:
   # **What this job does not see**, which is the cost of the split and is
   # written out rather than implied: eight check functions are reachable only
   # from those three arms, so they grade in `smoke-full` below and not here.
-  # Five have `tests/smoke-inject` entries and are exercised nightly; three —
-  # `check_opening`, `check_opening_gap`, `check_verb_classification` — have no
+  # Five have `tests/smoke-inject` entries and are exercised nightly; two —
+  # `check_opening` (retired with #361) and `check_opening_gap` — have no
   # entry, so between a pull request opening and its merge nothing runs them at
   # all. That is issue #233, and `tests/README.md` carries it under *Known
-  # gaps*. Reviewers of a green pull request have not seen those three pass.
+  # gaps*. A third, `check_verb_classification`, left this list in #392: its
+  # static sweep moved to `tests/unit`, which runs per push above. Reviewers
+  # of a green pull request have not seen those two pass.
   smoke:
     name: smoke (cheap arms, every push)
     runs-on: ubuntu-latest
