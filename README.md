@@ -67,8 +67,11 @@ jobs:
 ```
 
 It records only storyboards whose application changed, sets an explicit
-artifact retention and says it in the comment, and **refuses to record against
-a public host** — see
+artifact retention and says it in the comment, **refuses to record against
+a public host**, and **rehearses before it records**: each storyboard runs
+once, fast and strict (`scripts/demo-rehearse`), and one whose feature does
+not work fails the check in seconds — no take is made of something broken.
+See
 [`skills/demo-video/reference/ci.md`](skills/demo-video/reference/ci.md) for the
 trigger policy, what is published, and what the target guard does not cover.
 

@@ -34,6 +34,12 @@ name: Demo video
 #      only when the branch changed something under the app that storyboard
 #      demonstrates. A pull request that touches the app but no storyboard
 #      still records; a pull request that touches neither exits in seconds.
+#   3. The rehearsal (#387) — the functional one. Each selected storyboard
+#      runs once before any take: same verbs, pacing zeroed, strict=True.
+#      A storyboard whose feature does not work reddens the job in seconds,
+#      names itself, and nothing is recorded, staged or published — because
+#      the alternative is spending encoder minutes producing artifacts that
+#      document a bug as if it were the demo.
 #
 # A label was the alternative and was rejected: it needs a human action on a
 # branch that already exists, and when somebody forgets, the failure mode is
@@ -194,7 +200,7 @@ jobs:
           skill="$root/skills/demo-video"
           # Packaging and some checkout paths drop the executable bit.
           chmod +x "$dir"/demo-storyboards "$dir"/demo-comment "$dir"/demo-ticket-check
-          chmod +x "$skill"/scripts/demo-target-guard
+          chmod +x "$skill"/scripts/demo-target-guard "$skill"/scripts/demo-rehearse
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "skill=$skill" >> "$GITHUB_OUTPUT"
 
@@ -350,10 +356,51 @@ jobs:
           echo "--- app log ---"; cat "$APP_LOG" || true
           exit 1
 
+      # The functional gate (#387), before a single encoder minute is spent.
+      # Every selected storyboard runs once as a rehearsal — the same
+      # storyboard, pacing zeroed, no video, strict=True — and one that fails
+      # is not recorded: the job reddens here in seconds naming the file,
+      # nothing is staged or published, and no take exists to document a bug
+      # as if it were the demo. It exports the same target facts the Record
+      # step does, for the same reason that step does: the recorder classifies
+      # its target again at construction, and WorkflowGates (tests/ci-unit)
+      # holds the two steps to the same facts. A storyboard whose app is fine
+      # costs its rehearsal seconds; that is the whole price of never encoding
+      # a broken feature.
+      - name: Rehearse
+        id: rehearse
+        if: steps.discover.outputs.count != '0'
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SKILL: ${{ steps.helpers.outputs.skill }}
+          DEMO_VIDEO_BASE_URL: ${{ inputs.base-url }}
+          DEMO_VIDEO_ALLOW_PRIVATE: ${{ inputs.allow-private-network-target }}
+          DEMO_VIDEO_SPEECH: "0"
+        run: |
+          set -uo pipefail
+          status=ok
+          rehearsed=0
+          # fd 3, not stdin — `uv run` drains stdin, which ate every
+          # storyboard after the first until the Record step learned this.
+          while IFS= read -r sb <&3; do
+            [ -n "$sb" ] || continue
+            rehearsed=$((rehearsed + 1))
+            echo "::group::rehearse $sb"
+            if ! "$SKILL/scripts/demo-rehearse" "$sb" < /dev/null; then
+              echo "::error file=$sb::rehearsal failed — the feature does not work as the storyboard drives it; no take was recorded"
+              status=failed
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+          done 3< "$CHANGED.selected"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "rehearsal status: $status ($rehearsed storyboard(s) rehearsed)"
+
       # The take is allowed to fail here. What it left behind is the point of
       # every step after this one, so the job is failed at the very end instead.
       - name: Record
-        if: steps.discover.outputs.count != '0'
+        if: steps.discover.outputs.count != '0' && steps.rehearse.outputs.status == 'ok'
         id: record
         working-directory: ${{ inputs.working-directory }}
         env:

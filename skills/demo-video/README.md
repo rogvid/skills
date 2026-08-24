@@ -72,6 +72,12 @@ and a real terminal session (voice on):
   in this skill, deliberately, and `SKILL.md` opens with why. The same rules
   run as `scripts/demo-target-guard` in CI, over the workflow's configuration
   and each storyboard's source text.
+- **A gate on the thing being demoed** — before anything is polished or
+  recorded, the storyboard itself runs once as a *rehearsal*
+  (`scripts/demo-rehearse`): same verbs, pacing zeroed, seconds not minutes,
+  strict about console errors, failed requests and non-zero exits. A feature
+  that does not work fails there and no video of it is made. CI runs the same
+  command before spending encoder minutes on a take.
 - **Spoken narration (optional)** — with `ELEVENLABS_API_KEY` set, every
   caption line is synthesized via ElevenLabs and mixed onto the mp4 at the
   moment it appears. Clips are cached; pacing self-adjusts so speech is
@@ -152,6 +158,8 @@ demo-video/
 ├── README.md                      # this file — humans read this
 ├── ensure.sh                      # installs uv, restores exec bits — run once
 ├── scripts/
+│   ├── demo-rehearse              # the functional gate: storyboard, fast and
+│   │                              #   strict, before anything is recorded
 │   ├── demo-grade                 # the blind reader's brief, and the verdict
 │   │                              #   comparing it with the ac= tags (step 6b)
 │   ├── demo-shots                 # the take's stills as one pasteable block,

@@ -27,6 +27,13 @@ said": the `criteria=` map, the `ac=` tags and the coverage table all work
 exactly as they do in a take, and `timeline.md` comes out with the same
 acceptance section.
 
+**As a gate, run it through `scripts/demo-rehearse`.** That is this mode plus
+`strict=True` — console errors, failed requests and non-zero exits become a
+failing verdict instead of a note in the timeline — under one command that
+refuses an environment variable set to route around it. Nothing is polished
+and no take is recorded until it exits 0 (SKILL.md Process step 2.5); CI runs
+the same command before spending encoder minutes on a take.
+
 ## What it writes, and what it does not
 
 | Written | Not written |
