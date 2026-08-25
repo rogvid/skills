@@ -291,6 +291,24 @@ ORIGIN_CROP_PX = 16
 # review frames before the first pointer beat, the probe is the vacuous sweep.
 MIN_ABSENCE_FRAMES = 2
 
+# How far the spotlight ring's centroid may sit from the transform-positioned
+# node's centre, in video pixels (#398). A ring is symmetric around the
+# element it lights, so the healthy reading is a couple of pixels (review
+# frames are downscaled, plus to_video_rect's integer truncation); however
+# the camera push-in (1.3× zoom, eased 0.5 s each way) is baked into the
+# review frames and can shift the measured centroid by ~30-40 px even on a
+# correct take. The defect this exists to catch — the spotlight's
+# `transform: scale(1.02)` REPLACING the element's own inline
+# `translate(x,y)` and teleporting it to the origin — puts the ring hundreds
+# of pixels away. 50 px keeps an order of magnitude between them without
+# forgiving a real drift.
+SPOTLIGHT_POSITION_TOLERANCE_PX = 50.0
+# Fewer accent pixels than this within the app rect is not a ring: the
+# fixture node's ring reads well over a thousand pixels in a review frame
+# (measured on the take this bar was set from). A recorder that stopped
+# drawing the ring must fail here rather than pass an absence as a match.
+SPOTLIGHT_MIN_RING_PX = 400
+
 HEADER = (
     "pixel: no suite lock - this loop reads colour and geometry off cached "
     "frames, none of it sensitive to encoder contention, which is all the "
@@ -424,6 +442,14 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         # caught mid-fade, 15.7 dB from this one.
         rec.shot("02-spotlight", ac="AC-1")
         rec.spotlight()
+        # The transform-positioned fixture node (#398): spotlighted so
+        # check_spotlight_keeps_position can read its ring back at the spot
+        # its inline translate put it. Still in the pointer-free stretch —
+        # a spotlight is not a pointer verb.
+        rec.spotlight("#flow-node")
+        rec.hold()
+        rec.shot("03-flow-node", ac="AC-1")
+        rec.spotlight()
         rec.caption("The pointer has not moved yet.")
         # -- first pointer verb of the take: the park ------------------------
         # Parked on #search, and the choice is load-bearing: the dot is drawn
@@ -455,6 +481,12 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         )
         if not park or len(park) != 4:
             raise PixelFailure("web: #search has no box - the page never rendered")
+        node = rec.app.locator("#flow-node").first.evaluate(
+            "el => { const r = el.getBoundingClientRect();"
+            " return [r.x, r.y, r.width, r.height]; }"
+        )
+        if not node or len(node) != 4:
+            raise PixelFailure("web: #flow-node has no box - the page never rendered")
 
     # Second, so the paced arm is what `check_complete` reads, and into a
     # sub-directory of it so the two share one marker and one digest: two
@@ -479,12 +511,27 @@ def record_web(out_dir: Path, base_url: str) -> dict:
             f"{MIN_POINTERLESS_BEATS} floor - the pointer-free stretch is too "
             f"thin for an absence probe to mean anything"
         )
+    node_spot_beats = [
+        i
+        for i, beat in enumerate(beats)
+        if beat.get("verb") == "spotlight"
+        and "flow-node" in (beat.get("selector") or "")
+    ]
+    if not node_spot_beats:
+        raise PixelFailure(
+            "web: the take logged no spotlight of #flow-node - the "
+            "storyboard must light it, it is what #398's check reads"
+        )
     return {
         "geom": geom,
         "size": list(size),
         # The app-document box of the parked element; to_video_rect + geom
         # maps it into the recorded frame.
         "park": [int(park[0]), int(park[1]), int(park[2]), int(park[3])],
+        # The same for the transform-positioned node, plus the beats that
+        # lit it: #398's check reads its ring off those frames.
+        "flow_node": [int(n) for n in node],
+        "flow_node_spot_beats": node_spot_beats,
         # Beats [0, this) ran with a pointer that had never moved.
         "no_pointer_until_beat": first_pointer,
     }
@@ -1340,6 +1387,124 @@ def check_stills_match_the_take(
     return problems
 
 
+def check_spotlight_keeps_position(
+    take: Path, info: dict | None, dump: Path | None = None
+) -> list[str]:
+    """The ring sits on the transform-positioned node, not at its origin (#398).
+
+    The spotlight sets `transform: scale(1.02)` on its target. For an element
+    positioned by an inline `translate(x, y)` — React Flow nodes are the
+    canonical case — that REPLACES the translate rather than composing with
+    it, so the element teleports to its untransformed position for the whole
+    beat and jumps back when the clear restores the style attribute. The
+    fixture's #flow-node is built in exactly that shape (absolute at 0,0,
+    placed by inline transform), and this check reads the lit beat's frame:
+    the ring's accent centroid must sit at the node's mapped centre.
+
+    The search is a window around the node's expected centre, not the whole
+    app rect — the fixture (like any real app) carries other accent-coloured
+    pixels (#refresh is the accent orange outright), and a wide search reads
+    their centroid into the measurement. A window means the teleport defect
+    reports as "no ring where the node is"; the dumped frame shows where the
+    element actually went, which is the part a human reads.
+    """
+    name = "spotlight-position"
+    if not info or not all(
+        k in info for k in ("geom", "size", "flow_node", "flow_node_spot_beats")
+    ):
+        return [
+            f"{take.name}/{name}: the marker carries no #flow-node contract - "
+            f"re-record (tests/pixel record --force)"
+        ]
+    geom, size = info["geom"], info["size"]
+    node = tuple(info["flow_node"])
+    vx, vy, vw, vh = to_video_rect(node, geom)
+    expect = (vx + vw / 2, vy + vh / 2)
+    # Half a node past its edge on every side: the ring sits ~6 px outside
+    # the element, and the slack keeps a couple of pixels of drift measured
+    # rather than clipped. The fixture's only other accent field (#refresh)
+    # sits well outside a window this size — measured, not assumed: the
+    # wide-search reading that motivated the window is in this check's
+    # history.
+    slack = 48
+    window = (
+        int(expect[0] - vw / 2 - slack),
+        int(expect[1] - vh / 2 - slack),
+        int(vw + 2 * slack),
+        int(vh + 2 * slack),
+    )
+    problems: list[str] = []
+    measured: list[str] = []
+    frames_dir = take / "frames"
+    for beat_index in info["flow_node_spot_beats"]:
+        frame = frames_dir / f"beat-{beat_index:02d}.png"
+        if not frame.is_file():
+            problems.append(
+                f"{take.name}/{name}: no review frame for beat {beat_index:02d} "
+                f"- the beats this check reads must be kept"
+            )
+            continue
+        dims = png_size(frame)
+        if dims is None:
+            problems.append(f"{take.name}/{name}: {frame.name} is not a PNG")
+            continue
+        scale = dims[0] / size[0]  # review frames are downscaled (#343)
+        crop = (
+            int(window[0] * scale),
+            int(window[1] * scale),
+            int(window[2] * scale),
+            int(window[3] * scale),
+        )
+        got = rgb_crop(frame, crop)
+        if got is None:
+            problems.append(
+                f"{take.name}/{name}: {frame.name} decodes no {crop} crop - "
+                f"the node maps outside the frame, which is its own defect"
+            )
+            continue
+        dump_frame(dump, name, f"beat-{beat_index:02d}", frame)
+        w, h, raw = got
+        found = accent_centroid(w, h, raw)
+        count = 0 if found is None else found[2]
+        if count < SPOTLIGHT_MIN_RING_PX:
+            problems.append(
+                f"{take.name}/{name}: {count} accent pixels within the "
+                f"{crop[2]}x{crop[3]} window around #flow-node in "
+                f"{frame.name} (floor {SPOTLIGHT_MIN_RING_PX}) - no ring is "
+                f"up where the node sits; see the dumped frame for where the "
+                f"element actually rendered"
+            )
+            dump_frame(dump, name, f"beat-{beat_index:02d}-NO-RING", frame)
+            continue
+        cx = window[0] + found[0] / scale
+        cy = window[1] + found[1] / scale
+        dx, dy = cx - expect[0], cy - expect[1]
+        off = max(abs(dx), abs(dy))
+        measured.append(
+            f"beat {beat_index:02d}: ring ({cx:.1f}, {cy:.1f}) "
+            f"vs node ({expect[0]:.1f}, {expect[1]:.1f}), off "
+            f"({dx:+.1f}, {dy:+.1f})px, {count} px"
+        )
+        if off > SPOTLIGHT_POSITION_TOLERANCE_PX:
+            problems.append(
+                f"{take.name}/{name}: the ring reads ({cx:.1f}, "
+                f"{cy:.1f}) in video pixels, ({dx:+.1f}, {dy:+.1f}) "
+                f"from #flow-node's centre at ({expect[0]:.1f}, {expect[1]:.1f})"
+                f" (bar {SPOTLIGHT_POSITION_TOLERANCE_PX}px per axis) - the "
+                f"spotlight replaced the node's own positioning transform "
+                f"instead of leaving it alone (#398): the element teleported "
+                f"for the beat and jumped back after it"
+            )
+            dump_frame(dump, name, f"beat-{beat_index:02d}-FAIL", frame)
+    _verdict(
+        name,
+        take,
+        problems,
+        "; ".join(measured) + f" (bar {SPOTLIGHT_POSITION_TOLERANCE_PX}px)",
+    )
+    return problems
+
+
 CHECKS: dict[str, list[Callable]] = {
     "terminal": [check_complete, check_opening_card],
     "web": [
@@ -1348,6 +1513,7 @@ CHECKS: dict[str, list[Callable]] = {
         check_card_vs_window,
         check_cursor_parked,
         check_cursor_absence,
+        check_spotlight_keeps_position,
     ],
 }
 
