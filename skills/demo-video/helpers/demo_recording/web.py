@@ -216,20 +216,22 @@ window.__demoSpotlight = async (el) => {
   el.style.borderRadius = '6px';
   el.style.background = 'rgba(__ACCENT__,.10)';
   el.style.transform = 'scale(1.02)';
-  // Where the element sits in the recorded frame — the app iframe's
-  // position in the wrapper plus the element's viewport rect, rounded to
-  // whole pixels. Returned to `spotlight()`, which opens a camera event
-  // over it (camera.py): the push-in is rendered after the take, because
-  // a DOM transform cannot reach past the window chrome into the
-  // composited frame — the page zoom this replaced scaled the page
+  // Where the element sits **in the app's own viewport**, rounded to whole
+  // pixels. `spotlight()` moves it into the recorded frame's coordinates and
+  // opens a camera event over it (camera.py): the push-in is rendered after
+  // the take, because a DOM transform cannot reach past the window chrome
+  // into the composited frame — the page zoom this replaced scaled the page
   // inside the window and read as layout jitter, not as a move.
-  const f = window.frameElement
-    ? window.frameElement.getBoundingClientRect()
-    : { left: 0, top: 0 };
+  //
+  // The wrapper's offset is added in Python, not here: this script runs in
+  // the app frame, which is cross-origin to the wrapper whenever the demo is
+  // not served from the recorder's own origin, and `window.frameElement` is
+  // null across that boundary. Reading it here put the push 156 px from the
+  // element it was aimed at — measured on tests/smoke's spotlight take.
   const r = el.getBoundingClientRect();
   return {
-    x: Math.round(f.left + r.left),
-    y: Math.round(f.top + r.top),
+    x: Math.round(r.left),
+    y: Math.round(r.top),
     w: Math.round(r.width),
     h: Math.round(r.height),
   };
@@ -1095,8 +1097,27 @@ class Recorder(_DemoBase):
         # `"html": null` in the file with no explanation.
         self._spotlit = selector or None
         if rect:
-            self._camera_raise(rect)
+            self._camera_raise(self._frame_rect(rect))
         self.pause(0.3)
+
+    def _frame_rect(self, rect: dict) -> dict:
+        """An app-document rect, moved into the recorded frame's coordinates.
+
+        The app records inside the wrapper's content slot at true pixel size
+        (#358, cutover #361), so the mapping is the slot's offset and no
+        scale — the same one `tests/_pixels.to_video_rect` applies from the
+        other side. It is done here rather than in the page because the app
+        frame is cross-origin to the wrapper whenever the demo is not served
+        from the recorder's own origin, and `window.frameElement` is null
+        across that boundary.
+        """
+        geom = getattr(self, "_geom", None) or {"appx": 0, "appy": 0}
+        return {
+            "x": int(rect["x"]) + int(geom["appx"]),
+            "y": int(rect["y"]) + int(geom["appy"]),
+            "w": int(rect["w"]),
+            "h": int(rect["h"]),
+        }
 
     def _glide(self, x: float, y: float, steps: int) -> None:
         """Move the pointer to page coordinates `(x, y)`, dot included.

@@ -7063,84 +7063,11 @@ class CameraMove(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.chain([self.event(t_end=1.0)])
 
-    def test_a_real_encode_pushes_and_pulls(self):
-        # A static source — a white box on black — so every difference
-        # between two frames is the camera's, never the app's. The frame
-        # before the push and the held frame must differ (finite PSNR);
-        # identical frames would mean the chain parsed and moved nothing,
-        # which is exactly what the DOM zoom this replaces did.
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        work = Path(tmp.name)
-        chain = camera_filter(
-            [{"t_start": 1.0, "t_end": 3.0, "rect": [130, 50, 60, 80]}],
-            src_w=640,
-            src_h=360,
-            out_w=320,
-            out_h=180,
-        )
-        mp4 = work / "cam.mp4"
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=black:size=640x360:rate=25:duration=4,"
-                "drawbox=x=260:y=100:w=120:h=160:color=white:t=fill",
-                "-filter_complex",
-                chain,
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                str(mp4),
-            ],
-            check=True,
-        )
-        before, held = work / "a.png", work / "b.png"
-        for name, at in ((before, "0.2"), (held, "2.0")):
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                    at,
-                    "-i",
-                    str(mp4),
-                    "-frames:v",
-                    "1",
-                    str(name),
-                ],
-                check=True,
-            )
-        psnr = subprocess.run(
-            [
-                "ffmpeg",
-                "-i",
-                str(before),
-                "-i",
-                str(held),
-                "-filter_complex",
-                "psnr",
-                "-f",
-                "null",
-                "-",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stderr
-        found = re.search(r"average:(\S+)", psnr)
-        self.assertIsNotNone(found, f"no PSNR in ffmpeg output: {psnr[-400:]}")
-        self.assertNotIn(
-            "inf", found.group(1), "the camera did not move: frames identical"
-        )
+    # What a real encode does with that chain — does the picture actually
+    # move — is not here: it needs ffmpeg, and this suite's `dependencies = []`
+    # is the point of the file (issue #139). It is graded in `tests/smoke`'s
+    # spotlight arm instead, by `check_camera_push`, on a take that has both a
+    # camera event and window chrome for the push to move.
 
     def test_a_spotlight_left_open_closes_with_the_take(self):
         src = inspect.getsource(_DemoBase.__exit__)
@@ -7204,6 +7131,13 @@ class CameraMove(unittest.TestCase):
         # The verb wiring, browser-free: the rect the page returns opens an
         # event, and the next clear — the next spotlight's or an explicit
         # one — is what ends it.
+        #
+        # The rect comes back in the **app's** coordinates and the event is
+        # in the recorded frame's, so the slot's offset is added on the way
+        # in. Reading it in the page instead put the push 156 px from the
+        # element: the app frame is cross-origin to the wrapper, and
+        # `window.frameElement` is null across that boundary
+        # (`WebRecorder._frame_rect`).
         rec = recorder(self, page=DrawingPage())
         rec._t0 = time.monotonic() - 5.0
         rec._target = lambda: rec.page  # type: ignore[method-assign]
@@ -7217,12 +7151,18 @@ class CameraMove(unittest.TestCase):
             first = _First()
 
         rec.page.locator = lambda _sel: _Locator()  # type: ignore[method-assign]
+        rec._geom = chrome_geometry(1280, 720)
         rec.spotlight("#box")
         self.assertIsNone(
             rec._camera[0] if rec._camera else None,
             "an open event is not yet a move",
         )
-        self.assertEqual(rec._camera_open["rect"], [10, 20, 30, 40])
+        self.assertEqual(
+            rec._camera_open["rect"],
+            [10 + rec._geom["appx"], 20 + rec._geom["appy"], 30, 40],
+            "the event is at the element's app coordinates, not the frame's "
+            "— the wrapper slot's offset was not added",
+        )
         # Real time between raise and clear: both ends round to 3 decimals,
         # and a sub-millisecond take would be a degenerate event by the same
         # rule the recorder itself applies.
@@ -17983,10 +17923,7 @@ INJECTIONS = [
         "camera.py",
         '    u = f"clip({expr},0,1)"\n    return f"{u}*{u}*(3-2*{u})"',
         '    return "1.0"',
-        [
-            "CameraMove.test_the_push_eases_in_and_back",
-            "CameraMove.test_a_real_encode_pushes_and_pulls",
-        ],
+        ["CameraMove.test_the_push_eases_in_and_back"],
     ),
     (
         "the camera centres on the frame, not the element",
@@ -18033,8 +17970,15 @@ INJECTIONS = [
     (
         "the spotlight stops handing its element's rect to the camera",
         "web.py",
-        "        if rect:\n            self._camera_raise(rect)",
+        "        if rect:\n            self._camera_raise(self._frame_rect(rect))",
         "        if rect:\n            pass",
+        ["CameraMove.test_spotlight_opens_a_camera_event_over_the_element"],
+    ),
+    (
+        "the camera event keeps the app's coordinates instead of the frame's",
+        "web.py",
+        "            self._camera_raise(self._frame_rect(rect))",
+        "            self._camera_raise(rect)",
         ["CameraMove.test_spotlight_opens_a_camera_event_over_the_element"],
     ),
     (

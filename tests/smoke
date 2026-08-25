@@ -1414,6 +1414,44 @@ SPOTLIGHT_DURATION_S = (5.0, 30.0)
 # from different sides is how a determinism flip stays impossible to miss.
 MIN_SPOTLIGHT_CLEAR_S = 0.45
 
+# ## The camera's push-in (helpers/demo_recording/camera.py)
+#
+# Read in the strip of window chrome *above* the app rect, which is the one
+# region of the frame the page cannot reach. That is the whole difference
+# between this camera and the DOM zoom it replaced: `<body>` scaled around the
+# element moved nothing outside the app, while a push-in scales the composited
+# frame, chrome included. Reading the app rect instead would grade the
+# spotlight, which lights the same element over the same frames.
+#
+# Mean absolute luma over the reduced strip, measured on a real take: 0.06
+# across the quiet before the push, 33.8 into the held zoom, 0.45 once the
+# pull-back has landed. The floors sit well inside each of those, so the
+# reading separates a push from a still frame without depending on how far
+# from the frame's centre this fixture's element happens to sit.
+CAMERA_PUSH_MIN = 8.0
+CAMERA_STILL_MAX = 1.5
+
+# How much chrome has to sit above the app rect before that strip means
+# anything. A geometry that leaves less is not a broken camera, and the check
+# says so rather than reading app pixels and calling them chrome.
+CAMERA_STRIP_MIN_H = 24
+
+# The event has to be long enough for the push to reach full zoom and come
+# back — two eases, plus something to sample in the middle of.
+CAMERA_MIN_EVENT_S = 1.2
+
+# How long after the event the pull-back is read. The ease *ends* at `t_end`
+# (the pull starts before it, because `spotlight()`'s clear waits out its own
+# fade), so this is clear of the move; it is also clear of the spotlight's own
+# 250 ms exit, which repaints the app rect but never the chrome above it.
+CAMERA_AFTER_S = 0.4
+
+# How far the event's rect may sit from the element this take spotlighted,
+# centre to centre. Both are the same box in the same coordinates — the
+# recorder's own measurement and this file's — so the bar is for rounding and
+# for a fixture whose element moves a pixel, not for a difference of opinion.
+CAMERA_CENTRE_BAR_PX = 20.0
+
 # ## The card a terminal segment opens on (issue #110)
 #
 # `TerminalRecorder.__enter__` starts capturing before a storyboard can paint
@@ -8203,6 +8241,158 @@ def check_spotlight_transitions(
     return failures
 
 
+def _strip_frame(mp4: Path, strip: Rect, at: float) -> bytes | None:
+    """One frame of `strip`, at `at` seconds. `None` if the video is short."""
+    frames = gray_frames(mp4, rect=strip, start=at, duration=0.08)
+    return frames[0] if frames else None
+
+
+def check_camera_push(
+    out_dir: Path, info: dict, clock: HostClock | None = None
+) -> list[str]:
+    """The spotlight's camera move is in the encoded video, not only in JSON.
+
+    `camera.py` replaced a live DOM zoom that scaled `<body>` around the
+    element's own centre — the element therefore did not move, 6% of a 60 px
+    chip was invisible, and what a viewer saw was the layout jittering around
+    it. The push-in that replaced it scales the *composited* frame, so the
+    reading that separates the two is taken where the page cannot reach: the
+    strip of window chrome above the app rect.
+
+    Three statements about that strip, each broken by a different mistake:
+
+      * it is **still** in the quiet before the event — the control, without
+        which "the chrome moved" is a claim about a take that never sits still
+      * it has **moved** at the held zoom — the push itself
+      * it is **back** once the event has ended — the pull, and the reason a
+        camera that pushed in and stayed there is not a passing answer
+
+    Plus the two the pixels cannot make: the take logged exactly one event
+    (one spotlight interval), and that event is aimed at the element the
+    storyboard lit rather than at something else on the page.
+
+    The event's times come off `timeline.json`, where the recorder has already
+    moved them onto the video's clock (`_camera_on_the_video_clock`) — the
+    same correction the narration mix applies, for the same reason.
+    """
+    mp4 = out_dir / "demo.mp4"
+    doc = json.loads((out_dir / "timeline.json").read_text())
+    events = doc.get("camera") or []
+    if len(events) != 1:
+        return [
+            f"spotlight: the take logged {len(events)} camera event(s), "
+            f"expected 1 — one spotlight interval is one push-in, so there is "
+            f"no move in demo.mp4 to measure (timeline.json's `camera`)"
+        ]
+    event = events[0]
+    t_start, t_end = float(event["t_start"]), float(event["t_end"])
+    failures: list[str] = []
+    # Aimed at the element, before anything is read off the frames: a push
+    # centred somewhere else is still a push, and every reading below would
+    # pass while the viewer's eye was pulled to the wrong part of the screen.
+    ex, ey, ew, eh = (float(v) for v in event["rect"])
+    tx, ty, tw, th = info["rect"]
+    off = math.dist((ex + ew / 2, ey + eh / 2), (tx + tw / 2, ty + th / 2))
+    if off > CAMERA_CENTRE_BAR_PX:
+        failures.append(
+            f"spotlight: the camera event is centred "
+            f"{off:.1f}px from the element the take spotlighted, over the "
+            f"{CAMERA_CENTRE_BAR_PX}px bar — the move is aimed at "
+            f"{event['rect']}, the element is at {list(info['rect'])}"
+        )
+    appy = info["app"][1]
+    if appy < CAMERA_STRIP_MIN_H:
+        return failures + [
+            f"spotlight: the wrapper leaves {appy}px of chrome above the app "
+            f"rect, under the {CAMERA_STRIP_MIN_H}px this reading needs — the "
+            f"strip would be app pixels, which the page moves on its own"
+        ]
+    # A step inside the interval is not a camera defect and cannot be read as
+    # one: the recorder corrects the event onto the video's clock, and the
+    # video really is that much shorter — a 1.23 s backward step measured on
+    # this repo's WSL host turned a 1.88 s push into 0.85 s of frames, which
+    # never reaches full zoom no matter what the filter says. Said out loud
+    # rather than dropped silently, and the centre reading above still stands:
+    # it is geometry, and no clock touches it.
+    stepped_through = [
+        at
+        for at, _delta in (clock.steps if clock is not None else [])
+        if t_start - MAX_CLOCK_STEP_TIME_DISAGREEMENT_S
+        <= at
+        <= t_end + MAX_CLOCK_STEP_TIME_DISAGREEMENT_S
+    ]
+    if stepped_through:
+        print(
+            f"smoke: spotlight camera not measured — this host's wall clock "
+            f"stepped at {', '.join(f'{at:.2f}s' for at in stepped_through)}, "
+            f"inside the {t_start:.2f}-{t_end:.2f}s the push runs over, so the "
+            f"video holds fewer seconds of it than the recorder rendered"
+        )
+        return failures
+    if t_end - t_start < CAMERA_MIN_EVENT_S:
+        return failures + [
+            f"spotlight: the camera event runs {t_end - t_start:.2f}s, under "
+            f"the {CAMERA_MIN_EVENT_S}s two eases need — the push never "
+            f"reaches full zoom, so a frame from the middle of it is not the "
+            f"held zoom and this reading is about nothing"
+        ]
+    strip: Rect = (0, 0, info["size"][0], appy)
+    quiet = _strip_frame(mp4, strip, t_start - 0.8)
+    before = _strip_frame(mp4, strip, t_start - 0.25)
+    held = _strip_frame(mp4, strip, (t_start + t_end) / 2)
+    after = _strip_frame(mp4, strip, t_end + CAMERA_AFTER_S)
+    missing = [
+        name
+        for name, frame in (
+            ("quiet", quiet),
+            ("before", before),
+            ("held", held),
+            ("after", after),
+        )
+        if frame is None
+    ]
+    if missing:
+        return failures + [
+            f"spotlight: the video has no frame at the {', '.join(missing)} "
+            f"instant(s) of a camera event running {t_start:.2f}-{t_end:.2f}s "
+            f"— the recording is shorter than the event it claims to carry"
+        ]
+    still = frame_difference(quiet, before)
+    pushed = frame_difference(before, held)
+    pulled = frame_difference(before, after)
+    if still > CAMERA_STILL_MAX:
+        failures.append(
+            f"spotlight: the chrome strip above the app moved {still:.2f} mean "
+            f"luma in the quiet before the push, over the {CAMERA_STILL_MAX} "
+            f"bar — this is the control, and until it holds, the {pushed:.2f} "
+            f"read into the push is not evidence of a camera move"
+        )
+    if pushed < CAMERA_PUSH_MIN:
+        failures.append(
+            f"spotlight: the chrome strip above the app moved {pushed:.2f} "
+            f"mean luma between the frame before the event and the held zoom, "
+            f"under the {CAMERA_PUSH_MIN} bar. Nothing outside the app rect "
+            f"moved, which is what the DOM zoom this replaced did (camera.py) "
+            f"— the push is either not being rendered into demo.mp4 or is too "
+            f"small to see"
+        )
+    if pulled > CAMERA_STILL_MAX:
+        failures.append(
+            f"spotlight: the chrome strip is still {pulled:.2f} mean luma "
+            f"from where it was, {CAMERA_AFTER_S}s after the event ended and "
+            f"over the {CAMERA_STILL_MAX} bar — the camera pushed in and did "
+            f"not come back, so every frame after this spotlight is a crop of "
+            f"the take"
+        )
+    if not failures:
+        print(
+            f"smoke: spotlight camera pushed in and back (chrome strip moved "
+            f"{pushed:.2f} mean luma at the held zoom, {still:.2f} in the "
+            f"quiet before it, {pulled:.2f} once it pulled back)"
+        )
+    return failures
+
+
 def check_opening_card(out_dir: Path, info: dict) -> list[str]:
     """A terminal segment opens on its cover, not on a bare slot (#110).
 
@@ -8889,6 +9079,9 @@ def run_spotlight(out_root: Path) -> list[str]:
         problems
         + _check_video("spotlight", mp4, SPOTLIGHT_DURATION_S, keep_top(info["app"]))
         + check_spotlight_transitions(out_dir, info, clock)
+        # The same interval, one layer out: what the spotlight put on the page
+        # is graded above, and what the camera did to the frame around it here.
+        + check_camera_push(out_dir, info, clock)
         + check_healthy("spotlight", out_dir)
     )
 
