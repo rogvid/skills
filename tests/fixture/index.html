@@ -95,6 +95,25 @@
   .pill.hold { background: rgba(180, 121, 26, 0.14); color: var(--warn); }
   #empty { padding: 26px 20px; color: var(--ink-soft); }
 
+  /* Transform-positioned node (#398). The React Flow shape on purpose:
+     absolutely placed at the origin and moved into position by an INLINE
+     `transform: translate(...)`, which is exactly the declaration the
+     spotlight used to overwrite with its scale — teleporting the element for
+     the whole beat. The pixel check reads this element's ring back at this
+     spot. */
+  #flow-node {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 220px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    font: 600 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    transform: translate(620px, 396px);
+  }
+
   /* Entropy panel (only with ?entropy=1) ------------------------------ */
   /* The two things a re-recording is allowed to differ by, made large and
      high-contrast on purpose: a wall clock and a running animation. With
@@ -170,6 +189,8 @@
     </table>
     <div id="empty" hidden>No orders match that filter.</div>
   </div>
+
+  <div id="flow-node">Order NW-1041 · staged for pick-up</div>
 </div>
 
 <script>

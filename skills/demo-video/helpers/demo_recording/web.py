@@ -157,6 +157,8 @@ SPOTLIGHT_EXIT_SLACK_MS = 120
 
 # Spotlight: a highlight ring + slight scale on one element, pointing the
 # viewer at the evidence a caption is talking about (reason lines, chips).
+# An element that already carries a transform gets the ring only (#398) —
+# see the condition in `__demoSpotlight` below.
 #
 # **The exit is animated by the same transition the entrance used**, and the
 # order below is the whole of issue #111. Restoring `__spotPrev` in one
@@ -215,7 +217,19 @@ window.__demoSpotlight = async (el) => {
   el.style.outlineOffset = '3px';
   el.style.borderRadius = '6px';
   el.style.background = 'rgba(__ACCENT__,.10)';
-  el.style.transform = 'scale(1.02)';
+  // Ring-only for transform carriers (#398): setting `transform` REPLACES the
+  // inline declaration rather than composing with it, so an element positioned
+  // by its own inline transform — a React Flow node's `translate(x,y)` is the
+  // canonical case — teleports to its untransformed position for the whole
+  // beat and jumps back when the clear restores `__spotPrev`. The restore is
+  // correct; the during state is what the viewer watches. A computed (not
+  // inline) read, because an inline scale would clobber a stylesheet
+  // transform just as thoroughly. Such elements get ring + tint and keep
+  // their position; the enlarge is skipped, which reads as emphasis all the
+  // same.
+  if (getComputedStyle(el).transform === 'none') {
+    el.style.transform = 'scale(1.02)';
+  }
   // Where the element sits **in the app's own viewport**, rounded to whole
   // pixels. `spotlight()` moves it into the recorded frame's coordinates and
   // opens a camera event over it (camera.py): the push-in is rendered after
