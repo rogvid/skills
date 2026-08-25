@@ -34,6 +34,18 @@ needed; captions are the narration script.
   the previous spoken line.
 - Write captions for the ear as well as the eye: short sentences, no
   markup, nothing you wouldn't say aloud.
+- **The voice is pinned and normalized.** Every synthesis request carries a
+  fixed voice `stability` (`DEFAULT_STABILITY`, in the cache key like voice
+  and model), because unpinned the model's per-sentence pacing wanders —
+  measured at 2.1 to 3.3 words/s across one take's five clips, which reads
+  as some lines being sped up. And at mix time every clip is gained to one
+  loudness target (`LOUDNESS_TARGET_DB`), measured per clip with
+  `volumedetect`, because ElevenLabs returns clips at whatever level the
+  model produced and consecutive lines at audibly different levels read as
+  a production fault. Each line's `gain_db` is in `timeline.json`'s
+  `narration` when a correction of 0.1 dB or more was applied; a clip that
+  could not be measured gains nothing. The audio is never re-timed or
+  re-spoken — tempo is untouched end to end.
 - **A clip is mixed where its line is in the *video*, not where the beat
   log put it.** The log is `time.monotonic()` and the recording is stamped
   with the host's wall clock, so a host that steps that clock while a take
@@ -60,15 +72,20 @@ needed; captions are the narration script.
   any more, because an instant is never placed earlier than the step that
   moved it. The floor stays only because `adelay` cannot express a negative
   delay for a malformed record.
-- **A backward step between two lines can make their clips overlap, and that
-  is the correction working.** The step shortens the *video*; it does not
-  shorten the clip. The recorder waited line 1 out before starting line 2 in
-  monotonic time, but the seconds the step deleted are not in the file to wait
-  through, so line 2's corrected onset can land while line 1 is still
-  speaking — measured once at 0.4 s of overlap after a −1.07 s step. Two
-  voices for a fraction of a second is the price of both lines matching their
-  captions; the alternative is every line after the step trailing its caption
-  by the whole step. If a take comes back with audible double-talk, look at
+- **A backward step between two lines would make their clips overlap, and the
+  mix refuses.** The step shortens the *video*; it does not shorten the clip.
+  The recorder waited line 1 out before starting line 2 in monotonic time, but
+  the seconds the step deleted are not in the file to wait through, so line
+  2's corrected onset can land while line 1 is still speaking — measured first
+  at 0.4 s of overlap after a −1.07 s step and accepted then as the price of
+  sync, then re-measured at **1.6 s of double-talk** after a −1.65 s step,
+  which is not a price anyone pays knowingly. The mix now serializes the
+  corrected placements: a line that would start inside its predecessor starts
+  at its predecessor's end instead, and carries `held` — the seconds it starts
+  later than the stepped clock would put it. The trade is explicit: that
+  line's voice trails its caption by `held`, rather than two voices at once.
+  `timeline.md` names held lines in the same paragraph as the clock
+  correction. If a take comes back with a voice arriving late, look at
   `capture_clock.steps` before you look at the storyboard.
 - Verify audio like you verify frames: `ffprobe` shows the aac stream;
   `ffmpeg -af silencedetect` should show speech blocks spanning the video;

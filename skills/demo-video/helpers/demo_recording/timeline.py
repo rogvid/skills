@@ -1102,6 +1102,25 @@ def _narration_md(narration: object) -> list[str]:
         if holed
         else ""
     )
+    # ...and the lines serialization moved. A third sentence and never folded
+    # into the other two: `clamped` and `no_video` are lines the *clock* put
+    # somewhere other than their log instant; this one is the mix refusing to
+    # speak twice at once after that placement. Different cause, different
+    # thing a listener hears.
+    held_lines = [line for line in lines if line.get("held")]
+    tail += (
+        f" **{len(held_lines)} of them {'was' if len(held_lines) == 1 else 'were'} "
+        f"held back past the line before it**: a backward step compresses the "
+        f"video but not the clip, and the corrected onsets would have mixed two "
+        f"voices over each other — measured at 1.6 s of double-talk after a "
+        f"−1.65 s step. `held` is how many seconds later "
+        f"{'that clip' if len(held_lines) == 1 else 'those clips'} start{'s' if len(held_lines) == 1 else ''} "
+        f"than the stepped clock would put "
+        f"{'it' if len(held_lines) == 1 else 'them'}; the price is a voice "
+        f"trailing its caption by that much, not two at once."
+        if held_lines
+        else ""
+    )
     return [
         f"**The {len(lines)} spoken line(s) were mixed where the host's "
         f"stepped clock puts them in the video**, not at the beat-log offsets "

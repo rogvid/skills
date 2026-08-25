@@ -1713,6 +1713,10 @@ NARRATION_KEY = "not-a-real-key-and-must-never-be-used"
 NARRATION_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
 NARRATION_MODEL_ID = "eleven_multilingual_v2"
 NARRATION_KEY_CHARS = 20
+# The pinned voice stability, in the request format the key interpolates —
+# hand-copied like the two defaults above, and stale the same way if
+# `DEFAULT_STABILITY` moves.
+NARRATION_STABILITY = "0.75"
 
 # (line, clip seconds). The first is deliberately *long* against its beat's
 # hold, so the recorder has to wait it out and the wait is visible in the beat
@@ -3017,7 +3021,11 @@ def check_merged_capture_clock(
 
 
 _CAPTION_JS = """() => {
-  const el = document.getElementById('__demo_caption');
+  // Two stacked layers crossfade (chrome.py). The one the recorder just set
+  // is `__demoCapLayer`'s — reading the visible layer instead would grade
+  // the previous line for the ~0.3 s the fade is running.
+  const ids = ['__demo_caption', '__demo_caption2'];
+  const el = document.getElementById(ids[window.__demoCapLayer || 0]);
   if (!el) return null;
   return [el.textContent, getComputedStyle(el).opacity];
 }"""
@@ -11503,7 +11511,10 @@ def seed_tts_cache(out_dir: Path) -> dict[str, Path]:
     tts.mkdir(parents=True, exist_ok=True)
     seeded: dict[str, Path] = {}
     for text, seconds in NARRATION_LINES:
-        joined = f"{NARRATION_VOICE_ID}|{NARRATION_MODEL_ID}|{text}"
+        joined = (
+            f"{NARRATION_VOICE_ID}|{NARRATION_MODEL_ID}|{text}"
+            f"|stability={NARRATION_STABILITY}"
+        )
         key = hashlib.sha256(joined.encode()).hexdigest()[:NARRATION_KEY_CHARS]
         clip = tts / f"{key}.mp3"
         subprocess.run(

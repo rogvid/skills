@@ -39,6 +39,7 @@ from types import TracebackType
 
 from playwright.sync_api import Page, sync_playwright
 
+from .camera import camera_filter, video_dimensions
 from .content import (
     content_report,
     media_duration,
@@ -70,7 +71,12 @@ from .failure import (
     render_failure_md,
 )
 from .frames import _FRAME_EDGE_S, _extract, write_beat_frames
-from .narration import mix_plan, tts_clip
+from .narration import (
+    DEFAULT_STABILITY,
+    clip_gain_db,
+    mix_plan,
+    tts_clip,
+)
 from .target import guard_target
 from .timeline import (
     ATTRIBUTION_SLACK_S,
@@ -85,6 +91,7 @@ from .timeline import (
     TIMELINE_SCHEMA,
     StrictTakeFailed,
     _cap_text,
+    capture_clock_shift,
     evidence_name,
     write_timeline,
 )
@@ -642,8 +649,7 @@ class _CaptureClock:
         if abs(self.total) < self.WARN_S:
             return None
         when = ", ".join(
-            f"{step['delta'] * 1000:+.0f} ms at {step['t']:.1f}s"
-            for step in self.steps
+            f"{step['delta'] * 1000:+.0f} ms at {step['t']:.1f}s" for step in self.steps
         )
         return (
             f"demo-video: WARNING — this host's wall clock stepped while the "
@@ -821,6 +827,7 @@ class _DemoBase:
             "_failure_screen",
             "_media_path",
             "_opening_card",
+            "_raise_outro",
             # extension points, each beside the sealed member it extends
             "_watch_extra",
             "_before_shot",
@@ -875,6 +882,7 @@ class _DemoBase:
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        speech_stability: float | None = None,
         strict: bool | None = None,
         deterministic: bool | None = None,
         clock: str | None = None,
@@ -884,6 +892,10 @@ class _DemoBase:
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
         stills_only: bool | None = None,
+        pace: float | None = None,
+        intro: str | None = None,
+        outro: str | None = None,
+        window_title: str | None = None,
         # Last, and kept last. `tests/unit`'s "a way to permit a public host
         # appears as a constructor argument" injection anchors on this line
         # followed by the closing paren, and a parameter added after it makes
@@ -959,6 +971,19 @@ class _DemoBase:
                 )
             accent_rgb = tuple(int(p) for p in parts)  # type: ignore[assignment]
         self._accent = ",".join(str(c) for c in accent_rgb)
+        # The wrapper window's title bar. None means the medium picks its own
+        # default: a web take names the app it is pointed at (its base_url's
+        # host), a terminal take its `terminal_title`.
+        self._window_title = window_title or _env("WINDOW_TITLE")
+        # The opt-in opening title (web medium only — the terminal medium has
+        # its own `interlude=` opening card). Empty string is off, same as
+        # None: an intro that says nothing is no intro.
+        self._intro = (intro or _env("INTRO") or "").strip() or None
+        # The opt-in closing card, same terms. `_outro_up` is what turns the
+        # envelope key on: a take that asked for an outro and lost it to a
+        # late failure does not claim one.
+        self._outro = (outro or _env("OUTRO") or "").strip() or None
+        self._outro_up = False
         self._terminal_title = terminal_title or _env("TERMINAL_TITLE", "terminal")
         self._terminal_prompt = terminal_prompt or _env("TERMINAL_PROMPT", "$ ")
         if viewport is None:
@@ -970,6 +995,31 @@ class _DemoBase:
                 )
             viewport = (int(w), int(h))
         self._size = {"width": viewport[0], "height": viewport[1]}
+        # Audience pacing (SKILL.md, "Pacing and perception"). A multiplier
+        # over the holds this recorder *computes* — the no-speech caption
+        # read time, and the defaults of hold(), interlude() and criterion()
+        # — so one storyboard can serve a hurried viewer (pace < 1) or a
+        # deliberate one (pace > 1) without being rewritten. A duration the
+        # author wrote stays literal: pause(s), hold(min_s=…) and
+        # interlude(hold=…) passed explicitly are requests, not defaults.
+        # stills_only zeroes pacing entirely, so rehearsal speed does not
+        # depend on whatever a take sets here.
+        if pace is None:
+            raw_pace: float | str = _env("PACE", "1.0")
+        else:
+            raw_pace = pace
+        try:
+            pace = float(raw_pace)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f"DEMO_VIDEO_PACE must be a number, got {raw_pace!r}"
+            ) from None
+        if pace <= 0:
+            raise RuntimeError(
+                f"DEMO_VIDEO_PACE must be positive, got {pace!r} — a take at "
+                f"pace 0 never shows anything"
+            )
+        self._pace = pace
         # Determinism (see the section above). Opt-in, because the frozen clock
         # and the motion rule change what an app does and mostly do it
         # silently; timezone, locale and reduced motion are pinned regardless.
@@ -987,9 +1037,7 @@ class _DemoBase:
         if speech is None:
             speech = _env_flag("SPEECH")
         if speech is True and not api_key:
-            raise RuntimeError(
-                "speech is forced on but ELEVENLABS_API_KEY is not set"
-            )
+            raise RuntimeError("speech is forced on but ELEVENLABS_API_KEY is not set")
         if speech is True and self.stills_only:
             raise RuntimeError(
                 "speech is forced on for a stills-only run, which encodes no "
@@ -1005,7 +1053,37 @@ class _DemoBase:
         self._speech_model = speech_model or _env(
             "SPEECH_MODEL", "eleven_multilingual_v2"
         )
+        # Pinned voice stability (see narration.DEFAULT_STABILITY for the
+        # measurement behind the default): without it the model's per-sentence
+        # pacing wanders and consecutive lines read as different speeds.
+        if speech_stability is None:
+            raw_stability: float | str = _env(
+                "SPEECH_STABILITY", str(DEFAULT_STABILITY)
+            )
+        else:
+            raw_stability = speech_stability
+        try:
+            speech_stability = float(raw_stability)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f"DEMO_VIDEO_SPEECH_STABILITY must be a number, got {raw_stability!r}"
+            ) from None
+        if not 0.0 < speech_stability <= 1.0:
+            raise RuntimeError(
+                f"DEMO_VIDEO_SPEECH_STABILITY must be between 0 and 1, got "
+                f"{speech_stability!r}"
+            )
+        self._speech_stability = speech_stability
         self._tts_dir = self.out_dir / ".tts"
+        # The intro and outro cards are voiced from clips synthesized *here*,
+        # in the constructor — never when the card is raised. The raise runs
+        # on the capture clock, and the round trip paid there was 3.4 s of
+        # silent card at the top of the delivered exec demo (its first line
+        # mixed at t=3.557 for exactly this reason). A card raised over a
+        # take must have its voice already in hand; the cache makes every
+        # run after the first free.
+        self._intro_clip = self._pre_synth(self._intro)
+        self._outro_clip = self._pre_synth(self._outro)
         # Caption font size in px, handed to `chrome_html` by each medium's
         # `_start`. Both media record at true pixel size, so this is the
         # size on screen in the chrome's caption band. (The deleted
@@ -1023,6 +1101,12 @@ class _DemoBase:
         # over- or under-run by the size of the step.
         self._line_end = 0.0  # when the current line stops speaking
         self._t0 = 0.0  # when video capture started
+        # The camera (see camera.py): each spotlight interval as geometry,
+        # pushed in after the take, in _convert. An open event is the
+        # spotlight on screen right now; it closes when the next spotlight
+        # clears it, or with the take.
+        self._camera: list[dict] = []
+        self._camera_open: dict | None = None
         # ...and the one clock in here that is *not* monotonic, because the
         # video is on it and nothing else can reach it. See _CaptureClock.
         self._capture_clock = _CaptureClock()
@@ -1090,8 +1174,7 @@ class _DemoBase:
         # user expected voice (usually the key just isn't in this process's
         # env) is otherwise a confusing surprise only noticed after the fact.
         if self._speech:
-            print(f"demo-video: narration ON (voice {self._voice_id})",
-                  file=sys.stderr)
+            print(f"demo-video: narration ON (voice {self._voice_id})", file=sys.stderr)
         elif self.stills_only:
             print(
                 "demo-video: narration OFF — a stills-only run encodes no "
@@ -1214,7 +1297,6 @@ class _DemoBase:
         """
         return None
 
-
     # -- context manager ----------------------------------------------------
 
     def __enter__(self) -> "_DemoBase":
@@ -1238,9 +1320,7 @@ class _DemoBase:
             # a second flag somebody has to remember to check.
             self._context = self._browser.new_context(
                 viewport=self._size,
-                record_video_dir=(
-                    None if self.stills_only else str(self._video_dir)
-                ),
+                record_video_dir=(None if self.stills_only else str(self._video_dir)),
                 record_video_size=None if self.stills_only else self._size,
                 locale=self._locale,
                 timezone_id=self._timezone_id,
@@ -1314,6 +1394,21 @@ class _DemoBase:
         #     the `with` that carries an exception, for exactly that reason.
         if exc_type is None:
             self._finish_line(tail=0.5)  # don't end mid-sentence
+            # The opt-in closing card, while the page is alive and the
+            # capture still running — the mirror of the intro, at the other
+            # end. Never fatal: a take that recorded everything and lost its
+            # outro to a late failure is a take without an outro, not a take
+            # to throw away; the envelope key is what says whether it happened.
+            if exc_type is None:
+                try:
+                    self._raise_outro()
+                except Exception:  # noqa: BLE001 - the take is already on disk
+                    pass
+        # A spotlight still on at the take's end is a camera event with no
+        # end; it ends with the take. On the failure path too — the timeline
+        # is written either way, and an open event it never mentions would
+        # describe a push the mp4 does not contain.
+        self._camera_close()
         # The last thing asked of the live page, and it has to be here rather
         # than beside the rest of the picture check: `_measure_content` runs
         # after the browser is gone, off a file, and the one occlusion nothing
@@ -1615,8 +1710,10 @@ class _DemoBase:
                 return  # log/info/debug is an app talking, not an app failing
             where = message.location or {}
             self._note_issue(
-                kind, message.text,
-                url=where.get("url") or None, line=where.get("lineNumber"),
+                kind,
+                message.text,
+                url=where.get("url") or None,
+                line=where.get("lineNumber"),
             )
         except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
             pass
@@ -1633,7 +1730,8 @@ class _DemoBase:
             self._note_issue(
                 "request_failed",
                 f"{request.failure or 'request failed'} — {request.url}",
-                url=request.url, method=request.method,
+                url=request.url,
+                method=request.method,
             )
         except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
             pass
@@ -1645,8 +1743,10 @@ class _DemoBase:
             if response.status < 400:
                 return
             self._note_issue(
-                "http_error", f"HTTP {response.status} {response.url}",
-                url=response.url, status=response.status,
+                "http_error",
+                f"HTTP {response.status} {response.url}",
+                url=response.url,
+                status=response.status,
             )
         except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
             pass
@@ -1692,8 +1792,7 @@ class _DemoBase:
         recorded = [i for i in self._issues if i["kind"] in STRICT_KINDS]
         shown = recorded[:5]
         lines = [
-            f"  {i['kind']} in {self._issue_where(i)}: {i['message']}"
-            for i in shown
+            f"  {i['kind']} in {self._issue_where(i)}: {i['message']}" for i in shown
         ]
         if not shown:
             lines.append(
@@ -1871,7 +1970,6 @@ class _DemoBase:
         """Whitespace collapsed to single spaces, ends trimmed."""
         return " ".join(text.split())
 
-
     def _evidence_doc(self, beat: dict, payload: dict) -> dict:
         """One evidence document: the envelope, the payload, then the caps.
 
@@ -1894,8 +1992,16 @@ class _DemoBase:
             "media": self._media_name(),
             "beat": {
                 key: beat.get(key)
-                for key in ("index", "t_start", "t_end", "verb", "selector",
-                            "caption", "still", "evidence")
+                for key in (
+                    "index",
+                    "t_start",
+                    "t_end",
+                    "verb",
+                    "selector",
+                    "caption",
+                    "still",
+                    "evidence",
+                )
             },
         }
         doc.update(payload)
@@ -1923,8 +2029,10 @@ class _DemoBase:
             return
         out = self.out_dir / EVIDENCE_DIR
         self._evidence_docs = [
-            (out / evidence_name(beat["index"], self.segment),
-             self._evidence_doc(beat, payload))
+            (
+                out / evidence_name(beat["index"], self.segment),
+                self._evidence_doc(beat, payload),
+            )
             for beat, payload in self._evidence
         ]
 
@@ -1950,14 +2058,14 @@ class _DemoBase:
     def _clear_stale_evidence(self, keep: set[Path] | None = None) -> None:
         """Delete evidence a previous take into this directory left behind.
 
-        Re-recording into the same folder is how this skill is *meant* to be
-        used — `record.py` is committed precisely so it can be re-run — and a
-take with fewer beats than the last one would otherwise leave the
-        previous take's files sitting beside its own, named for beats this
-        take never recorded. Nothing else here has that shape: the mp4 is
-        overwritten, and a still is only kept because it might be a committed
-        guide. Evidence is never committed, so
-        there is no such thing as one worth keeping.
+                Re-recording into the same folder is how this skill is *meant* to be
+                used — `record.py` is committed precisely so it can be re-run — and a
+        take with fewer beats than the last one would otherwise leave the
+                previous take's files sitting beside its own, named for beats this
+                take never recorded. Nothing else here has that shape: the mp4 is
+                overwritten, and a still is only kept because it might be a committed
+                guide. Evidence is never committed, so
+                there is no such thing as one worth keeping.
         """
         for path in self._stale_evidence(keep):
             try:
@@ -2044,9 +2152,7 @@ take with fewer beats than the last one would otherwise leave the
             "generated_by": "demo-video",
             "recorder": type(self).__name__,
             "segment": self.segment,
-            "when": _dt.datetime.now(_dt.timezone.utc).isoformat(
-                timespec="seconds"
-            ),
+            "when": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             "failure": failure,
             # The failing beat in full, not just its index: this file is meant
             # to answer "which beat, and what was on screen" without anyone
@@ -2113,7 +2219,10 @@ take with fewer beats than the last one would otherwise leave the
         doc["media_written_by_this_take"] = self._converted
         written = 0
         for path, text in [
-            (out / "failure.json", json.dumps(doc, indent=2, ensure_ascii=False) + "\n"),
+            (
+                out / "failure.json",
+                json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+            ),
             (out / "failure.md", render_failure_md(doc)),
             *self._failure_docs,
         ]:
@@ -2261,7 +2370,24 @@ take with fewer beats than the last one would otherwise leave the
         except Exception:  # noqa: BLE001 - a diagnostic must not kill a take
             return
         if isinstance(up, list):
-            self._overlay_note = overlay_warning([str(i) for i in up])
+            ids = [str(i) for i in up]
+            if self._outro_up:
+                # The outro card is this take's deliberate last frame, raised
+                # by the recorder itself seconds ago. Warning "an overlay the
+                # recorder left up" about the take's own ending would be the
+                # probe grading its own feature. The bridge is not waived: an
+                # outro never raises one, so a bridge up here is still a bug.
+                ids = [i for i in ids if i != INTERLUDE_ID]
+            if ids:
+                self._overlay_note = overlay_warning(ids)
+
+    def _raise_outro(self) -> None:
+        """The opt-in closing card (`Recorder(outro=…)`, off by default).
+
+        A no-op in the base: the card machinery is the wrapper document's,
+        and only a medium that builds one can raise anything over it.
+        """
+        return None
 
     def _opening_card(self) -> dict | None:
         """What this take's **first frame** showed, for a medium that can say.
@@ -2468,6 +2594,29 @@ take with fewer beats than the last one would otherwise leave the
             "issues": issues,
             "issue_count": self._issue_count,
         }
+        # Present only when this take moved off the default pacing, for the
+        # same reason `mode` and `failure` are absent on an ordinary take:
+        # absence is the signal, and a reader skimming a fast take's
+        # timeline.json sees why it is fast instead of guessing.
+        if self._pace != 1.0:
+            doc["pace"] = self._pace
+        # Same absence-as-signal: a take that opened on an intro card says so,
+        # and carries the sentence that was on it — the one string a reader of
+        # frame 0 cannot recover from the beat table, which never shows it.
+        if self._intro:
+            doc["intro"] = self._intro
+        # Presence is the signal, and the signal is also the honesty: an
+        # outro that was asked for but never raised (a late TTS failure) is
+        # a take without one, and this key is what says so.
+        if self._outro_up:
+            doc["outro"] = self._outro
+        # The camera moves this take's mp4 was rendered with (see camera.py).
+        # Presence is the signal, like intro and outro: a take without
+        # push-ins reads as it always did. The rects are in output-frame
+        # pixels — the coordinates a reader maps onto demo.mp4 — so the
+        # moves can be re-rendered, audited, or graded without the take.
+        if self._camera:
+            doc["camera"] = [dict(event) for event in self._camera]
         # Both of these are the `failure` construction below, for the same
         # reason: **presence is the signal** (issue #372).
         #
@@ -2710,14 +2859,17 @@ take with fewer beats than the last one would otherwise leave the
         if self._speech:
             return 0.4
         words = len(text.split())
-        return min(6.0, max(1.4, 0.6 + words * 0.34))
+        return min(6.0, max(1.4, 0.6 + words * 0.34)) * self._pace
 
-    def interlude(self, text: str, hold: float = 2.8, style: str = "card") -> None:
+    def interlude(
+        self, text: str, hold: float | None = None, style: str = "card"
+    ) -> None:
         """Bridge a jump in the demo; "" takes it down, whichever style is up.
 
         With speech enabled the line is spoken too, and `hold` is how long the
         card stays before the storyboard moves on (a clear always takes 0.6 s,
-        long enough for the fade).
+        long enough for the fade). The default hold — 2.8 s — is scaled by
+        this take's `pace`; an explicit `hold` stays literal.
 
         style="card" (default) is a full-screen title card — right for real
         time-skips (minutes of background work) between segments. style="light"
@@ -2744,7 +2896,7 @@ take with fewer beats than the last one would otherwise leave the
                     "() => { window.__demoInterlude(''); window.__demoBridge(''); }"
                 )
             self._start_line(clip)
-            self.pause(hold if text else 0.6)
+            self.pause((2.8 * self._pace if hold is None else hold) if text else 0.6)
 
     def criterion(self, ac: str, hold: float | None = None) -> None:
         """Put a declared acceptance criterion's own sentence on screen.
@@ -2793,28 +2945,36 @@ take with fewer beats than the last one would otherwise leave the
     def _criterion_hold(self, text: str) -> float:
         """How long a clause stays up when the storyboard does not say.
 
-        Read speed over the clause, bounded by the two constants — and never
-        less than what is left of the line being spoken, because a card that
-        leaves mid-sentence while the voice is still reading the clause is the
-        one failure this verb exists to remove.
+        Read speed over the clause, bounded by the two constants and scaled
+        by `pace` like every other computed hold — never less than what is
+        left of the line being spoken, because a card that leaves mid-sentence
+        while the voice is still reading the clause is the one failure this
+        verb exists to remove.
         """
-        reading = min(
-            CRITERION_HOLD_MAX_S,
-            max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),
+        reading = (
+            min(
+                CRITERION_HOLD_MAX_S,
+                max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),
+            )
+            * self._pace
         )
         return max(reading, self._line_end - time.monotonic())
 
     @_beat_verb("hold")
-    def hold(self, min_s: float = 1.5) -> None:
+    def hold(self, min_s: float | None = None) -> None:
         """Keep the current frame up until the narration for the current
         caption finishes speaking — so a spotlight or highlight stays on
         screen for the whole spoken line instead of flashing. Holds at least
         `min_s` (a perception floor: ~1.5 s to notice and fixate on a change),
         which is also what governs pacing when narration is off. Use it right
-        after setting a spotlight/emphasis."""
-        remaining = self._line_end - time.monotonic()
-        self._idle(max(min_s, remaining))
+        after setting a spotlight/emphasis.
 
+        The floor is 1.5 s scaled by this take's `pace` when `min_s` is not
+        passed; an explicit `min_s` is the author's number and stays literal.
+        """
+        floor = 1.5 * self._pace if min_s is None else min_s
+        remaining = self._line_end - time.monotonic()
+        self._idle(max(floor, remaining))
 
     def _before_shot(self) -> None:
         """Bring the screen up to date before a still is taken.
@@ -2876,17 +3036,87 @@ take with fewer beats than the last one would otherwise leave the
             self.page.screenshot(path=str(path))
         return path
 
+    # -- camera (see camera.py) ----------------------------------------------
+
+    def _camera_raise(self, rect: dict) -> None:
+        """Open a camera event over the element just spotlighted. `rect` is
+        the spotlight's own measurement of where the element sits in the
+        recorded frame, in output-frame pixels."""
+        self._camera_open = {
+            "t_start": round(time.monotonic() - self._t0, 3),
+            "rect": [rect["x"], rect["y"], rect["w"], rect["h"]],
+        }
+
+    def _camera_close(self, t_end: float | None = None) -> None:
+        """End the open camera event, at `t_end` (now, unless given — the
+        spotlight's clear hands in the moment the pull *starts*, because its
+        evaluate waits out the fade). A degenerate event is dropped: a
+        camera move with no length is not a move, and the timeline carries
+        only what the mp4 will show."""
+        if self._camera_open is None:
+            return
+        event = dict(self._camera_open)
+        self._camera_open = None
+        end = round(time.monotonic() - self._t0, 3) if t_end is None else round(t_end, 3)
+        if end > event["t_start"]:
+            event["t_end"] = end
+            self._camera.append(event)
+
+    def _camera_on_the_video_clock(self, record: object) -> list[dict]:
+        """The camera events moved onto the clock the video is on.
+
+        The events' times are beat-log instants — `time.monotonic()` minus
+        `_t0` — and the video is stamped with the wall clock, so a host that
+        stepped puts every event after the step that far ahead of the frames
+        it names. The narration mix corrects its lines through
+        `capture_clock_shift` (issue #226); the moves ride the same
+        correction. An interval the step swallowed whole is dropped rather
+        than rendered as a push with no length. The list is replaced, so the
+        timeline this take writes describes the moves demo.mp4 actually
+        carries."""
+        place, _ = capture_clock_shift(record)
+        corrected = []
+        for event in self._camera:
+            moved = dict(event)
+            moved["t_start"] = round(place(event["t_start"]).at, 3)
+            moved["t_end"] = round(place(event["t_end"]).at, 3)
+            if moved["t_end"] > moved["t_start"]:
+                corrected.append(moved)
+        return corrected
+
     # -- speech (ElevenLabs narration) --------------------------------------
 
-    def _prepare_line(self, text: str) -> Path | None:
-        """Synthesize (or fetch cached) audio for a narration line, and wait
-        out the previous line — never speak two lines at once, never show a
-        caption while the voice is still on the previous one."""
+    def _pre_synth(self, text: str | None) -> Path | None:
+        """Synthesize a card's line off the clock — the constructor calls this
+        for the intro and outro, whose raises happen on the capture clock."""
+        if not (self._speech and text):
+            return None
+        return tts_clip(
+            text,
+            self._tts_dir,
+            self._voice_id,
+            self._speech_model,
+            self._api_key,
+            stability=self._speech_stability,
+        )
+
+    def _prepare_line(self, text: str, preset: Path | None = None) -> Path | None:
+        """Resolve the audio for a narration line, and wait out the previous
+        line — never speak two lines at once, never show a caption while the
+        voice is still on the previous one. `preset` is a clip already
+        synthesized off the clock (a card's line); when it is handed in there
+        is nothing left to synthesize and none is paid for."""
         clip = None
-        if self._speech and text:
+        if preset is not None:
+            clip = preset
+        elif self._speech and text:
             clip = tts_clip(
-                text, self._tts_dir, self._voice_id, self._speech_model,
+                text,
+                self._tts_dir,
+                self._voice_id,
+                self._speech_model,
                 self._api_key,
+                stability=self._speech_stability,
             )
         self._finish_line()
         return clip
@@ -2907,7 +3137,49 @@ take with fewer beats than the last one would otherwise leave the
 
     def _convert(self, webm: Path) -> None:
         mp4 = self._media_path()
-        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(webm)]
+        # The camera (see camera.py): one eased push-in per spotlight
+        # interval, rendered here, in the same encode as the narration mix.
+        # A take with no spotlight intervals builds no chain and encodes
+        # exactly as it did before the camera existed.
+        #
+        # **The camera renders in its own pass, and that is load-bearing.**
+        # The mix below maps video straight from its input and filters only
+        # audio — one graph output, `-shortest` cutting the pad. Adding the
+        # camera chain as a second graph output next to that audio made
+        # ffmpeg buffer the whole video through the interleaving queue:
+        # measured at 2.8 GB resident and "No space left on device" on a
+        # 54 s take, and a plain `fps,scale` video branch hangs the same
+        # way, so it is the two-output shape, not zoompan. A video-only
+        # pre-pass is a single-output graph — the shape the mix always
+        # used — and the mix then reads its frames like any other input.
+        source = webm
+        if self._camera:
+            self._camera = self._camera_on_the_video_clock(
+                self._capture_clock.report()
+            )
+        if self._camera:
+            src_w, src_h = video_dimensions(webm)
+            chain = camera_filter(
+                self._camera,
+                src_w=src_w,
+                src_h=src_h,
+                out_w=self._size["width"],
+                out_h=self._size["height"],
+            )
+            source = webm.with_suffix(".camera.mp4")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", str(webm),
+                    "-filter_complex", f"[0:v]{chain}[v]",
+                    "-map", "[v]",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
+                    "-r", "25",
+                    str(source),
+                ],
+                check=True,
+            )
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(source)]
         narration: dict | None = None
         if self._speech:
             # Mix each narration clip in at the moment its line appeared —
@@ -2922,14 +3194,31 @@ take with fewer beats than the last one would otherwise leave the
             # stitch()'s lossless concat sees uniform streams.
             if self._lines:
                 plan, clock = mix_plan(
-                    [off for off, _ in self._lines], self._capture_clock.report()
+                    [off for off, _ in self._lines],
+                    self._capture_clock.report(),
+                    # The clips' own lengths: without them the corrected
+                    # placements cannot be serialized, and a backward step
+                    # between two lines mixes one voice over another
+                    # (measured at 1.6 s of overlap on a −1.65 s step).
+                    [media_duration(clip) for _, clip in self._lines],
                 )
                 narration = {"lines": plan, "clock_correction": clock}
                 for _, clip in self._lines:
                     cmd += ["-i", str(clip)]
+                # Per-clip gain to one loudness target. ElevenLabs returns
+                # clips at whatever level the model produced, and mixed as-is
+                # consecutive lines sit at audibly different levels. Measured
+                # per clip, applied here where the mix is built; a clip that
+                # cannot be measured gains nothing and says so in its line.
+                gains = [clip_gain_db(clip) for _, clip in self._lines]
+                for line, gain in zip(plan, gains, strict=True):
+                    if abs(gain) >= 0.1:
+                        line["gain_db"] = gain
                 delayed = ";".join(
-                    f"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}:all=1[a{i}]"
-                    for i, line in enumerate(plan)
+                    f"[{i + 1}:a]"
+                    + (f"volume={gain:.2f}dB," if abs(gain) >= 0.1 else "")
+                    + f"adelay={int(round(line['at'] * 1000))}:all=1[a{i}]"
+                    for i, (line, gain) in enumerate(zip(plan, gains, strict=True))
                 )
                 inputs = "".join(f"[a{i}]" for i in range(len(self._lines)))
                 # aformat pins the layout: mixed mono TTS clips would
@@ -2942,13 +3231,39 @@ take with fewer beats than the last one would otherwise leave the
                     "apad[aud]"
                 )
             else:
-                cmd += ["-f", "lavfi", "-i",
-                        "anullsrc=channel_layout=stereo:sample_rate=44100"]
+                cmd += [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=channel_layout=stereo:sample_rate=44100",
+                ]
                 filt = "[1:a]apad[aud]"
-            cmd += ["-filter_complex", filt, "-map", "0:v", "-map", "[aud]",
-                    "-c:a", "aac", "-b:a", "160k", "-shortest"]
-        cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
-                "-r", "25", "-movflags", "+faststart", str(mp4)]
+            cmd += [
+                "-filter_complex",
+                filt,
+                "-map",
+                "0:v",
+                "-map",
+                "[aud]",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-shortest",
+            ]
+        cmd += [
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "23",
+            "-r",
+            "25",
+            "-movflags",
+            "+faststart",
+            str(mp4),
+        ]
         subprocess.run(cmd, check=True)
         self._postprocess(mp4)
         # Only now. Everything that reads `duration`, extracts a review frame,

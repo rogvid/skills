@@ -172,6 +172,7 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 import demo_recording.core as core_module  # noqa: E402
 import demo_recording.frames as frames_module  # noqa: E402
+from demo_recording.camera import camera_filter  # noqa: E402
 from demo_recording.chrome import (  # noqa: E402
     chrome_geometry,
     chrome_html,
@@ -5477,7 +5478,7 @@ class TerminalStill(unittest.TestCase):
             super().__init__()
             self.log = log
 
-        def screenshot(self, path: str) -> None:
+        def screenshot(self, path: str, **kwargs) -> None:
             self.log.append("screenshot")
 
     class Rec(TermRec):
@@ -6068,15 +6069,19 @@ class ActBeat(unittest.TestCase):
     def test_the_beat_spans_the_block(self):
         rec = recorder(self)
         with rec.act(self.LABEL):
-            # Long enough to survive the record's 3-decimal rounding: an act
-            # that opened its beat after the block, or closed it before, would
-            # collapse this span to zero.
             time.sleep(0.02)
             inside = round(time.monotonic() - rec._t0, 3)
         beat = rec._beats[-1]
         self.assertLess(beat["t_start"], beat["t_end"])
         self.assertLessEqual(beat["t_start"], inside)
         self.assertLessEqual(inside, beat["t_end"])
+        # The span, not just the ordering: a beat opened *after* the block —
+        # the injection this guards against — sits microseconds from its own
+        # end, and under load that epsilon has been known to round above the
+        # 3-decimal zero and slip past the assertLess above. A beat that
+        # spans a 20 ms block covers all but the rounding of it; one that
+        # does not, cannot.
+        self.assertGreaterEqual(beat["t_end"] - beat["t_start"], 0.015)
 
     def test_the_act_beat_is_captured_for_evidence_like_any_verb(self):
         # recorder() pins evidence=False for the rest of the suite, so this
@@ -6478,6 +6483,753 @@ class CriterionHold(unittest.TestCase):
         # is satisfied by a hold that is *always* whatever `_line_end` says,
         # including a negative one.
         self.assertEqual(self.held_for("It works.", spoken=-30.0), CRITERION_HOLD_MIN_S)
+
+
+class Pace(unittest.TestCase):
+    """One multiplier over the holds the recorder *computes*.
+
+    The knob exists so one storyboard can serve a hurried viewer and a
+    deliberate one without being rewritten. What the tests pin: the computed
+    holds scale; a duration the storyboard author wrote does not; and a take
+    that moved off the default says so in its own timeline. The line between
+    the two is the whole design — `pause(2)` is a request, not a suggestion.
+    """
+
+    class Held(WebRec):
+        """A recorder that writes down what it was asked to hold for."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.held: list[float] = []
+
+        def _hold_frame(self, seconds: float) -> None:
+            self.held.append(seconds)
+
+    WORDS = "one two three four five six seven eight nine ten"
+
+    def paced(self, pace):
+        settings = {} if pace is None else {"pace": pace}
+        return recorder(self, cls=self.Held, page=DrawingPage(), **settings)
+
+    @staticmethod
+    def base_hold(text: str) -> float:
+        words = len(text.split())
+        return min(6.0, max(1.4, 0.6 + words * 0.34))
+
+    def test_the_default_pace_is_one_and_holds_what_the_formula_says(self):
+        rec = self.paced(None)
+        self.assertEqual(rec._pace, 1.0)
+        self.assertAlmostEqual(
+            rec._caption_hold(self.WORDS), self.base_hold(self.WORDS)
+        )
+
+    def test_a_computed_caption_hold_scales_both_ways(self):
+        self.assertAlmostEqual(
+            self.paced(0.5)._caption_hold(self.WORDS),
+            0.5 * self.base_hold(self.WORDS),
+        )
+        self.assertAlmostEqual(
+            self.paced(2.0)._caption_hold(self.WORDS),
+            2.0 * self.base_hold(self.WORDS),
+        )
+
+    def test_the_criterion_card_scales_with_it(self):
+        clause = " ".join(["queue"] * 7)  # reading speed governs at 7 words
+        rec = recorder(
+            self,
+            cls=self.Held,
+            page=DrawingPage(),
+            pace=0.5,
+            criteria={"AC-1": clause},
+        )
+        rec.criterion("AC-1")
+        self.assertEqual(len(rec.held), 1)
+        self.assertAlmostEqual(rec.held[0], 0.5 * (0.6 + 7 * 0.34))
+
+    def test_an_authored_duration_is_not_touched(self):
+        rec = self.paced(0.5)
+        rec.pause(2.0)
+        rec.hold(min_s=3.0)
+        rec.interlude("A bridge.", hold=4.0)
+        self.assertEqual(rec.held[0], 2.0, "pause() is the author's number")
+        self.assertEqual(rec.held[1], 3.0, "an explicit min_s is too")
+        self.assertEqual(rec.held[2], 4.0, "an explicit interlude hold is too")
+
+    def test_the_computed_defaults_scale_and_the_clear_does_not(self):
+        rec = self.paced(0.5)
+        rec.hold()
+        rec.interlude("A bridge.")
+        n = len(rec.held)
+        rec.interlude("")
+        self.assertAlmostEqual(rec.held[0], 0.75, msg="hold()'s 1.5 s floor")
+        self.assertAlmostEqual(rec.held[1], 1.4, msg="interlude()'s 2.8 s default")
+        self.assertAlmostEqual(rec.held[n], 0.6, msg="the clear keeps its fade")
+
+    def test_zero_negative_and_non_numbers_are_refused_at_construction(self):
+        for pace in (0, -1, "quick"):
+            with self.subTest(pace=pace):
+                with self.assertRaises(RuntimeError) as refused:
+                    self.paced(pace)
+                self.assertIn("DEMO_VIDEO_PACE", str(refused.exception))
+
+    def test_the_environment_can_set_it(self):
+        # Saved and restored by hand: `target_env` pins exactly the two target
+        # variables, and a pace left in the environment would re-pace every
+        # later take in this suite.
+        saved = os.environ.get("DEMO_VIDEO_PACE")
+        os.environ["DEMO_VIDEO_PACE"] = "0.75"
+        try:
+            rec = recorder(self, cls=self.Held, page=DrawingPage())
+        finally:
+            if saved is None:
+                os.environ.pop("DEMO_VIDEO_PACE", None)
+            else:
+                os.environ["DEMO_VIDEO_PACE"] = saved
+        self.assertEqual(rec._pace, 0.75)
+
+    def test_a_take_that_moved_off_the_default_says_so_in_its_timeline(self):
+        doc = self.paced(0.5)._timeline_doc()
+        self.assertEqual(doc["pace"], 0.5)
+
+    def test_the_default_take_does_not_carry_the_key(self):
+        doc = self.paced(None)._timeline_doc()
+        self.assertNotIn("pace", doc)
+
+
+class WindowTitle(unittest.TestCase):
+    """What the wrapper window's title bar says, and who decides it.
+
+    A web take used to open titled after wherever it was pointed — every
+    localhost demo read `localhost`, telling the viewer nothing. The knob
+    is one string; what the tests pin is the fallback order: the take's
+    `window_title`, then the medium's own answer (the app's host on the
+    web, the branded `terminal_title` in a terminal), then nothing.
+    """
+
+    def web(self, **settings):
+        return recorder(self, cls=WebRec, page=DrawingPage(), **settings)
+
+    def term(self, **settings):
+        return recorder(self, cls=TermRec, page=DrawingPage(), **settings)
+
+    def test_a_web_take_opens_titled_for_the_app_it_demos(self):
+        # The control: without the knob the bar still names the host, which
+        # is at least *an* answer — the regression graded here is the
+        # fallback vanishing, not the knob existing.
+        self.assertEqual(self.web()._chrome_title(), "localhost:8000")
+
+    def test_an_explicit_window_title_wins_on_both_media(self):
+        self.assertEqual(
+            self.web(window_title="Acme Console")._chrome_title(), "Acme Console"
+        )
+        self.assertEqual(
+            self.term(terminal_title="upstream")._chrome_title(), "upstream"
+        )
+        self.assertEqual(
+            self.term(
+                window_title="Acme Console", terminal_title="upstream"
+            )._chrome_title(),
+            "Acme Console",
+            "the take's title outranks the medium's branding",
+        )
+
+    def test_the_environment_sets_it(self):
+        saved = os.environ.get("DEMO_VIDEO_WINDOW_TITLE")
+        os.environ["DEMO_VIDEO_WINDOW_TITLE"] = "Queue Demo"
+        try:
+            rec = self.web()
+        finally:
+            if saved is None:
+                os.environ.pop("DEMO_VIDEO_WINDOW_TITLE", None)
+            else:
+                os.environ["DEMO_VIDEO_WINDOW_TITLE"] = saved
+        self.assertEqual(rec._chrome_title(), "Queue Demo")
+
+
+class Intro(unittest.TestCase):
+    """The opt-in opening title card, and the ways it stays opt-in.
+
+    Off by default — a demo that opens on a title card spends its opening
+    seconds not showing the app, which is a choice the storyboard author
+    makes, not the recorder. What the tests pin: nothing is raised or held
+    without one; an intro is raised over the wrapper and held at reading
+    speed scaled by `pace`; and a take that opened on one says so in its
+    own timeline.
+    """
+
+    class Held(WebRec):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.held: list[float] = []
+
+        def _hold_frame(self, seconds: float) -> None:
+            self.held.append(seconds)
+
+    def held(self, **settings):
+        return recorder(self, cls=self.Held, page=DrawingPage(), **settings)
+
+    def test_the_default_take_raises_nothing_and_holds_nothing(self):
+        rec = self.held()
+        rec._raise_intro()
+        self.assertEqual(rec.held, [])
+        raised = [a for s, a in rec.page.drawn if "__demoInterlude" in s]
+        self.assertEqual(raised, [])
+
+    def test_an_intro_is_raised_over_the_wrapper_and_paced(self):
+        rec = self.held(intro="The support queue, in twenty seconds.")
+        rec._raise_intro()
+        raised = [a for s, a in rec.page.drawn if "__demoInterlude" in s]
+        self.assertEqual(raised, ["The support queue, in twenty seconds."])
+        self.assertAlmostEqual(rec.held, [2.8])
+
+    def test_pace_scales_the_intro_hold(self):
+        rec = self.held(intro="Quick.", pace=0.5)
+        rec._raise_intro()
+        self.assertAlmostEqual(rec.held, [1.4])
+
+    def test_a_voiced_intro_holds_the_card_for_the_whole_line(self):
+        # What `_start_line` does for a real narration clip, without one: the
+        # line is now known to end five seconds from here, and the card must
+        # still be up when it does — a voice outliving its card is the one
+        # failure this verb shape exists to remove.
+        rec = self.held(intro="Hello.")
+        rec._start_line = lambda clip: setattr(  # type: ignore[method-assign]
+            rec, "_line_end", time.monotonic() + 5.0
+        )
+        rec._raise_intro()
+        self.assertEqual(len(rec.held), 1)
+        self.assertAlmostEqual(rec.held[0], 5.0, delta=0.01)
+
+    def test_a_voiced_intro_starts_its_line_off_the_preset_no_synth_on_the_clock(self):
+        # The clip was synthesized in the constructor; the raise must go
+        # card-up then line-start with nothing in between. A synthesis round
+        # trip paid here was 3.4 s of silent card at the top of the delivered
+        # exec demo — the one failure this wiring exists to keep dead.
+        rec = self.held(intro="Hello.")
+        rec._speech = True
+        rec._intro_clip = Path("/tmp/opencode/intro.mp3")
+        order: list[str] = []
+        rec.page.evaluate = lambda script, arg=None, **kw: order.append("card")  # type: ignore[method-assign]
+        rec._start_line = lambda clip: order.append(f"start:{clip}")  # type: ignore[method-assign]
+        was_clip = core_module.tts_clip
+
+        def explode(*args, **kwargs):
+            raise AssertionError("synthesis paid on the capture clock")
+
+        core_module.tts_clip = explode  # type: ignore[assignment]
+        try:
+            rec._raise_intro()
+        finally:
+            core_module.tts_clip = was_clip  # type: ignore[assignment]
+        self.assertEqual(order[0], "card")
+        self.assertEqual(
+            order[1],
+            "start:/tmp/opencode/intro.mp3",
+            "the preset clip was not the line",
+        )
+
+    def test_card_lines_are_synthesized_in_the_constructor_off_the_clock(self):
+        # Behaviour: `_pre_synth` synthesizes exactly when speech is on and
+        # the text is real. Wiring: the constructor assigns both card clips
+        # from it — and the constructor runs before any browser exists, so
+        # "in the constructor" is "off the capture clock" by construction.
+        rec = self.held(intro="Hello.", outro="Bye.")
+        rec._speech = True
+        calls: list[str] = []
+        was_clip = core_module.tts_clip
+        core_module.tts_clip = (  # type: ignore[assignment]
+            lambda text, *a, **k: calls.append(text) or Path("/tmp/opencode/x.mp3")
+        )
+        try:
+            self.assertEqual(rec._pre_synth("Hello."), Path("/tmp/opencode/x.mp3"))
+            self.assertIsNone(rec._pre_synth(None))
+            # (Whitespace never reaches here: the constructor strips the
+            # card texts to None before this is called.)
+        finally:
+            core_module.tts_clip = was_clip  # type: ignore[assignment]
+        self.assertEqual(calls, ["Hello."])
+        src = inspect.getsource(_DemoBase.__init__)
+        self.assertIn("self._intro_clip = self._pre_synth(self._intro)", src)
+        self.assertIn("self._outro_clip = self._pre_synth(self._outro)", src)
+
+    def test_a_preset_line_is_used_not_synthesized_again(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._speech = True
+        was_clip = core_module.tts_clip
+
+        def explode(*args, **kwargs):
+            raise AssertionError("a preset line must not synthesize again")
+
+        core_module.tts_clip = explode  # type: ignore[assignment]
+        try:
+            clip = rec._prepare_line("Hello.", preset=Path("/tmp/opencode/p.mp3"))
+        finally:
+            core_module.tts_clip = was_clip  # type: ignore[assignment]
+        self.assertEqual(clip, Path("/tmp/opencode/p.mp3"))
+
+    def test_an_empty_intro_is_no_intro(self):
+        rec = self.held(intro="   ")
+        rec._raise_intro()
+        self.assertEqual(rec.held, [])
+        self.assertIsNone(rec._intro)
+
+    def test_the_environment_can_set_it(self):
+        saved = os.environ.get("DEMO_VIDEO_INTRO")
+        os.environ["DEMO_VIDEO_INTRO"] = "From the environment."
+        try:
+            rec = self.held()
+        finally:
+            if saved is None:
+                os.environ.pop("DEMO_VIDEO_INTRO", None)
+            else:
+                os.environ["DEMO_VIDEO_INTRO"] = saved
+        rec._raise_intro()
+        raised = [a for s, a in rec.page.drawn if "__demoInterlude" in s]
+        self.assertEqual(raised, ["From the environment."])
+
+    def test_a_take_that_opened_on_one_says_so_in_its_timeline(self):
+        doc = self.held(intro="The support queue.")._timeline_doc()
+        self.assertEqual(doc["intro"], "The support queue.")
+
+    def test_the_default_take_does_not_carry_the_key(self):
+        doc = self.held()._timeline_doc()
+        self.assertNotIn("intro", doc)
+
+    def test_the_terminal_medium_refuses_it_and_names_its_own_card(self):
+        # Accepted-and-ignored is the worst of both: the storyboard reads as
+        # if it asked for an intro and the take ships without one. Refused at
+        # the constructor, with this medium's own opening card named.
+        with self.assertRaises(RuntimeError) as refused:
+            recorder(self, cls=TermRec, page=DrawingPage(), intro="Hi")
+        self.assertIn("interlude=", str(refused.exception))
+
+
+class Outro(unittest.TestCase):
+    """The opt-in closing card, and the honesty of its record.
+
+    The intro's mirror, with one asymmetry that matters: the outro card is
+    **left up** — it is the take's last frame, not something to take down —
+    so the overlay probe has to waive the very card the feature raised, or
+    every outro take would end with a warning about its own ending. And the
+    envelope key hangs on `_outro_up`, not on the parameter: an outro that
+    was asked for and lost to a late failure claims nothing.
+    """
+
+    class Held(WebRec):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.held: list[float] = []
+
+        def _hold_frame(self, seconds: float) -> None:
+            self.held.append(seconds)
+
+    def held(self, **settings):
+        return recorder(self, cls=self.Held, page=DrawingPage(), **settings)
+
+    def test_an_outro_is_raised_voiced_and_left_up(self):
+        rec = self.held(outro="Filtered. In twenty seconds.")
+        rec._raise_outro()
+        raised = [a for s, a in rec.page.drawn if "__demoInterlude" in s]
+        self.assertEqual(raised, ["Filtered. In twenty seconds."])
+        self.assertAlmostEqual(rec.held, [2.8])
+        self.assertIs(rec._outro_up, True)
+
+    def test_the_cursor_dot_leaves_with_the_take(self):
+        # Wherever the story last parked the pointer, there it sits — over
+        # the closing card, on the take's final frame. The dot is hidden as
+        # the card goes up.
+        rec = self.held(outro="Bye.")
+        rec._raise_outro()
+        hides = [
+            (s, a) for s, a in rec.page.drawn if a == "__demo_cursor" and "none" in s
+        ]
+        self.assertEqual(len(hides), 1, "the cursor dot was not hidden once")
+        self.assertEqual(hides[0][1], "__demo_cursor")
+
+    def test_no_outro_raises_nothing_and_claims_nothing(self):
+        rec = self.held()
+        rec._raise_outro()
+        self.assertEqual(rec.held, [])
+        self.assertIs(rec._outro_up, False)
+        self.assertNotIn("outro", rec._timeline_doc())
+        self.assertEqual(
+            [s for s, a in rec.page.drawn if "__demo_cursor" in s],
+            [],
+            "a take with no outro must not touch the cursor",
+        )
+
+    def test_a_take_that_ended_on_one_says_so_in_its_timeline(self):
+        rec = self.held(outro="Filtered. In twenty seconds.")
+        rec._raise_outro()
+        self.assertEqual(rec._timeline_doc()["outro"], "Filtered. In twenty seconds.")
+
+    def test_an_outro_that_failed_to_raise_claims_nothing(self):
+        # The swallow lives in `__exit__` — a take that recorded everything
+        # must not die at second fourteen over a TTS blip — but the swallow
+        # must not leave the envelope claiming a card the frames never show.
+        rec = self.held(outro="Bye.")
+
+        def refuse(*args, **kwargs):
+            raise RuntimeError("the page is gone")
+
+        rec.page.evaluate = refuse  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            rec._raise_outro()
+        self.assertIs(rec._outro_up, False)
+        self.assertNotIn("outro", rec._timeline_doc())
+
+    def test_the_probe_waives_the_outro_card_and_nothing_else(self):
+        rec = self.held(outro="Bye.")
+        rec._raise_outro()
+        rec.page.evaluate = lambda script, arg=None, **kw: [  # type: ignore[method-assign]
+            "__demo_interlude"
+        ]
+        rec._note_overlays_up()
+        self.assertIsNone(
+            rec._overlay_note, "the take's own ending is not a left-up overlay"
+        )
+        rec.page.evaluate = lambda script, arg=None, **kw: [  # type: ignore[method-assign]
+            "__demo_interlude",
+            "__demo_bridge",
+        ]
+        rec._note_overlays_up()
+        assert rec._overlay_note is not None
+        self.assertIn("bridge", rec._overlay_note)
+
+    def test_the_terminal_medium_refuses_it_and_names_its_own_ending(self):
+        with self.assertRaises(RuntimeError) as refused:
+            recorder(self, cls=TermRec, page=DrawingPage(), outro="Bye")
+        self.assertIn("interlude(", str(refused.exception))
+
+
+class VoiceSettings(unittest.TestCase):
+    """Voice stability, pinned per line, and the cache key that knows it.
+
+    Without a pinned stability the model's per-sentence pacing wanders —
+    measured 2.1 to 3.3 words/s across one take's five clips, which a
+    listener reads as some lines being sped up. The knob is a recorder
+    constant by default; what the tests pin is that it reaches the
+    synthesis request and the cache key, because a stability change that
+    replayed old clips would silently keep the pacing it was made to fix.
+    """
+
+    def test_stability_is_part_of_the_cache_key(self):
+        a = _tts_key("line", "voice", "model", stability=0.5)
+        b = _tts_key("line", "voice", "model", stability=0.75)
+        self.assertNotEqual(a, b, "a stability change would replay old clips")
+
+    def test_the_recorder_pins_one_and_the_environment_can_set_it(self):
+        self.assertEqual(recorder(self, page=DrawingPage())._speech_stability, 0.75)
+        saved = os.environ.get("DEMO_VIDEO_SPEECH_STABILITY")
+        os.environ["DEMO_VIDEO_SPEECH_STABILITY"] = "0.9"
+        try:
+            rec = recorder(self, page=DrawingPage())
+        finally:
+            if saved is None:
+                os.environ.pop("DEMO_VIDEO_SPEECH_STABILITY", None)
+            else:
+                os.environ["DEMO_VIDEO_SPEECH_STABILITY"] = saved
+        self.assertEqual(rec._speech_stability, 0.9)
+
+    def test_out_of_range_and_non_numbers_are_refused_at_construction(self):
+        for bad in (0, 1.5, "loud"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(RuntimeError) as refused:
+                    recorder(self, page=DrawingPage(), speech_stability=bad)
+                self.assertIn("DEMO_VIDEO_SPEECH_STABILITY", str(refused.exception))
+
+    def test_synthesis_requests_carry_the_pinned_stability(self):
+        captured: dict = {}
+        was_clip = core_module.tts_clip
+        was_dur = core_module.media_duration
+        core_module.tts_clip = (  # type: ignore[assignment]
+            lambda text, cache_dir, voice_id, model_id, api_key, stability=0.5: (
+                captured.update(stability=stability) or Path("/nonexistent/clip.mp3")
+            )
+        )
+        core_module.media_duration = lambda clip: 1.0  # type: ignore[assignment]
+        try:
+            # `recorder()` pins speech off (a suite that inherits the key
+            # grades the box); the seam under test is `_prepare_line`'s call,
+            # so speech is forced on the instance instead.
+            rec = recorder(self, page=DrawingPage())
+            rec._speech = True
+            rec._prepare_line("Hello there.")
+        finally:
+            core_module.tts_clip = was_clip  # type: ignore[assignment]
+            core_module.media_duration = was_dur  # type: ignore[assignment]
+        self.assertEqual(captured["stability"], 0.75)
+
+
+class CaptionCrossfade(unittest.TestCase):
+    """The caption band crossfades between lines instead of popping.
+
+    A caption-to-caption change used to swap text under a steady opacity —
+    instant, while everything else in the take eased. Two stacked layers
+    fade the old line out as the new one fades in; what is graded here is
+    the wiring, and the pixels are `tests/pixel`'s.
+    """
+
+    def html(self) -> str:
+        return chrome_html(
+            chrome_geometry(1280, 720), title="t", window_body="#0b0c1d", accent="1,2,3"
+        )
+
+    def test_two_stacked_layers_exist_and_share_the_caption_style(self):
+        html = self.html()
+        for element_id in ("__demo_caption", "__demo_caption2"):
+            self.assertIn(f'id="{element_id}"', html)
+        found = re.search(r"#__demo_caption, #__demo_caption2 \{([^}]*)\}", html)
+        self.assertIsNotNone(found, "the two caption layers do not share one rule")
+        # Stacked, not side by side: the band is a flex row, and two
+        # in-flow layers would sit next to each other and half off-screen.
+        self.assertIn("position: absolute", found.group(1))
+
+    def test_the_swap_toggles_layers_and_measures_the_incoming_one(self):
+        found = re.search(
+            r"window\.__demoCaption = \(text\) => \{.*return Math\.max\(0, nxt\.scrollHeight",
+            self.html(),
+            re.S,
+        )
+        self.assertIsNotNone(found, "__demoCaption is not the crossfading version")
+        script = found.group(0)
+        self.assertIn("ids[1 - (window.__demoCapLayer", script)
+        self.assertIn("cur.style.opacity = '0'", script)
+        # The clipping measurement is taken on the layer about to be shown —
+        # a measurement of the outgoing layer would grade the wrong text.
+        self.assertIn("nxt.scrollHeight", script)
+
+
+class CameraMove(unittest.TestCase):
+    """The camera: spotlight intervals rendered as post-production push-ins.
+
+    The DOM zoom this replaced scaled the page inside the window — the
+    element sat at the transform's origin, so it did not move, and the
+    viewer got layout jitter instead of a move. The camera is rendered
+    after the take, by `zoompan`, from geometry the spotlight logged
+    while the page was alive. What is graded here:
+    the chain's shape (one zoompan, eased, centred on the element, at
+    the output size), the refusals (overlap, degenerate rects), the
+    wiring (close-with-the-take, the timeline key) — and one real
+    encode, because a filter string that parses is not a filter string
+    that moves.
+    """
+
+    def event(self, **over: object) -> dict:
+        event: dict = {"t_start": 1.0, "t_end": 3.0, "rect": [500, 250, 280, 60]}
+        event.update(over)
+        return event
+
+    def chain(self, events: list[dict] | None = None) -> str:
+        return camera_filter(
+            events if events is not None else [self.event()],
+            src_w=2560,
+            src_h=1440,
+            out_w=1280,
+            out_h=720,
+        )
+
+    def test_no_events_build_no_chain(self):
+        self.assertIsNone(
+            camera_filter([], src_w=2560, src_h=1440, out_w=1280, out_h=720)
+        )
+
+    def test_one_zoompan_carrying_the_event_at_the_output_size(self):
+        chain = self.chain()
+        self.assertTrue(chain.startswith("fps=25,"), "the PTS normalize is missing")
+        self.assertIn("zoompan=", chain)
+        self.assertIn(":d=1:", chain)
+        self.assertIn("s=1280x720", chain)
+
+    def test_the_push_eases_in_and_back(self):
+        u = "clip(min((time-1.000)/0.5,(3.000-time)/0.5),0,1)"
+        self.assertIn(f"{u}*{u}*(3-2*{u})", self.chain())
+
+    def test_the_camera_centres_on_the_element_not_the_frame(self):
+        # rect x 500..780, y 250..310 in output px; at 2x source scale the
+        # centre is (1280.0, 560.0) in source pixels — not (iw/2, ih/2).
+        chain = self.chain()
+        self.assertIn("*clip(1280.0-iw/(2*zoom),0,iw-iw/zoom)", chain)
+        self.assertIn("*clip(560.0-ih/(2*zoom),0,ih-ih/zoom)", chain)
+        self.assertNotIn("iw/2-", chain)
+
+    def test_overlapping_events_are_refused(self):
+        with self.assertRaises(ValueError):
+            self.chain([self.event(), self.event(t_start=2.0, t_end=4.0)])
+
+    def test_a_degenerate_rect_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.chain([self.event(rect=[500, 250, 0, 60])])
+        with self.assertRaises(ValueError):
+            self.chain([self.event(t_end=1.0)])
+
+    def test_a_real_encode_pushes_and_pulls(self):
+        # A static source — a white box on black — so every difference
+        # between two frames is the camera's, never the app's. The frame
+        # before the push and the held frame must differ (finite PSNR);
+        # identical frames would mean the chain parsed and moved nothing,
+        # which is exactly what the DOM zoom this replaces did.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        work = Path(tmp.name)
+        chain = camera_filter(
+            [{"t_start": 1.0, "t_end": 3.0, "rect": [130, 50, 60, 80]}],
+            src_w=640,
+            src_h=360,
+            out_w=320,
+            out_h=180,
+        )
+        mp4 = work / "cam.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:size=640x360:rate=25:duration=4,"
+                "drawbox=x=260:y=100:w=120:h=160:color=white:t=fill",
+                "-filter_complex",
+                chain,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(mp4),
+            ],
+            check=True,
+        )
+        before, held = work / "a.png", work / "b.png"
+        for name, at in ((before, "0.2"), (held, "2.0")):
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    at,
+                    "-i",
+                    str(mp4),
+                    "-frames:v",
+                    "1",
+                    str(name),
+                ],
+                check=True,
+            )
+        psnr = subprocess.run(
+            [
+                "ffmpeg",
+                "-i",
+                str(before),
+                "-i",
+                str(held),
+                "-filter_complex",
+                "psnr",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stderr
+        found = re.search(r"average:(\S+)", psnr)
+        self.assertIsNotNone(found, f"no PSNR in ffmpeg output: {psnr[-400:]}")
+        self.assertNotIn(
+            "inf", found.group(1), "the camera did not move: frames identical"
+        )
+
+    def test_a_spotlight_left_open_closes_with_the_take(self):
+        src = inspect.getsource(_DemoBase.__exit__)
+        self.assertIn("self._camera_close()", src)
+
+    def test_the_moves_ride_the_same_clock_correction_as_the_voice(self):
+        # The events' times are monotonic beat-log instants and the video is
+        # on the wall clock: a backward step puts every event after it that
+        # far ahead of the frames it names — the same exposure the narration
+        # mix corrects for (issue #226). A −1.0 s step at t=2 moves an event
+        # at [3, 5] to [2, 4] in the video.
+        rec = recorder(self, page=DrawingPage())
+        rec._camera = [
+            {"t_start": 3.0, "t_end": 5.0, "rect": [10, 20, 30, 40]},
+            {"t_start": 0.5, "t_end": 1.5, "rect": [1, 2, 3, 4]},
+        ]
+        moved = rec._camera_on_the_video_clock(clock_record((2.0, -1.0)))
+        self.assertEqual(moved[0]["t_start"], 2.0)
+        self.assertEqual(moved[0]["t_end"], 4.0)
+        # Before the step: untouched.
+        self.assertEqual(moved[1]["t_start"], 0.5)
+
+    def test_an_interval_a_step_swallowed_whole_is_dropped(self):
+        # A −3.0 s step at t=1 clamps every instant inside the hole to the
+        # moment the video starts again: an event at [1.5, 2.0] collapses to
+        # a point, and a push with no length is not a move.
+        rec = recorder(self, page=DrawingPage())
+        rec._camera = [
+            {"t_start": 1.5, "t_end": 2.0, "rect": [1, 2, 3, 4]},
+            {"t_start": 4.0, "t_end": 6.0, "rect": [5, 6, 7, 8]},
+        ]
+        moved = rec._camera_on_the_video_clock(clock_record((1.0, -3.0)))
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(moved[0]["t_start"], 1.0)
+
+    def test_camera_events_open_and_close_and_land_on_the_timeline(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._t0 = time.monotonic() - 10.0
+        rec._camera_raise({"x": 500, "y": 250, "w": 280, "h": 60})
+        self.assertEqual(len(rec._camera), 0, "an open event is not yet a move")
+        self.assertEqual(rec._camera_open["rect"], [500, 250, 280, 60])
+        rec._camera_close(time.monotonic() - rec._t0 + 2.0)
+        self.assertEqual(len(rec._camera), 1)
+        self.assertGreater(rec._camera[0]["t_end"], rec._camera[0]["t_start"])
+        self.assertIn("camera", rec._timeline_doc())
+        self.assertEqual(rec._timeline_doc()["camera"], rec._camera)
+
+    def test_a_degenerate_event_claims_nothing(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._t0 = time.monotonic()
+        rec._camera_raise({"x": 1, "y": 2, "w": 3, "h": 4})
+        rec._camera_close(time.monotonic() - rec._t0)  # same instant
+        self.assertEqual(rec._camera, [])
+        self.assertNotIn("camera", rec._timeline_doc())
+
+    def test_a_take_with_no_camera_claims_no_camera(self):
+        rec = recorder(self, page=DrawingPage())
+        self.assertNotIn("camera", rec._timeline_doc())
+
+    def test_spotlight_opens_a_camera_event_over_the_element(self):
+        # The verb wiring, browser-free: the rect the page returns opens an
+        # event, and the next clear — the next spotlight's or an explicit
+        # one — is what ends it.
+        rec = recorder(self, page=DrawingPage())
+        rec._t0 = time.monotonic() - 5.0
+        rec._target = lambda: rec.page  # type: ignore[method-assign]
+        rec.page.evaluate = lambda script, arg=None, **kw: None  # type: ignore[method-assign]
+
+        class _First:
+            def evaluate(self, _script: str):
+                return {"x": 10, "y": 20, "w": 30, "h": 40}
+
+        class _Locator:
+            first = _First()
+
+        rec.page.locator = lambda _sel: _Locator()  # type: ignore[method-assign]
+        rec.spotlight("#box")
+        self.assertIsNone(
+            rec._camera[0] if rec._camera else None,
+            "an open event is not yet a move",
+        )
+        self.assertEqual(rec._camera_open["rect"], [10, 20, 30, 40])
+        # Real time between raise and clear: both ends round to 3 decimals,
+        # and a sub-millisecond take would be a degenerate event by the same
+        # rule the recorder itself applies.
+        time.sleep(0.005)
+        rec.spotlight(None)
+        self.assertEqual(len(rec._camera), 1)
+        self.assertGreater(rec._camera[0]["t_end"], rec._camera[0]["t_start"])
 
 
 # --------------------------------------------------------------------------
@@ -8885,7 +9637,13 @@ class NarrationMix(unittest.TestCase):
     artifact-lies shape the record exists to prevent.
     """
 
-    def mixed(self, clock: object, *offsets: float) -> tuple[list[int], object]:
+    def mixed(
+        self,
+        clock: object,
+        *offsets: float,
+        duration: float = 0.3,
+        gain: float = 0.0,
+    ) -> tuple[list[int], object]:
         """(the adelay ms ffmpeg was really handed, the take's own record)."""
         rec = recorder(self, cls=TermRec)
         rec._speech = True
@@ -8894,6 +9652,14 @@ class NarrationMix(unittest.TestCase):
         rec._lines = [
             (off, Path(f"/nonexistent/line-{n}.mp3")) for n, off in enumerate(offsets)
         ]
+        # The clips do not exist here, and the mix needs two things from
+        # them — their lengths, for the serialization, and their loudness
+        # gain, for the volume filter. Both scripted like the clock is;
+        # the gain defaults to zero so the tests above read unchanged.
+        was_duration = core_module.media_duration
+        core_module.media_duration = lambda clip: duration  # type: ignore[assignment]
+        was_gain = core_module.clip_gain_db
+        core_module.clip_gain_db = lambda clip: gain  # type: ignore[assignment]
         seen: list[list[str]] = []
 
         def run(cmd, **kwargs):
@@ -8908,10 +9674,15 @@ class NarrationMix(unittest.TestCase):
                 rec._convert(Path(rec.out_dir) / "take.webm")
         finally:
             core_module.subprocess.run = was
+            core_module.media_duration = was_duration  # type: ignore[assignment]
+            core_module.clip_gain_db = was_gain  # type: ignore[assignment]
         self.assertEqual(len(seen), 1, f"expected one ffmpeg call, got {seen!r}")
         cmd = seen[0]
         self.assertIn("-filter_complex", cmd, "the mix went in without a filter graph")
         graph = cmd[cmd.index("-filter_complex") + 1]
+        # Kept for the tests that assert on the filter graph itself rather
+        # than on the delays parsed out of it.
+        self.graph = graph
         return [int(ms) for ms in re.findall(r"adelay=(-?\d+):", graph)], rec._narration
 
     # -- the instant each clip is delayed by --------------------------------
@@ -8930,6 +9701,31 @@ class NarrationMix(unittest.TestCase):
         # is the whole defect, moved from one clock to the other.
         delays, _record = self.mixed(clock_record((4.0, -0.78)), 0.5, 2.0)
         self.assertEqual(delays, [500, 2000])
+
+    def test_two_lines_a_step_would_overlap_are_serialized_in_the_real_mix(self):
+        # The take that earned the rule: corrected onsets 0.5 and 1.22, clips
+        # a second long — the second voice would start 0.28 s inside the
+        # first. The ffmpeg command is the proof, not the published record: a
+        # document that printed a serialized `at` over a clip mixed somewhere
+        # else would be the artifact-lies shape again.
+        delays, record = self.mixed(clock_record((1.0, -0.78)), 0.5, 2.0, duration=1.0)
+        self.assertEqual(delays, [500, 1500])
+        self.assertEqual(record["lines"][1]["held"], 0.28)
+
+    def test_every_clip_is_gained_to_the_one_loudness_target(self):
+        # Read off the ffmpeg command, for the same reason the delays are:
+        # a record claiming a gain the mix never applied would be the
+        # artifact-lies shape. The graph carries one volume filter per
+        # input, ahead of its delay — and the record names the gain, so a
+        # reader can audit both against each other.
+        delays, record = self.mixed(clock_record(), 0.5, 2.0, gain=2.5)
+        self.assertEqual(delays, [500, 2000])
+        self.assertIn("volume=2.50dB,", self.graph)
+        self.assertEqual([line.get("gain_db") for line in record["lines"]], [2.5, 2.5])
+
+    def test_a_clip_already_at_the_target_gains_nothing_and_says_nothing(self):
+        _delays, record = self.mixed(clock_record(), 0.5, gain=0.0)
+        self.assertEqual([line for line in record["lines"] if "gain_db" in line], [])
 
     def test_steps_that_cancel_still_move_a_line_mixed_between_them(self):
         # The host this work exists for moves in *pulses* — up 0.9 s, back down
@@ -8975,6 +9771,16 @@ class NarrationMix(unittest.TestCase):
         # first frame — the recorder's own sampler starts at `_t0` and does not
         # produce one, so this is a record shape only a reader has to survive,
         # and `adelay` losing the whole audio track is why it still does.
+        #
+        # This outcome now has **two enforcers** — the placement floor, and
+        # the serialization a caller with durations gets, which pushes any
+        # negative placement up to its predecessor's end (zero for a first
+        # line) — so no single break makes this delay nonzero and no single
+        # injection lands on it. Each mechanism is graded where it is the
+        # only one: the floor through `MixSerialization`'s no-durations test,
+        # the serialization through its own; what this test pins is the
+        # observable contract a listener hears — the clip at zero, the track
+        # alive.
         delays, _record = self.mixed(clock_record((-0.5, -0.78)), 0.5, 2.0)
         self.assertEqual(delays, [0, 1220])
 
@@ -9065,6 +9871,11 @@ class NarrationMix(unittest.TestCase):
         rec._speech = True
         rec._capture_clock = _ScriptedClock(clock_record((1.0, -0.78)))
         rec._lines = [(0.5, Path("/nonexistent/line-0.mp3"))]
+        # The clips' durations are read for the serialization; scripted like
+        # in `mixed` above, so the failure this test grades is ffmpeg's and
+        # not ffprobe's.
+        was_duration = core_module.media_duration
+        core_module.media_duration = lambda clip: 0.3  # type: ignore[assignment]
 
         def run(cmd, **kwargs):
             raise subprocess.CalledProcessError(1, cmd)
@@ -9076,6 +9887,7 @@ class NarrationMix(unittest.TestCase):
                 rec._convert(Path(rec.out_dir) / "take.webm")
         finally:
             core_module.subprocess.run = was
+            core_module.media_duration = was_duration  # type: ignore[assignment]
         self.assertIsNone(rec._narration)
 
     def test_the_timeline_carries_the_record_the_mix_wrote(self):
@@ -9128,6 +9940,65 @@ class NarrationMixPlan(unittest.TestCase):
         self.assertEqual([line["at"] for line in lines], [0.5, 2.9])
 
 
+class MixSerialization(unittest.TestCase):
+    """The corrected placements never speak twice at once.
+
+    A backward step between two lines compresses the video without
+    compressing the clip, so the corrected onsets can invert the gap the
+    recorder kept. Measured on the take that earned this: a −1.65 s step put
+    one voice 1.6 s inside the one before it. The mix serializes when the
+    caller can say how long the clips are, and marks what it moved.
+    """
+
+    # The shape of that take: the step lands between the third line and the
+    # fourth, and the corrected fourth onset lands inside the third clip.
+    RECORD = clock_record((10.0, -1.65))
+    OFFSETS = [1.4, 4.8, 9.43, 12.18]
+    DURATIONS = [1.4, 2.6, 2.74, 1.4]
+
+    def plan(self, durations):
+        return mix_plan(self.OFFSETS, self.RECORD, durations)
+
+    def test_a_line_that_would_start_inside_its_predecessor_starts_at_its_end(self):
+        lines, _state = self.plan(self.DURATIONS)
+        # The third clip runs 9.43 + 2.74 = 12.17 in the video; the fourth
+        # line's corrected onset is 12.18 − 1.65 = 10.53 — 1.64 s inside it.
+        self.assertEqual(lines[3]["at"], 12.17)
+        self.assertAlmostEqual(lines[3]["held"], 1.64)
+
+    def test_lines_that_do_not_collide_are_placed_and_marked_as_before(self):
+        lines, _state = self.plan(self.DURATIONS)
+        self.assertEqual([line["at"] for line in lines[:3]], [1.4, 4.8, 9.43])
+        self.assertEqual([line for line in lines[:3] if "held" in line], [])
+
+    def test_without_durations_the_placements_are_exactly_as_before(self):
+        # The legacy call: a caller that cannot say how long the clips are
+        # gets the old behavior, overlap included — not a serialization
+        # guessed from nothing.
+        lines, _state = self.plan(None)
+        self.assertEqual(lines[3]["at"], 10.53)
+        self.assertNotIn("held", lines[3])
+
+    def test_no_step_no_held_key_even_when_lines_are_tight(self):
+        # Durations that do not collide: a real take cannot produce a
+        # collision without a step — the recorder waits each line out on the
+        # same clock the mix places them at — so the no-step control has to
+        # be a clean one.
+        lines, _state = mix_plan([0.5, 1.2], clock_record(), [0.5, 0.5])
+        self.assertEqual([line["at"] for line in lines], [0.5, 1.2])
+        self.assertEqual([line for line in lines if "held" in line], [])
+
+    def test_the_floor_survives_for_a_caller_that_passes_no_durations(self):
+        # The floor's own grade, on the path where serialization cannot mask
+        # it: no durations, nothing pushes a negative placement anywhere, and
+        # the line lands at zero with `clamped` saying what was swallowed.
+        # (`adelay` refuses a negative delay and takes the whole audio track
+        # with it — that is what this floor exists to stop.)
+        lines, _state = mix_plan([0.5], clock_record((-0.5, -0.78)))
+        self.assertEqual(lines[0]["at"], 0.0)
+        self.assertEqual(lines[0]["clamped"], 0.28)
+
+
 class NarrationTimelineNote(unittest.TestCase):
     """What `timeline.md` says about where the voice went (issue #226).
 
@@ -9146,6 +10017,30 @@ class NarrationTimelineNote(unittest.TestCase):
 
     def record(self, state: dict) -> dict:
         return {"lines": [{"t": 0.5, "at": 0.5}], "clock_correction": state}
+
+    def test_a_held_line_is_named_and_its_price_is_stated(self):
+        # The serialization's own sentence, never folded into the clamped or
+        # no_video ones: those are lines the clock misplaced, this is the mix
+        # refusing to speak twice at once. A listener hears a late voice and
+        # this paragraph is where they learn the recorder did it on purpose.
+        text = render_timeline_md(
+            self.doc(
+                {
+                    "lines": [
+                        {"t": 9.43, "at": 9.43},
+                        {"t": 12.18, "at": 12.17, "held": 1.64},
+                    ],
+                    "clock_correction": {
+                        "applied": True,
+                        "total": -1.65,
+                        "steps": 1,
+                        "note": None,
+                    },
+                }
+            )
+        )
+        self.assertIn("held back past the line before it", text)
+        self.assertIn("`held` is how many seconds later", text)
 
     def test_a_mix_that_could_not_be_corrected_says_so_above_the_table(self):
         text = render_timeline_md(
@@ -12389,8 +13284,8 @@ INJECTIONS = [
         # environment, which is most of them.
         "the web recorder accepts a base setting and drops it",
         "web.py",
-        "criteria=criteria, ticket=ticket, allow_private=allow_private,\n            stills_only=stills_only,",
-        "criteria=criteria, ticket=ticket, allow_private=allow_private,",
+        "            allow_private=allow_private,\n            stills_only=stills_only,\n            pace=pace,",
+        "            allow_private=allow_private,\n            pace=pace,",
         ["StillsOnly.test_both_media_take_every_setting_the_base_offers"],
     ),
     # -- the pixel loop's cache key (tests/pixel, #350) -----------------------
@@ -12474,10 +13369,8 @@ INJECTIONS = [
         # are driven by a scripted record.
         "every narration clip is mixed at its beat-log offset",
         "core.py",
-        "                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}"
-        ':all=1[a{i}]"',
-        "                    f\"[{i + 1}:a]adelay={int(round(line['t'] * 1000))}"
-        ':all=1[a{i}]"',
+        "                    + f\"adelay={int(round(line['at'] * 1000))}:all=1[a{i}]\"",
+        "                    + f\"adelay={int(round(line['t'] * 1000))}:all=1[a{i}]\"",
         [
             "NarrationMix.test_a_line_is_mixed_where_its_own_offset_sits_in_the_video",
             "NarrationMix.test_steps_that_cancel_still_move_a_line_mixed_between_them",
@@ -12529,11 +13422,12 @@ INJECTIONS = [
         # one line — it costs the take its whole audio track.
         "a line the clock stepped past is given a negative delay",
         "narration.py",
-        '        line = {"t": round(float(off), 3), "at": round(max(0.0, want), 3)}',
-        '        line = {"t": round(float(off), 3), "at": round(want, 3)}',
+        "        at = max(0.0, want)",
+        "        at = want",
         [
-            "NarrationMix.test_a_step_bigger_than_a_lines_offset_starts_the_clip_at_zero",
             "NarrationMix.test_a_clamped_line_says_how_much_of_its_correction_it_lost",
+            "MixSerialization."
+            "test_the_floor_survives_for_a_caller_that_passes_no_durations",
         ],
     ),
     (
@@ -14309,8 +15203,10 @@ INJECTIONS = [
     (
         "the narration cache keys on the line alone, ignoring the voice",
         "narration.py",
-        "TTS_KEY_SEP.join((voice_id, model_id, text))",
-        "text",
+        "joined = TTS_KEY_SEP.join(\n"
+        '        (voice_id, model_id, text, f"stability={stability:.2f}")\n'
+        "    )",
+        "joined = text",
         ["TtsKey.test_each_of_the_three_inputs_changes_the_key_on_its_own"],
     ),
     (
@@ -14320,15 +15216,23 @@ INJECTIONS = [
         # each input", which is the claim the test actually makes.
         "the narration cache key drops the model but keeps the voice",
         "narration.py",
-        "TTS_KEY_SEP.join((voice_id, model_id, text))",
-        "TTS_KEY_SEP.join((voice_id, text))",
+        "joined = TTS_KEY_SEP.join(\n"
+        '        (voice_id, model_id, text, f"stability={stability:.2f}")\n'
+        "    )",
+        "joined = TTS_KEY_SEP.join(\n"
+        '        (voice_id, text, f"stability={stability:.2f}")\n'
+        "    )",
         ["TtsKey.test_each_of_the_three_inputs_changes_the_key_on_its_own"],
     ),
     (
-        "the three fields are joined with nothing between them",
+        "the fields are joined with nothing between them",
         "narration.py",
-        "TTS_KEY_SEP.join((voice_id, model_id, text))",
-        '"".join((voice_id, model_id, text))',
+        "joined = TTS_KEY_SEP.join(\n"
+        '        (voice_id, model_id, text, f"stability={stability:.2f}")\n'
+        "    )",
+        'joined = "".join(\n'
+        '        (voice_id, model_id, text, f"stability={stability:.2f}")\n'
+        "    )",
         ["TtsKey.test_moving_a_field_boundary_changes_the_key"],
     ),
     (
@@ -15192,9 +16096,7 @@ INJECTIONS = [
         # browser-free half of the same drive.
         "the glide moves the pointer and never the dot",
         "web.py",
-        "            self.page.evaluate(\n"
-        '                "([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi]\n'
-        "            )",
+        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])',
         "            pass  # the dot is never told",
         ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
     ),
@@ -15204,8 +16106,8 @@ INJECTIONS = [
         # so an offset here is the one way left for them to disagree.
         "the dot is commanded off the pointer's own path",
         "web.py",
-        '                "([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi]',
-        '                "([x, y]) => window.__demoChromeCursor(x, y)", [xi + 30, yi]',
+        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])',
+        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi + 30, yi])',
         ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
     ),
     (
@@ -15916,9 +16818,12 @@ INJECTIONS = [
         # to remove wearing the clothes of the fix.
         "every clause is held for the floor, whatever it takes to read",
         "core.py",
-        "        reading = min(\n"
-        "            CRITERION_HOLD_MAX_S,\n"
-        "            max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),\n"
+        "        reading = (\n"
+        "            min(\n"
+        "                CRITERION_HOLD_MAX_S,\n"
+        "                max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),\n"
+        "            )\n"
+        "            * self._pace\n"
         "        )",
         "        reading = CRITERION_HOLD_MIN_S",
         [
@@ -16002,8 +16907,7 @@ INJECTIONS = [
         # last frame, #91's shape with the recorder's own furniture.
         "the opening card's clear leaves the hold standing",
         "terminal.py",
-        '                "() => { window.__demoChromeHoldClear();"\n'
-        "                \" window.__demoInterlude(''); }\"",
+        "                \"() => { window.__demoChromeHoldClear(); window.__demoInterlude(''); }\"",
         "                \"() => { window.__demoInterlude(''); }\"",
         [
             "TerminalChrome."
@@ -16034,8 +16938,8 @@ INJECTIONS = [
         # storyboards this repo runs least.
         "TerminalRecorder drops the ticket on the way to its base class",
         "terminal.py",
-        "            criteria=criteria, ticket=ticket, allow_private=allow_private,",
-        "            criteria=criteria, allow_private=allow_private,",
+        "            criteria=criteria,\n            ticket=ticket,\n",
+        "            criteria=criteria,\n",
         ["BeatLog.test_the_terminal_recorder_carries_the_ticket_to_its_own_envelope"],
     ),
     (
@@ -16045,8 +16949,8 @@ INJECTIONS = [
         # is a second injection rather than an assurance.
         "Recorder drops the ticket on the way to its base class",
         "web.py",
-        "            criteria=criteria, ticket=ticket, allow_private=allow_private,",
-        "            criteria=criteria, allow_private=allow_private,",
+        "            criteria=criteria,\n            ticket=ticket,\n",
+        "            criteria=criteria,\n",
         ["BeatLog.test_the_envelope_names_the_ticket_the_storyboard_recorded_against"],
     ),
     (
@@ -16813,6 +17717,399 @@ INJECTIONS = [
         "                )",
         "            pass",
         ["StitchedHold.test_the_hold_instant_is_shifted_with_its_beat"],
+    ),
+    # -- pace, the audience-pacing multiplier --------------------------------
+    (
+        "the caption read-time stops scaling with pace",
+        "core.py",
+        "        return min(6.0, max(1.4, 0.6 + words * 0.34)) * self._pace",
+        "        return min(6.0, max(1.4, 0.6 + words * 0.34))",
+        ["Pace.test_a_computed_caption_hold_scales_both_ways"],
+    ),
+    (
+        "hold()'s floor stops scaling when the storyboard passes no min_s",
+        "core.py",
+        "        floor = 1.5 * self._pace if min_s is None else min_s",
+        "        floor = 1.5 if min_s is None else min_s",
+        ["Pace.test_the_computed_defaults_scale_and_the_clear_does_not"],
+    ),
+    (
+        "interlude()'s default hold stops scaling",
+        "core.py",
+        "            self.pause((2.8 * self._pace if hold is None else hold) if text else 0.6)",
+        "            self.pause((2.8 if hold is None else hold) if text else 0.6)",
+        ["Pace.test_the_computed_defaults_scale_and_the_clear_does_not"],
+    ),
+    (
+        "the criterion card's reading time stops scaling",
+        "core.py",
+        "                max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),\n"
+        "            )\n"
+        "            * self._pace",
+        "                max(CRITERION_HOLD_MIN_S, 0.6 + len(text.split()) * 0.34),\n"
+        "            )\n"
+        "            * 1.0",
+        ["Pace.test_the_criterion_card_scales_with_it"],
+    ),
+    (
+        "an off-default pace is computed but never written to the timeline",
+        "core.py",
+        "        if self._pace != 1.0:",
+        "        if False:",
+        ["Pace.test_a_take_that_moved_off_the_default_says_so_in_its_timeline"],
+    ),
+    (
+        "a non-positive pace is accepted and silently paces nothing",
+        "core.py",
+        "        if pace <= 0:",
+        "        if False:",
+        ["Pace.test_zero_negative_and_non_numbers_are_refused_at_construction"],
+    ),
+    (
+        "DEMO_VIDEO_PACE in the environment is ignored",
+        "core.py",
+        '            raw_pace: float | str = _env("PACE", "1.0")',
+        '            raw_pace: float | str = "1.0"',
+        ["Pace.test_the_environment_can_set_it"],
+    ),
+    # -- window_title, the wrapper bar's text ---------------------------------
+    (
+        "the web take's window title ignores the take's own answer",
+        "web.py",
+        '        return self._window_title or urlparse(self.base_url).netloc or "app"',
+        '        return urlparse(self.base_url).netloc or "app"',
+        ["WindowTitle.test_an_explicit_window_title_wins_on_both_media"],
+    ),
+    (
+        "the web take stops titling itself after the app it demos",
+        "web.py",
+        'urlparse(self.base_url).netloc or "app"',
+        '"app"',
+        ["WindowTitle.test_a_web_take_opens_titled_for_the_app_it_demos"],
+    ),
+    (
+        "the terminal take's window title ignores the take's own answer",
+        "terminal.py",
+        "        return self._window_title or self._terminal_title",
+        "        return self._terminal_title",
+        ["WindowTitle.test_an_explicit_window_title_wins_on_both_media"],
+    ),
+    (
+        "DEMO_VIDEO_WINDOW_TITLE in the environment is ignored",
+        "core.py",
+        '        self._window_title = window_title or _env("WINDOW_TITLE")',
+        "        self._window_title = window_title",
+        ["WindowTitle.test_the_environment_sets_it"],
+    ),
+    # -- intro, the opt-in opening title card ---------------------------------
+    (
+        "an intro the take asked for is never raised",
+        "web.py",
+        "        if not self._intro:\n            return",
+        "        if True:\n            return",
+        ["Intro.test_an_intro_is_raised_over_the_wrapper_and_paced"],
+    ),
+    (
+        "the intro hold stops scaling with pace",
+        "web.py",
+        "        clip = self._prepare_line(self._intro, self._intro_clip)\n"
+        "        self._start_line(clip)\n"
+        "        hold = INTRO_HOLD_S * self._pace",
+        "        clip = self._prepare_line(self._intro, self._intro_clip)\n"
+        "        self._start_line(clip)\n"
+        "        hold = INTRO_HOLD_S",
+        ["Intro.test_pace_scales_the_intro_hold"],
+    ),
+    (
+        "a voiced intro never starts a line",
+        "web.py",
+        "        clip = self._prepare_line(self._intro, self._intro_clip)\n        self._start_line(clip)",
+        "        clip = None",
+        ["Intro.test_a_voiced_intro_holds_the_card_for_the_whole_line"],
+    ),
+    (
+        "the intro card drops while its line is still being spoken",
+        "web.py",
+        "        clip = self._prepare_line(self._intro, self._intro_clip)\n"
+        "        self._start_line(clip)\n"
+        "        hold = INTRO_HOLD_S * self._pace\n"
+        "        remaining = self._line_end - time.monotonic()\n"
+        "        self._idle(max(hold, remaining))",
+        "        clip = self._prepare_line(self._intro, self._intro_clip)\n"
+        "        self._start_line(clip)\n"
+        "        hold = INTRO_HOLD_S * self._pace\n"
+        "        remaining = self._line_end - time.monotonic()\n"
+        "        self._idle(hold)",
+        ["Intro.test_a_voiced_intro_holds_the_card_for_the_whole_line"],
+    ),
+    (
+        "DEMO_VIDEO_INTRO in the environment is ignored",
+        "core.py",
+        '        self._intro = (intro or _env("INTRO") or "").strip() or None',
+        '        self._intro = (intro or "").strip() or None',
+        ["Intro.test_the_environment_can_set_it"],
+    ),
+    (
+        "a take that opened on an intro never writes it to the timeline",
+        "core.py",
+        '        if self._intro:\n            doc["intro"] = self._intro',
+        "        if False:\n            pass",
+        ["Intro.test_a_take_that_opened_on_one_says_so_in_its_timeline"],
+    ),
+    (
+        "the terminal medium silently accepts an intro it will never raise",
+        "terminal.py",
+        "        if intro is not None:",
+        "        if False:",
+        ["Intro.test_the_terminal_medium_refuses_it_and_names_its_own_card"],
+    ),
+    (
+        "card lines are synthesized on the clock again",
+        "core.py",
+        "        self._intro_clip = self._pre_synth(self._intro)\n"
+        "        self._outro_clip = self._pre_synth(self._outro)",
+        "        pass",
+        ["Intro.test_card_lines_are_synthesized_in_the_constructor_off_the_clock"],
+    ),
+    (
+        "a preset clip is ignored and the line synthesizes again",
+        "core.py",
+        "        if preset is not None:\n            clip = preset",
+        "        if False:\n            pass",
+        [
+            "Intro.test_a_preset_line_is_used_not_synthesized_again",
+            "Intro."
+            "test_a_voiced_intro_starts_its_line_off_the_preset_no_synth_on_the_clock",
+        ],
+    ),
+    (
+        "the voiced intro re-synthesizes its line instead of using the preset",
+        "web.py",
+        "        clip = self._prepare_line(self._intro, self._intro_clip)",
+        "        clip = self._prepare_line(self._intro)",
+        [
+            "Intro."
+            "test_a_voiced_intro_starts_its_line_off_the_preset_no_synth_on_the_clock"
+        ],
+    ),
+    # -- narration serialization under a backward clock step ------------------
+    (
+        "the corrected placements stop being serialized",
+        "narration.py",
+        "        if durations is not None and at < prev_end:",
+        "        if False:",
+        [
+            "MixSerialization."
+            "test_a_line_that_would_start_inside_its_predecessor_starts_at_its_end"
+        ],
+    ),
+    (
+        "a held line stops saying it was held",
+        "narration.py",
+        '        if held:\n            line["held"] = held',
+        "        if False:\n            pass",
+        [
+            "MixSerialization."
+            "test_a_line_that_would_start_inside_its_predecessor_starts_at_its_end"
+        ],
+    ),
+    (
+        "the mix stops handing the clips' durations to the plan",
+        "core.py",
+        "                    [media_duration(clip) for _, clip in self._lines],",
+        "                    None,",
+        [
+            "NarrationMix."
+            "test_two_lines_a_step_would_overlap_are_serialized_in_the_real_mix"
+        ],
+    ),
+    # -- voice stability, loudness, crossfade, zoom, outro --------------------
+    (
+        "the cache key stops carrying the voice stability",
+        "narration.py",
+        "joined = TTS_KEY_SEP.join(\n"
+        '        (voice_id, model_id, text, f"stability={stability:.2f}")\n'
+        "    )",
+        "joined = TTS_KEY_SEP.join((voice_id, model_id, text))",
+        ["VoiceSettings.test_stability_is_part_of_the_cache_key"],
+    ),
+    (
+        "DEMO_VIDEO_SPEECH_STABILITY in the environment is ignored",
+        "core.py",
+        "            raw_stability: float | str = _env(\n"
+        '                "SPEECH_STABILITY", str(DEFAULT_STABILITY)\n'
+        "            )",
+        "            speech_stability = str(DEFAULT_STABILITY)",
+        ["VoiceSettings.test_the_recorder_pins_one_and_the_environment_can_set_it"],
+    ),
+    (
+        "a stability outside 0..1 is accepted",
+        "core.py",
+        "        if not 0.0 < speech_stability <= 1.0:",
+        "        if False:",
+        ["VoiceSettings.test_out_of_range_and_non_numbers_are_refused_at_construction"],
+    ),
+    (
+        "synthesis requests drop the pinned stability",
+        "core.py",
+        "                stability=self._speech_stability,",
+        "                stability=0.5,",
+        ["VoiceSettings.test_synthesis_requests_carry_the_pinned_stability"],
+    ),
+    (
+        "the volume filter stops reaching the mix",
+        "core.py",
+        '                    + (f"volume={gain:.2f}dB," if abs(gain) >= 0.1 else "")',
+        '                    + ""',
+        ["NarrationMix.test_every_clip_is_gained_to_the_one_loudness_target"],
+    ),
+    (
+        "a gained clip stops saying it was gained",
+        "core.py",
+        '                        line["gain_db"] = gain',
+        "                        pass",
+        ["NarrationMix.test_every_clip_is_gained_to_the_one_loudness_target"],
+    ),
+    (
+        "the second caption layer disappears",
+        "chrome.py",
+        '  <div id="__chrome_band"><div id="__demo_caption"></div><div id="__demo_caption2"></div></div>',
+        '  <div id="__chrome_band"><div id="__demo_caption"></div></div>',
+        ["CaptionCrossfade.test_two_stacked_layers_exist_and_share_the_caption_style"],
+    ),
+    # -- the camera: post-production push-ins ---------------------------------
+    (
+        "the push-in stops easing in, it snaps to full zoom",
+        "camera.py",
+        '    u = f"clip({expr},0,1)"\n    return f"{u}*{u}*(3-2*{u})"',
+        '    return "1.0"',
+        [
+            "CameraMove.test_the_push_eases_in_and_back",
+            "CameraMove.test_a_real_encode_pushes_and_pulls",
+        ],
+    ),
+    (
+        "the camera centres on the frame, not the element",
+        "camera.py",
+        '        xs.append(f"{weight}*clip({cx:.1f}-iw/(2*zoom),0,iw-iw/zoom)")',
+        '        xs.append(f"{weight}*clip(iw/2-iw/(2*zoom),0,iw-iw/zoom)")',
+        ["CameraMove.test_the_camera_centres_on_the_element_not_the_frame"],
+    ),
+    (
+        "the PTS normalize is dropped and zoompan re-stamps a VFR stream",
+        "camera.py",
+        '    return (\n        f"fps={fps},"',
+        '    return (\n        f""',
+        ["CameraMove.test_one_zoompan_carrying_the_event_at_the_output_size"],
+    ),
+    (
+        "the camera filter is never built",
+        "camera.py",
+        "    if not events:\n        return None",
+        "    if False:\n        return None",
+        ["CameraMove.test_no_events_build_no_chain"],
+    ),
+    (
+        "a spotlight left open never closes its camera event",
+        "core.py",
+        "        self._camera_close()",
+        "        pass",
+        ["CameraMove.test_a_spotlight_left_open_closes_with_the_take"],
+    ),
+    (
+        "closing a camera event appends nothing",
+        "core.py",
+        "        if self._camera_open is None:\n            return",
+        "        if True:\n            return",
+        ["CameraMove.test_camera_events_open_and_close_and_land_on_the_timeline"],
+    ),
+    (
+        "a take with camera moves never writes them to the timeline",
+        "core.py",
+        '        if self._camera:\n            doc["camera"] = [dict(event) for event in self._camera]',
+        "        if False:\n            pass",
+        ["CameraMove.test_camera_events_open_and_close_and_land_on_the_timeline"],
+    ),
+    (
+        "the spotlight stops handing its element's rect to the camera",
+        "web.py",
+        "        if rect:\n            self._camera_raise(rect)",
+        "        if rect:\n            pass",
+        ["CameraMove.test_spotlight_opens_a_camera_event_over_the_element"],
+    ),
+    (
+        "the spotlight's clear stops closing the camera event",
+        "web.py",
+        "        self._camera_close(time.monotonic() - self._t0)",
+        "        pass",
+        ["CameraMove.test_spotlight_opens_a_camera_event_over_the_element"],
+    ),
+    (
+        "a move's start stops being corrected onto the video clock",
+        "core.py",
+        '            moved["t_start"] = round(place(event["t_start"]).at, 3)',
+        '            moved["t_start"] = event["t_start"]',
+        ["CameraMove.test_the_moves_ride_the_same_clock_correction_as_the_voice"],
+    ),
+    (
+        "a move's end stops being corrected onto the video clock",
+        "core.py",
+        '            moved["t_end"] = round(place(event["t_end"]).at, 3)',
+        '            moved["t_end"] = event["t_end"]',
+        ["CameraMove.test_the_moves_ride_the_same_clock_correction_as_the_voice"],
+    ),
+    (
+        "an interval a step swallowed is rendered anyway",
+        "core.py",
+        '            if moved["t_end"] > moved["t_start"]:\n                corrected.append(moved)',
+        "            corrected.append(moved)",
+        ["CameraMove.test_an_interval_a_step_swallowed_whole_is_dropped"],
+    ),
+    (
+        "an outro the take asked for is never raised",
+        "web.py",
+        "        if not self._outro:\n            return",
+        "        if True:\n            return",
+        ["Outro.test_an_outro_is_raised_voiced_and_left_up"],
+    ),
+    (
+        "the cursor dot survives onto the outro frame",
+        "web.py",
+        "        self.page.evaluate(\n"
+        '            "id => { const c = document.getElementById(id);"\n'
+        "            \" if (c) c.style.display = 'none'; }\",\n"
+        "            CURSOR_ID,\n"
+        "        )",
+        "        pass",
+        ["Outro.test_the_cursor_dot_leaves_with_the_take"],
+    ),
+    (
+        "a raised outro stops claiming it happened",
+        "web.py",
+        "        self._outro_up = True",
+        "        pass",
+        ["Outro.test_a_take_that_ended_on_one_says_so_in_its_timeline"],
+    ),
+    (
+        "a take that ended on an outro never writes it to the timeline",
+        "core.py",
+        '        if self._outro_up:\n            doc["outro"] = self._outro',
+        "        if False:\n            pass",
+        ["Outro.test_a_take_that_ended_on_one_says_so_in_its_timeline"],
+    ),
+    (
+        "the overlay probe stops waiving the outro card",
+        "core.py",
+        "                ids = [i for i in ids if i != INTERLUDE_ID]",
+        "                pass",
+        ["Outro.test_the_probe_waives_the_outro_card_and_nothing_else"],
+    ),
+    (
+        "the terminal medium silently accepts an outro it will never raise",
+        "terminal.py",
+        "        if outro is not None:",
+        "        if False:",
+        ["Outro.test_the_terminal_medium_refuses_it_and_names_its_own_ending"],
     ),
 ]
 

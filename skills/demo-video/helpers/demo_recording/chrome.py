@@ -188,7 +188,12 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
   #__chrome_band { position: absolute; left: __PAD__px; top: __BANDTOP__px;
     width: __APPW__px; height: __BAND__px; overflow: hidden;
     display: flex; align-items: center; justify-content: center; }
-  #__demo_caption { max-width: 90%; padding: 12px 30px; border-radius: 12px;
+  /* Two stacked caption layers crossfade: `__demoCaption` fades the old
+     line out while the new one fades in, so a caption-to-caption change is
+     a transition instead of a pop. The layers sit on top of each other in
+     the band's centre; only the visible one is measured for clipping. */
+  #__demo_caption, #__demo_caption2 { position: absolute; max-width: 90%;
+    padding: 12px 30px; border-radius: 12px;
     background: rgba(22,20,16,.72); backdrop-filter: blur(3px);
     color: #f7f4ee; text-align: center;
     font: 600 __CAPFONT__px/1.36 system-ui, sans-serif; letter-spacing: .01em;
@@ -244,7 +249,7 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     <span style="width:44px"></span>
   </div>
   <div id="__chrome_slot"></div>
-  <div id="__chrome_band"><div id="__demo_caption"></div></div>
+  <div id="__chrome_band"><div id="__demo_caption"></div><div id="__demo_caption2"></div></div>
   <div id="__chrome_card">
     <div id="__chrome_hold"></div>
     <div id="__demo_bridge"><div id="__demo_bridge_t"></div></div>
@@ -254,9 +259,24 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
 <div id="__demo_cursor"></div>
 <script>
   window.__demoCaption = (text) => {
-    const el = document.getElementById('__demo_caption');
-    el.textContent = text;
-    el.style.opacity = text ? '1' : '0';
+    // Two stacked layers crossfade. The old line fades out while the new
+    // one fades in — a text-to-text change used to swap instantly under a
+    // steady opacity, which read as a pop between otherwise smooth takes.
+    // Same ids-and-contract as before: `__demo_caption` is whichever layer
+    // is currently visible, the clipped measurement is taken on the layer
+    // about to be shown, and '' fades whatever is up.
+    const band = document.getElementById('__chrome_band');
+    const ids = ['__demo_caption', '__demo_caption2'];
+    const cur = document.getElementById(ids[window.__demoCapLayer || 0]);
+    if (cur.textContent === text) {
+      if (!text) return 0;
+      return Math.max(0, cur.scrollHeight - band.clientHeight);
+    }
+    const nxt = document.getElementById(ids[1 - (window.__demoCapLayer || 0)]);
+    nxt.textContent = text;
+    nxt.style.opacity = text ? '1' : '0';
+    cur.style.opacity = '0';
+    window.__demoCapLayer = 1 - (window.__demoCapLayer || 0);
     // How many pixels of this caption the band cannot show. The band has a
     // fixed height and overflow: hidden — the construction that keeps the
     // app rect caption-free — so a line too tall for it is shaved at the
@@ -264,8 +284,7 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     // (core.caption reads this return value); the in-page overlay version
     // of this function grows with its text and returns nothing.
     if (!text) return 0;
-    const band = document.getElementById('__chrome_band');
-    return Math.max(0, el.scrollHeight - band.clientHeight);
+    return Math.max(0, nxt.scrollHeight - band.clientHeight);
   };
   // The card and the scrim, band-aware for the same reason __demoCaption
   // above is: this document's versions render in the card layer over the app
