@@ -38,7 +38,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
-from .chrome import chrome_geometry, chrome_html, opening_hold_script
+from .chrome import (
+    CURSOR_ID,
+    chrome_geometry,
+    chrome_html,
+    opening_hold_script,
+)
 from .content import content_rect
 from .core import (
     WEB_WINDOW_BODY,
@@ -125,6 +130,11 @@ window.__demoTerminalHide = () => {
 # wants the result dwelt on says `hold()` after it, as it does after a click.
 PRESS_HOLD_S = 0.5
 
+#: How long the opt-in intro card holds before the storyboard's first beat,
+#: before `pace` scales it. Reading time for a short title, same scale the
+#: interlude default sits on.
+INTRO_HOLD_S = 2.8
+
 # How long `clear()` leaves the selection highlight up before deleting it.
 #
 # The highlight is the only thing on screen that explains where the text went.
@@ -206,6 +216,25 @@ window.__demoSpotlight = async (el) => {
   el.style.borderRadius = '6px';
   el.style.background = 'rgba(__ACCENT__,.10)';
   el.style.transform = 'scale(1.02)';
+  // Where the element sits **in the app's own viewport**, rounded to whole
+  // pixels. `spotlight()` moves it into the recorded frame's coordinates and
+  // opens a camera event over it (camera.py): the push-in is rendered after
+  // the take, because a DOM transform cannot reach past the window chrome
+  // into the composited frame — the page zoom this replaced scaled the page
+  // inside the window and read as layout jitter, not as a move.
+  //
+  // The wrapper's offset is added in Python, not here: this script runs in
+  // the app frame, which is cross-origin to the wrapper whenever the demo is
+  // not served from the recorder's own origin, and `window.frameElement` is
+  // null across that boundary. Reading it here put the push 156 px from the
+  // element it was aimed at — measured on tests/smoke's spotlight take.
+  const r = el.getBoundingClientRect();
+  return {
+    x: Math.round(r.left),
+    y: Math.round(r.top),
+    w: Math.round(r.width),
+    h: Math.round(r.height),
+  };
 };
 window.__demoSpotlightClear = () => {
   const el = window.__spotEl;
@@ -240,7 +269,6 @@ window.__demoSpotlightClear = () => {
   });
 };
 """
-
 
 
 # What the recorder's own chrome is saying on screen, read out of the wrapper
@@ -406,7 +434,6 @@ _EVIDENCE_HTML_JS = r"""(el) => {
 }"""
 
 
-
 class Recorder(_DemoBase):
     """Playwright page wrapper that records video and captures guide stills.
 
@@ -434,6 +461,7 @@ class Recorder(_DemoBase):
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        speech_stability: float | None = None,
         strict: bool | None = None,
         deterministic: bool | None = None,
         clock: str | None = None,
@@ -443,21 +471,41 @@ class Recorder(_DemoBase):
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
         stills_only: bool | None = None,
+        pace: float | None = None,
+        intro: str | None = None,
+        outro: str | None = None,
+        window_title: str | None = None,
         allow_private: bool | None = None,
     ) -> None:
         super().__init__(
-            out_dir, segment=segment, accent_rgb=accent_rgb,
-            terminal_title=terminal_title, terminal_prompt=terminal_prompt,
-            viewport=viewport, speech=speech, voice_id=voice_id,
-            speech_model=speech_model, strict=strict,
-            deterministic=deterministic, clock=clock,
-            timezone_id=timezone_id, locale=locale, evidence=evidence,
-            criteria=criteria, ticket=ticket, allow_private=allow_private,
+            out_dir,
+            segment=segment,
+            accent_rgb=accent_rgb,
+            terminal_title=terminal_title,
+            terminal_prompt=terminal_prompt,
+            viewport=viewport,
+            speech=speech,
+            voice_id=voice_id,
+            speech_model=speech_model,
+            speech_stability=speech_stability,
+            strict=strict,
+            deterministic=deterministic,
+            clock=clock,
+            timezone_id=timezone_id,
+            locale=locale,
+            evidence=evidence,
+            criteria=criteria,
+            ticket=ticket,
+            allow_private=allow_private,
             stills_only=stills_only,
+            pace=pace,
+            intro=intro,
+            outro=outro,
+            window_title=window_title,
         )
-        self.base_url = (
-            base_url or _env("BASE_URL", "http://localhost:8000")
-        ).rstrip("/")
+        self.base_url = (base_url or _env("BASE_URL", "http://localhost:8000")).rstrip(
+            "/"
+        )
         # The base checked `DEMO_VIDEO_BASE_URL`; this checks what this take
         # actually resolved, which is the explicit argument when there is one.
         # Still before a browser exists — `__enter__` is what launches one.
@@ -511,9 +559,7 @@ class Recorder(_DemoBase):
         geom = getattr(self, "_geom", None)
         if not geom:
             return None
-        return content_rect(
-            (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
-        )
+        return content_rect((geom["appx"], geom["appy"], geom["appw"], geom["apph"]))
 
     @property
     def app(self):
@@ -558,8 +604,9 @@ class Recorder(_DemoBase):
             )
         )
         context.add_init_script(
-            _TERMINAL_JS.replace("__TERM_TITLE__", self._terminal_title)
-            .replace("__TERM_PROMPT__", self._terminal_prompt)
+            _TERMINAL_JS.replace("__TERM_TITLE__", self._terminal_title).replace(
+                "__TERM_PROMPT__", self._terminal_prompt
+            )
         )
         context.add_init_script(
             _SPOTLIGHT_JS.replace("__ACCENT__", self._accent)
@@ -608,6 +655,12 @@ class Recorder(_DemoBase):
         # is a statement about a mask and about nothing else.
         page.on("framenavigated", self._note_navigation)
 
+    def _chrome_title(self) -> str:
+        """What the wrapper window's title bar says: the take's
+        `window_title` when it has one, the app's host when it does not —
+        a demo of `http://localhost:3000` opens titled for what it demos."""
+        return self._window_title or urlparse(self.base_url).netloc or "app"
+
     def _start(self) -> None:
         """Build the wrapper page on the recorded page itself (issue #358).
 
@@ -618,11 +671,10 @@ class Recorder(_DemoBase):
         shape `_content_rect` and every other geometry consumer reads.
         """
         self._geom = chrome_geometry(self._size["width"], self._size["height"])
-        title = urlparse(self.base_url).netloc or "app"
         self.page.set_content(
             chrome_html(
                 self._geom,
-                title=title,
+                title=self._chrome_title(),
                 window_body=WEB_WINDOW_BODY,
                 accent=self._accent,
                 caption_font_px=self._caption_font_px,
@@ -656,6 +708,66 @@ class Recorder(_DemoBase):
                 "returned no frame for it — the take cannot drive the app"
             )
         self._app_frame = frame
+        self._raise_intro()
+
+    def _raise_intro(self) -> None:
+        """The opt-in opening title (`Recorder(intro=…)`, off by default).
+
+        What is being presented, up over the wrapper from the take's first
+        seconds — before the app has loaded, which is the point: the card
+        covers the load instead of delaying it. The first `goto()` takes it
+        down (the same evaluate that clears the recorder's cards on every
+        navigation), so a storyboard needs nothing extra to end the intro.
+
+        **Voiced when speech is on**, like any caption — a silent card over a
+        narrated take reads as broken audio. The card rides the whole spoken
+        line (criterion()'s pattern): held `INTRO_HOLD_S` scaled by `pace`,
+        and never less than what is left of the line, so the voice never
+        outlives the card it belongs to. With speech off the line is empty
+        and the hold is just the reading time. The line's clip was
+        synthesized in the constructor, off the capture clock — the raise
+        starts the voice the moment the card is up, with no round trip of
+        dead air between them.
+        """
+        if not self._intro:
+            return
+        self.page.evaluate("t => window.__demoInterlude(t)", self._intro)
+        clip = self._prepare_line(self._intro, self._intro_clip)
+        self._start_line(clip)
+        hold = INTRO_HOLD_S * self._pace
+        remaining = self._line_end - time.monotonic()
+        self._idle(max(hold, remaining))
+
+    def _raise_outro(self) -> None:
+        """The opt-in closing card (`Recorder(outro=…)`, off by default).
+
+        The intro's mirror at the other end of the take: raised over the
+        wrapper by `__exit__` while the capture is still running, voiced when
+        speech is on, and **deliberately left up** — it is the take's last
+        frame, the way the opening hold was its first. The overlay probe
+        waives the card it raised (core's `_note_overlays_up`), so a take
+        that ends on its outro is clean, not "an overlay left up".
+        """
+        if not self._outro:
+            return
+        self.page.evaluate("t => window.__demoInterlude(t)", self._outro)
+        # The cursor is wherever the story last left it — over the closing
+        # card that is a stray dot parked on the take's final frame. It goes
+        # as the card goes up, not after the hold, or it rides the card the
+        # whole time. The pointer leaves with the take.
+        self.page.evaluate(
+            "id => { const c = document.getElementById(id);"
+            " if (c) c.style.display = 'none'; }",
+            CURSOR_ID,
+        )
+        clip = self._prepare_line(self._outro, self._outro_clip)
+        self._start_line(clip)
+        hold = INTRO_HOLD_S * self._pace
+        remaining = self._line_end - time.monotonic()
+        self._idle(max(hold, remaining))
+        # Only after the hold: the envelope key and the probe waiver both
+        # hang on this, so a raise that failed halfway claims nothing.
+        self._outro_up = True
 
     def _failure_screen(self) -> str | None:
         """The page's accessibility tree, for `failure/screen.txt` (issue #11).
@@ -693,7 +805,6 @@ class Recorder(_DemoBase):
         head.append(f"aria_format: {aria_format}")
         return "\n".join([*head, "", aria or "(no accessibility snapshot)"])
 
-
     def _note_navigation(self, frame) -> None:
         """A frame navigated. Nothing reads this, and that is deliberate.
 
@@ -708,7 +819,6 @@ class Recorder(_DemoBase):
         self._navigated = True
 
     # -- evidence (issue #9) ------------------------------------------------
-
 
     def _aria(self, locator) -> tuple[str | None, str]:
         """(snapshot, format) for one locator's accessibility tree.
@@ -969,9 +1079,16 @@ class Recorder(_DemoBase):
         # functions are context init scripts, which Playwright evaluates in
         # every frame, so they exist in the app iframe too — and the element
         # being lit lives there.
+        #
+        # The camera pulls back when the pull *starts*, not when the fade
+        # lands: the clear's `evaluate` waits out the exit transition, and
+        # an event that ended when it returned would hold the push ~250 ms
+        # past the spotlight that justified it.
+        self._camera_close(time.monotonic() - self._t0)
         self._target().evaluate("() => window.__demoSpotlightClear()")
+        rect = None
         if selector:
-            self._target().locator(selector).first.evaluate(
+            rect = self._target().locator(selector).first.evaluate(
                 "el => window.__demoSpotlight(el)"
             )
         # Set after the highlight actually landed, so a selector that matched
@@ -979,7 +1096,28 @@ class Recorder(_DemoBase):
         # evidence — a scope naming an element that is not there would put
         # `"html": null` in the file with no explanation.
         self._spotlit = selector or None
+        if rect:
+            self._camera_raise(self._frame_rect(rect))
         self.pause(0.3)
+
+    def _frame_rect(self, rect: dict) -> dict:
+        """An app-document rect, moved into the recorded frame's coordinates.
+
+        The app records inside the wrapper's content slot at true pixel size
+        (#358, cutover #361), so the mapping is the slot's offset and no
+        scale — the same one `tests/_pixels.to_video_rect` applies from the
+        other side. It is done here rather than in the page because the app
+        frame is cross-origin to the wrapper whenever the demo is not served
+        from the recorder's own origin, and `window.frameElement` is null
+        across that boundary.
+        """
+        geom = getattr(self, "_geom", None) or {"appx": 0, "appy": 0}
+        return {
+            "x": int(rect["x"]) + int(geom["appx"]),
+            "y": int(rect["y"]) + int(geom["appy"]),
+            "w": int(rect["w"]),
+            "h": int(rect["h"]),
+        }
 
     def _glide(self, x: float, y: float, steps: int) -> None:
         """Move the pointer to page coordinates `(x, y)`, dot included.
@@ -1004,9 +1142,7 @@ class Recorder(_DemoBase):
             xi = sx + (x - sx) * i / steps
             yi = sy + (y - sy) * i / steps
             self.page.mouse.move(xi, yi)
-            self.page.evaluate(
-                "([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi]
-            )
+            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])
         self._cursor_at = (x, y)
 
     def _cursor_pressed(self, down: bool) -> None:
@@ -1020,9 +1156,7 @@ class Recorder(_DemoBase):
         box = self._target().locator(selector).first.bounding_box()
         if box is None:
             raise RuntimeError(f"no visible element for {selector!r}")
-        self._glide(
-            box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=30
-        )
+        self._glide(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=30)
 
     @_beat_verb("click")
     def click(self, selector: str) -> None:

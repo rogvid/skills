@@ -136,7 +136,7 @@ seen red under a planted recorder defect in #351's pull request.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~55 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~56 min, nightly)
 ├── unit               # the browser-free half (~4 s, 568 tests, no dependencies)
 ├── ci-unit            # the .github/scripts helpers, and the two skill
 │                      #   CLIs whose output a person pastes (~2.5 s)
@@ -318,7 +318,7 @@ grades, the manifest that proves it can still fail:
 tests/smoke-inject --self-test    # the harness's own guards (instant)
 tests/smoke-inject --list         # every entry, its arm and what it costs
 tests/smoke-inject --arm coverage # one arm's entries (~195 s)
-tests/smoke-inject                # all 76 entries, ~55 min
+tests/smoke-inject                # all 78 entries, ~56 min
 ```
 
 Those three figures, and every number in **The injection manifest** below, are
@@ -636,7 +636,7 @@ argument for keeping them is cost per check function moved. Dropping one from
 | arm | seconds | check functions it would move | seconds per check moved |
 |---|---|---|---|
 | segments | 29 | 11 | 2.6 |
-| polish | 26 | 3 | 8.7 |
+| polish | 26 | 4 | 6.5 |
 | overlay | 31 | 1 | 31 |
 | failure | 48 | 1 | 48 |
 | the three expensive arms | 457 | 8 | 57 |
@@ -644,11 +644,12 @@ argument for keeping them is cost per check function moved. Dropping one from
 Every one of the four buys check coverage more cheaply than the arms the
 decision *did* move, so a second cut inside the cheap tier would be a worse
 trade than the first one, made on no measurement. Two specifics on top of the
-ratio: two of `--polish-only`'s three functions (`check_opening_card`,
+ratio: two of `--polish-only`'s four functions (`check_opening_card`,
 `check_spotlight_transitions`) have no injection anywhere, so the per-push run
-is their only exercise in the repo — the third,
-`check_reported_opening_card`, is the arm's own four entries
-([#235](https://github.com/rogvid/skills/issues/235)); and `--failure-only` is the only thing that
+is their only exercise in the repo — the other two,
+`check_reported_opening_card` and `check_camera_push`, are the arm's own six
+entries ([#235](https://github.com/rogvid/skills/issues/235), and the camera's
+two); and `--failure-only` is the only thing that
 runs the recorder's exception paths, which is where the catalogue's
 *clean-path-only assertion* lives. `--failure-only` is nonetheless the one to
 revisit first if the per-push budget ever binds — it is 22% of `--cheap` for
@@ -2313,7 +2314,7 @@ easy to break. This is what `tests/smoke-inject --list` reports today, quoted
 rather than remembered:
 
 ```
-76 entries, 15 arms, ~54.8 min of takes
+78 entries, 15 arms, ~55.7 min of takes
 ```
 
 That figure is `--list`'s **estimate** — each entry's arm from the table above,
@@ -2347,7 +2348,7 @@ paragraph whose job is to say what this manifest does not cover.
 | `--stills-only` | 2 | the mode that skips the video stops being either of the two things it claims ([#372](https://github.com/rogvid/skills/issues/372)): a run that declines the screencast and gets one anyway, leaving a real `demo.mp4` in a folder whose timeline says `media: null` — the artifact-lie outcome, and the only half a browser is needed for; or a run that records nothing and paces the storyboard anyway, which is correct and pointless. Either alone is satisfied by the wrong fix, which is why there are two. The pictures the mode produces are graded in `tests/pixel` (`stills-match`) and its artifact shape in `tests/unit` (`StillsOnly`) |
 | `--determinism-only` | 3 | a re-recording stops reproducing: the cursor dot parked on-screen so it ships in every still with no pointer verb run, a frozen clock that freezes at the wall time, an animation still moving when the still is taken |
 | `--issues-only` | 2 | what the recorder saw behind the pixels stops being true: a problem that fired with no beat open acquires a confident beat index and caption, or a command's exit status lands on the wrong `run()` beat and a failure is recorded as a success |
-| `--polish-only` | 4 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the cover painted a colour that is not the window body, so frame 0 is not the cover at all — #110's own defect, the card raised late, can no longer be planted here: since [#362](https://github.com/rogvid/skills/issues/362) the shared chrome covers frame 0 twice, independently, and breaking either cover alone leaves frame 0 reading 24.0; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one |
+| `--polish-only` | 6 | a terminal segment stops saying what it opened on ([#235](https://github.com/rogvid/skills/issues/235)), which is the one account of that frame a demo directory ships: the field gone entirely; the number a plausible constant instead of a reading, which every other statement about the field is happy with; the cover painted a colour that is not the window body, so frame 0 is not the cover at all — #110's own defect, the card raised late, can no longer be planted here: since [#362](https://github.com/rogvid/skills/issues/362) the shared chrome covers frame 0 twice, independently, and breaking either cover alone leaves frame 0 reading 24.0; or the report forgetting that a card was asked for, without which `"bare"` cannot be told from a segment that never wanted one . The other two are the camera's push-in over a spotlight ([camera.py](../skills/demo-video/helpers/demo_recording/camera.py)), and they are the two halves of one move: a push rendered at a zoom of 1.0, which leaves every frame the frame it always was — the exact failure of the DOM zoom this camera replaced, and one no artifact can report — and a push whose ease only rises, so the camera never pulls back and every frame from that spotlight to the last is a crop of the take |
 | `--segments-only` | 14 | the merge renumbers `segment_index`, so `(segment, segment_index)` stops naming the same beat across a stitch ([#22](https://github.com/rogvid/skills/issues/22)); every review frame is cut at its beat's start instead of its midpoint, and the sheet is caption fade-ins; the sheet stops saying **which clock** it cut them on, so a reviewer cannot tell a corrected sheet from one cut on the raw beat log ([#229](https://github.com/rogvid/skills/issues/229)); the take stops recording the clock `demo.mp4` is actually on — the field gone, a step invented, the total disagreeing with its own steps, or the beat log stamped half a second off the frames and nothing saying so ([#215](https://github.com/rogvid/skills/issues/215)); or the *merge* stops carrying that clock — no merged record at all, every capture boundary at zero, a step belonging to no capture, or a part's own record never reaching the segment it was measured in ([#225](https://github.com/rogvid/skills/issues/225)); or the record stops saying **how well it watched** — the `measured` flag gone, the flag disagreeing with the `max_gap` it is derived from, or the recorder refusing to report on a host it could have measured, which is the failure that looks like silence ([#247](https://github.com/rogvid/skills/issues/247)) |
 | `--evidence-only` | 4 | one capture of the page is stamped onto every beat, so what a beat's evidence describes is not what that beat showed — [#9](https://github.com/rogvid/skills/issues/9)'s acceptance criterion, on a 7 s arm instead of a 123 s one. Or evidence goes back to omitting on-screen text in silence ([#353](https://github.com/rogvid/skills/issues/353)): a rich-text editor's contents and a painted `aria-hidden` subtree, neither of which `aria_snapshot()` can carry. The other two entries are the opposite direction — a probe that also reports what was never painted buries the two that matter under every icon wrapper on the page — and there is one per visibility guard, because `display:none` trips both and would leave either deletable in silence |
 | `--overlay-only` | 4 | the four breaks [#170](https://github.com/rogvid/skills/pull/170) performed by hand: the pre-fix `interlude("")` dispatch, the overlay probe silent, the probe reporting everything, and the healthy "shows a picture" line disappearing — the control without which "the covered take does not say it" is satisfied by a recorder that stopped saying it about anything |
@@ -2358,7 +2359,7 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### What it does **not** cover
 
-- **16 of `tests/smoke`'s 51 check functions have no entry**, and the harness
+- **16 of `tests/smoke`'s 52 check functions have no entry**, and the harness
   prints every one of them as `ungraded` at the end of a run rather than
   leaving the boundary to somebody's memory.
 

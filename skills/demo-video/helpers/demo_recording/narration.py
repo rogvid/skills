@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -102,7 +104,9 @@ TTS_API_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
 
 
 def mix_plan(
-    offsets: Sequence[float], record: object
+    offsets: Sequence[float],
+    record: object,
+    durations: Sequence[float] | None = None,
 ) -> tuple[list[dict], dict]:
     """Where each narration line goes in the encoded media. -> (lines, state)
 
@@ -112,6 +116,22 @@ def mix_plan(
     video, and what the mix delays the clip by). `state` is the three-state
     clock record — see the section above; a caller that drops it publishes a
     demo whose audio placement cannot be told from a guess.
+
+    **`durations`, when given, are the clips' own lengths in the same order,
+    and the corrected placements are then serialized**: the recorder never
+    spoke two lines at once — each started after the previous ended, on the
+    monotonic clock the beats keep — but a backward step between two lines
+    compresses the video without compressing the clip, and the corrected
+    onset of the later line can land inside its predecessor. Measured on a
+    real take: a −1.65 s step put a line 1.6 s inside the voice before it —
+    double-talk for the length of a whole clause, not the fraction of a
+    second an earlier measurement had priced the overlap at. A line that
+    would start inside its predecessor starts at its predecessor's end
+    instead, and carries `held` — the seconds it starts later than the
+    stepped clock would put it. That is a voice trailing its caption by the
+    step, traded for two voices at once; `held` is what says the trade was
+    made, and the caller that omits `durations` gets the unserialized
+    placement exactly as before.
 
     `at` never goes below zero, and **a line that hit that floor says so** —
     though since #256 nothing this recorder writes can hit it: a step's own
@@ -146,7 +166,8 @@ def mix_plan(
     """
     place, state = capture_clock_shift(record)
     lines = []
-    for off in offsets:
+    prev_end = 0.0
+    for i, off in enumerate(offsets):
         placed = place(off)
         want = placed.at
         # Rounded *before* the test, not after. A `want` of −5e-5 is a
@@ -154,25 +175,80 @@ def mix_plan(
         # and a `clamped: 0.0` beside it would be a line claiming its `at` is
         # not `t` plus the steps before it when it is. Same for `no_video`.
         clamped = round(-want, 3) if want < 0 else 0.0
-        line = {"t": round(float(off), 3), "at": round(max(0.0, want), 3)}
+        at = max(0.0, want)
+        # The serialization, after the clock correction and the floor: a line
+        # that would start inside its predecessor starts when its predecessor
+        # ends. `held` is absent from lines placed genuinely — including ones
+        # whose shortfall rounds away to nothing, same rule as `clamped`.
+        held = 0.0
+        if durations is not None and at < prev_end:
+            held = round(prev_end - at, 3)
+            at = prev_end
+        line = {"t": round(float(off), 3), "at": round(at, 3)}
         if clamped:
             line["clamped"] = clamped
         if round(placed.lost, 3):
             line["no_video"] = round(placed.lost, 3)
+        if held:
+            line["held"] = held
         lines.append(line)
+        if durations is not None:
+            prev_end = at + float(durations[i])
     return lines, state
 
 
-def _tts_key(text: str, voice_id: str, model_id: str) -> str:
-    """The cache filename stem for one line, in one voice, from one model.
+#: ElevenLabs voice stability pinned on every synthesis. The model's default
+#: lets per-sentence pacing wander — measured 2.1 to 3.3 words/s across the
+#: five clips of one take, which a listener reads as some lines being sped up.
+#: Higher stability trades expressiveness for consistency; it is a recorder
+#: constant rather than a per-take knob until someone asks for the knob.
+DEFAULT_STABILITY = 0.75
 
-    **All three inputs are in the key, and that is the contract.** Switching
+
+#: The mean level every narration clip is mixed to. ElevenLabs returns clips
+#: at whatever level the model produced; mixed as-is, consecutive lines sit at
+#: audibly different loudnesses, which reads as a production fault even when
+#: nobody can name it. One target, measured per clip, gained per clip.
+LOUDNESS_TARGET_DB = -20.0
+
+
+def clip_gain_db(path: Path, target: float = LOUDNESS_TARGET_DB) -> float:
+    """The gain in dB that puts a clip's mean level at `target`.
+
+    Measured with ffmpeg's `volumedetect`, not assumed: the correction is
+    per clip, because the variance is per clip. A clip that cannot be
+    measured (or has no audio to measure) gains nothing — a silent mix of a
+    clip at the wrong level beats a take that died in the mix.
+    """
+    probe = subprocess.run(
+        ["ffmpeg", "-v", "info", "-i", str(path), "-af", "volumedetect",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    found = re.search(r"mean_volume:\s*(-?\d+\.?\d*) dB", probe.stderr)
+    if not found:
+        return 0.0
+    return round(target - float(found.group(1)), 2)
+
+
+def _tts_key(
+    text: str, voice_id: str, model_id: str, stability: float = DEFAULT_STABILITY
+) -> str:
+    """The cache filename stem for one line, in one voice, one model, one
+    voice stability.
+
+    **All four inputs are in the key, and that is the contract.** Switching
     voice or model has to re-generate rather than replay the old audio — a
     cache that keyed on text alone would hand a take recorded in one voice the
     clips of another, and nothing downstream would notice: the mp4 would come
     out with a full, correctly-timed audio track in the wrong voice.
+    Stability is the same shape of input: it changes how the line is *spoken*,
+    so a stability change that replayed old clips would silently keep the
+    pacing the stability change was made to fix.
     """
-    joined = TTS_KEY_SEP.join((voice_id, model_id, text))
+    joined = TTS_KEY_SEP.join(
+        (voice_id, model_id, text, f"stability={stability:.2f}")
+    )
     return hashlib.sha256(joined.encode()).hexdigest()[:TTS_KEY_CHARS]
 
 
@@ -182,6 +258,7 @@ def tts_clip(
     voice_id: str,
     model_id: str,
     api_key: str,
+    stability: float = DEFAULT_STABILITY,
 ) -> Path:
     """Synthesize one narration line with ElevenLabs, cached by content.
 
@@ -189,14 +266,28 @@ def tts_clip(
     `api_key` is not read at all on a hit. That is what lets `tests/smoke`
     grade the pacing and the audio mix without a key or a network: seed the
     cache with clips of known duration and every line is a hit.
+
+    `stability` is pinned on every request (and in the cache key) so the
+    model's per-sentence pacing stays inside a band a listener reads as one
+    voice — measured without it at 2.1 to 3.3 words/s across one take's five
+    clips, which reads as some lines being sped up.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    clip = cache_dir / f"{_tts_key(text, voice_id, model_id)}.mp3"
+    clip = cache_dir / f"{_tts_key(text, voice_id, model_id, stability)}.mp3"
     if clip.exists():
         return clip
     req = urllib.request.Request(
         f"{TTS_API_BASE}/{voice_id}?output_format=mp3_44100_128",
-        data=json.dumps({"text": text, "model_id": model_id}).encode(),
+        data=json.dumps(
+            {
+                "text": text,
+                "model_id": model_id,
+                "voice_settings": {
+                    "stability": stability,
+                    "similarity_boost": 0.75,
+                },
+            }
+        ).encode(),
         headers={"xi-api-key": api_key, "Content-Type": "application/json"},
     )
     for attempt in range(TTS_ATTEMPTS):

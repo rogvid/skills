@@ -46,15 +46,25 @@ _ASSETS = Path(__file__).parent.parent / "assets" / "xterm"
 # (#355's design record): the window frame around it comes from chrome.py,
 # shared with the web recorder since #362.
 _TERM_THEME = {
-    "background": "#181825", "foreground": "#cdd6f4",
+    "background": "#181825",
+    "foreground": "#cdd6f4",
     "cursorAccent": "#181825",
     "selectionBackground": "#414458",
-    "black": "#45475a", "red": "#f38ba8", "green": "#a6e3a1",
-    "yellow": "#f9e2af", "blue": "#89b4fa", "magenta": "#f5c2e7",
-    "cyan": "#94e2d5", "white": "#bac2de",
-    "brightBlack": "#585b70", "brightRed": "#f38ba8", "brightGreen": "#a6e3a1",
-    "brightYellow": "#f9e2af", "brightBlue": "#89b4fa",
-    "brightMagenta": "#f5c2e7", "brightCyan": "#94e2d5",
+    "black": "#45475a",
+    "red": "#f38ba8",
+    "green": "#a6e3a1",
+    "yellow": "#f9e2af",
+    "blue": "#89b4fa",
+    "magenta": "#f5c2e7",
+    "cyan": "#94e2d5",
+    "white": "#bac2de",
+    "brightBlack": "#585b70",
+    "brightRed": "#f38ba8",
+    "brightGreen": "#a6e3a1",
+    "brightYellow": "#f9e2af",
+    "brightBlue": "#89b4fa",
+    "brightMagenta": "#f5c2e7",
+    "brightCyan": "#94e2d5",
     "brightWhite": "#a6adc8",
 }
 
@@ -172,10 +182,22 @@ OPENING_STRIP = (0.01, 0.04, 0.90, 0.16)  # x, y, w, h as fractions of the app r
 # Named keys -> the bytes a terminal program expects. Ctrl-<letter> is
 # handled generically (C-a..C-z -> 0x01..0x1a).
 _KEYMAP = {
-    "Enter": "\r", "Return": "\r", "Tab": "\t", "Space": " ",
-    "Escape": "\x1b", "Esc": "\x1b", "Backspace": "\x7f", "Delete": "\x1b[3~",
-    "Up": "\x1b[A", "Down": "\x1b[B", "Right": "\x1b[C", "Left": "\x1b[D",
-    "Home": "\x1b[H", "End": "\x1b[F", "PageUp": "\x1b[5~", "PageDown": "\x1b[6~",
+    "Enter": "\r",
+    "Return": "\r",
+    "Tab": "\t",
+    "Space": " ",
+    "Escape": "\x1b",
+    "Esc": "\x1b",
+    "Backspace": "\x7f",
+    "Delete": "\x1b[3~",
+    "Up": "\x1b[A",
+    "Down": "\x1b[B",
+    "Right": "\x1b[C",
+    "Left": "\x1b[D",
+    "Home": "\x1b[H",
+    "End": "\x1b[F",
+    "PageUp": "\x1b[5~",
+    "PageDown": "\x1b[6~",
 }
 
 # Exit-status side channel.
@@ -219,8 +241,6 @@ _EXIT_OSC = "\x1b]777;demo-video-exit;"
 _EXIT_RE = re.compile(re.escape(_EXIT_OSC) + r"(-?\d+);(\d+)\x07")
 
 
-
-
 class TerminalRecorder(_DemoBase):
     """Records a terminal session (CLI, REPL, or full-screen TUI).
 
@@ -256,6 +276,7 @@ class TerminalRecorder(_DemoBase):
         speech: bool | None = None,
         voice_id: str | None = None,
         speech_model: str | None = None,
+        speech_stability: float | None = None,
         strict: bool | None = None,
         deterministic: bool | None = None,
         clock: str | None = None,
@@ -265,6 +286,10 @@ class TerminalRecorder(_DemoBase):
         criteria: dict[str, str] | None = None,
         ticket: str | None = None,
         stills_only: bool | None = None,
+        pace: float | None = None,
+        intro: str | None = None,
+        outro: str | None = None,
+        window_title: str | None = None,
         allow_private: bool | None = None,
         type_delay_ms: int = 45,
         interlude: str | None = None,
@@ -273,15 +298,47 @@ class TerminalRecorder(_DemoBase):
         # A branded, distinctive default prompt so wait_for_prompt's marker
         # is unlikely to collide with command output.
         prompt = terminal_prompt or _env("TERMINAL_PROMPT") or "❯ "
+        # This medium's opening card is `interlude=`, raised before capture
+        # and cleared by its own hold. An `intro=` accepted and ignored here
+        # would be a setting that does nothing, so it is refused with the way
+        # out named — the same posture as every other authoring error.
+        if intro is not None:
+            raise RuntimeError(
+                "TerminalRecorder has no intro= — open on a title card with "
+                "TerminalRecorder(interlude=...) instead, which this medium "
+                "raises before capture starts and clears itself"
+            )
+        if outro is not None:
+            raise RuntimeError(
+                "TerminalRecorder has no outro= — close on a card with "
+                "rec.interlude(...) and leave it up, which this medium "
+                "records as the segment's last frame"
+            )
         super().__init__(
-            out_dir, segment=segment, accent_rgb=accent_rgb,
-            terminal_title=terminal_title, terminal_prompt=prompt,
-            viewport=viewport, speech=speech, voice_id=voice_id,
-            speech_model=speech_model, strict=strict,
-            deterministic=deterministic, clock=clock,
-            timezone_id=timezone_id, locale=locale, evidence=evidence,
-            criteria=criteria, ticket=ticket, allow_private=allow_private,
+            out_dir,
+            segment=segment,
+            accent_rgb=accent_rgb,
+            terminal_title=terminal_title,
+            terminal_prompt=prompt,
+            viewport=viewport,
+            speech=speech,
+            voice_id=voice_id,
+            speech_model=speech_model,
+            speech_stability=speech_stability,
+            strict=strict,
+            deterministic=deterministic,
+            clock=clock,
+            timezone_id=timezone_id,
+            locale=locale,
+            evidence=evidence,
+            criteria=criteria,
+            ticket=ticket,
+            allow_private=allow_private,
             stills_only=stills_only,
+            pace=pace,
+            intro=intro,
+            outro=outro,
+            window_title=window_title,
         )
         self._shell = shell or _env("TERMINAL_SHELL") or "/bin/bash"
         fs = font_size
@@ -330,6 +387,12 @@ class TerminalRecorder(_DemoBase):
             )
         )
 
+    def _chrome_title(self) -> str:
+        """What the wrapper window's title bar says: the take's
+        `window_title` when it has one, this medium's branded
+        `terminal_title` when it does not."""
+        return self._window_title or self._terminal_title
+
     def _start(self) -> None:
         # The chrome document first, so the recorded pixels are the shared
         # window from the earliest paint after frame 0's hold. `self._geom`
@@ -339,7 +402,7 @@ class TerminalRecorder(_DemoBase):
         self.page.set_content(
             chrome_html(
                 self._geom,
-                title=self._terminal_title,
+                title=self._chrome_title(),
                 window_body=TERM_WINDOW_BODY,
                 accent=self._accent,
                 caption_font_px=self._caption_font_px,
@@ -354,9 +417,7 @@ class TerminalRecorder(_DemoBase):
             # else this method does: its fade runs over the opening hold's
             # flat field (the card layer stacks above the hold), never over
             # the recorder's setup — #110's point, on #360's machinery.
-            self.page.evaluate(
-                "t => window.__demoInterlude(t)", self._opening
-            )
+            self.page.evaluate("t => window.__demoInterlude(t)", self._opening)
 
         master, slave = pty.openpty()
         self._fd = master
@@ -375,8 +436,12 @@ class TerminalRecorder(_DemoBase):
         # interactive shell (job control, line editing) as a user would see.
         self._proc = subprocess.Popen(
             [self._shell, "--norc", "--noprofile", "-i"],
-            stdin=slave, stdout=slave, stderr=slave,
-            start_new_session=True, env=env, close_fds=True,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+            env=env,
+            close_fds=True,
         )
         os.close(slave)
         flags = fcntl.fcntl(master, fcntl.F_GETFL)
@@ -398,9 +463,11 @@ class TerminalRecorder(_DemoBase):
         self.page.add_script_tag(content=_TERM_MOUNT_JS)
         dims = self.page.evaluate(
             "o => window.__demoTermInit(o)",
-            {"theme": _TERM_THEME,
-             "cursor": f"rgb({self._accent})",
-             "fontSize": self._font_size},
+            {
+                "theme": _TERM_THEME,
+                "cursor": f"rgb({self._accent})",
+                "fontSize": self._font_size,
+            },
         )
         self._set_winsize(int(dims["rows"]), int(dims["cols"]))
         self._read_host_box()
@@ -445,8 +512,10 @@ class TerminalRecorder(_DemoBase):
             return
         if box:
             self._host_box = (
-                int(box["x"]), int(box["y"]),
-                int(box["width"]), int(box["height"]),
+                int(box["x"]),
+                int(box["y"]),
+                int(box["width"]),
+                int(box["height"]),
             )
 
     def _opening_card_rect(self) -> tuple[int, int, int, int] | None:
@@ -542,8 +611,7 @@ class TerminalRecorder(_DemoBase):
             self._start_line(clip)
             self.pause(self._opening_hold)
             self.page.evaluate(
-                "() => { window.__demoChromeHoldClear();"
-                " window.__demoInterlude(''); }"
+                "() => { window.__demoChromeHoldClear(); window.__demoInterlude(''); }"
             )
             self.pause(0.6)
 
@@ -577,7 +645,8 @@ class TerminalRecorder(_DemoBase):
         # so a TUI already running re-lays-out to the new size.
         if self._fd is not None:
             fcntl.ioctl(
-                self._fd, termios.TIOCSWINSZ,
+                self._fd,
+                termios.TIOCSWINSZ,
                 struct.pack("HHHH", rows, cols, 0, 0),
             )
 
@@ -616,7 +685,6 @@ class TerminalRecorder(_DemoBase):
         if text:
             self.page.evaluate("d => window.__termWrite(d)", text)
 
-
     def _failure_screen(self) -> str | None:
         """The rendered terminal buffer, for `failure/screen.txt` (issue #11).
 
@@ -645,7 +713,7 @@ class TerminalRecorder(_DemoBase):
         kept: list[str] = []
         cut = 0
         for match in _EXIT_RE.finditer(text):
-            kept.append(text[cut:match.start()])
+            kept.append(text[cut : match.start()])
             cut = match.end()
             self._record_exit_code(int(match.group(1)), int(match.group(2)))
         rest = text[cut:]
@@ -694,7 +762,9 @@ class TerminalRecorder(_DemoBase):
             self._note_issue(
                 "nonzero_exit",
                 f"{command!r} exited {code}",
-                beat=beat, exit_code=code, command=command,
+                beat=beat,
+                exit_code=code,
+                command=command,
             )
 
     def _hold_frame(self, seconds: float) -> None:

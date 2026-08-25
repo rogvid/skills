@@ -165,8 +165,14 @@ read them all up front, and do not skip one the text tells you to open.
    evidence — `locator.aria_snapshot()` arrived there, and the older
    `page.accessibility` API it replaced has since been removed.
 3. **Learn how the app runs** (dev server command, port, how to build the
-   frontend, how to seed data). If the project documents this, follow it;
-   otherwise ask. Reuse an already-running server.
+   frontend, how to seed data). **Read `<project root>/.demo-video/context.md`
+   first** — a previous demo session may have written down exactly this, and
+   re-deriving it is the heaviest part of a first demo. If it does not exist,
+   inspect as usual and then **write it**: how to start the server and on
+   which port, how to seed or reset data, auth quirks, selector conventions,
+   anything a fresh session would otherwise have to rediscover. Keep it short
+   and factual, and commit it — it is project knowledge, not session state.
+   Reuse an already-running server.
 4. **Set project defaults in env** (see Configuration) or pass them as
    `Recorder(...)` parameters per storyboard.
 
@@ -228,6 +234,9 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_BASE_URL` | `base_url` — app under demo. Classified before the browser opens; a public host is refused | `http://localhost:8000` |
 | `DEMO_VIDEO_ALLOW_PRIVATE` | `allow_private` — permit a private/internal target (`1`/`0`). There is no equivalent for a public one | off |
 | `DEMO_VIDEO_ACCENT_RGB` | `accent_rgb` — cursor/spotlight color, `"235,110,20"` | orange |
+| `DEMO_VIDEO_PACE` | `pace` — multiplier over the holds the recorder computes (caption read time; the defaults of `hold()`, `interlude()`, `criterion()`). Durations the storyboard writes itself are never touched. See **Pacing and perception** | `1.0` |
+| `DEMO_VIDEO_WINDOW_TITLE` | `window_title` — the wrapper window's title bar. Web default: the app's host; terminal default: `terminal_title` | — |
+| `DEMO_VIDEO_INTRO` | `intro` — opt-in opening title card over the wrapper (web takes), taken down by the first `goto()`. Held ~2.8 s (scaled by `pace`), or the whole spoken line when narration is on. Terminal takes already have this as `TerminalRecorder(interlude=…)` | off |
 | `DEMO_VIDEO_TERMINAL_TITLE` | `terminal_title` — web `terminal()` card title | `terminal` |
 | `DEMO_VIDEO_TERMINAL_PROMPT` | `terminal_prompt` — prompt string: web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
 | `DEMO_VIDEO_TERMINAL_SHELL` | `shell` — shell `TerminalRecorder` launches | `/bin/bash` |
@@ -243,6 +252,8 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_EVIDENCE` | `evidence` — write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
 | `DEMO_VIDEO_VOICE_ID` | `voice_id` — ElevenLabs voice | Sarah (premade) |
 | `DEMO_VIDEO_SPEECH_MODEL` | `speech_model` — ElevenLabs model | `eleven_multilingual_v2` |
+| `DEMO_VIDEO_SPEECH_STABILITY` | `speech_stability` — voice stability pinned on every line, for one consistent speaking rate (without it: 2.1–3.3 words/s across one take) | `0.75` |
+| `DEMO_VIDEO_OUTRO` | `outro` — opt-in closing card, the intro's mirror: voiced with speech on, left up as the take's last frame. Web takes; `TerminalRecorder` refuses it | off |
 | `DEMO_VIDEO_SKILL_DIR` | *no parameter* — where storyboards find this skill | the constant baked into each storyboard |
 | `ELEVENLABS_API_KEY` | *no parameter* — enables speech narration | off |
 
@@ -275,7 +286,7 @@ exception, or a non-zero exit. Both are
 | `clear(selector)` | Empty a field, visibly — click, select what is in it, delete. Its own beat, because emptying a field is something the viewer watches happen |
 | `press(key, hold_s=0.5)` | Press one named key wherever the focus already is — `"Enter"` to submit, `"Escape"` to dismiss, `"Tab"` to move on, `"Control+A"`. Playwright's key names; an unknown one raises. Selector-free on purpose: `Tab` *is* the focus demo and `Escape` acts on whatever is up, and `type_into`/`clear` leave the caret where they put it. Holds `hold_s` so the change is on screen long enough to read |
 | `wait_for(selector)` | Wait for something the app does on its own |
-| `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition) |
+| `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition). Each spotlight interval also becomes a **camera push-in** (1.3×, eased 0.5 s each way, centred on the element) rendered after the take — see `helpers/demo_recording/camera.py`. The moves land in demo.mp4 automatically; `timeline.json`'s `camera` key publishes the geometry |
 | `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
 | `interlude(text, hold=2.8, style=…)` | Bridge a jump; `hold` is how long the card stays before the storyboard moves on. `style="card"` (default) is a full-screen title card — dark on a terminal take, so a segment can open on it; the window's own body colour on a web one, so the content area becomes the window with the sentence on it (#291) — for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. **`interlude("")` fades out whatever is up, whichever style raised it** — the clear takes no `style` and ignores the one it is given. Leave one up and the take says so on stderr and in `content.warnings`; nothing else will notice (see [reference/limits.md](reference/limits.md)). |
 | `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
@@ -314,6 +325,17 @@ below are encoded in the recorder; the point is to *not fight them*.
   checkbox clicks), `pause()` before the caption so the aggregate gets a
   frame. One run shipped frames reading "1 row selected" beside a toast
   saying "Excluded 3 rows"; both reviewers flagged the jump.
+
+**Pace to the audience.** The floors above are for a viewer seeing the
+feature cold — an executive skimming a PR is not that viewer, and a dev
+pausing to inspect can always rewind. `Recorder(pace=0.5)` (or
+`DEMO_VIDEO_PACE`) halves every hold the recorder *computes*, so the same
+storyboard serves both audiences without being rewritten; `pace > 1`
+slows down for a colder one. Two limits: below ~0.5 a caption outruns
+reading speed, so shorten the lines too, not just the waits — and a
+duration the storyboard writes itself (`pause(2)`, `hold(min_s=…)`,
+`interlude(hold=…)`) is never scaled. A take recorded off the default
+records its `pace` in `timeline.json`.
 
 ## Terminal demos (CLI / TUI)
 
@@ -365,8 +387,10 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 ## Process
 
 1. **Pick a demo story that is deterministic, and know where the slow
-   parts are.** Prefer flows the app completes on its own in seconds. Seed
-   needed state *before* recording starts. The recorder pins the browser's
+    parts are.** Prefer flows the app completes on its own in seconds. Seed
+    needed state *before* recording starts — reading
+    `.demo-video/context.md` first (Setup step 3), and writing back what you
+    learned if it does not exist yet. The recorder pins the browser's
    timezone and locale for you, and will freeze its clock if you ask
    ([reference/determinism.md](reference/determinism.md) — read it first);
    the app's own randomness and its server data are yours to pin down. If

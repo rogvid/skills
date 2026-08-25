@@ -205,9 +205,8 @@ INJECTIONS = [
         name="a stills-only run records a video after all",
         module="core.py",
         old=(
-            "                record_video_dir=(\n"
-            "                    None if self.stills_only else str(self._video_dir)\n"
-            "                ),"
+            "                record_video_dir=(None if self.stills_only"
+            " else str(self._video_dir)),"
         ),
         new="                record_video_dir=str(self._video_dir),",
         arm="--stills-only",
@@ -341,9 +340,9 @@ INJECTIONS = [
         # reason the loud bar means anything, and it had never been seen fail.
         name="every narration clip is mixed in at the start of the take",
         module="core.py",
-        old="                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}"
+        old="                    + f\"adelay={int(round(line['at'] * 1000))}"
         ':all=1[a{i}]"',
-        new='                    f"[{i + 1}:a]adelay=0:all=1[a{i}]"',
+        new='                    + f"adelay=0:all=1[a{i}]"',
         arm="--narration-only",
         sites=("check_narration_audio",),
         must_contain=("audio is playing where no line was spoken",),
@@ -364,10 +363,10 @@ INJECTIONS = [
         # answering instead. 250 ms is the middle of it.
         name="every narration clip is mixed 250 ms from where the record says",
         module="core.py",
-        old="                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))}"
+        old="                    + f\"adelay={int(round(line['at'] * 1000))}"
         ':all=1[a{i}]"',
-        new="                    f\"[{i + 1}:a]adelay={int(round(line['at'] * 1000))"
-        ' + 250}:all=1[a{i}]"',
+        new="                    + f\"adelay={int(round(line['at'] * 1000)) + 250}"
+        ':all=1[a{i}]"',
         arm="--narration-only",
         sites=("check_narration_placement",),
         must_contain=("voice is that far from the caption it was spoken for",),
@@ -801,6 +800,39 @@ INJECTIONS = [
         sites=("check_reported_opening_card",),
         must_contain=("cannot be told from a segment that never asked for a card",),
     ),
+    # -- the camera's push-in (camera.py), 26 s an entry ----------------------
+    #
+    # Two entries against one check, and they are the two halves of one move.
+    # The first breaks the push: the chain still renders, the timeline still
+    # publishes the geometry, and every frame is the frame it always was —
+    # which is exactly the failure the DOM zoom this camera replaced had, and
+    # exactly the one no artifact can report. The second breaks the pull, the
+    # half a "did it move" reading passes without ever asking about: a camera
+    # that pushes in and stays there is a take cropped from that spotlight to
+    # its last frame.
+    Injection(
+        name="the camera renders a push that moves nothing",
+        module="camera.py",
+        old="CAMERA_ZOOM = 1.3",
+        new="CAMERA_ZOOM = 1.0",
+        arm="--polish-only",
+        sites=("check_camera_push",),
+        must_contain=("moved, which is what the DOM zoom this replaced did ",),
+    ),
+    Injection(
+        name="the camera pushes in and never pulls back",
+        module="camera.py",
+        old=(
+            "        ease = (\n"
+            "            f\"min((time-{event['t_start']:.3f})/{CAMERA_EASE_S},\"\n"
+            "            f\"({event['t_end']:.3f}-time)/{CAMERA_EASE_S})\"\n"
+            "        )"
+        ),
+        new=("        ease = f\"(time-{event['t_start']:.3f})/{CAMERA_EASE_S}\""),
+        arm="--polish-only",
+        sites=("check_camera_push",),
+        must_contain=("the chrome strip is still ",),
+    ),
     # -- the clock demo.mp4 is on (issues #18/#215), 29 s an entry ------------
     #
     # Chromium stamps every screencast frame with the host's *wall* clock and
@@ -1046,8 +1078,8 @@ INJECTIONS = [
         # that showed them.
         name="every beat's evidence describes the first beat's page",
         module="core.py",
-        old="             self._evidence_doc(beat, payload))",
-        new="             self._evidence_doc(beat, self._evidence[0][1]))",
+        old="                self._evidence_doc(beat, payload),",
+        new="                self._evidence_doc(beat, self._evidence[0][1]),",
         arm="--evidence-only",
         sites=("check_evidence",),
         must_contain=(
@@ -1074,8 +1106,14 @@ INJECTIONS = [
     Injection(
         name="the end-of-take overlay probe reports nothing",
         module="core.py",
-        old="            self._overlay_note = overlay_warning([str(i) for i in up])",
-        new="            self._overlay_note = overlay_warning([])",
+        old=(
+            "            if ids:\n"
+            "                self._overlay_note = overlay_warning(ids)"
+        ),
+        new=(
+            "            if False:\n"
+            "                self._overlay_note = overlay_warning(ids)"
+        ),
         arm="--overlay-only",
         sites=("check_overlay_pair",),
         must_contain=(
@@ -1087,8 +1125,14 @@ INJECTIONS = [
     Injection(
         name="the overlay probe reports an overlay on every take",
         module="core.py",
-        old="            self._overlay_note = overlay_warning([str(i) for i in up])",
-        new='            self._overlay_note = overlay_warning(["__demo_bridge"])',
+        old=(
+            "            if ids:\n"
+            "                self._overlay_note = overlay_warning(ids)"
+        ),
+        new=(
+            "            if True:\n"
+            '                self._overlay_note = overlay_warning(["__demo_bridge"])'
+        ),
         arm="--overlay-only",
         sites=("check_overlay_pair",),
         must_contain=("the recorder reported an overlay still up on ",),
@@ -1112,8 +1156,8 @@ INJECTIONS = [
         # stays perfect, and only the pixels can say the band held nothing.
         name="the wrapper caption is dispatched and never painted in the band",
         module="chrome.py",
-        old="    el.textContent = text;\n    el.style.opacity = text ? '1' : '0';",
-        new="    el.textContent = '';\n    el.style.opacity = '0';",
+        old="    nxt.textContent = text;\n    nxt.style.opacity = text ? '1' : '0';",
+        new="    nxt.textContent = '';\n    nxt.style.opacity = '0';",
         arm="--wrapper-only",
         sites=("check_wrapper_band",),
         must_contain=("never painted in its band",),
@@ -1126,15 +1170,11 @@ INJECTIONS = [
         # assertion.
         name="the caption's appearance repaints pixels inside the app rect",
         module="chrome.py",
-        old=(
-            "  window.__demoCaption = (text) => {\n"
-            "    const el = document.getElementById('__demo_caption');"
-        ),
+        old="  window.__demoCaption = (text) => {\n",
         new=(
             "  window.__demoCaption = (text) => {\n"
             "    document.getElementById('__chrome_slot').style.opacity ="
             " text ? '0.75' : '1';\n"
-            "    const el = document.getElementById('__demo_caption');"
         ),
         arm="--wrapper-only",
         sites=("check_wrapper_band",),
@@ -1182,8 +1222,7 @@ INJECTIONS = [
         module="chrome.py",
         old=(
             "    if (!text) return 0;\n"
-            "    const band = document.getElementById('__chrome_band');\n"
-            "    return Math.max(0, el.scrollHeight - band.clientHeight);"
+            "    return Math.max(0, nxt.scrollHeight - band.clientHeight);"
         ),
         new="    return 0;",
         arm="--wrapper-only",
