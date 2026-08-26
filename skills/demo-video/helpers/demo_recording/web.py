@@ -489,6 +489,7 @@ class Recorder(_DemoBase):
         intro: str | None = None,
         outro: str | None = None,
         window_title: str | None = None,
+        window_scale: float | tuple[float, float] | None = None,
         allow_private: bool | None = None,
     ) -> None:
         super().__init__(
@@ -516,6 +517,7 @@ class Recorder(_DemoBase):
             intro=intro,
             outro=outro,
             window_title=window_title,
+            window_scale=window_scale,
         )
         self.base_url = (base_url or _env("BASE_URL", "http://localhost:8000")).rstrip(
             "/"
@@ -611,9 +613,15 @@ class Recorder(_DemoBase):
         # document (chrome.py) and is driven explicitly by the recorder
         # (`_glide`), so there is no event-following overlay for the app
         # iframe to draw a second dot with.
+        width_scale, height_scale = self._window_scale
         context.add_init_script(
             opening_hold_script(
-                chrome_geometry(self._size["width"], self._size["height"]),
+                chrome_geometry(
+                    self._size["width"],
+                    self._size["height"],
+                    width_scale=width_scale,
+                    height_scale=height_scale,
+                ),
                 window_body=WEB_WINDOW_BODY,
             )
         )
@@ -684,7 +692,13 @@ class Recorder(_DemoBase):
         true pixel size. `self._geom` is `chrome_geometry`'s dict, the one
         shape `_content_rect` and every other geometry consumer reads.
         """
-        self._geom = chrome_geometry(self._size["width"], self._size["height"])
+        width_scale, height_scale = self._window_scale
+        self._geom = chrome_geometry(
+            self._size["width"],
+            self._size["height"],
+            width_scale=width_scale,
+            height_scale=height_scale,
+        )
         self.page.set_content(
             chrome_html(
                 self._geom,

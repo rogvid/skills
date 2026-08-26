@@ -896,6 +896,10 @@ class _DemoBase:
         intro: str | None = None,
         outro: str | None = None,
         window_title: str | None = None,
+        # Window scale override (issue #397). Allows consumers to request a
+        # larger/smaller app rect within the wrapper window. Accepts a single
+        # float (applied to both width and height) or a tuple of (width_scale, height_scale).
+        window_scale: float | tuple[float, float] | None = None,
         # Last, and kept last. `tests/unit`'s "a way to permit a public host
         # appears as a constructor argument" injection anchors on this line
         # followed by the closing paren, and a parameter added after it makes
@@ -995,6 +999,32 @@ class _DemoBase:
                 )
             viewport = (int(w), int(h))
         self._size = {"width": viewport[0], "height": viewport[1]}
+        # Window scale override (issue #397). Allows consumers to request a
+        # larger/smaller app rect within the wrapper window. Resolved from
+        # explicit parameter > DEMO_VIDEO_WINDOW_SCALE env var > built-in default.
+        if window_scale is None:
+            raw_scale = _env("WINDOW_SCALE")
+        else:
+            raw_scale = str(window_scale)
+        if raw_scale is None:
+            width_scale = 0.80
+            height_scale = 2 / 3
+        else:
+            parts = [p.strip() for p in raw_scale.split(",")]
+            if len(parts) == 1:
+                width_scale = height_scale = float(parts[0])
+            elif len(parts) == 2:
+                width_scale = float(parts[0])
+                height_scale = float(parts[1])
+            else:
+                raise RuntimeError(
+                    f"DEMO_VIDEO_WINDOW_SCALE must be 'WIDTH_SCALE' or 'WIDTH_SCALE,HEIGHT_SCALE', got {raw_scale!r}"
+                )
+        if not (0 < width_scale <= 1 and 0 < height_scale <= 1):
+            raise RuntimeError(
+                f"DEMO_VIDEO_WINDOW_SCALE values must be in (0, 1], got {width_scale},{height_scale}"
+            )
+        self._window_scale = (width_scale, height_scale)
         # Audience pacing (SKILL.md, "Pacing and perception"). A multiplier
         # over the holds this recorder *computes* — the no-speech caption
         # read time, and the defaults of hold(), interlude() and criterion()

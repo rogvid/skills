@@ -102,12 +102,13 @@ def chrome_geometry(
     pad: int = CHROME_PAD_PX,
     bar: int = CHROME_BAR_PX,
     band: int = CAPTION_BAND_PX,
+    width_scale: float = 0.80,
+    height_scale: float = 2 / 3,
 ) -> dict:
     """Where the window, the content slot and the caption band sit.
 
     All in recorded-frame pixels — the wrapper page is the video, unscaled.
-    The slot is `int(width * 0.80)` wide (the composite's app width, kept so
-    the window is the size viewers already know) and `int(height * 2/3)`
+    The slot is `int(width * width_scale)` wide and `int(height * height_scale)`
     tall, both forced even for the encoder. The band sits directly below the
     slot: `bandy == appy + apph`, so the two rectangles are disjoint by
     construction — the property `tests/unit` asserts on this function and
@@ -116,8 +117,8 @@ def chrome_geometry(
     The `app*`/`win*` keys deliberately match `Recorder._frame_geometry`'s,
     so `_content_rect` and every geometry consumer reads one shape.
     """
-    appw = int(width * 0.80) & ~1
-    apph = int(height * 2 / 3) & ~1
+    appw = int(width * width_scale) & ~1
+    apph = int(height * height_scale) & ~1
     winw = appw + 2 * pad
     winh = bar + pad + apph + band + pad
     winx = (width - winw) // 2
