@@ -2998,6 +2998,30 @@ class PublicSurface(unittest.TestCase):
 
 SMOKE = Path(os.environ.get("UNIT_SMOKE", REPO / "tests" / "smoke"))
 
+# The smoke entry is a thin launcher over the `tests/smokekit` package (#401).
+# Every test below that reads smoke's source reads the entry *and* every
+# module of this package, so a definition cannot hide from the sweeps by
+# moving between files. Overridable for the same reason `SMOKE` is: under
+# `--fault-inject` both are staged copies in a temp directory, and the
+# package must be read from beside the staged entry or an injection aimed at
+# it would grade the pristine working tree.
+SMOKE_PACKAGE = Path(os.environ.get("UNIT_SMOKE_PACKAGE", REPO / "tests" / "smokekit"))
+
+
+def _smoke_trees() -> list[tuple[str, object]]:
+    """The smoke entry and every module of its package, as (name, tree)."""
+    import ast
+
+    files = [SMOKE, *sorted(SMOKE_PACKAGE.glob("*.py"))]
+    return [
+        (
+            path.name,
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path)),
+        )
+        for path in files
+    ]
+
+
 # `tests/README.md`, overridable for the same reason `SMOKE` is: under
 # `--fault-inject` this file runs from a temp directory, where `REPO` points at
 # nothing. The runner passes a copy, so the figures and the prose below stay
@@ -3025,34 +3049,48 @@ class SmokeResidue(unittest.TestCase):
         import ast
         from collections import Counter
 
-        tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
-        defined: dict[str, int] = {}
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        defined[target.id] = node.lineno
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                defined[node.target.id] = node.lineno
-            elif isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                defined[node.name] = node.lineno
+        defined: dict[str, tuple[str, int]] = {}
+        read = Counter()
+        for where, tree in _smoke_trees():
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and not (
+                            target.id.startswith("__") and target.id.endswith("__")
+                        ):
+                            # Dunder bindings (`__all__`) are read by the
+                            # import machinery, not by a name this sweep
+                            # can see.
+                            defined[target.id] = (where, node.lineno)
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                    node.target, ast.Name
+                ):
+                    defined[node.target.id] = (where, node.lineno)
+                elif isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    defined[node.name] = (where, node.lineno)
+            # The haystack, before anything is claimed about it — aggregated
+            # across the entry and the package, since a definition can sit in
+            # any of them.
+            read.update(
+                n.id
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+            )
 
-        # The haystack, before anything is claimed about it.
         self.assertGreaterEqual(len(defined), SMOKE_DEFINITION_FLOOR)
 
-        read = Counter(
-            n.id
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        dead = sorted(
+            (where, lineno, name)
+            for name, (where, lineno) in defined.items()
+            if not read[name]
         )
-        dead = sorted((line, name) for name, line in defined.items() if not read[name])
         self.assertEqual(
             dead,
             [],
-            f"{len(dead)} definition(s) in {SMOKE.name} that nothing reads: "
-            + ", ".join(f"{name} (line {line})" for line, name in dead),
+            f"{len(dead)} definition(s) in the smoke suite that nothing reads: "
+            + ", ".join(f"{name} ({where}:{lineno})" for where, lineno, name in dead),
         )
 
 
@@ -3141,8 +3179,9 @@ def _smoke_guards():
     """
     import ast
 
-    tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
-    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    funcs = {}
+    for _, tree in _smoke_trees():
+        funcs.update({n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)})
     guards = []
     for node in funcs["run_phases"].body:
         if not isinstance(node, ast.If):
@@ -11369,9 +11408,12 @@ class ClockProbe(unittest.TestCase):
 
     def timing_phases(self) -> set:
         """The `run_*` phases whose grading reads a beat log against a video."""
-        tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
+        import ast
+        import itertools
+
+        nodes = itertools.chain.from_iterable(t.body for _, t in _smoke_trees())
         out = set()
-        for node in tree.body:
+        for node in nodes:
             if not isinstance(node, ast.FunctionDef):
                 continue
             if not node.name.startswith("run_"):
@@ -11538,9 +11580,15 @@ class LogEarlyCause(unittest.TestCase):
     # Where that claim was shipped. The smoke harness's failure text and its
     # `MAX_LOG_EARLY_S` comment, the skill's published limits, and the suite's
     # own README — three documents, one claim, and it was corrected in one
-    # place at a time twice before.
-    def carriers(self) -> list[Path]:
-        return [SMOKE, SKILL_DIR / "reference" / "limits.md", README]
+    # place at a time twice before. The smoke harness is now an entry plus a
+    # package (#401), so its carrier is read as one document spread over
+    # files; a phrase cannot escape by moving between them.
+    def carriers(self) -> list[list[Path]]:
+        return [
+            [SMOKE, *sorted(SMOKE_PACKAGE.glob("*.py"))],
+            [SKILL_DIR / "reference" / "limits.md"],
+            [README],
+        ]
 
     def assertNoVerdict(self, said: str):
         for phrase in self.VERDICTS:
@@ -11648,18 +11696,18 @@ class LogEarlyCause(unittest.TestCase):
         tripwire and nothing more: see the class docstring for what it cannot
         see.
         """
-        for path in self.carriers():
-            text = path.read_text(encoding="utf-8")
+        for group in self.carriers():
+            text = "\n".join(path.read_text(encoding="utf-8") for path in group)
             # The haystack, before anything is claimed about it: a path that
             # moved would otherwise make every assertion below hold over an
             # empty string.
-            self.assertGreater(len(text), 20_000, f"{path} is not the document")
+            self.assertGreater(len(text), 20_000, f"{group[0]} is not the document")
             for phrase in self.RETRACTED:
                 self.assertNotIn(
                     phrase,
                     text,
-                    f"{path.name} explains a positive skew as a partial loss "
-                    f"of the step ({phrase!r}), which issue #255 retracted",
+                    f"{group[0].name} explains a positive skew as a partial "
+                    f"loss of the step ({phrase!r}), which issue #255 retracted",
                 )
 
     def test_a_step_after_the_beat_leaves_the_beat_log_named(self):
@@ -11742,8 +11790,11 @@ class LogEarlyCause(unittest.TestCase):
         """
         import ast
 
-        tree = ast.parse(SMOKE.read_text(encoding="utf-8"))
-        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        funcs = {}
+        for _, tree in _smoke_trees():
+            funcs.update(
+                {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+            )
         for name in ("check_timeline", "check_merge_offset"):
             calls = {
                 node.func.id
@@ -18132,6 +18183,14 @@ def fault_inject() -> int:
             root = skill / "helpers"
             smoke = Path(tmp) / "smoke"
             shutil.copy(REPO / "tests" / "smoke", smoke)
+            # The entry resolves its package from its own directory (#401),
+            # so a staged copy of the entry without `smokekit` beside it
+            # would die on import rather than on anything an injection did.
+            shutil.copytree(
+                REPO / "tests" / "smokekit",
+                Path(tmp) / "smokekit",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
             # `tests/smoke` imports its pixel toolkit from the module beside
             # it (#349), resolved off its own path — so the copy needs the
             # module beside it too.
@@ -18166,7 +18225,21 @@ def fault_inject() -> int:
                 # into the skill directory.
                 target = examples / module[len("examples/") :]
             elif module == "tests/smoke":
-                target = smoke
+                # The entry now shares its source with the smokekit package
+                # staged beside it (#401), so the injection aims at whichever
+                # single member holds the pattern exactly once. Anything else
+                # falls through to the entry itself, whose count of zero (or
+                # two) aborts below with the reason.
+                members = [
+                    smoke,
+                    *sorted((Path(tmp) / "smokekit").glob("*.py")),
+                ]
+                holders = [
+                    member
+                    for member in members
+                    if member.read_text(encoding="utf-8").count(old) == 1
+                ]
+                target = holders[0] if len(holders) == 1 else smoke
             elif module == "tests/smoke-inject":
                 # Before the `"/" in module` branch below, which would send it
                 # into the skill directory and fail on a file that is not there.
@@ -18210,6 +18283,7 @@ def fault_inject() -> int:
                     "UNIT_HELPERS": str(root),
                     "UNIT_SKILL_DIR": str(skill),
                     "UNIT_SMOKE": str(smoke),
+                    "UNIT_SMOKE_PACKAGE": str(Path(tmp) / "smokekit"),
                     "UNIT_SMOKE_INJECT": str(smoke_inject),
                     "UNIT_PIXEL": str(pixel),
                     "UNIT_README": str(readme),
