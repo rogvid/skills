@@ -1658,28 +1658,46 @@ def verify_manifest(entries: list[Injection]) -> None:
             raise Refused(f"{entry.name!r}: {entry.arm} is not a measured smoke arm")
         if not entry.must_contain:
             raise Refused(f"{entry.name!r}: names no assertion that must fire")
-        path = injection_target(REPO, entry.module, entry.old)
-        if path is None:
-            raise Refused(
-                f"{entry.name!r}: {entry.old!r} occurs nowhere in "
-                f"{entry.module} — the entry has drifted off the code it "
-                f"claims to break"
+        if entry.module == "tests/smoke":
+            path = injection_target(REPO, entry.module, entry.old)
+            if path is None:
+                raise Refused(
+                    f"{entry.name!r}: {entry.old!r} occurs nowhere in "
+                    f"{entry.module} — the entry has drifted off the code it "
+                    f"claims to break"
+                )
+            if path is False:
+                total = sum(
+                    p.read_text(encoding="utf-8").count(entry.old)
+                    for p in smoke_member_paths(REPO)
+                    if p.is_file()
+                )
+                raise Refused(
+                    f"{entry.name!r}: its search string occurs {total} times "
+                    f"across {entry.module}'s files and cannot be pinned to one —"
+                    f"the injection would not land, so nothing it claims to prove "
+                    f"would be proven.\n"
+                    f"       looked for: {entry.old!r}"
+                )
+        else:
+            path = (
+                REPO
+                / "skills"
+                / "demo-video"
+                / "helpers"
+                / "demo_recording"
+                / entry.module
             )
-        if path is False:
-            total = sum(
-                p.read_text(encoding="utf-8").count(entry.old)
-                for p in smoke_member_paths(REPO)
-                if p.is_file()
-            )
-            raise Refused(
-                f"{entry.name!r}: its search string occurs {total} times "
-                f"across {entry.module}'s files and cannot be pinned to one —"
-                f"the injection would not land, so nothing it claims to prove "
-                f"would be proven.\n"
-                f"       looked for: {entry.old!r}"
-            )
-        if not path.is_file():
-            raise Refused(f"{entry.name!r}: {entry.module} does not exist")
+            if not path.is_file():
+                raise Refused(f"{entry.name!r}: {entry.module} does not exist")
+            hits = path.read_text(encoding="utf-8").count(entry.old)
+            if hits != 1:
+                raise Refused(
+                    f"{entry.name!r}: its search string occurs {hits} times in "
+                    f"{entry.module}, expected exactly 1 — the injection would not "
+                    f"land, so nothing it claims to prove would be proven.\n"
+                    f"       looked for: {entry.old!r}"
+                )
         pool: list[str] = []
         for site in entry.sites:
             if site not in named:
