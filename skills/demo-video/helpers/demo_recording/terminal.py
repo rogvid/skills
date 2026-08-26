@@ -290,6 +290,7 @@ class TerminalRecorder(_DemoBase):
         intro: str | None = None,
         outro: str | None = None,
         window_title: str | None = None,
+        window_scale: float | tuple[float, float] | None = None,
         allow_private: bool | None = None,
         type_delay_ms: int = 45,
         interlude: str | None = None,
@@ -339,6 +340,7 @@ class TerminalRecorder(_DemoBase):
             intro=intro,
             outro=outro,
             window_title=window_title,
+            window_scale=window_scale,
         )
         self._shell = shell or _env("TERMINAL_SHELL") or "/bin/bash"
         fs = font_size
@@ -382,7 +384,12 @@ class TerminalRecorder(_DemoBase):
         # document, earlier than any Python statement can reach.
         context.add_init_script(
             opening_hold_script(
-                chrome_geometry(self._size["width"], self._size["height"]),
+                chrome_geometry(
+                    self._size["width"],
+                    self._size["height"],
+                    width_scale=self._window_scale[0],
+                    height_scale=self._window_scale[1],
+                ),
                 window_body=TERM_WINDOW_BODY,
             )
         )
@@ -398,7 +405,12 @@ class TerminalRecorder(_DemoBase):
         # window from the earliest paint after frame 0's hold. `self._geom`
         # is `chrome_geometry`'s dict — the one shape every geometry consumer
         # reads, web and terminal alike (#362).
-        self._geom = chrome_geometry(self._size["width"], self._size["height"])
+        self._geom = chrome_geometry(
+            self._size["width"],
+            self._size["height"],
+            width_scale=self._window_scale[0],
+            height_scale=self._window_scale[1],
+        )
         self.page.set_content(
             chrome_html(
                 self._geom,

@@ -16848,7 +16848,12 @@ INJECTIONS = [
         "terminal.py",
         "        context.add_init_script(\n"
         "            opening_hold_script(\n"
-        '                chrome_geometry(self._size["width"], self._size["height"]),\n'
+        "                chrome_geometry(\n"
+        '                    self._size["width"],\n'
+        '                    self._size["height"],\n'
+        "                    width_scale=self._window_scale[0],\n"
+        "                    height_scale=self._window_scale[1],\n"
+        "                ),\n"
         "                window_body=TERM_WINDOW_BODY,\n"
         "            )\n"
         "        )",
@@ -16870,9 +16875,19 @@ INJECTIONS = [
         # `chrome_html(...)` call passes the same keyword and a bare
         # `window_body=` line matches twice (#362 gave the terminal two
         # consumers of one colour, which is the point of the constant).
-        '                chrome_geometry(self._size["width"], self._size["height"]),\n'
+        "                chrome_geometry(\n"
+        '                    self._size["width"],\n'
+        '                    self._size["height"],\n'
+        "                    width_scale=self._window_scale[0],\n"
+        "                    height_scale=self._window_scale[1],\n"
+        "                ),\n"
         "                window_body=TERM_WINDOW_BODY,",
-        '                chrome_geometry(self._size["width"], self._size["height"]),\n'
+        "                chrome_geometry(\n"
+        '                    self._size["width"],\n'
+        '                    self._size["height"],\n'
+        "                    width_scale=self._window_scale[0],\n"
+        "                    height_scale=self._window_scale[1],\n"
+        "                ),\n"
         '                window_body="#1c1a17",',
         [
             "TerminalChrome."

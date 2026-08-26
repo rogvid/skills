@@ -242,6 +242,7 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_TERMINAL_SHELL` | `shell` — shell `TerminalRecorder` launches | `/bin/bash` |
 | `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `font_size` — `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | `viewport` — recording size, `"1280x720"` | 1280×720 |
+| `DEMO_VIDEO_WINDOW_SCALE` | `window_scale` — framed-window size relative to the viewport: a fraction of it for width/height, in `(0, 1]`. A single float or `"width,height"` | 0.80 width; 2/3 height |
 | `DEMO_VIDEO_DETERMINISTIC` | `deterministic` — freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
 | `DEMO_VIDEO_CLOCK` | `clock` — the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
 | `DEMO_VIDEO_TIMEZONE` | `timezone_id` — browser timezone, always applied | `UTC` |
