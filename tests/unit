@@ -18225,7 +18225,21 @@ def fault_inject() -> int:
                 # into the skill directory.
                 target = examples / module[len("examples/") :]
             elif module == "tests/smoke":
-                target = smoke
+                # The entry now shares its source with the smokekit package
+                # staged beside it (#401), so the injection aims at whichever
+                # single member holds the pattern exactly once. Anything else
+                # falls through to the entry itself, whose count of zero (or
+                # two) aborts below with the reason.
+                members = [
+                    smoke,
+                    *sorted((Path(tmp) / "smokekit").glob("*.py")),
+                ]
+                holders = [
+                    member
+                    for member in members
+                    if member.read_text(encoding="utf-8").count(old) == 1
+                ]
+                target = holders[0] if len(holders) == 1 else smoke
             elif module == "tests/smoke-inject":
                 # Before the `"/" in module` branch below, which would send it
                 # into the skill directory and fail on a file that is not there.
