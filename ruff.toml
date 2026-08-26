@@ -46,6 +46,14 @@ select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
 # of them. Drop this once that queue drains.
 "skills/demo-video/helpers/demo_recording/core.py" = ["UP037"]
 
+# The smoke entry (`tests/smoke`) re-binds every name its package
+# (`tests/smokekit/`) defines, so the suite keeps presenting itself — to a
+# reader and to `tests/unit`'s SourceFileLoader, which reads attributes off
+# the loaded file directly — as the one namespace it was before the split.
+# That makes nearly every import unused by ruff's reading and load-bearing by
+# everyone else's. Only `main` is called here.
+"tests/smoke" = ["F401"]
+
 [format]
 # The recorder modules predate any formatter. Running one over them now would
 # rewrite all three files and collide with every queued PR, so they are

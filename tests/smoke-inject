@@ -79,6 +79,10 @@ from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parent.parent
 SMOKE = REPO / "tests" / "smoke"
+# The entry is a launcher over this package (#401); an entry's check function
+# lives in one of these modules, so every read of smoke's source — the AST
+# sweeps and the injection search — covers both.
+SMOKE_PACKAGE = REPO / "tests" / "smokekit"
 HELPERS = REPO / "skills" / "demo-video" / "helpers" / "demo_recording"
 
 # Generous: an arm that normally takes 148 s can take longer under an injection
@@ -1513,8 +1517,25 @@ INJECTIONS = [
 # --------------------------------------------------------------------------
 
 
+def smoke_files() -> list[Path]:
+    """The smoke entry and every module of its package, in a stable order."""
+    return [SMOKE, *sorted(SMOKE_PACKAGE.glob("*.py"))]
+
+
 def smoke_tree() -> ast.Module:
-    return ast.parse(SMOKE.read_text(encoding="utf-8"), filename=str(SMOKE))
+    """Smoke's source as one tree: every top-level statement of the entry
+    and the package, concatenated in file order.
+
+    The sweeps read this like the pre-split single file's AST — a check
+    function is found wherever it now lives, and none may hide by moving
+    between files.
+    """
+    body: list[ast.stmt] = []
+    for path in smoke_files():
+        body.extend(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path)).body
+        )
+    return ast.Module(body=body, type_ignores=[])
 
 
 def check_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
@@ -1561,10 +1582,37 @@ def literal_pool(tree: ast.Module, site: ast.FunctionDef) -> list[str]:
     return pool
 
 
-def target_path(root: Path, module: str) -> Path:
-    if module == "tests/smoke":
-        return root / "tests" / "smoke"
-    return root / "skills" / "demo-video" / "helpers" / "demo_recording" / module
+def smoke_member_paths(root: Path) -> list[Path]:
+    """The entry and package files behind `tests/smoke`, staged or not."""
+    return [
+        root / "tests" / "smoke",
+        *sorted((root / "tests" / "smokekit").glob("*.py")),
+    ]
+
+
+def injection_target(root: Path, module: str, old: str) -> Path | None | bool:
+    """The file an injection patches.
+
+    A recorder module is named directly. `tests/smoke` now spans an entry and
+    a package (#401), so the target is whichever single member holds exactly
+    one occurrence of the pattern — a pattern spread over several files, or
+    hitting several times, would not land where the entry claims. Returns
+    `None` when no file holds the pattern and `False` when the occurrence
+    cannot be pinned to one file.
+    """
+    if module != "tests/smoke":
+        return root / "skills" / "demo-video" / "helpers" / "demo_recording" / module
+    counts = {
+        path: path.read_text(encoding="utf-8").count(old)
+        for path in smoke_member_paths(root)
+        if path.is_file()
+    }
+    holders = [path for path, n in counts.items() if n]
+    if not holders:
+        return None
+    if len(holders) == 1 and counts[holders[0]] == 1:
+        return holders[0]
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -1610,17 +1658,28 @@ def verify_manifest(entries: list[Injection]) -> None:
             raise Refused(f"{entry.name!r}: {entry.arm} is not a measured smoke arm")
         if not entry.must_contain:
             raise Refused(f"{entry.name!r}: names no assertion that must fire")
-        path = target_path(REPO, entry.module)
-        if not path.is_file():
-            raise Refused(f"{entry.name!r}: {entry.module} does not exist")
-        hits = path.read_text(encoding="utf-8").count(entry.old)
-        if hits != 1:
+        path = injection_target(REPO, entry.module, entry.old)
+        if path is None:
             raise Refused(
-                f"{entry.name!r}: its search string occurs {hits} times in "
-                f"{entry.module}, expected exactly 1 — the injection would not "
-                f"land, so nothing it claims to prove would be proven.\n"
+                f"{entry.name!r}: {entry.old!r} occurs nowhere in "
+                f"{entry.module} — the entry has drifted off the code it "
+                f"claims to break"
+            )
+        if path is False:
+            total = sum(
+                p.read_text(encoding="utf-8").count(entry.old)
+                for p in smoke_member_paths(REPO)
+                if p.is_file()
+            )
+            raise Refused(
+                f"{entry.name!r}: its search string occurs {total} times "
+                f"across {entry.module}'s files and cannot be pinned to one —"
+                f"the injection would not land, so nothing it claims to prove "
+                f"would be proven.\n"
                 f"       looked for: {entry.old!r}"
             )
+        if not path.is_file():
+            raise Refused(f"{entry.name!r}: {entry.module} does not exist")
         pool: list[str] = []
         for site in entry.sites:
             if site not in named:
@@ -1708,6 +1767,14 @@ def stage(tmp: Path) -> Path:
     smoke = root / "tests" / "smoke"
     shutil.copy2(SMOKE, smoke)
     smoke.chmod(0o755)
+    # The entry resolves its package from its own directory (#401), so the
+    # staged copy needs `smokekit` beside it or it dies on import before any
+    # injection could be graded.
+    shutil.copytree(
+        SMOKE_PACKAGE,
+        root / "tests" / "smokekit",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     # The pixel toolkit `tests/smoke` imports from beside itself (#349).
     shutil.copy2(REPO / "tests" / "_pixels.py", root / "tests" / "_pixels.py")
     return root
@@ -2092,15 +2159,22 @@ def inject(entries: list[Injection]) -> int:
         entry_started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="smoke-inject-") as tmp:
             root = stage(Path(tmp))
-            path = target_path(root, entry.module)
+            path = injection_target(root, entry.module, entry.old)
+            if not isinstance(path, Path):
+                print(
+                    f"ABORT: {entry.name!r} did not land in exactly one file "
+                    f"of the staged {entry.module} (already checked against "
+                    f"the working tree; the staged copy is what runs).",
+                    file=sys.stderr,
+                )
+                return 3
             text = path.read_text(encoding="utf-8")
-            hits = text.count(entry.old)
-            if hits != 1:
-                # Already checked against the working tree; checked again here
+            if text.count(entry.old) != 1:
+                # Already pinned against the working tree; checked again here
                 # because it is the staged copy that runs.
                 print(
-                    f"ABORT: {entry.name!r} matched {hits} times in the staged "
-                    f"{entry.module}, expected 1.",
+                    f"ABORT: {entry.name!r} matched more than once in the "
+                    f"staged {entry.module}, expected 1.",
                     file=sys.stderr,
                 )
                 return 3
