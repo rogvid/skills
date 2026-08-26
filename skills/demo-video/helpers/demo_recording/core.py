@@ -678,6 +678,21 @@ def _env_flag(name: str) -> bool | None:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+# Quality presets (#403): a named bundle of *defaults*, so a storyboard (or
+# the agent writing one) can say what the take is for instead of tuning five
+# knobs. "high" is the registered defaults — a polished take fit for sharing —
+# and deliberately empty: high quality IS the default, and a key added here
+# would fork it from the documented settings table. "quick" is the cheap
+# proof for a code review or an issue comment: smaller frame, brisker holds,
+# no narration (which is also what makes it free and fast — no TTS round
+# trips). Resolution stays explicit parameter > DEMO_VIDEO_* env var > preset
+# > built-in default, so a preset never overrides something the take said.
+PRESETS: dict[str, dict] = {
+    "high": {},
+    "quick": {"viewport": "1280x720", "pace": 0.6, "speech": False},
+}
+
+
 def _verb_target(fn: Callable) -> Callable[[tuple, dict], str | None]:
     """Build the default beat-target extractor for one storyboard verb.
 
@@ -900,6 +915,14 @@ class _DemoBase:
         # larger/smaller app rect within the wrapper window. Accepts a single
         # float (applied to both width and height) or a tuple of (width_scale, height_scale).
         window_scale: float | tuple[float, float] | None = None,
+        # Caption as a floating pill over the app's bottom edge, instead of
+        # the reserved band below it (#403). Trades the "app never shares a
+        # pixel with the caption" invariant for schoko-style framing.
+        caption_overlay: bool | None = None,
+        # Quality preset (#403): "high" (the defaults) or "quick" — see
+        # PRESETS. A preset replaces built-in defaults only; explicit
+        # parameters and DEMO_VIDEO_* env vars still win.
+        preset: str | None = None,
         # Last, and kept last. `tests/unit`'s "a way to permit a public host
         # appears as a constructor argument" injection anchors on this line
         # followed by the closing paren, and a parameter added after it makes
@@ -966,8 +989,19 @@ class _DemoBase:
         if stills_only is None:
             stills_only = _env_flag("STILLS_ONLY")
         self.stills_only = False if stills_only is None else bool(stills_only)
+        # The preset resolves before every setting it can default, and its
+        # name is validated here so a typo fails the take at construction
+        # rather than silently recording at "high".
+        preset_name = (preset or _env("PRESET") or "high").strip().lower()
+        if preset_name not in PRESETS:
+            raise RuntimeError(
+                f"DEMO_VIDEO_PRESET must be one of {sorted(PRESETS)}, "
+                f"got {preset_name!r}"
+            )
+        self.preset = preset_name
+        preset_defaults = PRESETS[preset_name]
         if accent_rgb is None:
-            raw = _env("ACCENT_RGB", "235,110,20")
+            raw = _env("ACCENT_RGB", "0,127,255")
             parts = [p.strip() for p in raw.split(",")]
             if len(parts) != 3 or not all(p.isdigit() for p in parts):
                 raise RuntimeError(
@@ -991,7 +1025,7 @@ class _DemoBase:
         self._terminal_title = terminal_title or _env("TERMINAL_TITLE", "terminal")
         self._terminal_prompt = terminal_prompt or _env("TERMINAL_PROMPT", "$ ")
         if viewport is None:
-            raw = _env("VIEWPORT", "1280x720")
+            raw = _env("VIEWPORT", preset_defaults.get("viewport", "1920x1080"))
             w, sep, h = raw.lower().partition("x")
             if not (sep and w.strip().isdigit() and h.strip().isdigit()):
                 raise RuntimeError(
@@ -999,16 +1033,39 @@ class _DemoBase:
                 )
             viewport = (int(w), int(h))
         self._size = {"width": viewport[0], "height": viewport[1]}
+        # Overlay caption (#403): explicit parameter > DEMO_VIDEO_CAPTION_OVERLAY
+        # > on. Known limit, accepted when this became the default: the camera
+        # push-in crops the composited frame around the spotlit element, and a
+        # pill riding the app's bottom edge can be shaved by that crop — a
+        # storyboard that spotlights while a caption is up should fade the
+        # pill first (caption("")), or set caption_overlay=False to get the
+        # reserved band back. Resolved before window_scale, because the scale
+        # *default* depends on it.
+        if caption_overlay is None:
+            caption_overlay = _env_flag("CAPTION_OVERLAY")
+        self._caption_overlay = True if caption_overlay is None else bool(
+            caption_overlay
+        )
         # Window scale override (issue #397). Allows consumers to request a
         # larger/smaller app rect within the wrapper window. Resolved from
         # explicit parameter > DEMO_VIDEO_WINDOW_SCALE env var > built-in default.
         if window_scale is None:
             raw_scale = _env("WINDOW_SCALE")
+        elif isinstance(window_scale, (tuple, list)):
+            # str() on a tuple would render "(0.95, 0.66)" and the float()
+            # below would choke on "(0.95" — the bug the status-filter-exec
+            # take's record.py worked around by passing a string.
+            raw_scale = ",".join(str(part) for part in window_scale)
         else:
             raw_scale = str(window_scale)
         if raw_scale is None:
-            width_scale = 0.80
-            height_scale = 2 / 3
+            width_scale = 0.95
+            # The default height is coupled to the caption mode: 0.9 fills
+            # the frame when nothing else needs vertical room, but with the
+            # reserved band back on, bar + pads + a 0.9 slot + the band
+            # overflow any viewport (chrome_geometry would refuse the take).
+            # 0.85 is the largest even fit at 1920x1080 with the band.
+            height_scale = 0.9 if self._caption_overlay else 0.85
         else:
             parts = [p.strip() for p in raw_scale.split(",")]
             if len(parts) == 1:
@@ -1035,7 +1092,9 @@ class _DemoBase:
         # stills_only zeroes pacing entirely, so rehearsal speed does not
         # depend on whatever a take sets here.
         if pace is None:
-            raw_pace: float | str = _env("PACE", "1.0")
+            raw_pace: float | str = _env(
+                "PACE", str(preset_defaults.get("pace", 1.0))
+            )
         else:
             raw_pace = pace
         try:
@@ -1066,6 +1125,8 @@ class _DemoBase:
         api_key = os.environ.get("ELEVENLABS_API_KEY", "")
         if speech is None:
             speech = _env_flag("SPEECH")
+        if speech is None:
+            speech = preset_defaults.get("speech")
         if speech is True and not api_key:
             raise RuntimeError("speech is forced on but ELEVENLABS_API_KEY is not set")
         if speech is True and self.stills_only:

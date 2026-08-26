@@ -245,19 +245,20 @@ MIN_CARD_STRETCH_S = 1.0
 MIN_CARD_DOWN_S = 1.0
 
 # The recorder's default accent — core.py's DEMO_VIDEO_ACCENT_RGB fallback,
-# "235,110,20". scrub_env() strips the knob before recording, so the default
-# is what painted every cached frame.
-ACCENT_RGB = (235, 110, 20)
+# "0,127,255" (azure, #403). scrub_env() strips the knob before recording,
+# so the default is what painted every cached frame.
+ACCENT_RGB = (0, 127, 255)
 
 # What counts as a pixel of the cursor dot. Channel *gaps* rather than a
 # distance to ACCENT_RGB, because the dot is drawn at two alphas (.45 fill,
 # .95 border, chrome.py's #__demo_cursor rule) over whatever the page has
-# there: the blends range (122,66,25)–(246,175,149) across dark and white
-# grounds, all of them ≥ 95 red-over-blue and ≥ 56 red-over-green, while
-# the fixture's paper (245,246,249), the window body (24,24,37) and the
-# terminal card (28,26,23) are all ≤ 5 on at least one gap.
-ACCENT_R_MINUS_B = 60
-ACCENT_R_MINUS_G = 40
+# there: the blends range (13,70,135)–(135,192,252) across dark and white
+# grounds, all of them ≥ 117 blue-over-red and ≥ 60 blue-over-green, while
+# the fixture's paper (245,246,249), the window body (24,24,37), the
+# terminal card (28,26,23) and the fixture's slate ink-soft (91,100,120)
+# are all ≤ 29 blue-over-red.
+ACCENT_B_MINUS_R = 60
+ACCENT_B_MINUS_G = 40
 
 # How far the disc's measured centre may sit from the park, in video pixels.
 # The healthy reading is ~1 px (centroid over a review frame downscaled 0.8,
@@ -303,11 +304,14 @@ MIN_ABSENCE_FRAMES = 2
 # of pixels away. 50 px keeps an order of magnitude between them without
 # forgiving a real drift.
 SPOTLIGHT_POSITION_TOLERANCE_PX = 50.0
-# Fewer accent pixels than this within the app rect is not a ring: the
-# fixture node's ring reads well over a thousand pixels in a review frame
-# (measured on the take this bar was set from). A recorder that stopped
-# drawing the ring must fail here rather than pass an absence as a match.
-SPOTLIGHT_MIN_RING_PX = 400
+# Fewer accent pixels than this within the app rect is not a ring. The bar
+# was 400 when takes recorded at 1280x720 (the ring read well over a
+# thousand pixels); the 1080p default (#403) downscales review frames by
+# 1024/1920 instead of 1024/1280, and the healthy azure ring measures ~306
+# px in that geometry. 150 keeps half the healthy reading between a ring
+# and an absence (which reads ~0): a recorder that stopped drawing the ring
+# must fail here rather than pass an absence as a match.
+SPOTLIGHT_MIN_RING_PX = 150
 
 HEADER = (
     "pixel: no suite lock - this loop reads colour and geometry off cached "
@@ -452,14 +456,13 @@ def record_web(out_dir: Path, base_url: str) -> dict:
         rec.spotlight()
         rec.caption("The pointer has not moved yet.")
         # -- first pointer verb of the take: the park ------------------------
-        # Parked on #search, and the choice is load-bearing: the dot is drawn
-        # in the accent colour at .45/.95 alpha, and #refresh IS the accent
-        # colour (the fixture themes itself to the recorder's default), so a
-        # dot parked there is pixel-invisible — measured on a real take, the
-        # "accent disc" a probe finds over #refresh is the button itself,
-        # 1306 pixels whose centroid agrees with the park whether or not any
-        # dot was drawn. Over #search's white field the only accent pixels
-        # near the park are the dot's own.
+        # Parked on #search. The choice was load-bearing while the fixture's
+        # own #refresh button shared the recorder's old orange accent — a dot
+        # parked there was pixel-invisible, and the "accent disc" a probe
+        # found was the button itself (1306 pixels agreeing with the park
+        # whether or not any dot was drawn). The azure default (#403) ended
+        # that collision, but the park stays on #search: a neutral ground
+        # under the dot is what makes the probe's count the dot's own.
         rec.move_to("#search")
         rec.hold()
         rec.caption("")
@@ -710,8 +713,8 @@ def longest_run(flags: list[bool]) -> tuple[int, int] | None:
 
 
 def accent_like(r: int, g: int, b: int) -> bool:
-    """Whether one pixel could be the cursor dot. See ACCENT_R_MINUS_B."""
-    return (r - b) >= ACCENT_R_MINUS_B and (r - g) >= ACCENT_R_MINUS_G
+    """Whether one pixel could be the cursor dot. See ACCENT_B_MINUS_R."""
+    return (b - r) >= ACCENT_B_MINUS_R and (b - g) >= ACCENT_B_MINUS_G
 
 
 def accent_centroid(w: int, h: int, raw: bytes) -> tuple[float, float, int] | None:
