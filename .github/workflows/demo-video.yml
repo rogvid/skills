@@ -7,7 +7,7 @@ name: Demo video
 #   jobs:
 #     demo:
 #       permissions:
-#         contents: read
+#         contents: write  # the preview's release-asset upload (#410)
 #         pull-requests: write
 #         issues: read     # so the ticket re-read (#276) can fetch the issue;
 #                          # without it that check reports `not checked`
@@ -17,8 +17,14 @@ name: Demo video
 #         app-command: ./serve --port 8901
 #         base-url: http://127.0.0.1:8901
 #
-# and gets one comment on the pull request, rewritten on every push, carrying
-# the beat table as text and a deep link to the mp4.
+# and gets a short block spliced into the pull-request body, rewritten on every
+# push: what kind of change this is, one sentence, the demo, and the acceptance
+# clauses as a checklist.
+#
+# **The caller's permissions must be at least what this file declares.** A
+# called workflow cannot request more than its caller grants, and a caller that
+# grants less does not fail a step — the whole run is refused before it starts,
+# as `startup_failure`, with no log to read.
 #
 # ---------------------------------------------------------------------------
 # Trigger policy: the caller decides *when*, this workflow decides *whether*.

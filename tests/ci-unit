@@ -47,6 +47,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / ".github" / "scripts"
 SKILL = REPO / "skills" / "demo-video"
 WORKFLOW = REPO / ".github" / "workflows" / "demo-video.yml"
+CALLER = REPO / ".github" / "workflows" / "ticket-queue-demo.yml"
 
 
 def load(name: str, directory: Path | None = None) -> ModuleType:
@@ -66,6 +67,7 @@ def load(name: str, directory: Path | None = None) -> ModuleType:
 _DIR = Path(os.environ.get("CI_UNIT_SCRIPTS", SCRIPTS))
 _SKILL = Path(os.environ.get("CI_UNIT_SKILL", SKILL))
 _WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
+_CALLER = Path(os.environ.get("CI_UNIT_CALLER", CALLER))
 storyboards = load("demo-storyboards", _DIR)
 comment = load("demo-comment", _DIR)
 ticket_check = load("demo-ticket-check", _DIR)
@@ -5222,6 +5224,31 @@ INJECTIONS += [
         '    cleaned = (text or "").strip()',
         ["BlockSummary.test_a_conventional_commit_prefix_is_stripped"],
     ),
+    (
+        # The workflow drops back to `contents: read` and the preview upload
+        # 403s on every run — the exact failure the first live run hit, and
+        # one that leaves a passing-looking job with no preview in the block.
+        "the workflow stops asking for the write its preview upload needs",
+        "demo-video.yml",
+        "      contents: write\n      pull-requests: write",
+        "      contents: read\n      pull-requests: write",
+        [
+            "CallerPermissions.test_the_workflow_can_write_contents_for_the_preview_upload"
+        ],
+    ),
+    (
+        # The caller grants less than the callee declares. GitHub refuses the
+        # run **before it starts**, as `startup_failure`, with no job and no
+        # log — nothing points at the caller, and actionlint reads each file
+        # alone. This is the assertion that has to catch it.
+        "the caller grants less than the workflow declares",
+        "ticket-queue-demo.yml",
+        "      contents: write",
+        "      contents: read",
+        [
+            "CallerPermissions.test_the_caller_grants_at_least_what_the_workflow_declares"
+        ],
+    ),
 ]
 
 
@@ -5242,13 +5269,24 @@ def stage_tree(tmp: Path) -> dict[str, Path]:
     # of that file and of nothing else.
     workflow = tmp / "demo-video.yml"
     shutil.copy(WORKFLOW, workflow)
+    # And the caller, because the two agreeing on permissions is a property of
+    # the *pair* — a called workflow cannot request more than its caller
+    # grants, and neither file alone shows the mismatch.
+    caller = tmp / "ticket-queue-demo.yml"
+    shutil.copy(CALLER, caller)
     # And this file, so an injection can reach the suite's own
     # allowlist. The copy is what runs; it reads every path it uses
     # from the three variables below, so `REPO` resolving to /tmp
     # changes nothing.
     inner = tmp / "ci-unit"
     shutil.copy(Path(__file__).resolve(), inner)
-    return {"root": root, "skill": skill, "workflow": workflow, "inner": inner}
+    return {
+        "root": root,
+        "skill": skill,
+        "workflow": workflow,
+        "caller": caller,
+        "inner": inner,
+    }
 
 
 def injection_target(script: str, staged: dict[str, Path]) -> Path:
@@ -5268,6 +5306,8 @@ def injection_target(script: str, staged: dict[str, Path]) -> Path:
         return staged["skill"] / script
     if script == "demo-video.yml":
         return staged["workflow"]
+    if script == "ticket-queue-demo.yml":
+        return staged["caller"]
     if script == "tests/ci-unit":
         return staged["inner"]
     return staged["root"] / script
@@ -5316,6 +5356,73 @@ def check_anchors() -> int:
         return 3
     print(f"All {len(INJECTIONS)} injections still resolve.")
     return 0
+
+
+class CallerPermissions(unittest.TestCase):
+    """The caller must grant at least what the reusable workflow declares.
+
+    A called workflow cannot request more permission than its caller grants,
+    and the failure mode is unusually bad: the run is refused **before it
+    starts**, as `startup_failure`, with no job and no log to read. Nothing
+    points at the caller, and `actionlint` does not check across the two files.
+
+    That is how #410's `contents: write` was found — by a run that produced
+    nothing at all, on a change that had passed every local check.
+    """
+
+    RANK = {"none": 0, "read": 1, "write": 2}
+
+    def perms(self, path: Path) -> dict:
+        """The job-level `permissions:` map, read without a YAML parser.
+
+        `tests/ci-unit` ships `dependencies = []` and the repo keeps it that
+        way, so this reads the block by indentation: `    permissions:` at job
+        level, then every `      scope: level` line under it, comments and
+        blank lines skipped. Both files are written that way and `actionlint`
+        already refuses malformed YAML, so the narrow reader is enough.
+        """
+        found: dict[str, str] = {}
+        inside = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if re.match(r"^ {4}permissions:\s*$", line):
+                inside = True
+                continue
+            if not inside:
+                continue
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            m = re.match(r"^ {6}([a-z-]+):\s*([a-z]+)\s*$", line)
+            if not m:
+                break
+            found[m.group(1)] = m.group(2)
+        return found
+
+    def test_the_caller_grants_at_least_what_the_workflow_declares(self):
+        callee = self.perms(_WORKFLOW)
+        caller = self.perms(_CALLER)
+        # The haystack, before anything is claimed over it: a file whose
+        # permissions this could not read would make every comparison below
+        # true over an empty dict.
+        self.assertTrue(callee, f"no permissions block found in {_WORKFLOW}")
+        self.assertTrue(caller, f"no permissions block found in {_CALLER}")
+        short = {
+            scope: (caller.get(scope, "none"), need)
+            for scope, need in callee.items()
+            if self.RANK.get(caller.get(scope, "none"), 0) < self.RANK.get(need, 0)
+        }
+        self.assertEqual(
+            short,
+            {},
+            f"{_CALLER.name} grants less than {_WORKFLOW.name} declares for "
+            f"{sorted(short)} — GitHub refuses such a run before it starts, as "
+            f"`startup_failure`, with no log to read",
+        )
+
+    def test_the_workflow_can_write_contents_for_the_preview_upload(self):
+        """Named out loud, so dropping it back to `read` has to delete a line
+        that says why it is not `read`. The preview is uploaded as a release
+        asset, which is a write even though no ref moves (#410)."""
+        self.assertEqual(self.perms(_WORKFLOW).get("contents"), "write")
 
 
 class BlockDemoChoice(unittest.TestCase):
@@ -5554,6 +5661,7 @@ def fault_inject() -> int:
                     "CI_UNIT_SCRIPTS": str(root),
                     "CI_UNIT_SKILL": str(skill),
                     "CI_UNIT_WORKFLOW": str(workflow),
+                    "CI_UNIT_CALLER": str(staged["caller"]),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}

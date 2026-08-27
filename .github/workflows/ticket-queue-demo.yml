@@ -31,7 +31,12 @@ concurrency:
 jobs:
   demo:
     permissions:
-      contents: read
+      # `write`, and it must be at least what demo-video.yml declares: a called
+      # workflow cannot request more than its caller grants, and a caller that
+      # grants less does not fail a step — the whole run is refused before it
+      # starts, as `startup_failure`, with no log to read. That is how this was
+      # found. The write is the preview's release-asset upload (#410).
+      contents: write
       pull-requests: write
       # So the ticket re-read (#276) can fetch the issue a storyboard names;
       # without it that check reports every clause `not checked`.
