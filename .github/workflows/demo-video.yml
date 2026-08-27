@@ -141,7 +141,16 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      contents: read
+      # `write`, not `read`, since #410: the pull-request preview is uploaded
+      # as a **release asset**, and that is a write to the repository even
+      # though no ref moves. `read` gave `HTTP 403: Resource not accessible by
+      # integration` on the first live run.
+      #
+      # **A pull request from a fork cannot do this**, whatever is written
+      # here: GitHub hands a fork's workflow a read-only token by design. Such
+      # a run gets a block with no preview and a line saying so, which is why
+      # the upload step below is allowed to fail without failing the job.
+      contents: write
       pull-requests: write
       # For the ticket re-read (#276) only. A caller who does not grant it
       # gets `not checked` in the comment rather than a failed check.
@@ -652,8 +661,13 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        # A preview is a convenience; the recording is the deliverable. An
+        # upload that fails — a fork's read-only token, a transient 5xx —
+        # leaves the block saying the video was not recorded, which is true
+        # and readable, rather than reddening a job whose take succeeded.
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -uo pipefail
           url=""
           while IFS= read -r dir; do
             [ -n "$dir" ] || continue
@@ -708,20 +722,26 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$REPO/pulls/$PR" --jq '.body // ""' > "$PR_BODY"
-          # One block per pull request, from the first demo. A pull request
-          # recording several is rare and the block is deliberately short; the
-          # run link at its foot carries the rest.
-          demo=$(head -n 1 "$DEMO_DIRS")
+          # Every recorded demo is handed over; `demo-pr-body` picks the one
+          # with the most declared acceptance clauses. A change under an app
+          # root makes every storyboard of that app stale — the first live run
+          # recorded seven — so taking the first directory meant taking the
+          # alphabetically first, which chose a demo with no criteria and
+          # rendered an empty checklist while the demo with four went
+          # unmentioned. The choice is in Python because it is a rule worth a
+          # test, not a line of shell.
           args=(--classification "$CLASSIFY" --summary "$SUMMARY")
-          if [ -n "$demo" ]; then
-            args+=(--timeline "$STAGE_DEMO/$demo/timeline.json")
-            args+=(--ticket-check "$STAGE_DEMO/$demo/review/ticket-check.json")
-          fi
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            args+=(--demo "$dir")
+          done < "$DEMO_DIRS"
           if [ -n "$PREVIEW_URL" ]; then args+=(--video-url "$PREVIEW_URL"); fi
           "$SCRIPTS/demo-pr-body" "${args[@]}" \
-            --demo "$demo" --path-prefix "$WORKDIR" --repo-url "$REPO_URL" \
+            --demo-root "$STAGE_DEMO" \
+            --path-prefix "$WORKDIR" --repo-url "$REPO_URL" \
             --sha "$HEAD_SHA" --details-url "$RUN_URL" \
             --existing-body "$PR_BODY" --out "$PR_BLOCK"
+          cat "$PR_BLOCK"
           gh api -X PATCH "repos/$REPO/pulls/$PR" -F body=@"$PR_BLOCK" --jq .html_url
 
       - name: Fail the check if the take failed

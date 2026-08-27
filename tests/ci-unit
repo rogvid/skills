@@ -4555,8 +4555,8 @@ INJECTIONS = [
         # in a repository like this one is linked at the root and 404s.
         "the block step stops passing the working directory to the script",
         "demo-video.yml",
-        '--demo "$demo" --path-prefix "$WORKDIR" --repo-url "$REPO_URL"',
-        '--demo "$demo" --repo-url "$REPO_URL"',
+        '--path-prefix "$WORKDIR" --repo-url "$REPO_URL"',
+        '--repo-url "$REPO_URL"',
         ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
@@ -5179,6 +5179,49 @@ INJECTIONS += [
         'slug = slug or "demo"',
         ["PreviewAssetNames.test_a_path_that_would_break_a_url_is_made_safe"],
     ),
+    (
+        # Back to `demos[0]`: the block describes whichever demo sorts first
+        # rather than the one with something to check. This is the defect the
+        # first live run shipped — an empty checklist on a pull request with
+        # four clauses.
+        "the block describes the first demo instead of the one with the most clauses",
+        "demo-pr-body",
+        "        if count > best_n:\n            best, best_n = name, count",
+        "        if best_n < 0:\n            best, best_n = name, count",
+        [
+            "BlockDemoChoice.test_the_demo_with_the_most_clauses_wins",
+            "BlockDemoChoice.test_it_is_not_simply_the_first",
+        ],
+    ),
+    (
+        # A demo whose timeline cannot be read takes the block, and the
+        # reviewer gets a checklist for a take nothing could describe.
+        "an unreadable timeline wins the block instead of counting as zero",
+        "demo-pr-body",
+        "        except (OSError, ValueError):\n            count = 0",
+        "        except (OSError, ValueError):\n            count = 99",
+        [
+            "BlockDemoChoice.test_an_unreadable_timeline_counts_as_zero_rather_than_raising"
+        ],
+    ),
+    (
+        # The prefix rule goes greedy and eats the first clause of any title
+        # carrying a colon — which is a lot of them, and the loss is silent.
+        "the summary rule eats any title with a colon in it",
+        "demo-pr-body",
+        '_CC_PREFIX = re.compile(r"^[a-z]+(?:\\([^)]*\\))?!?:\\s+")',
+        '_CC_PREFIX = re.compile(r"^.*?:\\s+")',
+        ["BlockSummary.test_a_colon_that_is_not_a_prefix_survives"],
+    ),
+    (
+        # The prefix stops being stripped, so the sentence a reviewer reads
+        # opens with machinery the category line already said.
+        "the conventional-commit prefix is left in the summary",
+        "demo-pr-body",
+        '    cleaned = _CC_PREFIX.sub("", (text or "").strip())',
+        '    cleaned = (text or "").strip()',
+        ["BlockSummary.test_a_conventional_commit_prefix_is_stripped"],
+    ),
 ]
 
 
@@ -5273,6 +5316,100 @@ def check_anchors() -> int:
         return 3
     print(f"All {len(INJECTIONS)} injections still resolve.")
     return 0
+
+
+class BlockDemoChoice(unittest.TestCase):
+    """Which demo the pull-request block describes, when a run recorded several.
+
+    A change under an app root makes every storyboard of that app stale. The
+    first live run of this pipeline recorded **seven**, and taking the first
+    directory took the alphabetically first — a demo with no acceptance
+    criteria — so the block rendered an empty checklist for a pull request with
+    four clauses to tick, and the demo that had them went unmentioned.
+    """
+
+    def tree(self, spec: dict[str, int | None]):
+        """A staging root of demos, each with `n` declared criteria (None = no
+        readable timeline)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name, count in spec.items():
+            (root / name).mkdir(parents=True)
+            if count is None:
+                continue
+            doc = {"coverage": {"criteria": {f"AC-{i}": "x" for i in range(count)}}}
+            (root / name / "timeline.json").write_text(json.dumps(doc))
+        return root
+
+    def test_the_demo_with_the_most_clauses_wins(self):
+        root = self.tree({"a-empty": 0, "z-rich": 4})
+        self.assertEqual(pr_body.pick_demo(["a-empty", "z-rich"], root), "z-rich")
+
+    def test_it_is_not_simply_the_first(self):
+        """The regression this was written for, stated as its own assertion so
+        an edit back to `demos[0]` has to delete a line that says why."""
+        root = self.tree({"a-empty": 0, "b-rich": 3})
+        self.assertNotEqual(pr_body.pick_demo(["a-empty", "b-rich"], root), "a-empty")
+
+    def test_a_tie_takes_the_earlier_name_so_the_choice_is_stable(self):
+        root = self.tree({"a-one": 2, "b-two": 2})
+        self.assertEqual(pr_body.pick_demo(["a-one", "b-two"], root), "a-one")
+        self.assertEqual(pr_body.pick_demo(["b-two", "a-one"], root), "b-two")
+
+    def test_an_unreadable_timeline_counts_as_zero_rather_than_raising(self):
+        """A block describing the wrong demo is a bad block; no block at all is
+        worse, and this step runs after a take that already succeeded."""
+        root = self.tree({"broken": None, "good": 1})
+        self.assertEqual(pr_body.pick_demo(["broken", "good"], root), "good")
+
+    def test_one_demo_is_chosen_even_with_no_criteria_at_all(self):
+        root = self.tree({"only": 0})
+        self.assertEqual(pr_body.pick_demo(["only"], root), "only")
+
+    def test_no_demos_gives_no_demo(self):
+        self.assertEqual(pr_body.pick_demo([], None), "")
+
+
+class BlockSummary(unittest.TestCase):
+    """The one-sentence description, which defaults to the pull-request title."""
+
+    def test_a_conventional_commit_prefix_is_stripped(self):
+        """The title in this repository is a commit subject, and `feat(scope):`
+        is machinery in a sentence meant to read as English — the category line
+        directly above it already says what `feat:` said."""
+        self.assertEqual(
+            pr_body.summarise("feat(ticket-queue): assign actually assigns"),
+            "Assign actually assigns",
+        )
+
+    def test_a_breaking_marker_is_stripped_too(self):
+        self.assertEqual(
+            pr_body.summarise("feat!: drop the old flag"), "Drop the old flag"
+        )
+
+    def test_a_plain_sentence_is_left_alone(self):
+        self.assertEqual(
+            pr_body.summarise("Assign actually assigns"), "Assign actually assigns"
+        )
+
+    def test_a_colon_that_is_not_a_prefix_survives(self):
+        """The control. A greedy rule would eat the first clause of any title
+        with a colon in it, which is a lot of them."""
+        self.assertEqual(
+            pr_body.summarise("Search: it now reads the requester too"),
+            "Search: it now reads the requester too",
+        )
+
+    def test_only_the_first_character_is_capitalised(self):
+        """So `iOS` and `demo-video` survive a title that starts with them."""
+        self.assertEqual(
+            pr_body.summarise("fix: iOS Safari drops the pill"),
+            "IOS Safari drops the pill",
+        )
+        self.assertEqual(
+            pr_body.summarise("fix: demo-video loses a beat"), "Demo-video loses a beat"
+        )
 
 
 class PreviewAssetNames(unittest.TestCase):
