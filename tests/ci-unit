@@ -69,6 +69,9 @@ _WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
 storyboards = load("demo-storyboards", _DIR)
 comment = load("demo-comment", _DIR)
 ticket_check = load("demo-ticket-check", _DIR)
+preview_asset = load("demo-preview-asset", _DIR)
+classify = load("demo-classify", _DIR)
+pr_body = load("demo-pr-body", _DIR)
 
 # **The classifier is the skill's, not the workflow's** — `demo-target-guard`
 # moved under `skills/demo-video/` so that `npx skills add` carries it, and the
@@ -5117,6 +5120,65 @@ INJECTIONS += [
             "TicketCheckRender.test_not_checked_is_printed_with_the_reason_not_omitted",
         ],
     ),
+    (
+        # A pruner that deletes what it cannot parse. Somebody's hand-uploaded
+        # file, or a name from a future format, gone — and this is the one bug
+        # in this script that loses data rather than merely misleading.
+        "prune deletes an asset whose name it does not recognise",
+        "demo-preview-asset",
+        """        if not m:
+            # Left alone, and said out loud. A pruner that deleted what it did
+            # not understand is the one bug here that loses data.
+            print(f"skipped {name!r}: not a preview asset name")
+            continue""",
+        """        if not m:
+            _gh("release", "delete-asset", ASSET_TAG, name, *scope, "--yes")
+            continue""",
+        ["PreviewAssetPrune.test_a_name_it_cannot_parse_is_kept_and_reported"],
+    ),
+    (
+        # A failed `gh pr view` becoming a deletion. One network blip empties
+        # the store, and every open pull request loses the picture it is being
+        # reviewed against.
+        "an unreadable pull-request state is read as closed, so prune deletes it",
+        "demo-preview-asset",
+        '            open_prs[number] = state != "CLOSED" and state != "MERGED"',
+        '            open_prs[number] = state == "OPEN"',
+        ["PreviewAssetPrune.test_an_unreadable_pr_state_is_treated_as_open"],
+    ),
+    (
+        # An open pull request's asset deleted out from under a review in
+        # progress. The body still embeds it, so the reviewer sees a broken
+        # image where the demo was.
+        "prune stops checking state and deletes every asset it can parse",
+        "demo-preview-asset",
+        "        if open_prs[number]:\n            continue",
+        "        if False:\n            continue",
+        ["PreviewAssetPrune.test_it_leaves_an_open_prs_asset_alone"],
+    ),
+    (
+        # The store is flat and every take writes the same `demo.preview.webp`,
+        # so a name without the demo in it has each demo overwrite the last —
+        # silently, and only on a pull request that recorded more than one.
+        "the asset name drops the demo, so two demos on one PR collide",
+        "demo-preview-asset",
+        'return f"pr{int(pr)}-{slug}-{sha[:7]}.webp"',
+        'return f"pr{int(pr)}-{sha[:7]}.webp"',
+        [
+            "PreviewAssetNames.test_two_demos_on_one_pr_do_not_collide",
+            "PreviewAssetNames.test_the_name_carries_the_pr_the_demo_and_the_commit",
+        ],
+    ),
+    (
+        # The round trip broken: `upload` writes names `prune` cannot read, so
+        # nothing is ever deleted and the store grows without bound. Nothing
+        # fails at upload time — this is only visible from the pruner's side.
+        "upload writes a name prune cannot parse, so nothing is ever pruned",
+        "demo-preview-asset",
+        'slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip("-") or "demo"',
+        'slug = slug or "demo"',
+        ["PreviewAssetNames.test_a_path_that_would_break_a_url_is_made_safe"],
+    ),
 ]
 
 
@@ -5211,6 +5273,117 @@ def check_anchors() -> int:
         return 3
     print(f"All {len(INJECTIONS)} injections still resolve.")
     return 0
+
+
+class PreviewAssetNames(unittest.TestCase):
+    """The flat asset store's naming and pruning (#410).
+
+    A preview is not committed — CI uploads it as a release asset, which is not
+    a git object, so the repository does not grow. The store is flat and shared
+    across every pull request, which is what makes these two things load-bearing:
+    a name that does not identify its owner cannot be pruned, and a pruner that
+    guesses deletes somebody's evidence.
+    """
+
+    def test_the_name_carries_the_pr_the_demo_and_the_commit(self):
+        name = preview_asset.asset_name(
+            412, "examples/ticket-queue/demos/2026-08-27-glide", "a1b2c3d4e5f6"
+        )
+        self.assertEqual(name, "pr412-2026-08-27-glide-a1b2c3d.webp")
+
+    def test_two_demos_on_one_pr_do_not_collide(self):
+        """Every take writes the same `demo.preview.webp`, so a store keyed on
+        the filename would have each demo silently overwrite the last."""
+        one = preview_asset.asset_name(412, "demos/queue-search", "a1b2c3d")
+        two = preview_asset.asset_name(412, "demos/status-filter", "a1b2c3d")
+        self.assertNotEqual(one, two)
+
+    def test_two_pushes_keep_both_pictures(self):
+        """An already-reviewed pull-request body must keep pointing at the
+        picture it was reviewed against, not silently acquire a newer one —
+        the same rule `timeline["preview"]` follows (#20)."""
+        first = preview_asset.asset_name(412, "demos/glide", "aaaaaaa")
+        second = preview_asset.asset_name(412, "demos/glide", "bbbbbbb")
+        self.assertNotEqual(first, second)
+
+    def test_a_path_that_would_break_a_url_is_made_safe(self):
+        name = preview_asset.asset_name(7, "demos/a demo (v2)/", "abcdef0")
+        self.assertNotIn(" ", name)
+        self.assertNotIn("(", name)
+        self.assertTrue(preview_asset.ASSET_RE.match(name), name)
+
+    def test_every_name_it_writes_is_one_it_can_read_back(self):
+        """The round trip, which is the whole contract between the two halves:
+        a name `upload` writes that `prune` cannot parse is an asset nothing
+        will ever delete."""
+        for demo in ("demos/2026-08-27-glide", "demos/x", "demos/a b c"):
+            name = preview_asset.asset_name(412, demo, "a1b2c3d")
+            m = preview_asset.ASSET_RE.match(name)
+            self.assertIsNotNone(m, f"upload wrote a name prune cannot read: {name}")
+            self.assertEqual(int(m.group("pr")), 412)
+
+
+class PreviewAssetPrune(unittest.TestCase):
+    """What `prune` deletes, and — the part that matters — what it does not."""
+
+    def run_prune(self, assets, states, dry_run=False):
+        calls = []
+
+        def fake_gh(*args, check=True):
+            calls.append(list(args))
+            if args[:2] == ("release", "view"):
+                return json.dumps({"assets": [{"name": n} for n in assets]})
+            if args[:2] == ("pr", "view"):
+                return states.get(int(args[2]), "OPEN")
+            return ""
+
+        was = preview_asset._gh
+        preview_asset._gh = fake_gh
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                gone = preview_asset.prune(None, dry_run)
+        finally:
+            preview_asset._gh = was
+        deleted = [c[3] for c in calls if c[:2] == ["release", "delete-asset"]]
+        return gone, deleted, out.getvalue()
+
+    def test_it_deletes_a_closed_prs_asset(self):
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "CLOSED"})
+        self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
+
+    def test_it_leaves_an_open_prs_asset_alone(self):
+        """The reason pruning is by state and not by age: an open pull request
+        may be weeks old and still under review."""
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "OPEN"})
+        self.assertEqual(deleted, [])
+
+    def test_a_merged_pr_is_prunable(self):
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "MERGED"})
+        self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
+
+    def test_a_name_it_cannot_parse_is_kept_and_reported(self):
+        """The one bug here that loses data. Somebody's hand-uploaded file, or
+        a name from a future format, must survive a pruner that does not
+        recognise it — and the reader must be told it was skipped rather than
+        left to assume it was considered."""
+        _, deleted, said = self.run_prune(["hand-uploaded.txt"], {})
+        self.assertEqual(deleted, [])
+        self.assertIn("skipped", said)
+        self.assertIn("hand-uploaded.txt", said)
+
+    def test_an_unreadable_pr_state_is_treated_as_open(self):
+        """A failed lookup must not become a deletion: a network blip would
+        otherwise take out every asset in the store in one run."""
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ""})
+        self.assertEqual(deleted, [])
+
+    def test_dry_run_deletes_nothing_but_still_counts(self):
+        gone, deleted, said = self.run_prune(
+            ["pr9-glide-aaaaaaa.webp"], {9: "CLOSED"}, dry_run=True
+        )
+        self.assertEqual(deleted, [])
+        self.assertEqual(gone, 1)
+        self.assertIn("would delete", said)
 
 
 def fault_inject() -> int:

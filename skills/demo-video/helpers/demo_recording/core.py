@@ -1062,7 +1062,9 @@ class _DemoBase:
         # reading as motion — 8 fps looked stepped, and stepped motion is a lie
         # about the thing this recorder exists to show.
         #
-        # It costs about 2.7 MB per take, committed, and one extra ffmpeg pass.
+        # It costs one extra ffmpeg pass and about 3 MB on disk. The file is
+        # gitignored: CI uploads it as a release asset, which is not a git
+        # object, so none of that reaches the repository.
         if preview is None:
             preview = _env_flag("PREVIEW")
         self._preview = True if preview is None else bool(preview)
@@ -3499,13 +3501,14 @@ class _DemoBase:
         self._write_preview(webm, chain)
         spoken = f", {len(self._lines)} spoken lines" if self._speech else ""
         print(f"wrote {mp4} ({mp4.stat().st_size // 1024} kB{spoken})")
-        # Reported with its size and said to be committed, because that is the
-        # part a reader needs to decide about: this file goes into git history
-        # and stays there. A preview that quietly appeared would have its cost
-        # discovered by whoever next clones the repository.
+        # Reported with its size, and said to be gitignored, because both are
+        # what a reader needs: it is ~3 MB, and it is **not** committed. CI
+        # uploads it as a release asset instead (`demo-preview-asset`), which is
+        # not a git object — so a clone never fetches one and the repository
+        # does not grow by a copy per demo per re-record.
         if self._preview_written:
             preview = self._preview_path()
             print(
                 f"wrote {preview} ({preview.stat().st_size // 1024} kB, "
-                f"committed — it is what a pull-request body embeds)"
+                f"gitignored — CI uploads it as a release asset)"
             )
