@@ -454,7 +454,7 @@ GUARD_FACT_NOT_PASSED = {
 
 GUARD_STEP = "Refuse a target that could be production"
 RECORD_STEP = "Record"
-COMMENT_STEP = "Render the comment"
+COMMENT_STEP = "Update the pull-request body"
 _INPUT_RE = re.compile(r"^\$\{\{\s*inputs\.([a-z0-9-]+)\s*\}\}$")
 
 
@@ -4553,19 +4553,19 @@ INJECTIONS = [
         # The other half of the coupling, and the half no reading of
         # `demo-comment` can see: the argument is never passed, so every still
         # in a repository like this one is linked at the root and 404s.
-        "the comment step stops passing the working directory to the script",
+        "the block step stops passing the working directory to the script",
         "demo-video.yml",
-        '            --path-prefix "$WORKDIR" \\\n',
-        "",
+        '--demo "$demo" --path-prefix "$WORKDIR" --repo-url "$REPO_URL"',
+        '--demo "$demo" --repo-url "$REPO_URL"',
         ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
         # And the variable exported but not used, which is the shape
         # `WorkflowGates` exists for: it looks coupled.
-        "the comment step exports the working directory and drops it",
+        "the block step exports the working directory and drops it",
         "demo-video.yml",
-        '            --path-prefix "$WORKDIR"',
-        '            --path-prefix ""',
+        '--path-prefix "$WORKDIR" --repo-url',
+        '--path-prefix "" --repo-url',
         ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
