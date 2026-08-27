@@ -13352,13 +13352,13 @@ INJECTIONS = [
         ["PixelChecks.test_longest_run_finds_the_longest_stretch_not_the_first"],
     ),
     (
-        # The accent predicate drops its red-over-green gap, so any warm
+        # The accent predicate drops its blue-over-green gap, so any cool
         # surface reads as the cursor dot and both cursor checks grade the
         # page instead of the pointer.
-        "the accent predicate takes any red-over-blue surface as the dot",
+        "the accent predicate takes any blue-over-red surface as the dot",
         "tests/pixel",
-        "    return (r - b) >= ACCENT_R_MINUS_B and (r - g) >= ACCENT_R_MINUS_G",
-        "    return (r - b) >= ACCENT_R_MINUS_B",
+        "    return (b - r) >= ACCENT_B_MINUS_R and (b - g) >= ACCENT_B_MINUS_G",
+        "    return (b - r) >= ACCENT_B_MINUS_R",
         ["PixelChecks.test_accent_like_matches_the_dot_blends_and_not_the_chrome"],
     ),
     (
@@ -16106,9 +16106,11 @@ INJECTIONS = [
         # browser-free half of the same drive.
         "the glide moves the pointer and never the dot",
         "web.py",
-        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])',
-        "            pass  # the dot is never told",
-        ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
+        """        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x, y, ms]
+        )""",
+        "        pass  # the dot is never told",
+        ["CursorDrive.test_the_dot_is_commanded_once_to_the_target_with_a_duration"],
     ),
     (
         # The dot commanded somewhere the pointer is not — #202's class with
@@ -16116,9 +16118,13 @@ INJECTIONS = [
         # so an offset here is the one way left for them to disagree.
         "the dot is commanded off the pointer's own path",
         "web.py",
-        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])',
-        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi + 30, yi])',
-        ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
+        """        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x, y, ms]
+        )""",
+        """        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x + 30, y, ms]
+        )""",
+        ["CursorDrive.test_the_dot_is_commanded_once_to_the_target_with_a_duration"],
     ),
     (
         # The seed forgotten: every glide sweeps in from the origin, which is
@@ -16872,6 +16878,7 @@ INJECTIONS = [
         '                    self._size["height"],\n'
         "                    width_scale=self._window_scale[0],\n"
         "                    height_scale=self._window_scale[1],\n"
+        "                    caption_overlay=self._caption_overlay,\n"
         "                ),\n"
         "                window_body=TERM_WINDOW_BODY,\n"
         "            )\n"
@@ -16899,6 +16906,7 @@ INJECTIONS = [
         '                    self._size["height"],\n'
         "                    width_scale=self._window_scale[0],\n"
         "                    height_scale=self._window_scale[1],\n"
+        "                    caption_overlay=self._caption_overlay,\n"
         "                ),\n"
         "                window_body=TERM_WINDOW_BODY,",
         "                chrome_geometry(\n"
@@ -16906,6 +16914,7 @@ INJECTIONS = [
         '                    self._size["height"],\n'
         "                    width_scale=self._window_scale[0],\n"
         "                    height_scale=self._window_scale[1],\n"
+        "                    caption_overlay=self._caption_overlay,\n"
         "                ),\n"
         '                window_body="#1c1a17",',
         [
@@ -17541,8 +17550,8 @@ INJECTIONS = [
         # what keeps the arithmetic half honest without a browser.
         "the caption band is raised into the app rect it must sit below",
         "chrome.py",
-        '        "bandy": winy + bar + pad + apph,',
-        '        "bandy": winy + bar + pad + apph - band // 2,',
+        "    bandy = winy + bar + pad + apph",
+        "    bandy = winy + bar + pad + apph - band // 2",
         [
             "WrapperChrome.test_the_caption_band_and_the_app_rect_share_no_pixels",
             "WrapperChrome.test_the_band_sits_directly_below_the_slot_inside_the_window",
@@ -17793,7 +17802,9 @@ INJECTIONS = [
     (
         "DEMO_VIDEO_PACE in the environment is ignored",
         "core.py",
-        '            raw_pace: float | str = _env("PACE", "1.0")',
+        """            raw_pace: float | str = _env(
+                "PACE", str(preset_defaults.get("pace", 1.0))
+            )""",
         '            raw_pace: float | str = "1.0"',
         ["Pace.test_the_environment_can_set_it"],
     ),
