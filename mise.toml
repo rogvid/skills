@@ -50,8 +50,16 @@ description = "The chrome reference loop — cached takes, no lock (#324)"
 run = "tests/pixel"
 
 [tasks.smoke]
-description = "The cheap smoke arms; the expensive ones are --web-only/--terminal-only/--content-only"
-run = "tests/smoke --cheap"
+description = "The core smoke arms — what CI records per pull request (~84 s)"
+run = "tests/smoke --core"
+
+[tasks.smoke-full]
+description = "The whole smoke suite — what CI records on merge to main (~7 min)"
+run = "tests/smoke"
+
+[tasks.anchors]
+description = "Both injection manifests still resolve (~1 s)"
+run = ["tests/unit --anchors", "tests/ci-unit --anchors"]
 
 [tasks.budget]
 description = "What SKILL.md costs a caller on every invocation"

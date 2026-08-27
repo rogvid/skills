@@ -25,6 +25,7 @@ file; read it before treating a green run as coverage of the workflow.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import importlib.util
 import io
@@ -5119,47 +5120,108 @@ INJECTIONS += [
 ]
 
 
+def stage_tree(tmp: Path) -> dict[str, Path]:
+    """Copy everything an injection may break into `tmp`, and name the copies.
+
+    Split out of `fault_inject` so `check_anchors` resolves targets through the
+    identical staging rather than a second implementation of it.
+    """
+    root = tmp / "scripts"
+    shutil.copytree(SCRIPTS, root)
+    # The skill travels too: the target guard is bundled with it now,
+    # and both the module under `helpers/` and the CLI under `scripts/`
+    # have to be the broken copy or the inner run grades the tree.
+    skill = tmp / "demo-video"
+    shutil.copytree(SKILL, skill)
+    # And the workflow, because the two gates agreeing is a property
+    # of that file and of nothing else.
+    workflow = tmp / "demo-video.yml"
+    shutil.copy(WORKFLOW, workflow)
+    # And this file, so an injection can reach the suite's own
+    # allowlist. The copy is what runs; it reads every path it uses
+    # from the three variables below, so `REPO` resolving to /tmp
+    # changes nothing.
+    inner = tmp / "ci-unit"
+    shutil.copy(Path(__file__).resolve(), inner)
+    return {"root": root, "skill": skill, "workflow": workflow, "inner": inner}
+
+
+def injection_target(script: str, staged: dict[str, Path]) -> Path:
+    """Which staged file an injection's `script` field names."""
+    if script == "target.py":
+        return staged["skill"] / "helpers" / "demo_recording" / script
+    if script.startswith(("scripts/", "helpers/")):
+        # Anything shipped with the skill rather than under
+        # `.github/scripts/`: the three CLIs, and the package modules
+        # they import. `GuardExitCode` runs `demo-target-guard`;
+        # `grade` and `shots` at the top of this file import the other
+        # two, which is how an injection into either reddens the
+        # couplings the comment has with them and cannot import. A
+        # prefix rather than a list because the list was a second
+        # place to remember, and `demo_recording/links.py` (#373) is
+        # the first module either CLI's behaviour lives in.
+        return staged["skill"] / script
+    if script == "demo-video.yml":
+        return staged["workflow"]
+    if script == "tests/ci-unit":
+        return staged["inner"]
+    return staged["root"] / script
+
+
+def check_anchors() -> int:
+    """Every injection still resolves: its pattern matches once, its tests exist.
+
+    The cheap half of `--fault-inject`; see `tests/unit`'s twin for why the
+    weaker question is worth its own mode. One staging, no inner runs.
+    """
+    stale: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = stage_tree(Path(tmp))
+        known: set[str] = set()
+        tree = ast.parse(staged["inner"].read_text(encoding="utf-8"))
+        for cls in tree.body:
+            if isinstance(cls, ast.ClassDef):
+                known |= {
+                    f"{cls.name}.{fn.name}"
+                    for fn in cls.body
+                    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+        for name, script, old, _new, must_fail in INJECTIONS:
+            target = injection_target(script, staged)
+            hits = target.read_text(encoding="utf-8").count(old)
+            if hits != 1:
+                stale.append(
+                    f"{name!r} matched {hits} times in {script}, expected "
+                    f"exactly 1 — the injection would not land, so nothing "
+                    f"it claims to prove is proven.\n       looked for: {old!r}"
+                )
+            gone = [t for t in must_fail if t not in known]
+            if gone:
+                stale.append(
+                    f"{name!r} names {', '.join(gone)}, which this suite does "
+                    f"not define — nothing it claims to prove is proven."
+                )
+    if stale:
+        print(
+            f"ABORT: {len(stale)} of {len(INJECTIONS)} injections no longer resolve.",
+            file=sys.stderr,
+        )
+        for line in stale:
+            print(f"  - {line}", file=sys.stderr)
+        return 3
+    print(f"All {len(INJECTIONS)} injections still resolve.")
+    return 0
+
+
 def fault_inject() -> int:
     """Break one thing at a time and require the named tests to notice."""
     failures = 0
     for name, script, old, new, must_fail in INJECTIONS:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "scripts"
-            shutil.copytree(SCRIPTS, root)
-            # The skill travels too: the target guard is bundled with it now,
-            # and both the module under `helpers/` and the CLI under `scripts/`
-            # have to be the broken copy or the inner run grades the tree.
-            skill = Path(tmp) / "demo-video"
-            shutil.copytree(SKILL, skill)
-            # And the workflow, because the two gates agreeing is a property
-            # of that file and of nothing else.
-            workflow = Path(tmp) / "demo-video.yml"
-            shutil.copy(WORKFLOW, workflow)
-            # And this file, so an injection can reach the suite's own
-            # allowlist. The copy is what runs; it reads every path it uses
-            # from the three variables below, so `REPO` resolving to /tmp
-            # changes nothing.
-            inner = Path(tmp) / "ci-unit"
-            shutil.copy(Path(__file__).resolve(), inner)
-            if script == "target.py":
-                target = skill / "helpers" / "demo_recording" / script
-            elif script.startswith(("scripts/", "helpers/")):
-                # Anything shipped with the skill rather than under
-                # `.github/scripts/`: the three CLIs, and the package modules
-                # they import. `GuardExitCode` runs `demo-target-guard`;
-                # `grade` and `shots` at the top of this file import the other
-                # two, which is how an injection into either reddens the
-                # couplings the comment has with them and cannot import. A
-                # prefix rather than a list because the list was a second
-                # place to remember, and `demo_recording/links.py` (#373) is
-                # the first module either CLI's behaviour lives in.
-                target = skill / script
-            elif script == "demo-video.yml":
-                target = workflow
-            elif script == "tests/ci-unit":
-                target = inner
-            else:
-                target = root / script
+            staged = stage_tree(Path(tmp))
+            root, skill = staged["root"], staged["skill"]
+            workflow, inner = staged["workflow"], staged["inner"]
+            target = injection_target(script, staged)
             text = target.read_text(encoding="utf-8")
             hits = text.count(old)
             if hits != 1:
@@ -5252,8 +5314,16 @@ def main() -> int:
         action="store_true",
         help="break each assertion's subject and require it to fail",
     )
+    ap.add_argument(
+        "--anchors",
+        action="store_true",
+        help="check every injection still resolves — its pattern matches its "
+        "file once and its tests exist — without running any of them",
+    )
     ap.add_argument("--_inner", action="store_true", help=argparse.SUPPRESS)
     args, rest = ap.parse_known_args()
+    if args.anchors:
+        return check_anchors()
     if args.fault_inject:
         return fault_inject()
     result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=2).result

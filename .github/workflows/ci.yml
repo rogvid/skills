@@ -127,10 +127,27 @@ jobs:
       - name: tests/ci-unit
         run: tests/ci-unit
 
+      # The cheap half of the question below, and the half that has actually
+      # caught something: every injection still matches its file exactly once
+      # and still names tests this suite defines. A rename or a reflow is what
+      # goes stale, and it goes stale on a branch — so this runs on the branch,
+      # in a fifth of a second.
+      - name: tests/ci-unit --anchors
+        run: tests/ci-unit --anchors
+
       # An assertion nobody has watched fail is a claim, not a check. This
       # breaks each helper in a named way and requires the tests that watch it
       # to go red; it aborts rather than passing if an injection fails to land.
+      #
+      # On merge, not on every push: it re-runs the suite once per injection,
+      # which measured **298 s** against the 2 s the suite itself costs. A
+      # pull request gets `--anchors` above instead. What that trades away is
+      # written down rather than implied: between a pull request opening and
+      # its merge, nothing proves these 135 assertions can still fail — only
+      # that they would still be *applied*. An assertion that stopped grading
+      # its subject reaches `main` and is caught there.
       - name: tests/ci-unit --fault-inject
+        if: github.event_name != 'pull_request'
         run: tests/ci-unit --fault-inject
 
   # The recorder's own fast job. Everything it grades is a function of
@@ -159,7 +176,17 @@ jobs:
       - name: tests/unit
         run: tests/unit
 
+      # See the twin in `ci-unit` above for the reasoning. 419 injections,
+      # 0.7 s, and it is what catches the manifest going stale under a
+      # refactor — which is the failure this manifest actually has.
+      - name: tests/unit --anchors
+        run: tests/unit --anchors
+
+      # On merge, not on every push: **132 s**, against 7 s for the suite it
+      # is proving. The stated cost of that: a pull request is never told
+      # these 419 assertions can still fail, only that they still land.
       - name: tests/unit --fault-inject
+        if: github.event_name != 'pull_request'
         run: tests/unit --fault-inject
 
       # `tests/smoke`'s injection manifest costs ~32 minutes of recording
@@ -239,42 +266,46 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # The per-push half of `tests/smoke` (issue #61). `--cheap` is every phase
-  # reachable from an arm other than `--web-only` (123 s), `--content-only`
-  # (148 s) and `--terminal-only` (186 s) — the three that are 74% of a whole
-  # run. It is a *complement* rather than a list, computed in `run_phases`, so a
-  # new cheap arm is on this job automatically; `tests/unit`'s `CheapArm` grades
-  # that and its four assertions are fault-injected in `tests/unit
-  # --fault-inject` above.
+  # The per-pull-request half of `tests/smoke`, and the second time this job
+  # has been narrowed. #61 split it into `--cheap`, a *complement* — every
+  # phase an arm outside the three expensive ones reaches. A complement has no
+  # ceiling: it grew to 22 takes and a measured 300 s without anybody choosing
+  # that, and 300 s on the critical path is what a reviewer waits through
+  # before they can even look at the change.
   #
-  # **What this job does not see**, which is the cost of the split and is
-  # written out rather than implied: eight check functions are reachable only
-  # from those three arms, so they grade in `smoke-full` below and not here.
-  # Five have `tests/smoke-inject` entries and are exercised nightly; two —
-  # `check_opening` (retired with #361) and `check_opening_gap` — have no
-  # entry, so between a pull request opening and its merge nothing runs them at
-  # all. That is issue #233, and `tests/README.md` carries it under *Known
-  # gaps*. A third, `check_verb_classification`, left this list in #392: its
-  # static sweep moved to `tests/unit`, which runs per push above. Reviewers
-  # of a green pull request have not seen those two pass.
+  # `--core` is a *list*, enumerated in `tests/smokekit/constants.py` with the
+  # measured cost of each entry beside it, which is the only shape that can be
+  # scaled down. Six arms, 83.5 s on a 16-core box, ~97 s here. They buy the
+  # two ways a recording lies to its reader: a take that did not finish
+  # leaving something that reads as a success (`--failure-only`, six takes),
+  # and a take that should have been refused not being (`--strict-only`, both
+  # media). Plus the three artifacts a reviewer actually reads — coverage,
+  # evidence, stills.
+  #
+  # **What this job does not see** — written out rather than implied, because
+  # the last split's unstated half became #233. The wrapper pair and its
+  # geometry (#358), the console/exit-code reporting (#197), the polish takes
+  # (#110/#111), the light-interlude pair (#162/#163), the stitch (#7),
+  # narration (#157), determinism, and the eight check functions reachable
+  # only from `--web-only`, `--content-only` and `--terminal-only`. All of
+  # them run in `smoke-full` below, on merge to `main`. Rendered-frame
+  # geometry has a faster second reader in `tests/pixel` — 4.7 s warm, 60 s
+  # cold, which is why it is the local loop CLAUDE.md already sends a chrome
+  # change through and not a job here.
   smoke:
-    name: smoke (cheap arms, every push)
+    name: smoke (core arms, every push)
     runs-on: ubuntu-latest
-    # Measured, not derived. Three consecutive `tests/smoke --cheap` runs on a
-    # 16-core developer box, one at a time behind the machine lock and with the
-    # load average read before each: **223.0 s, 221.5 s, 221.9 s** — 222 s, and
-    # a 1.5 s spread. Against the whole suite's measured 427 s that is a 48%
-    # cut. The table, the load averages and run 3's red (a host wall-clock step,
-    # #215/#224, not the selection) are in tests/README.md under "When each take
-    # runs".
+    # Measured one arm at a time on a 16-core developer box behind the machine
+    # lock: 0.2 + 2.1 + 11.6 + 15.5 + 7.3 + 46.8 = 83.5 s, and two
+    # back-to-back `--core` runs at **82.8 s and 82.2 s** confirm the sum. At
+    # the 1.16x a runner has measured against this box that is ~97 s, plus
+    # ~60 s of checkout, uv, ffmpeg and Chromium install.
     #
-    # 12 is 222 s at the 1.16x a CI runner has measured against this box on the
-    # injection manifest (~4m18s), plus ~60 s of checkout, uv, ffmpeg and
-    # Chromium install, with about 2x headroom on top. The headroom is for
-    # runner variance, not for growth: an arm added to the cheap set lands here
-    # automatically, so if this job starts approaching the bar the thing to do
-    # is re-measure `--cheap` and update the table, not nudge this number.
-    timeout-minutes: 12
+    # 6 is that with better than 2x headroom. The headroom is for runner
+    # variance, not for growth: `--core` is a named list, so nothing lands
+    # here without somebody adding it to `CORE_ARMS` and to the costs written
+    # beside it. If this job approaches the bar, re-measure the list.
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -291,8 +322,8 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       # Writes outside the checkout, at a path the upload step below knows.
-      - name: Record every take except the web, content and terminal arms
-        run: tests/smoke --cheap --out-dir "$RUNNER_TEMP/smoke-out"
+      - name: Record the core arms
+        run: tests/smoke --core --out-dir "$RUNNER_TEMP/smoke-out"
 
       # Only on failure: a green run's recordings are noise, a red run's are
       # the only way to see what the recorder actually produced.
@@ -305,24 +336,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # The other half: the three expensive arms, on merge to `main` and on a pull
+  # Everything `--core` above leaves out, on merge to `main` and on a pull
   # request labelled `smoke-full`.
   #
-  # **Why the whole suite and not the three arms.** The arm flags are mutually
-  # exclusive, so "web, content and terminal" is three invocations —
-  # 123 + 148 + 186 = 457 s of takes against a measured 427 s for one whole
-  # run, because the arms share takes. A whole run is cheaper *and* is the only
-  # invocation that grades them together, so this job runs `tests/smoke` with
-  # no flag. It re-records the cheap arms; that is the price of the cheaper
-  # option and it is paid once per merge.
+  # **Why the whole suite and not the difference.** The arm flags are mutually
+  # exclusive, so "everything except the core" would be a dozen invocations
+  # that re-record each other's shared takes and cost more than one whole run.
+  # A whole run is cheaper *and* is the only invocation that grades the takes
+  # together, so this job runs `tests/smoke` with no flag. It re-records the
+  # core arms; that is the price of the cheaper option, and it is paid once
+  # per merge rather than on every push.
   #
   # **Why a label and not only a schedule.** A take that runs after the review
   # is a take that fails after the review, which is the argument #61 was open
-  # against for months. The label is what puts it back in front of the review
-  # for the diffs where it matters — anything in `skills/demo-video/helpers/`
-  # that touches the web or terminal recorders, or `tests/smoke` itself.
+  # against for months, and narrowing the push job to `--core` widens the
+  # window this label exists to close. Reach for it on any diff that touches
+  # the web or terminal recorder, the chrome, or `tests/smoke` itself.
   smoke-full:
-    name: smoke (web, content and terminal takes)
+    name: smoke (everything the core arms leave out)
     # On a pull request only when it is labelled `smoke-full`. A push to `main`
     # — which is what a merge is — always goes. Same shape as
     # .github/workflows/smoke-inject.yml's `fault-inject` label.

@@ -145,6 +145,17 @@ Two rules:
   thing it watches, run it, show the failure output in the pull request, then
   undo the break. Confirm the injection landed — make the harness refuse to
   proceed unless its pattern matched exactly once.
+
+  **This is now your job locally, not CI's on the branch.** `tests/unit
+  --fault-inject` (132 s) and `tests/ci-unit --fault-inject` (298 s) run on
+  merge to `main`, not on a pull request — they were 430 s of a 750 s job set
+  whose actual tests cost 9 s. What runs on the branch, and pre-commit, is
+  `--anchors`: every injection's pattern still matches its file exactly once
+  and still names tests that exist, in under a second. That catches a stale
+  anchor, which is the failure the manifest actually has. It does **not**
+  catch an assertion that stopped grading its subject. So when you add or
+  change an injection, run the driver yourself and put its output in the pull
+  request; a green branch no longer says you did.
 - **Reviewing: answer only "does this meet its stated acceptance criterion, and
   does it regress anything."** Everything else genuine that you notice goes in
   the PR body as a stated limit, or into an issue with its measurement. It does
@@ -221,14 +232,14 @@ mise run setup      # installs the git hooks
 ```
 
 `prek` runs the hooks. **Every one of them shells out to the command CI runs**
-— `tests/lint`, `tests/typecheck`, `tests/unit`, `tests/ci-unit`, and the
-shellcheck / actionlint invocations `ci.yml` spells out. None re-implements a
-check and none names a tool version, because the repo has exactly one pin per
-tool and the scripts read it out of `ci.yml` as text (#189). A hook that called
-`ruff` or `mypy` itself would be the second pin; `tests/lint --self-test` and
-`tests/typecheck --self-test` refuse one.
+— `tests/lint`, `tests/typecheck`, `tests/unit`, `tests/ci-unit`, both
+`--anchors` sweeps, and the shellcheck / actionlint invocations `ci.yml` spells
+out. None re-implements a check and none names a tool version, because the repo
+has exactly one pin per tool and the scripts read it out of `ci.yml` as text
+(#189). A hook that called `ruff` or `mypy` itself would be the second pin;
+`tests/lint --self-test` and `tests/typecheck --self-test` refuse one.
 
-The pre-commit set measures **~6 s** over the whole tree. What needs the
+The pre-commit set measures **~7 s** over the whole tree. What needs the
 network runs on pre-push instead (`tests/lint --issues`), and what needs a
 browser (`tests/smoke`, `tests/pixel`) is not a hook at all — a hook people
 disable is worse than no hook.

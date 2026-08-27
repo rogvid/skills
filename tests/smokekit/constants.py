@@ -1172,3 +1172,50 @@ REAP_MIN_AGE_S = 3600.0
 
 
 EXPENSIVE_ARMS = ("--web-only", "--content-only", "--terminal-only")
+
+
+# The per-pull-request selection, and the one list in this file that is
+# enumerated rather than derived.
+#
+# `--cheap` (#61) is a *complement* — every phase an arm outside
+# EXPENSIVE_ARMS reaches — which is why it grew to 22 takes and 300 s on a
+# runner without anybody choosing that. A complement cannot be scaled down;
+# only a list can. So this is a list, and the cost of each entry is written
+# beside it, measured one arm at a time on a 16-core box:
+#
+#     --lock-only        0.2 s   a refused run leaves no directory to send
+#                                anybody to (#105)
+#     --stills-only      2.1 s   pictures with no video, nothing readable as
+#                                a take (#372)
+#     --strict-only     11.6 s   the two takes strict=True must refuse, web
+#                                and terminal (#3)
+#     --coverage-only   15.5 s   every acceptance clause is answered by a
+#                                beat (#12)
+#     --evidence-only    7.3 s   the per-beat evidence a reviewer reads (#9)
+#     --failure-only    46.8 s   six takes that crash, and what each leaves
+#                                behind (#11/#20/#24/#46)
+#                       ------
+#                       83.5 s   ~97 s on a runner at the measured 1.16x
+#
+# The class each entry buys is the reason it is here: a take that did not
+# finish must not leave something that reads as a success, and a take that
+# should have been refused must be refused. Those are the two ways a
+# recording lies to its reader, which is what GOAL.md measures.
+#
+# **What a pull request therefore no longer sees**, written out rather than
+# implied, because the last split's unstated half became #233: the wrapper
+# pair and its geometry (#358), the console/exit-code reporting both media do
+# (#197), the spotlight and terminal-opening polish takes (#110/#111), the
+# light-interlude pair (#162/#163), the stitch (#7), narration (#157) and
+# determinism. Every one of them runs on merge to `main`, where `smoke-full`
+# records the whole suite. Rendered-frame geometry has a second, faster
+# reader in `tests/pixel`, which is 4.7 s warm and is the loop CLAUDE.md
+# already sends a chrome change through first.
+CORE_ARMS = (
+    "--lock-only",
+    "--stills-only",
+    "--strict-only",
+    "--coverage-only",
+    "--evidence-only",
+    "--failure-only",
+)

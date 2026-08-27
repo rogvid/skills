@@ -305,8 +305,11 @@ tests/smoke --issues-only         # just the broken page and the failing
                                   #   grades (issue #197)
 tests/smoke --lock-only           # records nothing: what a run the machine
                                   #   lock refuses leaves behind (issue #105)
-tests/smoke --cheap               # every arm except web/content/terminal —
-                                  #   what CI records per push (issue #61)
+tests/smoke --core                # the six arms CI records per pull request
+                                  #   (~84 s) — CORE_ARMS in constants.py
+tests/smoke --cheap               # every arm except web/content/terminal
+                                  #   (~222 s) — the older, wider selection
+                                  #   (issue #61); CI no longer runs it
 tests/smoke --out-dir /tmp/smoke  # keep the recordings at a known path
 tests/smoke --keep                # keep the temp dir even when it passes
 ```
@@ -361,11 +364,13 @@ default:
   interval between steps cannot promise to see one, and the widest interval
   this repo has measured is 32.3 s. `ClockProbe` in `tests/unit` holds those
   measurements and fails if the window drops below the widest.
-- **`--segments-only` and `--cheap` are not probed.** `--segments-only` reaches
-  a timing phase but costs 29 s, so a 40 s probe in front of it spends more
-  than it can save; `tests/smoke-inject` re-records that arm on a step instead
-  ([#258](https://github.com/rogvid/skills/issues/258)). `--cheap` is what CI
-  runs on every push, and it pays nothing.
+- **`--segments-only`, `--cheap` and `--core` are not probed.**
+  `--segments-only` reaches a timing phase but costs 29 s, so a 40 s probe in
+  front of it spends more than it can save; `tests/smoke-inject` re-records
+  that arm on a step instead
+  ([#258](https://github.com/rogvid/skills/issues/258)). `--core` is what CI
+  runs per pull request and `--cheap` is what it used to run; neither pays
+  anything.
 - **`tests/smoke-inject` passes `--allow-stepping-clock` on every arm**, for
   that same reason: it already handles a stepping host after the fact, and
   paying 40 s per entry to be told what the re-record fixes would be the cost
@@ -538,8 +543,13 @@ Since #61, CI does not record those three on every push.
 
 | when | what CI runs | job in `ci.yml` |
 |---|---|---|
-| every pull-request commit, and every push to `main` | `tests/smoke --cheap` | `smoke (cheap arms, every push)` |
-| merge to `main`, or a pull request labelled `smoke-full` | `tests/smoke`, the whole suite | `smoke (web, content and terminal takes)` |
+| every pull-request commit, and every push to `main` | `tests/smoke --core` | `smoke (core arms, every push)` |
+| merge to `main`, or a pull request labelled `smoke-full` | `tests/smoke`, the whole suite | `smoke (everything the core arms leave out)` |
+
+**`--cheap` is no longer what CI runs**, and the rest of this section is kept as
+the record of why. The complement grew to 22 takes and a measured 300 s on a
+runner, which is what a reviewer waits through before they can look at the
+change at all. `--core` replaced it: see *The second cut* below.
 
 The merge job runs the **whole suite** rather than the three arms, because the
 arm flags are mutually exclusive: three invocations cost 123 + 148 + 186 =
@@ -654,6 +664,95 @@ runs the recorder's exception paths, which is where the catalogue's
 *clean-path-only assertion* lives. `--failure-only` is nonetheless the one to
 revisit first if the per-push budget ever binds — it is 22% of `--cheap` for
 one check function.
+
+## The second cut — `--core` (the per-pull-request list)
+
+The budget bound. `--cheap` measured **300 s on a runner** and sat on the
+critical path of every pull request, next to a 298 s `ci-unit --fault-inject`
+and a 132 s `unit --fault-inject` — 730 s of a 750 s job set, against **9 s**
+for the two unit suites themselves. That is the whole argument: the tests cost
+nine seconds, and everything else was recording video and re-running suites to
+prove assertions can fail.
+
+### What `--core` is, and why it is a list
+
+The opposite shape from `--cheap`, deliberately. A complement has no ceiling —
+every new cheap arm joins it automatically, which is exactly how the per-push
+job reached 22 takes without anybody deciding that. **A complement cannot be
+scaled down; only a list can.** `CORE_ARMS` in `tests/smokekit/constants.py`
+enumerates six arms with the measured cost of each written beside it:
+
+| arm | seconds | what it buys |
+|---|---|---|
+| `--lock-only` | 0.2 | a refused run leaves no directory to send anybody to (#105) |
+| `--stills-only` | 2.1 | pictures with no video (#372) |
+| `--evidence-only` | 7.3 | the per-beat evidence a reviewer reads (#9) |
+| `--strict-only` | 11.6 | the takes `strict=True` must refuse, both media (#3) |
+| `--coverage-only` | 15.5 | every acceptance clause answered by a beat (#12) |
+| `--failure-only` | 46.8 | six takes that crash, and what each leaves behind |
+| | **83.5** | measured; two `--core` runs read 82.8 s and 82.2 s |
+
+At the runner's 1.16x that is ~97 s, against `--cheap`'s 300 s.
+
+`tests/unit`'s `CoreArm` grades the rule against the guards read out of
+`run_phases`' AST, names the seven phases `--core` runs rather than counting
+them, requires every arm it names to be a flag `main()` defines — a misspelled
+entry silently selects nothing and shrinks the job — and requires `--core` to
+be a *strict subset* of `--cheap`, so narrowing can never add a take. Its four
+assertions have four injections.
+
+### Keeping `--failure-only`, against this file's own advice
+
+The section above named `--failure-only` as "the one to revisit first if the
+per-push budget ever binds". The budget bound and it was kept, so the
+disagreement is recorded rather than quietly reversed.
+
+The seconds-per-check ratio that recommended dropping it counts check
+*functions*, and that is the wrong denominator for this one. `--failure-only`
+is the only phase that runs the recorder's exception paths, and what those
+paths decide is whether a take that did not finish leaves behind something a
+reader takes for a success — a `demo.mp4` beside a `timeline.json` describing a
+different run, a stale `demo-video-FAILED.md`, a duration for a file this take
+never wrote. That is not one check function's worth of risk; it is one of the
+**two ways a recording lies to its reader**, which is what `GOAL.md` measures.
+The other is a take that should have been refused and was not, which is
+`--strict-only`. Those two are the reason this list exists, and the remaining
+four are the artifacts a reviewer actually opens.
+
+### What a pull request therefore no longer sees
+
+On top of the four phases in *What now grades only at merge* above: the wrapper
+pair and its geometry (#358), the console/exit-code reporting both media do
+(#197), the polish takes (#110/#111), the light-interlude pair (#162/#163), the
+stitch (#7), narration (#157), and determinism. All of them run in
+`smoke-full` on merge to `main`, and the `smoke-full` label puts them back in
+front of a review that wants them.
+
+Rendered-frame geometry keeps a second, faster reader: `tests/pixel` is **4.7 s
+warm** and grades the card colour, the parked cursor, cursor absence and the
+spotlight ring off cached frames. It is not a CI job because it is 60 s cold
+and CI is always cold — it is the local loop `CLAUDE.md` already routes a
+chrome change through first.
+
+### The injection drivers: `--anchors` on the branch, `--fault-inject` on merge
+
+Both drivers re-run their whole suite once per injection: 419 injections for
+`tests/unit` (132 s) and 135 for `tests/ci-unit` (298 s). They now run on merge.
+
+What runs on the branch is `--anchors`, the cheap half: one staging, no inner
+runs, and for every injection it checks that the pattern still matches its file
+**exactly once** and that every test it names still exists. 419 injections in
+**0.7 s**, 135 in **0.2 s**.
+
+The split is honest about what it gives up: `--anchors` does **not** prove an
+assertion can fail. It proves the weaker thing the driver spends its first
+millisecond on before aborting — that the injection would still *land*. That is
+worth its own mode because a stale anchor is the failure this manifest actually
+has: a rename or a reflow moves the text an entry pinned, the entry stops
+describing anything, and nothing says so. Six entries went stale in one
+afternoon's refactor, and CI reported it at merge; `--anchors` reports it on the
+branch, in under a second. An assertion that stopped *grading its subject*
+while still landing now reaches `main` before it is caught.
 
 ## What it asserts
 
