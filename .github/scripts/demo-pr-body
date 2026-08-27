@@ -1,0 +1,299 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Render the block a reviewer reads first, for the pull-request *body*.
+
+    demo-pr-body --classification c.json --summary "one line" --out block.md
+    demo-pr-body --classification c.json --summary "one line" \
+                 --demo demos/2026-08-27-glide --video-url https://... \
+                 --existing-body body.md --out body.md
+
+Prints a marker-delimited block. With `--existing-body` it splices the block
+into that body — replacing the previous one if it is there, appending it if it
+is not — so re-running on every push updates in place instead of stacking.
+
+**Why the body and not a comment.** The comment this replaces carried every
+caption, every acceptance message and every diagnostic, and it lived below the
+fold on a conversation tab. What a reviewer wants on opening a pull request is
+three things in this order: *what kind of change is this*, *one sentence on
+what it does*, and *is there something I should watch*. Those fit in a dozen
+lines at the top of the body, which is the first thing the page renders.
+
+**The shape, and what it deliberately leaves out.**
+
+    ## Enhancement · watch the video
+    <one sentence>
+    <video>
+    **Acceptance criteria** — tick what you see:
+    - [ ] AC-1 ...
+    <sub>where the category came from</sub>
+
+No caption table. No beat log. No recorder diagnostics. Those still exist and
+are still uploaded; they belong behind a link for the reviewer who has a
+question, not in front of the one who does not. The acceptance criteria are
+checkboxes because a reviewer ticking a box is the unit of work this repo
+measures — `GOAL.md` counts seconds of human attention per reviewed ticket, and
+an unticked box is the honest state of a clause nobody has looked at yet.
+
+**A change with no demo still gets a block.** One heading and one sentence
+saying why there is nothing to watch. That is not ceremony: the reviewer's
+question was "do I need to watch something", and "no, and here is why" is an
+answer to it. A missing block would leave them to work it out.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+START = "<!-- demo-video:start -->"
+END = "<!-- demo-video:end -->"
+
+# What the heading says after the category, per demo decision. The reviewer
+# reads this line and nothing else about a third of the time, so it carries the
+# instruction rather than a label: "watch the video", not "video".
+HEADLINE = {
+    "video": "watch the video",
+    "stills": "see the stills",
+    "none": "nothing to watch",
+}
+
+
+# What GitHub will actually inline. Settled by probing a real pull request
+# rather than by reading documentation, because the answer is not documented:
+# GitHub's own attachment upload — the drag-and-drop that yields a
+# `user-attachments/assets/…` URL — goes through an endpoint that needs a
+# browser session, so **CI cannot produce one**. Everything here therefore
+# comes from a file committed on the branch, referenced by absolute URL.
+#
+#   .png .jpg .webp   inline, and an animated .webp animates
+#   .mp4              NOT inline from a committed file; only an attachment
+#                     uploaded through the web UI gets a player
+#
+# So a video reaches a reviewer as an animated WebP, and the full-quality mp4
+# stays behind the artifact link. A GIF of the same take measured 2.62 MB
+# against WebP's 0.23 MB — larger than the source mp4 — which is why GIF is
+# not in this list.
+INLINE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif")
+
+
+def _embed(url: str, alt: str) -> str:
+    """An image if GitHub will inline it, a plain link if it will not.
+
+    A bare `![](…)` around an `.mp4` renders as a broken image, which is worse
+    than a link: it tells the reviewer something is missing rather than that
+    something is elsewhere.
+    """
+    base = url.split("?", 1)[0].split("#", 1)[0].lower()
+    if base.endswith(INLINE_SUFFIXES):
+        return f"![{alt}]({url})"
+    return f"▶ [{alt}]({url})"
+
+
+def _fmt_seconds(value: object) -> str:
+    """`0:07` from a beat's start time, or "" when there is not one."""
+    try:
+        total = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    return f"{int(total) // 60}:{int(total) % 60:02d}"
+
+
+def clause_rows(timeline: dict) -> list[tuple[str, str, str, str | None]]:
+    """`(id, text, timestamp, still)` for each acceptance clause the take declared.
+
+    Read out of the same `coverage` block the old comment rendered, so this
+    changes where the clauses are shown and not what they are: `criteria` maps
+    id to text, `claimed` maps id to the beats that answered it, each carrying
+    `t_start` and possibly a `still`.
+
+    **A clause no beat claimed keeps its row**, with no timestamp and a marker
+    saying so. It is precisely the row a reviewer must not skim past — a
+    checklist that silently omitted its unanswered item would be the artifact
+    lying by omission, which is the one thing `GOAL.md` will not trade for
+    brevity.
+
+    The earliest claiming beat wins the timestamp, and the first still any
+    claiming beat carries is offered as the picture for that clause: a reviewer
+    scrubbing to a clause wants where it *starts*, not where it happened to be
+    mentioned again.
+    """
+    coverage = timeline.get("coverage") or {}
+    criteria = coverage.get("criteria") or {}
+    claimed = coverage.get("claimed") or {}
+    rows: list[tuple[str, str, str, str | None]] = []
+    for cid, text in criteria.items():
+        beats = sorted(claimed.get(cid) or [], key=lambda b: b.get("t_start") or 0.0)
+        at = _fmt_seconds(beats[0].get("t_start")) if beats else ""
+        still = next((b.get("still") for b in beats if b.get("still")), None)
+        rows.append((str(cid), str(text).strip(), at, still))
+    return rows
+
+
+def render_block(
+    classification: dict,
+    summary: str,
+    *,
+    video_url: str | None = None,
+    stills: list[str] | None = None,
+    timeline: dict | None = None,
+    sha: str | None = None,
+    details_url: str | None = None,
+) -> str:
+    """The whole block, markers included."""
+    category = classification.get("category")
+    demo = classification.get("demo", "none")
+    label = (category or "unclassified").capitalize()
+
+    out = [START, "", f"## {label} · {HEADLINE.get(demo, 'nothing to watch')}", ""]
+    if summary.strip():
+        out += [summary.strip(), ""]
+
+    if demo == "none":
+        out += [
+            f"Nothing here changes what a viewer sees — {classification.get('why_demo', '')}.",
+            "",
+        ]
+    else:
+        # `![…]()` and not `[…]()`. A link is one click away from being looked
+        # at, and a reviewer who has to click has already decided whether to
+        # bother — which is the decision this block exists to make for them.
+        # The URLs are absolute (`{repo}/raw/{sha}/{path}`) because a relative
+        # path does not resolve in a pull-request body, and pinned to the sha
+        # so the picture is the one this take recorded rather than whatever is
+        # at the branch head when somebody reads it a week later.
+        if demo == "video" and video_url:
+            out += [_embed(video_url, "demo"), ""]
+        elif demo == "video":
+            out += ["_The video for this change has not been recorded yet._", ""]
+        if stills:
+            for path in stills:
+                out.append(_embed(path, Path(path).stem))
+            out.append("")
+        elif demo == "stills" and not stills:
+            out += ["_The stills for this change have not been recorded yet._", ""]
+
+        rows = clause_rows(timeline or {})
+        if rows:
+            out += ["**Acceptance criteria** — tick what the demo shows:", ""]
+            for cid, text, at, still in rows:
+                if at:
+                    stamp = f" [{at}]({still})" if still else f" ({at})"
+                else:
+                    stamp = " — ⚠️ **no beat claims this**"
+                out.append(f"- [ ] **{cid}** {text}{stamp}")
+            out.append("")
+
+    foot = [f"Category from {classification.get('why_category', 'nothing')}"]
+    foot.append("override with a `Category:` line in this body")
+    if sha:
+        # "recorded from" only when something *was* recorded. On a block that
+        # says there is nothing to watch, it would be describing a take that
+        # does not exist — small, and exactly the kind of small the artifact
+        # cannot afford, because a reviewer who goes looking for that recording
+        # finds nothing and stops trusting the rest of the block.
+        foot.append(f"{'recorded from' if demo != 'none' else 'on'} `{sha[:7]}`")
+    if details_url:
+        foot.append(f"[captions, beat log and diagnostics]({details_url})")
+    out.append("<sub>" + " · ".join(foot) + ".</sub>")
+    out += ["", END]
+    return "\n".join(out) + "\n"
+
+
+def preview_url(
+    timeline: dict, *, demo: str, repo_url: str | None, sha: str | None
+) -> str | None:
+    """The absolute URL of the take's committed preview, or None.
+
+    `timeline["preview"]` is named only when *this* run wrote one, which is the
+    same rule `media` follows and for the same reason (#20): a
+    `demo.preview.webp` from a previous take is very likely sitting in the
+    directory, and pointing a pull-request body at it would show a reviewer a
+    recording of something else and invite them to tick boxes against it.
+
+    None without a repository or a commit, matching `demo-comment`'s
+    `_still_href`: a URL built without both resolves to the wrong bytes, and
+    saying nothing beats showing the wrong picture.
+    """
+    name = timeline.get("preview")
+    base = (repo_url or "").rstrip("/")
+    if not name or not base or not sha:
+        return None
+    return f"{base}/raw/{quote(sha)}/{quote(demo.strip('/'))}/{quote(str(name))}"
+
+
+def splice(body: str, block: str) -> str:
+    """Replace the managed block in `body`, or append it.
+
+    Everything outside the markers is the author's and is never touched. A body
+    carrying a half-written pair of markers — a start with no end — is left
+    alone and the block is appended, because guessing where somebody's unclosed
+    marker was meant to end is how a tool eats a paragraph.
+    """
+    start, end = body.find(START), body.find(END)
+    if start != -1 and end != -1 and end > start:
+        return body[:start] + block.rstrip("\n") + body[end + len(END) :]
+    sep = "" if not body.strip() else body.rstrip("\n") + "\n\n"
+    return sep + block
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--classification", required=True, help="demo-classify --json output"
+    )
+    ap.add_argument(
+        "--summary", default="", help="one sentence on what the change does"
+    )
+    ap.add_argument("--timeline", help="timeline.json, for the acceptance clauses")
+    ap.add_argument("--video-url", help="where the recording can be watched")
+    ap.add_argument("--still", action="append", default=[], help="a still to embed")
+    ap.add_argument("--sha", help="the commit this was recorded from")
+    ap.add_argument("--demo", help="the demo directory, for the preview URL")
+    ap.add_argument("--repo-url", help="https://<host>/<owner>/<repo>")
+    ap.add_argument("--details-url", help="the old long comment, or the artifact")
+    ap.add_argument(
+        "--existing-body", help="splice into this body instead of printing bare"
+    )
+    ap.add_argument("--out", help="write here instead of stdout")
+    args = ap.parse_args()
+
+    classification = json.loads(Path(args.classification).read_text(encoding="utf-8"))
+    timeline = (
+        json.loads(Path(args.timeline).read_text(encoding="utf-8"))
+        if args.timeline
+        else None
+    )
+    # An explicit --video-url wins; otherwise the take's own committed
+    # preview is the thing to embed, and it is the only file of a take that a
+    # pull-request body can show inline at all.
+    video_url = args.video_url
+    if not video_url and timeline and args.demo:
+        video_url = preview_url(
+            timeline, demo=args.demo, repo_url=args.repo_url, sha=args.sha
+        )
+    block = render_block(
+        classification,
+        args.summary,
+        video_url=video_url,
+        stills=args.still,
+        timeline=timeline,
+        sha=args.sha,
+        details_url=args.details_url,
+    )
+    if args.existing_body:
+        block = splice(Path(args.existing_body).read_text(encoding="utf-8"), block)
+    if args.out:
+        Path(args.out).write_text(block, encoding="utf-8")
+    else:
+        sys.stdout.write(block)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

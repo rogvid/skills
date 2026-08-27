@@ -9804,8 +9804,18 @@ class NarrationMix(unittest.TestCase):
             core_module.subprocess.run = was
             core_module.media_duration = was_duration  # type: ignore[assignment]
             core_module.clip_gain_db = was_gain  # type: ignore[assignment]
-        self.assertEqual(len(seen), 1, f"expected one ffmpeg call, got {seen!r}")
-        cmd = seen[0]
+        # The *mix*, selected by what it writes rather than by being the only
+        # ffmpeg call. It stopped being the only one when #410 added the
+        # pull-request preview, and `seen[0]` then silently became a WebP
+        # encode that has no `adelay` in it — so the floor is kept, and made
+        # precise: exactly one command writes this take's mp4.
+        mixes = [c for c in seen if c[-1].endswith(".mp4")]
+        self.assertEqual(
+            len(mixes),
+            1,
+            f"expected exactly one ffmpeg call writing an mp4, got {seen!r}",
+        )
+        cmd = mixes[0]
         self.assertIn("-filter_complex", cmd, "the mix went in without a filter graph")
         graph = cmd[cmd.index("-filter_complex") + 1]
         # Kept for the tests that assert on the filter graph itself rather
@@ -12847,6 +12857,164 @@ class ExitStatus(_GradeCase):
         # written against.
         section = grade.__doc__.split("## Exit status")[1]
         self.assertEqual(set(re.findall(r"\b([0-9])\b", section)), {"0", "2"})
+
+
+class PreviewWebp(unittest.TestCase):
+    """The animated WebP a pull-request body embeds (issue #410).
+
+    GitHub has no public API for the attachment upload its drag-and-drop uses,
+    so a video cannot reach a reviewer as a player — only as an inline image.
+    This is that image, and every test here is about a way it could mislead:
+    naming a file this run did not write, losing the camera moves the mp4 has,
+    or being encoded from a source two h264 generations down.
+    """
+
+    def doc(self, **settings) -> dict:
+        rec = recorder(self, page=DrawingPage(), **settings)
+        rec.caption("A small dashboard.")
+        with contextlib.redirect_stderr(io.StringIO()):
+            return rec._timeline_doc()
+
+    def test_a_run_that_wrote_no_preview_names_none(self):
+        """The #20 rule, one field over.
+
+        `demo.preview.webp` from a previous take is very likely sitting in the
+        directory — `record.py` is committed so it can be re-run. Naming it
+        would point a pull-request body at a recording of something else and
+        invite a reviewer to tick acceptance boxes against it.
+        """
+        doc = self.doc()
+        self.assertIsNone(doc["preview"])
+
+    def test_a_run_that_wrote_one_names_it(self):
+        rec = recorder(self, page=DrawingPage())
+        rec.caption("A small dashboard.")
+        rec._preview_written = True
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = rec._timeline_doc()
+        self.assertEqual(doc["preview"], "demo.preview.webp")
+
+    def test_a_segment_names_its_own_preview_and_not_the_takes(self):
+        """Two segments in one directory would otherwise collide on one name,
+        and the second would overwrite the first's preview while both
+        timelines went on naming it."""
+        rec = recorder(self, page=DrawingPage(), segment="part2")
+        self.assertEqual(rec._preview_path().name, "part2.preview.webp")
+        plain = recorder(self, page=DrawingPage())
+        self.assertEqual(plain._preview_path().name, "demo.preview.webp")
+
+    def test_convert_hands_the_preview_the_webm_and_not_the_mp4(self):
+        """The call site, which is where this can actually go wrong.
+
+        The test below grades what `_write_preview` does with the path it is
+        handed. It cannot see `_convert` handing it the wrong one — and that
+        is the whole defect: two extra h264 generations, a preview that still
+        renders, and nobody the wiser. `--fault-inject` found this gap by
+        breaking the call site and watching the suite stay green.
+
+        Read off the source rather than by running `_convert`, which encodes
+        two files and needs a browser's output to do it.
+        """
+        tree = ast.parse(
+            textwrap.dedent(inspect.getsource(core_module._DemoBase._convert))
+        )
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_write_preview"
+        ]
+        self.assertEqual(len(calls), 1, "_convert does not call _write_preview once")
+        first = calls[0].args[0]
+        self.assertIsInstance(
+            first,
+            ast.Name,
+            f"_convert passes {ast.dump(first)[:60]} to _write_preview, not a bare name",
+        )
+        self.assertEqual(
+            first.id,
+            "webm",
+            f"_convert hands the preview `{first.id}`; it must be the webm, or the "
+            f"preview is encoded from a source two h264 generations down",
+        )
+
+    def test_the_encode_reads_the_webm_and_never_the_mp4(self):
+        """The whole reason #410 encodes where it does.
+
+        By the time `demo.mp4` exists the frames have been through h264 twice.
+        Measured on a 25 s take, encoding the preview from the mp4 instead is
+        both dirtier and larger — 2.95 MB against 2.67 MB at identical WebP
+        settings, because a noisier source costs the encoder bits. So this
+        asserts the *input path*, which is the thing that decides it.
+        """
+        rec = recorder(self, page=DrawingPage())
+        seen = []
+        with mock.patch.object(
+            core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        self.assertEqual(len(seen), 1, "the preview encode did not run")
+        cmd = [str(part) for part in seen[0]]
+        self.assertIn("/tmp/x/page@abc.webm", cmd)
+        self.assertFalse(
+            [part for part in cmd if part.endswith((".mp4", ".camera.mp4"))],
+            f"the preview was encoded from an mp4: {cmd}",
+        )
+
+    def test_the_camera_chain_reaches_the_preview(self):
+        """Encoding from the raw webm without it loses every push-in — which
+        is exactly what a first cut of this did, and what a reviewer caught by
+        eye. The chain is threaded in rather than re-derived so the preview
+        and the mp4 cannot disagree about where the camera went."""
+        rec = recorder(self, page=DrawingPage())
+        seen = []
+        with mock.patch.object(
+            core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), "zoompan=z='1.3'")
+        graph = [str(p) for p in seen[0]][
+            [str(p) for p in seen[0]].index("-filter_complex") + 1
+        ]
+        self.assertIn("zoompan", graph)
+        self.assertIn("scale=1280", graph)
+
+    def test_a_take_with_no_camera_still_gets_a_preview(self):
+        rec = recorder(self, page=DrawingPage())
+        seen = []
+        with mock.patch.object(
+            core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        graph = [str(p) for p in seen[0]][
+            [str(p) for p in seen[0]].index("-filter_complex") + 1
+        ]
+        self.assertNotIn("zoompan", graph)
+        self.assertIn("scale=1280", graph)
+
+    def test_a_failed_encode_warns_and_keeps_the_take(self):
+        """A reviewer losing a preview is an inconvenience; raising here would
+        throw away a recording that is already complete."""
+        rec = recorder(self, page=DrawingPage())
+        err = io.StringIO()
+        with (
+            mock.patch.object(
+                core_module.subprocess,
+                "run",
+                side_effect=subprocess.CalledProcessError(1, "ffmpeg"),
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        self.assertFalse(rec._preview_written)
+        self.assertIn("preview", err.getvalue().lower())
+
+    def test_it_can_be_turned_off(self):
+        rec = recorder(self, page=DrawingPage(), preview=False)
+        with mock.patch.object(core_module.subprocess, "run") as run:
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        run.assert_not_called()
+        self.assertFalse(rec._preview_written)
 
 
 class StillsOnly(unittest.TestCase):
@@ -16484,6 +16652,61 @@ INJECTIONS = [
             "CheapArm.test_a_whole_run_still_takes_everything_and_a_named_arm_still_itself"
         ],
     ),
+    # -- the pull-request preview (issue #410) ------------------------------
+    #
+    # Five breaks, for the five ways this file can mislead a reviewer rather
+    # than merely be absent. Absence is visible — the block says the video was
+    # not recorded. Every one of these is *silent*: the preview renders, and
+    # shows the wrong thing.
+    (
+        # The #20 lie, one field over. `record.py` is committed so it can be
+        # re-run, so a previous take's preview is very likely sitting right
+        # there — and a pull-request body pointed at it invites a reviewer to
+        # tick acceptance boxes against a recording of something else.
+        "the timeline names a preview this run did not write",
+        "core.py",
+        '            "preview": self._preview_path().name if self._preview_written else None,',
+        '            "preview": self._preview_path().name,',
+        ["PreviewWebp.test_a_run_that_wrote_no_preview_names_none"],
+    ),
+    (
+        # Two segments in one directory collide on one name: the second
+        # overwrites the first's preview while both timelines go on naming it.
+        "every segment's preview is written to the same name",
+        "core.py",
+        '        stem = self.segment if self.segment else "demo"',
+        '        stem = "demo"',
+        ["PreviewWebp.test_a_segment_names_its_own_preview_and_not_the_takes"],
+    ),
+    (
+        # The whole reason #410 encodes where it does. Reading the mp4 costs
+        # two extra h264 generations and measured both dirtier and larger.
+        # Nothing raises — the preview still appears, just degraded.
+        "the preview is encoded from the mp4 instead of the browser's frames",
+        "core.py",
+        "        self._write_preview(webm, chain)",
+        "        self._write_preview(self._media_path(), chain)",
+        ["PreviewWebp.test_convert_hands_the_preview_the_webm_and_not_the_mp4"],
+    ),
+    (
+        # The defect a reviewer caught by eye on the first cut: encoding from
+        # the raw webm drops every camera push-in. The preview looks fine
+        # until somebody compares it with the mp4.
+        "the camera chain stops reaching the preview, so it loses every push-in",
+        "core.py",
+        'graph = f"[0:v]{chain},{scale}[v]" if chain else f"[0:v]{scale}[v]"',
+        'graph = f"[0:v]{scale}[v]"',
+        ["PreviewWebp.test_the_camera_chain_reaches_the_preview"],
+    ),
+    (
+        # A preview failure taking the take with it. The recording is already
+        # complete at this point; raising would discard it over a convenience.
+        "a failed preview encode throws away the finished take",
+        "core.py",
+        "        except (OSError, subprocess.CalledProcessError) as exc:",
+        "        except _NeverRaised as exc:",
+        ["PreviewWebp.test_a_failed_encode_warns_and_keeps_the_take"],
+    ),
     # -- what `tests/smoke --core` selects ----------------------------------
     #
     # Four breaks, for the four ways a *named list* goes wrong, which are not
@@ -18010,9 +18233,7 @@ INJECTIONS = [
     (
         "DEMO_VIDEO_PACE in the environment is ignored",
         "core.py",
-        """            raw_pace: float | str = _env(
-                "PACE", str(preset_defaults.get("pace", 1.0))
-            )""",
+        '            raw_pace: float | str = _env("PACE", str(preset_defaults.get("pace", 1.0)))',
         '            raw_pace: float | str = "1.0"',
         ["Pace.test_the_environment_can_set_it"],
     ),
