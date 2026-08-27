@@ -100,7 +100,12 @@ with TerminalRecorder(
     rec.shot("07-cli-open")
 
     rec.caption("An unknown status is refused.")
-    rec.run("./tickets list --status frozen")
+    # The refusal *is* the demonstration, so the exit code is declared rather
+    # than tolerated (#405). Without this the take cannot rehearse:
+    # `demo-rehearse` pins strict=True, and strict read every non-zero exit as
+    # a defect — so the one storyboard showing that bad input is rejected was
+    # the one storyboard that could not pass the gate.
+    rec.run("./tickets list --status frozen", expect_exit=2)
     rec.wait_for_prompt()
     rec.hold()
     rec.shot("08-cli-unknown")

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from .content import _common, media_duration, merge_content, print_content_summary
@@ -46,8 +47,7 @@ def _merge_determinism(records: list[dict]) -> dict:
             if key not in order:
                 order.append(key)
     return {
-        key: _common([(record or {}).get(key) for record in records])
-        for key in order
+        key: _common([(record or {}).get(key) for record in records]) for key in order
     }
 
 
@@ -130,8 +130,11 @@ def _merge_capture_clock(docs: list[dict], records: list[dict]) -> dict | None:
         # The worst coverage any part managed, not an average: a stitched
         # record is only as believable as its shakiest capture.
         "max_gap": max(
-            (g for g in gaps if isinstance(g, (int, float))
-             and not isinstance(g, bool)),
+            (
+                g
+                for g in gaps
+                if isinstance(g, (int, float)) and not isinstance(g, bool)
+            ),
             default=None,
         ),
         "max_gap_limit": _common([c.get("max_gap_limit") for c in clocks]),
@@ -268,7 +271,10 @@ def _segment_timeline(out_dir: Path, segment: str, media: Path, probed: float) -
             f"stamp somebody else's beats onto this demo"
         )
     logged = doc.get("duration")
-    if isinstance(logged, (int, float)) and abs(float(logged) - probed) > SEGMENT_STALE_S:
+    if (
+        isinstance(logged, (int, float))
+        and abs(float(logged) - probed) > SEGMENT_STALE_S
+    ):
         raise ValueError(
             f"{json_path} was written for a {float(logged):.2f}s recording, but "
             f"{media.name} is {probed:.2f}s — the log and the video are from "
@@ -303,15 +309,39 @@ _STREAM_FIELDS = ("codec", "width", "height", "frame rate", "audio track")
 def _stream_shape(path: Path) -> tuple:
     """(codec, width, height, r_frame_rate, has audio) for one part."""
     out = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries",
-         "stream=codec_name,width,height,r_frame_rate", "-of", "csv=p=0", str(path)],
-        check=True, capture_output=True, text=True,
+        [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,width,height,r_frame_rate",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     video = tuple(out.stdout.strip().split(","))
     audio = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-select_streams", "a", "-show_entries",
-         "stream=codec_name", "-of", "csv=p=0", str(path)],
-        check=True, capture_output=True, text=True,
+        [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return (*video, bool(audio.stdout.strip()))
 
@@ -593,6 +623,24 @@ def _merged_timeline(
     return doc
 
 
+def _stills_only_segment(out_dir: Path, segment: str) -> bool:
+    """Whether this segment's own beat log says it recorded pictures, no video.
+
+    Read off the segment's timeline rather than off the environment: the log is
+    what the run actually wrote, and `DEMO_VIDEO_STILLS_ONLY` is only what it
+    was asked for. A segment whose log is missing or unreadable is **not**
+    stills-only — it falls through to the ordinary checks, which have proper
+    words for every way that can be wrong.
+    """
+    json_path = out_dir / f"{segment}.seg.timeline.json"
+    if not json_path.is_file():
+        return False
+    try:
+        return json.loads(json_path.read_text()).get("mode") == "stills"
+    except (OSError, ValueError):
+        return False
+
+
 def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None:
     """Concatenate segment recordings into demo.mp4 and merge their beat logs.
 
@@ -617,6 +665,30 @@ def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None
     """
     out_dir = Path(out_dir)
     parts = [out_dir / f"{s}.seg.mp4" for s in segments]
+    # A stills-only run of a segmented storyboard is not a broken stitch — it
+    # is a run that correctly recorded no video, in every segment, on purpose
+    # (#372). There is nothing to concatenate and the stills are the artifact,
+    # so this returns rather than refusing.
+    #
+    # That distinction is the whole of #405's second half. `demo-rehearse`
+    # runs stills-only, so before this a *segmented* storyboard could not
+    # rehearse at all: the gate that decides whether a take is worth recording
+    # died on `FileNotFoundError: part1.seg.mp4` — a message about a missing
+    # file, for a file nothing was supposed to write.
+    #
+    # A **mix** stays an error, and is left to the per-segment check below,
+    # which words it properly: some segments having video and others not is a
+    # take somebody half re-recorded, and joining them would publish a demo
+    # missing the middle.
+    stills = [_stills_only_segment(out_dir, name) for name in segments]
+    if stills and all(stills):
+        print(
+            f"stitch: every segment of this run is stills-only, so there is no "
+            f"video to join — {len(segments)} segment(s) wrote their pictures "
+            f"and nothing else. No demo.mp4 was written.",
+            file=sys.stderr,
+        )
+        return
     for p in parts:
         if not p.exists():
             raise FileNotFoundError(p)
@@ -644,9 +716,23 @@ def stitch(out_dir: Path, segments: list[str], keep_parts: bool = False) -> None
             )
         )
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-             "-i", str(listing), "-c", "copy", "-movflags", "+faststart",
-             str(demo)],
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(listing),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(demo),
+            ],
             check=True,
         )
     finally:

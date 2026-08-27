@@ -62,6 +62,7 @@ HELPERS = REPO / "skills" / "demo-video" / "helpers"
 _PKG_PARENT = Path(os.environ.get("UNIT_HELPERS", HELPERS))
 sys.path.insert(0, str(_PKG_PARENT))
 
+import demo_recording.stitching as stitching_module  # noqa: E402
 from demo_recording.content import (  # noqa: E402
     CONTENT_ACTING_VERBS,
     CONTENT_CAPTION_TRIM,
@@ -8295,6 +8296,138 @@ def reader_correction(doc: dict, beat: dict) -> float:
         for step in record.get("steps") or []
         if step.get("segment") == beat.get("segment") and step["t"] <= beat["t_start"]
     )
+
+
+class ExpectedExit(unittest.TestCase):
+    """A non-zero exit a storyboard declared, versus one it did not (#405).
+
+    The whole point is that these stay different. `expect_exit` exists so a
+    storyboard demonstrating that bad input is *refused* can rehearse — before
+    it, `demo-rehearse` pins strict=True and strict read every non-zero exit as
+    a defect, so the one storyboard showing a refusal was the one storyboard
+    that could not pass the gate. It must not become a way to silence a command
+    that failed for a reason nobody predicted.
+    """
+
+    def recorder(self, **kw):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with target_env(), contextlib.redirect_stderr(io.StringIO()):
+            return TerminalRecorder(tmp.name, evidence=False, **kw)
+
+    def note(self, rec, *, expect: int, got: int):
+        """Drive the exit-status path with one pending run() beat."""
+        beat = {"selector": "./tickets list --status frozen", "exit_code": None}
+        if expect:
+            beat["expect_exit"] = expect
+        rec._beats.append(beat)
+        rec._pending_runs.append(beat)
+        # `_record_exit_code` takes a sequence number and *swallows the
+        # first* — the shell's exit markers arrive in order and the opening one
+        # only establishes the sequence. Seeding `_exit_seq` is what makes a
+        # single call land, rather than silently doing nothing and leaving
+        # every assertion below true over an empty issue list.
+        rec._exit_seq = 0
+        with contextlib.redirect_stderr(io.StringIO()):
+            rec._record_exit_code(got, 1)
+        return [i for i in rec._issues if i.get("kind") == "nonzero_exit"]
+
+    def test_a_declared_failure_records_no_issue(self):
+        rec = self.recorder()
+        self.assertEqual(self.note(rec, expect=2, got=2), [])
+
+    def test_an_undeclared_failure_still_records_one(self):
+        """The control. Without it, "declaring 2 is quiet" is satisfied by a
+        recorder that stopped noticing exits at all."""
+        rec = self.recorder()
+        self.assertEqual(len(self.note(rec, expect=0, got=2)), 1)
+
+    def test_the_wrong_code_is_still_a_failure_and_says_what_was_promised(self):
+        """A storyboard promising 2 and getting 1 has found something. This is
+        the assertion that stops `expect_exit` becoming `ignore_exit`."""
+        rec = self.recorder()
+        issues = self.note(rec, expect=2, got=1)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("expected 2", issues[0]["message"])
+
+    def test_a_success_where_a_failure_was_promised_is_a_failure(self):
+        """The direction nobody thinks of: the command was *fixed*, the
+        storyboard still claims it is refused, and the demo now shows a
+        sentence the screen contradicts."""
+        rec = self.recorder()
+        self.assertEqual(len(self.note(rec, expect=2, got=0)), 1)
+
+    def test_the_promise_is_written_into_the_beat(self):
+        """So `timeline.json` carries it beside the result and a reader can see
+        the take meant it, rather than having to trust that it did."""
+        rec = self.recorder()
+        with contextlib.redirect_stderr(io.StringIO()):
+            with (
+                mock.patch.object(type(rec), "_type", lambda self, t: None),
+                mock.patch.object(type(rec), "_write", lambda self, t: None),
+                mock.patch.object(type(rec), "_idle", lambda self, s: None),
+            ):
+                rec._beats.append({"selector": "x", "verb": "run"})
+                rec.run("./tickets list --status frozen", expect_exit=2)
+        self.assertEqual(rec._beats[-1].get("expect_exit"), 2)
+
+
+class StitchStillsOnly(unittest.TestCase):
+    """A segmented storyboard rehearsing (#405's second half).
+
+    `demo-rehearse` runs stills-only, so a segmented storyboard's `stitch()`
+    found no `.seg.mp4` and raised `FileNotFoundError` — a message about a
+    missing file, for a file nothing was supposed to write. The gate that
+    decides whether a take is worth recording could not run on any segmented
+    storyboard at all.
+    """
+
+    def seg(self, directory: Path, name: str, mode: str | None) -> None:
+        doc = {"schema": TIMELINE_SCHEMA, "segment": name}
+        if mode:
+            doc["mode"] = mode
+        (directory / f"{name}.seg.timeline.json").write_text(json.dumps(doc))
+
+    def test_an_all_stills_run_writes_nothing_and_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for name in ("part1", "part2"):
+                self.seg(out, name, "stills")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                stitching_module.stitch(out, ["part1", "part2"])
+            self.assertFalse((out / "demo.mp4").exists())
+            self.assertIn("stills-only", err.getvalue())
+
+    def test_a_mix_is_still_refused(self):
+        """The distinction the no-op must not erase. Some segments having video
+        and others not is a take somebody half re-recorded, and joining them
+        would publish a demo missing its middle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.seg(out, "part1", "stills")
+            self.seg(out, "part2", None)
+            with self.assertRaises(FileNotFoundError):
+                stitching_module.stitch(out, ["part1", "part2"])
+
+    def test_a_video_run_is_untouched(self):
+        """The regression half: a segment log with no `mode` is an ordinary
+        recording, and must reach the checks it always did."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for name in ("part1", "part2"):
+                self.seg(out, name, None)
+            with self.assertRaises(FileNotFoundError):
+                stitching_module.stitch(out, ["part1", "part2"])
+
+    def test_a_missing_segment_log_is_not_read_as_stills(self):
+        """A log that is absent says nothing about what was recorded, so it
+        must fall through to the ordinary errors rather than being taken as
+        permission to write nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with self.assertRaises(FileNotFoundError):
+                stitching_module.stitch(out, ["part1"])
 
 
 class StitchedHold(unittest.TestCase):
@@ -16651,6 +16784,55 @@ INJECTIONS = [
         [
             "CheapArm.test_a_whole_run_still_takes_everything_and_a_named_arm_still_itself"
         ],
+    ),
+    # -- a declared failure, and a stills-only stitch (issue #405) ---------
+    (
+        # `expect_exit` becomes `ignore_exit`: any non-zero status passes as
+        # long as the storyboard declared *something*. The take then records a
+        # command that failed for a reason nobody predicted and says nothing.
+        "a declared exit code silences every failure rather than the one promised",
+        "terminal.py",
+        '        expected = beat.get("expect_exit", 0)\n        if code != expected:',
+        '        expected = beat.get("expect_exit", 0)\n        if code != expected and not expected:',
+        [
+            "ExpectedExit.test_the_wrong_code_is_still_a_failure_and_says_what_was_promised",
+            "ExpectedExit.test_a_success_where_a_failure_was_promised_is_a_failure",
+        ],
+    ),
+    (
+        # The promise never reaches the beat, so `timeline.json` cannot show a
+        # reader that the take meant it — and the declaration silently stops
+        # working, which reddens the rehearsal #405 exists to unblock.
+        "the declared exit code never reaches the beat",
+        "terminal.py",
+        '            if expect_exit:\n                beat["expect_exit"] = expect_exit',
+        "            pass  # the promise is dropped",
+        # Only the beat check. `test_a_declared_failure_records_no_issue`
+        # builds its beat by hand rather than through `run()`, so it cannot see
+        # this break — listing it claimed coverage that does not exist, and
+        # `--fault-inject` said so.
+        ["ExpectedExit.test_the_promise_is_written_into_the_beat"],
+    ),
+    (
+        # The no-op swallows a *mix*: some segments with video, some without,
+        # and stitch quietly writes nothing instead of refusing. A take
+        # somebody half re-recorded then publishes as though it were whole.
+        "a half-recorded segmented take is treated as a stills-only run",
+        "stitching.py",
+        "    if stills and all(stills):",
+        "    if stills and any(stills):",
+        ["StitchStillsOnly.test_a_mix_is_still_refused"],
+    ),
+    (
+        # A missing segment log read as stills-only. Every ordinary error about
+        # a segment that was never recorded turns into a silent success.
+        "a segment with no beat log is read as stills-only",
+        "stitching.py",
+        "    if not json_path.is_file():\n        return False",
+        "    if not json_path.is_file():\n        return True",
+        # Only the missing-log case. `test_a_video_run_is_untouched` writes
+        # its segment logs, so the missing-file branch never runs for it.
+        ["StitchStillsOnly.test_a_missing_segment_log_is_not_read_as_stills"],
     ),
     # -- the pull-request preview (issue #410) ------------------------------
     #
