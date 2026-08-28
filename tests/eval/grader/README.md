@@ -138,7 +138,7 @@ Also committed, on `caption-overclaims`, `clean-search` and
 which `demo-grade verdict` copies out of the sheet into `review/frames/`. Same
 argument as `readings/`, one step downstream, plus one this corpus does not
 otherwise have a use for: a verdict is a **committed** file precisely so that
-`.github/scripts/demo-comment` can render it into a pull-request comment, and
+`demo-grade pr-block` can render it for a pull request, and
 `caption-overclaims` and `clean-search` are what that rendering was checked
 against. Roughly 700 kB across the three, against the 16 MB `frames/` would
 cost.

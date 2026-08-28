@@ -15,7 +15,8 @@ step, which runs in CI after the recording and outside the take, is the one
 place that may. For each demo it reads `ticket` and `coverage.criteria` out of
 the staged `timeline.json`, fetches the issue body with the token in
 `GH_TOKEN` or `GITHUB_TOKEN`, and writes `<demo>/review/ticket-check.json` —
-a gitignored working file of one review, which `demo-comment` renders.
+a gitignored working file of one review, which `demo-pr-body` renders into
+the pull request's body.
 
 Three states per clause, never two:
 
@@ -63,16 +64,16 @@ MATCH_RULE = (
 )
 
 #: What the states are and are not evidence of, in the artifact itself rather
-#: than in a comment nobody reads. `demo-comment` prints its own copy of this
-#: limit beside the rendered states; this one is for whoever opens the file.
+#: than in a document nobody reads. The pull-request block marks only the two
+#: states a reviewer must act on; this one is for whoever opens the file.
 LIMIT = (
     "This grades quotation, not meaning: a storyboard can quote a clause "
     "word for word and record something else entirely. Nothing here reads "
     "the frames."
 )
 
-#: `owner/repo#N` — the same shape `demo-comment` links, and the one ticket
-#: spelling that can be turned into an API call without guessing a host.
+#: `owner/repo#N` — the one ticket spelling that can be turned into an API
+#: call without guessing a host.
 _TICKET_REF = re.compile(r"^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#([0-9]+)$")
 
 
@@ -103,8 +104,8 @@ def fetch_issue_body(ref: re.Match, token: str) -> str:
     """The issue's current body, off the API host this runner was given.
 
     `GITHUB_API_URL` rather than a hardcoded api.github.com, for the same
-    reason `demo-comment` reads `GITHUB_SERVER_URL`: a GitHub Enterprise
-    caller's tickets live on its own host.
+    reason the workflow passes `GITHUB_SERVER_URL` down as `--repo-url`: a
+    GitHub Enterprise caller's tickets live on its own host.
     """
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
     request = urllib.request.Request(

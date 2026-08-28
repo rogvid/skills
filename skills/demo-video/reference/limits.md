@@ -511,27 +511,29 @@ runs nightly rather than having been performed once.
 
 ## What CI will and will not do for you
 
-### A pull request from a fork gets no comment
+### A pull request from a fork gets no block
 
-The workflow posts its comment with `github.token` on a `pull_request` event.
-For a pull request from a fork that token is read-only whatever the
-`permissions:` block says, so the `POST /issues/{n}/comments` call fails and
-the contributor gets no beat table and no artifact link where an internal
-contributor gets both.
+The workflow edits the pull request's body with `github.token` on a
+`pull_request` event. For a pull request from a fork that token is read-only
+whatever the `permissions:` block says, so the `PATCH /pulls/{n}` call fails
+and the contributor gets no clause checklist and no preview where an internal
+contributor gets both. The preview's release-asset upload fails first and for
+the same reason; that step is `continue-on-error`, and the body update is not,
+so **a fork's pull request sees the demo job go red** even when the take
+itself succeeded.
 
-The information is not lost: `demo-comment` also writes the body to
-`$GITHUB_STEP_SUMMARY`, which does work on a fork run. It is one click deeper
-than the pull request and invisible to anyone reading the conversation.
+The information is not lost, but it is a click further away than it used to
+be: the step prints the rendered block to the job log before trying to write
+it, so a reviewer can read the checklist there.
 
 The obvious fix is the one that must not be taken. `pull_request_target` runs
 the workflow from the base branch with a writable token and the fork's code
 checked out — and this workflow's job is precisely to run arbitrary code from
 the branch (`uv run record.py`, plus the caller's `app-command`). That would
 hand a fork a writable token and the repository's secrets, which is worse than
-no comment ([#118](https://github.com/rogvid/skills/issues/118)).
+no block ([#118](https://github.com/rogvid/skills/issues/118)).
 
-What to do: for a fork's pull request, point the reviewer at the workflow run's
-summary page.
+What to do: for a fork's pull request, read the block out of the job log.
 
 ### How much a green suite is worth on a third encoder
 

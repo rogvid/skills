@@ -1700,6 +1700,22 @@ hold as deliberate is the frames.md note's job, not a pixel's.
 
 ### Acceptance-criterion coverage (issue #12)
 
+> **Most of what follows is history, and is kept because the reasoning is
+> load-bearing and the tests are not.** From "the comment" onwards this section
+> describes `.github/scripts/demo-comment`, which the workflow stopped calling
+> in [#408](https://github.com/rogvid/skills/pull/408) and which was deleted
+> with its ~65 injections and nine test classes in
+> [#412](https://github.com/rogvid/skills/issues/412). Every property it names
+> that a reviewer can still see was moved to `demo-pr-body`'s block first and
+> is graded by `BlockClauses`, `BlockStillLinks`, `BlockSplice` and
+> `BlockVerdict` — see **The sweep grades the sentences the renderer writes**
+> below, which is current. Two things did **not** move and are stated as
+> losses rather than implied by silence: the **caption table**, left out of the
+> block by design, and **`render_coverage`'s unmet-clause-leads ordering**
+> (#12/#273), which survives only in `demo-shots` (`UnmetInTheBlock`) and has
+> no equivalent in the block. The `coverage/` arm below is a `tests/smoke`
+> arm and is untouched by any of this.
+
 The `coverage/` take is recorded against a three-criterion ticket and
 deliberately demonstrates only two. What is graded is that the report **cannot
 flatter the storyboard**, and the arms are chosen for the three ways it could:
@@ -1804,9 +1820,9 @@ because a link that resolves to the wrong bytes is worse than no link:
 relative to `working-directory`, and this repository's own reference call sets
 that to `examples/ticket-queue`. Without it every still is linked at the
 repository root — a 404 that renders exactly like a working link, and one that
-no reading of `demo-comment` alone can see. Two injections cover it, the same
-pair `WorkflowGates` uses: the argument dropped, and the variable exported and
-then not passed.
+no reading of the script alone can see. Two injections cover it, the same pair
+`WorkflowGates` uses: the argument dropped, and the variable exported and then
+not passed.
 
 Each sentence #274 adds is swept for verdict words on a fixture that renders
 it, and they are enumerated rather than counted, because the count is what went
@@ -1822,10 +1838,11 @@ here is proved or verified"* left the whole suite green.
 
 `TAGGED` reaches none of them — it has a picture for every clause it claims —
 so a sweep run only there would grade these three by never seeing them. The
-second and third rows each have an injection that reddens
-`test_the_same_words_are_refused_where_a_clause_has_no_picture` **alone**,
-which is the measurement that says their fixtures are carrying those sentences
-rather than decorating an existing test.
+second and third rows each had an injection reddening one assertion **alone**,
+which is the measurement that says their fixtures were carrying those sentences
+rather than decorating an existing test. `BlockStillLinks` keeps the property —
+a still that is not inside the demo is not linked — and grades it on
+`still_href` directly rather than through a rendered table.
 
 **A claim a failed take made must not read as a clean one**
 ([#278](https://github.com/rogvid/skills/issues/278)). `coverage_report` copied
@@ -1913,14 +1930,13 @@ reviewing the merged change rather than by anything in the suite:
   running, so no beat is blamed"* with *"beat None (`None`)"* left the suite at
   `Ran 420 tests … OK`. `CoverageMd.test_a_take_that_died_between_beats_blames_no_beat`
   and an injection now hold it.
-- `Coverage.test_a_clean_take_carries_none_of_this` and
-  `Coverage.test_the_same_words_are_refused_on_a_take_that_did_not_finish` in
-  `tests/ci-unit` were in no `INJECTIONS` entry. Neither was hollow, but an edit
-  that hollowed them would have been silent. They now have one each: the lead
-  printed on a take that *finished* (the #24 direction, which `tests/unit` had
-  and this side did not), and a verdict word appended to the lead — appended
-  rather than substituted, for the reason the per-word injections append to the
-  disclaimer.
+- Two `Coverage` assertions in `tests/ci-unit` were in no `INJECTIONS` entry.
+  Neither was hollow, but an edit that hollowed them would have been silent.
+  Each got one: the lead printed on a take that *finished* (the #24 direction,
+  which `tests/unit` had and this side did not), and a verdict word appended to
+  the lead — appended rather than substituted. Both went with `demo-comment`;
+  the appended-not-substituted rule did not, and now governs the fifteen
+  per-word injections into `demo-pr-body`'s footer.
 
 **The sweep grades the sentences the renderer writes, not the ones it quotes**
 ([#283](https://github.com/rogvid/skills/issues/283)). Clause text belongs to
@@ -1942,7 +1958,7 @@ the only one whose ticket and captions read as verdicts.
 
 What that boundary leaves out, stated rather than implied: a ticket clause, a
 caption, a failure message or an issue message may print any of these words in
-the comment, and nothing here objects. Only the words `demo-comment` itself
+the artifact, and nothing here objects. Only the words the renderer itself
 writes are swept. Clause **ids** are not exempted either — they are too short
 to subtract safely, so a ticket with a clause called `verified` would redden
 this suite.
@@ -1988,10 +2004,9 @@ clean take, and a sentence printed only where the comment already has a gap to
 report would be missing from exactly the take a reviewer trusts most. That is
 an injection, and it reddens the first assertion alone.
 
-**The sentence sits inside the verdict sweep rather than beside it.** `_quoted`
-subtracts the ticket's clauses and the storyboard's captions and nothing else,
-and this is neither — it is text `demo-comment` writes, so
-`test_no_sentence_promotes_a_claim_to_a_verdict` reads it like every other
+**The sentence sits inside the verdict sweep rather than beside it.** The
+sweep subtracts what the renderer quotes and nothing else, and this is not
+quoted — it is text the renderer writes, so the sweep reads it like every other
 sentence in the section. Which is why it carries none of `VERDICT_WORDS`:
 `shown` and `demonstrat*` are both on the list, and the wording works around
 the sweep rather than the sweep being taught to skip the wording. There is no
@@ -2006,11 +2021,10 @@ sweep is the only thing that notices.
 **Where #303 stopped, stated rather than implied:** a take recorded without
 `criteria=` renders no acceptance section, and so carries no sentence. The demo
 whose storyboard declared no ticket says nothing about its own reach. That
-boundary is graded only in the negative — by
-`test_a_take_recorded_without_criteria_prints_no_acceptance_section`, which
-refuses the word `clause` anywhere in that body, and which is therefore also
-what would redden if the sentence were later printed unconditionally without
-being reworded.
+boundary was graded only in the negative, by an assertion refusing the word
+`clause` anywhere in such a body. `BlockClauses` holds the same shape for the
+block: a take with no timeline renders no **Acceptance criteria** heading at
+all.
 
 **Which ticket the clauses were copied out of**
 ([#275](https://github.com/rogvid/skills/issues/275)). `criteria={...}` quotes
