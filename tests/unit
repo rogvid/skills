@@ -3722,19 +3722,24 @@ class PixelChecks(unittest.TestCase):
 
     def test_accent_like_matches_the_dot_blends_and_not_the_chrome(self):
         px = self.px
-        # The dot's own colours: full accent, the .45 fill over white and
-        # over a dark ground — the range the policy comment states.
-        for dot in [(235, 110, 20), (246, 175, 149), (122, 66, 25)]:
+        # The dot's own colours: full azure accent (#403), the .45 fill over
+        # white and over a dark ground — the range the policy comment states.
+        for dot in [(0, 127, 255), (135, 192, 252), (13, 70, 135)]:
             self.assertTrue(px.accent_like(*dot), f"{dot} is the dot")
         # What the probes actually sweep past: the fixture's paper, both
-        # cards, white — and a pale yellow that is red-over-blue but not
-        # red-over-green, which a predicate reduced to one gap would take.
+        # cards, white, the slate ink-soft — and a cyan that is
+        # blue-over-red but not blue-over-green, which a predicate reduced
+        # to one gap would take. The recorder's old orange accent is here
+        # too: the fixture's #refresh still wears it, and it must not read
+        # as the dot any more.
         for ground in [
             (245, 246, 249),
             (24, 23, 38),
             (28, 26, 23),
             (255, 255, 255),
-            (230, 220, 120),
+            (91, 100, 120),
+            (120, 220, 230),
+            (235, 110, 20),
         ]:
             self.assertFalse(px.accent_like(*ground), f"{ground} is not the dot")
 
@@ -3746,7 +3751,7 @@ class PixelChecks(unittest.TestCase):
             raw[i : i + 3] = (245, 246, 249)  # the fixture's paper
         for y in range(4, 7):  # a 3x3 accent block centred on (5, 5)
             for x in range(4, 7):
-                raw[(y * w + x) * 3 : (y * w + x) * 3 + 3] = (235, 110, 20)
+                raw[(y * w + x) * 3 : (y * w + x) * 3 + 3] = (0, 127, 255)
         found = px.accent_centroid(w, h, bytes(raw))
         self.assertIsNotNone(found)
         cx, cy, count = found
@@ -7276,7 +7281,13 @@ class TerminalChrome(unittest.TestCase):
         from demo_recording.terminal import _TERM_THEME, TERM_WINDOW_BODY
 
         self.assertEqual(TERM_WINDOW_BODY, _TERM_THEME["background"])
-        geom = chrome_geometry(1280, 720)
+        # The terminal recorder's own registered defaults, not
+        # chrome_geometry's function defaults — the two diverged when #403
+        # registered the near-full-bleed framing, and this test is about the
+        # hold sitting on whatever rect the take actually uses. This medium
+        # keeps the reserved band (a pill would ride the prompt line), and
+        # the band couples the height default down to 0.85.
+        geom = chrome_geometry(1920, 1080, width_scale=0.95, height_scale=0.85)
         hold = self.hold_scripts()[0]
         self.assertIn(TERM_WINDOW_BODY, hold)
         self.assertIn(f"left: {geom['appx']}px", hold)
@@ -7410,30 +7421,38 @@ class CursorDrive(unittest.TestCase):
                 self.squeezed.append("up")
             return None
 
-    def glided(self, *to, steps):
+    def glided(self, *to):
         page = self.PointerPage()
         rec = recorder(self, page=page)
         for target in to:
-            rec._glide(*target, steps=steps)
+            rec._glide(*target)
         return rec, page
 
-    def test_the_dot_rides_every_pointer_step_and_ends_at_the_target(self):
-        # One dot command per pointer step, at the same coordinate — the dot
-        # cannot trail the pointer or jump ahead of it, because the recorder
-        # is the only writer of both.
-        rec, page = self.glided((60, 640), steps=4)
-        self.assertEqual(len(page.pointer), 4)
-        self.assertEqual(page.dot, page.pointer)
-        self.assertEqual(page.dot[-1], (60.0, 640.0))
+    def test_the_dot_is_commanded_once_to_the_target_with_a_duration(self):
+        # One dot command per glide, at the exact target, with a positive
+        # duration for the browser to ease over (#403) — and the pointer's
+        # last step is the same coordinate, so dot and pointer land together.
+        rec, page = self.glided((60, 640))
+        self.assertEqual(len(page.dot), 1)
+        x, y, ms = page.dot[0]
+        self.assertEqual((x, y), (60.0, 640.0))
+        self.assertGreater(ms, 0)
+        self.assertEqual(page.pointer[-1], (60.0, 640.0))
         self.assertEqual(rec._cursor_at, (60.0, 640.0))
 
     def test_a_second_glide_starts_from_the_last_commanded_position(self):
         # `_cursor_at` is the seed: a glide that forgot it would sweep in
         # from the origin on every move, which is motion the storyboard
-        # never asked for.
-        rec, page = self.glided((60.0, 640.0), (100.0, 640.0), steps=2)
-        self.assertEqual(page.dot[-2], (80.0, 640.0))
-        self.assertEqual(page.dot[-1], (100.0, 640.0))
+        # never asked for. Every pointer step of the second glide stays on
+        # the segment between the two targets.
+        rec, page = self.glided((60.0, 640.0), (100.0, 640.0))
+        first_end = page.pointer.index((60.0, 640.0))
+        for x, y in page.pointer[first_end + 1 :]:
+            self.assertGreaterEqual(x, 60.0)
+            self.assertLessEqual(x, 100.0)
+            self.assertEqual(y, 640.0)
+        self.assertEqual(page.dot[-1][:2], (100.0, 640.0))
+        self.assertEqual(rec._cursor_at, (100.0, 640.0))
 
     def test_nothing_but_a_glide_moves_the_dot(self):
         # The structural end of the #186 class: with no glide commanded, no
@@ -13333,13 +13352,13 @@ INJECTIONS = [
         ["PixelChecks.test_longest_run_finds_the_longest_stretch_not_the_first"],
     ),
     (
-        # The accent predicate drops its red-over-green gap, so any warm
+        # The accent predicate drops its blue-over-green gap, so any cool
         # surface reads as the cursor dot and both cursor checks grade the
         # page instead of the pointer.
-        "the accent predicate takes any red-over-blue surface as the dot",
+        "the accent predicate takes any blue-over-red surface as the dot",
         "tests/pixel",
-        "    return (r - b) >= ACCENT_R_MINUS_B and (r - g) >= ACCENT_R_MINUS_G",
-        "    return (r - b) >= ACCENT_R_MINUS_B",
+        "    return (b - r) >= ACCENT_B_MINUS_R and (b - g) >= ACCENT_B_MINUS_G",
+        "    return (b - r) >= ACCENT_B_MINUS_R",
         ["PixelChecks.test_accent_like_matches_the_dot_blends_and_not_the_chrome"],
     ),
     (
@@ -16087,9 +16106,11 @@ INJECTIONS = [
         # browser-free half of the same drive.
         "the glide moves the pointer and never the dot",
         "web.py",
-        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])',
-        "            pass  # the dot is never told",
-        ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
+        """        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x, y, ms]
+        )""",
+        "        pass  # the dot is never told",
+        ["CursorDrive.test_the_dot_is_commanded_once_to_the_target_with_a_duration"],
     ),
     (
         # The dot commanded somewhere the pointer is not — #202's class with
@@ -16097,9 +16118,13 @@ INJECTIONS = [
         # so an offset here is the one way left for them to disagree.
         "the dot is commanded off the pointer's own path",
         "web.py",
-        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])',
-        '            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi + 30, yi])',
-        ["CursorDrive.test_the_dot_rides_every_pointer_step_and_ends_at_the_target"],
+        """        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x, y, ms]
+        )""",
+        """        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x + 30, y, ms]
+        )""",
+        ["CursorDrive.test_the_dot_is_commanded_once_to_the_target_with_a_duration"],
     ),
     (
         # The seed forgotten: every glide sweeps in from the origin, which is
@@ -16853,6 +16878,7 @@ INJECTIONS = [
         '                    self._size["height"],\n'
         "                    width_scale=self._window_scale[0],\n"
         "                    height_scale=self._window_scale[1],\n"
+        "                    caption_overlay=self._caption_overlay,\n"
         "                ),\n"
         "                window_body=TERM_WINDOW_BODY,\n"
         "            )\n"
@@ -16880,6 +16906,7 @@ INJECTIONS = [
         '                    self._size["height"],\n'
         "                    width_scale=self._window_scale[0],\n"
         "                    height_scale=self._window_scale[1],\n"
+        "                    caption_overlay=self._caption_overlay,\n"
         "                ),\n"
         "                window_body=TERM_WINDOW_BODY,",
         "                chrome_geometry(\n"
@@ -16887,6 +16914,7 @@ INJECTIONS = [
         '                    self._size["height"],\n'
         "                    width_scale=self._window_scale[0],\n"
         "                    height_scale=self._window_scale[1],\n"
+        "                    caption_overlay=self._caption_overlay,\n"
         "                ),\n"
         '                window_body="#1c1a17",',
         [
@@ -17522,8 +17550,8 @@ INJECTIONS = [
         # what keeps the arithmetic half honest without a browser.
         "the caption band is raised into the app rect it must sit below",
         "chrome.py",
-        '        "bandy": winy + bar + pad + apph,',
-        '        "bandy": winy + bar + pad + apph - band // 2,',
+        "    bandy = winy + bar + pad + apph",
+        "    bandy = winy + bar + pad + apph - band // 2",
         [
             "WrapperChrome.test_the_caption_band_and_the_app_rect_share_no_pixels",
             "WrapperChrome.test_the_band_sits_directly_below_the_slot_inside_the_window",
@@ -17774,7 +17802,9 @@ INJECTIONS = [
     (
         "DEMO_VIDEO_PACE in the environment is ignored",
         "core.py",
-        '            raw_pace: float | str = _env("PACE", "1.0")',
+        """            raw_pace: float | str = _env(
+                "PACE", str(preset_defaults.get("pace", 1.0))
+            )""",
         '            raw_pace: float | str = "1.0"',
         ["Pace.test_the_environment_can_set_it"],
     ),

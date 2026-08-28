@@ -66,7 +66,8 @@ and is **Unix-only** because it uses a PTY.
 Both record into the **same framed window on a soft pastel background** (rounded
 window, title bar, traffic lights): one recorder-owned chrome whose content slot
 holds the web app in an iframe at true pixel size, or the terminal's xterm.js
-screen, with the caption in a reserved band **below** the app rect. The page is
+screen, with the caption a floating pill riding the app rect's bottom edge
+(`caption_overlay=False` restores the reserved band below the app). The page is
 the finished picture — one encode per take, and `shot()` stills match the video.
 `rec.page` is the framed page; `rec.app` is the app's document. Two edges:
 an app answering `X-Frame-Options`/CSP `frame-ancestors` refuses the take
@@ -233,7 +234,7 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_OUT_DIR` | `out_dir` — where demo files land | — (required one way or the other) |
 | `DEMO_VIDEO_BASE_URL` | `base_url` — app under demo. Classified before the browser opens; a public host is refused | `http://localhost:8000` |
 | `DEMO_VIDEO_ALLOW_PRIVATE` | `allow_private` — permit a private/internal target (`1`/`0`). There is no equivalent for a public one | off |
-| `DEMO_VIDEO_ACCENT_RGB` | `accent_rgb` — cursor/spotlight color, `"235,110,20"` | orange |
+| `DEMO_VIDEO_ACCENT_RGB` | `accent_rgb` — cursor/spotlight color, `"0,127,255"` | azure |
 | `DEMO_VIDEO_PACE` | `pace` — multiplier over the holds the recorder computes (caption read time; the defaults of `hold()`, `interlude()`, `criterion()`). Durations the storyboard writes itself are never touched. See **Pacing and perception** | `1.0` |
 | `DEMO_VIDEO_WINDOW_TITLE` | `window_title` — the wrapper window's title bar. Web default: the app's host; terminal default: `terminal_title` | — |
 | `DEMO_VIDEO_INTRO` | `intro` — opt-in opening title card over the wrapper (web takes), taken down by the first `goto()`. Held ~2.8 s (scaled by `pace`), or the whole spoken line when narration is on. Terminal takes already have this as `TerminalRecorder(interlude=…)` | off |
@@ -241,8 +242,10 @@ three it is not the variable lowercased, so do not infer it:
 | `DEMO_VIDEO_TERMINAL_PROMPT` | `terminal_prompt` — prompt string: web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
 | `DEMO_VIDEO_TERMINAL_SHELL` | `shell` — shell `TerminalRecorder` launches | `/bin/bash` |
 | `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `font_size` — `TerminalRecorder` font px | `15` |
-| `DEMO_VIDEO_VIEWPORT` | `viewport` — recording size, `"1280x720"` | 1280×720 |
-| `DEMO_VIDEO_WINDOW_SCALE` | `window_scale` — framed-window size relative to the viewport: a fraction of it for width/height, in `(0, 1]`. A single float or `"width,height"` | 0.80 width; 2/3 height |
+| `DEMO_VIDEO_VIEWPORT` | `viewport` — recording size, `"1920x1080"` | 1920×1080 (`quick` preset: 1280×720) |
+| `DEMO_VIDEO_WINDOW_SCALE` | `window_scale` — framed-window size relative to the viewport: a fraction of it for width/height, in `(0, 1]`. A single float or `"width,height"` | 0.95 width; 0.9 height (0.85 with the reserved band — the taller default plus the band cannot fit a viewport) |
+| `DEMO_VIDEO_CAPTION_OVERLAY` | `caption_overlay` — caption as a floating pill over the app's bottom edge (`1`), or a reserved band below the app rect (`0`). **Known limit of the overlay:** a camera push-in crops the frame around the spotlit element and can shave the pill — fade it (`caption("")`) before spotlighting, or turn the band back on | **on** |
+| `DEMO_VIDEO_PRESET` | `preset` — quality preset, `"high"` or `"quick"`; see **Quality presets** below | `high` |
 | `DEMO_VIDEO_DETERMINISTIC` | `deterministic` — freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
 | `DEMO_VIDEO_CLOCK` | `clock` — the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
 | `DEMO_VIDEO_TIMEZONE` | `timezone_id` — browser timezone, always applied | `UTC` |
@@ -264,6 +267,22 @@ parameters with **no** env var are per-storyboard by nature: `segment`,
 `criteria` and `ticket` on both recorders, plus `TerminalRecorder`'s
 `interlude`, `interlude_hold` and `type_delay_ms`.
 
+### Quality presets
+
+`preset` picks a named bundle of defaults so a take can say what it is for
+instead of tuning knobs — explicit parameters and `DEMO_VIDEO_*` env vars
+still win over whatever the preset says:
+
+- **`high`** (the default) — the settings table above exactly: 1080p,
+  narration on when a key is present, `pace` 1.0. For finished demos and
+  anything shared with others. "Make a high quality demo of X" means this,
+  which means it means the plain defaults.
+- **`quick`** — 720p, `pace` 0.6, narration off (no TTS round trips, so it
+  is also the fast and free one). For a cheap watchable proof: a code-review
+  demonstration, an issue comment, "a quick demo proving B".
+
+`Recorder(out_dir, preset="quick")` or `DEMO_VIDEO_PRESET=quick`.
+
 ## Recorder API (storyboard verbs)
 
 `Recorder(out_dir, base_url=..., segment=None, strict=False, ...)` as a context
@@ -278,7 +297,7 @@ exception, or a non-zero exit. Both are
 |---|---|
 | `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
-| `caption(text)` | Narrator line in the caption band below the app; `""` clears. Both media draw it in the same band, which is the recorder's own document — so the line survives full page loads and SPA routing alike, and `caption_lost` cannot fire at all any more. A line taller than the two-line band is shaved at the band's edges and recorded as a `caption_clipped` issue: shorten it, or split it over two captions |
+| `caption(text)` | Narrator line in the caption pill over the app's bottom edge (a reserved band below the app with `caption_overlay=False`); `""` clears. Both media draw it in the recorder's own document — so the line survives full page loads and SPA routing alike, and `caption_lost` cannot fire at all any more. A line taller than the two-line zone is shaved at its edges and recorded as a `caption_clipped` issue: shorten it, or split it over two captions. With the overlay pill, fade the line (`caption("")`) before a `spotlight()` — the camera push-in crops the frame and can shave a pill riding the bottom edge |
 | `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. Add `shows="unmet"` to point the claim the other way — this beat is evidence the clause is **not** met, which is the case worth the most to a reviewer. It needs an `ac=`, and it is still the author's assertion: nothing read the ticket. See [reference/review.md](reference/review.md). |
 | `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped — so the viewer meets the clause and then watches it happen. The beat claims AC-3 and nothing else; the beats after it are untagged. Held to reading speed, and cleared by `interlude("")` like any card. |
 | `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |
@@ -446,7 +465,7 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
     commit only after the real take).
 3. **Caption every beat.** A fresh caption before each thing the viewer
    should understand, `caption("")` to end clean. The caption lives in the
-   recorder's own band and survives every navigation — full loads and SPA
+   recorder's own document and survives every navigation — full loads and SPA
    routing alike — so a line left up across one reads as narrating the next
    view too: `caption("")` before the click that navigates, fresh caption
    after. Rules (each earned in a fresh-eyes review round):

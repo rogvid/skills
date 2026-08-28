@@ -273,6 +273,23 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+/* One line however narrow the pane: the address ellipsizes rather than
+   breaking a character before its end, and the Copy button's title carries
+   the full value. */
+.requester {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.requester-email {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .copy-email {
   margin-left: 6px;
   font-size: 12px;
@@ -306,12 +323,6 @@ details pre {
   margin-top: 14px;
 }
 
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
 .detail-actions button,
 .modal-actions button {
   font: inherit;
@@ -321,6 +332,15 @@ button.primary {
   border: 1px solid var(--line);
   background: var(--paper);
   cursor: pointer;
+}
+
+/* After the generic action-button rule: both selectors weigh (0,1,1), so
+   source order is what keeps the primary button orange instead of
+   white-on-white. */
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
 
 .modal {

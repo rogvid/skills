@@ -110,6 +110,18 @@ def scrub_env() -> None:
     for name in [k for k in os.environ if k.startswith("DEMO_VIDEO_")]:
         del os.environ[name]
     os.environ.pop("ELEVENLABS_API_KEY", None)
+    # Pin the geometry every bar in this suite was measured in — 720p, the
+    # 0.80x2/3 window, the reserved caption band. The recorder's defaults
+    # moved to 1080p / 0.95x0.9 / overlay pill (#403), and under those two
+    # premises silently invert: the near-full-bleed window puts the band
+    # outside a camera push-in's crop (so the band sweep finds the caption
+    # a beat late), and WRAPPER_LONG_CAPTION wraps to two lines in a
+    # 1824px band and legitimately stops clipping. This suite grades
+    # recorder *mechanics*, not the defaults; the default geometry's pixels
+    # are graded by tests/pixel, whose cached takes record at the defaults.
+    os.environ["DEMO_VIDEO_VIEWPORT"] = "1280x720"
+    os.environ["DEMO_VIDEO_WINDOW_SCALE"] = "0.80,0.66666667"
+    os.environ["DEMO_VIDEO_CAPTION_OVERLAY"] = "0"
 
 
 def fresh_take_dir(out_root: Path, name: str) -> Path:

@@ -95,6 +95,11 @@ HOLD_Z = 2147483644
 CARD_LAYER_Z = 2147483645
 
 
+# How far the overlay caption pill's zone keeps off the slot's bottom edge,
+# when the caption renders as an overlay (see `caption_overlay` below).
+CAPTION_OVERLAY_INSET_PX = 14
+
+
 def chrome_geometry(
     width: int,
     height: int,
@@ -104,6 +109,7 @@ def chrome_geometry(
     band: int = CAPTION_BAND_PX,
     width_scale: float = 0.80,
     height_scale: float = 2 / 3,
+    caption_overlay: bool = False,
 ) -> dict:
     """Where the window, the content slot and the caption band sit.
 
@@ -114,13 +120,20 @@ def chrome_geometry(
     construction — the property `tests/unit` asserts on this function and
     `tests/smoke` asserts on the pixels.
 
+    `caption_overlay=True` trades that invariant away deliberately (#403
+    prototype): the band contributes nothing to the window's height and the
+    caption renders as a floating pill *over* the slot's bottom edge, the way
+    a video player subtitles. The band keys then describe the overlay zone —
+    inside the app rect — and "the app never shares a pixel with the caption"
+    no longer holds.
+
     The `app*`/`win*` keys deliberately match `Recorder._frame_geometry`'s,
     so `_content_rect` and every geometry consumer reads one shape.
     """
     appw = int(width * width_scale) & ~1
     apph = int(height * height_scale) & ~1
     winw = appw + 2 * pad
-    winh = bar + pad + apph + band + pad
+    winh = bar + pad + apph + (0 if caption_overlay else band) + pad
     winx = (width - winw) // 2
     winy = (height - winh) // 2
     if winx < 0 or winy < 0:
@@ -129,10 +142,14 @@ def chrome_geometry(
             f"window would be {winw}x{winh}. Use a viewport of at least "
             f"{winw}x{winh}."
         )
+    bandy = winy + bar + pad + apph
+    if caption_overlay:
+        bandy -= band + CAPTION_OVERLAY_INSET_PX
     return {
         "pad": pad,
         "bar": bar,
         "band": band,
+        "overlay": caption_overlay,
         "appw": appw,
         "apph": apph,
         "winw": winw,
@@ -142,7 +159,7 @@ def chrome_geometry(
         "appx": winx + pad,
         "appy": winy + bar + pad,
         "bandx": winx + pad,
-        "bandy": winy + bar + pad + apph,
+        "bandy": bandy,
         "bandw": appw,
         "bandh": band,
     }
@@ -188,7 +205,8 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     width: __APPW__px; height: __APPH__px; }
   #__chrome_band { position: absolute; left: __PAD__px; top: __BANDTOP__px;
     width: __APPW__px; height: __BAND__px; overflow: hidden;
-    display: flex; align-items: center; justify-content: center; }
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none; }
   /* Two stacked caption layers crossfade: `__demoCaption` fades the old
      line out while the new one fades in, so a caption-to-caption change is
      a transition instead of a pop. The layers sit on top of each other in
@@ -309,8 +327,18 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
     const el = document.getElementById('__chrome_hold');
     if (el) el.style.opacity = '0';
   };
-  window.__demoChromeCursor = (x, y) => {
+  window.__demoChromeCursor = (x, y, ms) => {
+    // ms > 0: the browser eases the dot to (x, y) over that long —
+    // cubic-bezier(.33,1,.68,1) is easeOutCubic, the deceleration a hand
+    // makes landing on a target. The recorder paces the real pointer along
+    // the same curve (web._glide), so dot and pointer land together. ms
+    // absent or 0 keeps the old contract: the dot is exactly where this
+    // call puts it, instantly.
     const dot = document.getElementById('__demo_cursor');
+    const glide = ms ? ms + 'ms' : '0s';
+    dot.style.transition = 'width .1s, height .1s, '
+      + 'left ' + glide + ' cubic-bezier(.33,1,.68,1), '
+      + 'top ' + glide + ' cubic-bezier(.33,1,.68,1)';
     dot.style.left = x + 'px';
     dot.style.top = y + 'px';
   };
@@ -346,7 +374,9 @@ def chrome_html(
     `#__chrome_slot`.
     """
     slot_top = geom["bar"] + geom["pad"]
-    band_top = slot_top + geom["apph"]
+    # Window-local position of the caption zone: below the slot normally,
+    # riding over its bottom edge when the geometry says overlay.
+    band_top = geom["bandy"] - geom["winy"]
     replacements = {
         "__TITLE__": title,
         "__BG__": background,

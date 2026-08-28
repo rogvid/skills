@@ -32,6 +32,7 @@ to survive the downscale. #355 records why in-page framing replaced it and
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Iterator
@@ -490,6 +491,8 @@ class Recorder(_DemoBase):
         outro: str | None = None,
         window_title: str | None = None,
         window_scale: float | tuple[float, float] | None = None,
+        caption_overlay: bool | None = None,
+        preset: str | None = None,
         allow_private: bool | None = None,
     ) -> None:
         super().__init__(
@@ -518,6 +521,8 @@ class Recorder(_DemoBase):
             outro=outro,
             window_title=window_title,
             window_scale=window_scale,
+            caption_overlay=caption_overlay,
+            preset=preset,
         )
         self.base_url = (base_url or _env("BASE_URL", "http://localhost:8000")).rstrip(
             "/"
@@ -621,6 +626,7 @@ class Recorder(_DemoBase):
                     self._size["height"],
                     width_scale=width_scale,
                     height_scale=height_scale,
+                    caption_overlay=self._caption_overlay,
                 ),
                 window_body=WEB_WINDOW_BODY,
             )
@@ -698,6 +704,7 @@ class Recorder(_DemoBase):
             self._size["height"],
             width_scale=width_scale,
             height_scale=height_scale,
+            caption_overlay=self._caption_overlay,
         )
         self.page.set_content(
             chrome_html(
@@ -1147,18 +1154,28 @@ class Recorder(_DemoBase):
             "h": int(rect["h"]),
         }
 
-    def _glide(self, x: float, y: float, steps: int) -> None:
+    def _glide(self, x: float, y: float, fast: bool = False) -> None:
         """Move the pointer to page coordinates `(x, y)`, dot included.
 
         The dot lives in the wrapper document, and no wrapper listener can
         hear a move whose target is inside the iframe — the browser delivers
-        it to the iframe's document — so the recorder drives the dot itself,
-        one explicit update per pointer step. The dot is exactly where the
-        pointer was commanded to be, by construction, which is also what
-        makes the #186/#202 class (a dot placed by an event the storyboard
-        never sent) unreachable here: nothing listens, so nothing synthetic
-        can move it. The stated cost: raw `rec.page.mouse` work moves the
-        pointer and not the dot.
+        it to the iframe's document — so the recorder drives the dot itself.
+        One call commands the dot to the target and the browser eases it
+        there over a duration set by the travel distance (#403): the
+        compositor paints the dot's easeOutCubic in every frame, which is
+        what the old per-step scheme could not do — its 30 CDP round-trips
+        completed in ~250 ms of wall time, so the encode held ~6 frames of
+        constant-velocity motion and a hard stop. The dot still moves only
+        when the storyboard says so — a CSS transition toward a commanded
+        target is commanded motion — so the #186/#202 class (a dot placed by
+        an event the storyboard never sent) stays unreachable: nothing
+        listens, so nothing synthetic can move it. The stated cost is
+        unchanged: raw `rec.page.mouse` work moves the pointer and not the
+        dot.
+
+        The real pointer is paced along the same easing curve while the dot
+        animates, so hover states track the visible motion and both land
+        together. `fast=True` halves the duration — `click_fast`'s ask.
 
         Coordinates are wrapper-page coordinates — Playwright's
         `bounding_box()` answers relative to the main frame's viewport even
@@ -1166,11 +1183,23 @@ class Recorder(_DemoBase):
         every box the verbs read.
         """
         sx, sy = self._cursor_at
-        for i in range(1, steps + 1):
-            xi = sx + (x - sx) * i / steps
-            yi = sy + (y - sy) * i / steps
-            self.page.mouse.move(xi, yi)
-            self.page.evaluate("([x, y]) => window.__demoChromeCursor(x, y)", [xi, yi])
+        dist = math.hypot(x - sx, y - sy)
+        # ~800 px/s reads as a hand, not a dart; clamped so a short hop is
+        # not instant and a corner-to-corner run does not stall the story.
+        ms = min(max(dist / 800.0 * 1000.0, 280.0), 1000.0)
+        if fast:
+            ms /= 2
+        self.page.evaluate(
+            "([x, y, ms]) => window.__demoChromeCursor(x, y, ms)", [x, y, ms]
+        )
+        t0 = time.monotonic()
+        while True:
+            t = min((time.monotonic() - t0) * 1000.0 / ms, 1.0)
+            p = 1 - (1 - t) ** 3  # easeOutCubic — the dot's cubic-bezier(.33,1,.68,1)
+            self.page.mouse.move(sx + (x - sx) * p, sy + (y - sy) * p)
+            if t >= 1.0:
+                break
+            time.sleep(0.016)
         self._cursor_at = (x, y)
 
     def _cursor_pressed(self, down: bool) -> None:
@@ -1184,7 +1213,7 @@ class Recorder(_DemoBase):
         box = self._target().locator(selector).first.bounding_box()
         if box is None:
             raise RuntimeError(f"no visible element for {selector!r}")
-        self._glide(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=30)
+        self._glide(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
     @_beat_verb("click")
     def click(self, selector: str) -> None:
@@ -1211,7 +1240,7 @@ class Recorder(_DemoBase):
                     raise RuntimeError(f"no visible element for {selector!r}")
                 time.sleep(0.1)
         x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-        self._glide(x, y, steps=15)
+        self._glide(x, y, fast=True)
         self.pause(0.3)
         self._cursor_pressed(True)
         try:

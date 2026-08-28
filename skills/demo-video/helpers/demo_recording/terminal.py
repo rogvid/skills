@@ -291,6 +291,8 @@ class TerminalRecorder(_DemoBase):
         outro: str | None = None,
         window_title: str | None = None,
         window_scale: float | tuple[float, float] | None = None,
+        caption_overlay: bool | None = None,
+        preset: str | None = None,
         allow_private: bool | None = None,
         type_delay_ms: int = 45,
         interlude: str | None = None,
@@ -299,6 +301,13 @@ class TerminalRecorder(_DemoBase):
         # A branded, distinctive default prompt so wait_for_prompt's marker
         # is unlikely to collide with command output.
         prompt = terminal_prompt or _env("TERMINAL_PROMPT") or "❯ "
+        # This medium defaults to the reserved band even though the base
+        # defaults to the overlay pill (#403): a shell keeps its prompt on
+        # the bottom rows, exactly where the pill rides, so the overlay
+        # would sit on the one line a terminal take is usually about. An
+        # explicit parameter or DEMO_VIDEO_CAPTION_OVERLAY still wins.
+        if caption_overlay is None and _env("CAPTION_OVERLAY") is None:
+            caption_overlay = False
         # This medium's opening card is `interlude=`, raised before capture
         # and cleared by its own hold. An `intro=` accepted and ignored here
         # would be a setting that does nothing, so it is refused with the way
@@ -341,6 +350,8 @@ class TerminalRecorder(_DemoBase):
             outro=outro,
             window_title=window_title,
             window_scale=window_scale,
+            caption_overlay=caption_overlay,
+            preset=preset,
         )
         self._shell = shell or _env("TERMINAL_SHELL") or "/bin/bash"
         fs = font_size
@@ -389,6 +400,7 @@ class TerminalRecorder(_DemoBase):
                     self._size["height"],
                     width_scale=self._window_scale[0],
                     height_scale=self._window_scale[1],
+                    caption_overlay=self._caption_overlay,
                 ),
                 window_body=TERM_WINDOW_BODY,
             )
@@ -410,6 +422,7 @@ class TerminalRecorder(_DemoBase):
             self._size["height"],
             width_scale=self._window_scale[0],
             height_scale=self._window_scale[1],
+            caption_overlay=self._caption_overlay,
         )
         self.page.set_content(
             chrome_html(
