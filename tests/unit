@@ -3135,6 +3135,42 @@ CHEAP_SKIPS = frozenset(
 # Written here so this suite disagrees with a change to smoke's own tuple.
 CHEAP_EXCLUDES = frozenset({"--web-only", "--content-only", "--terminal-only"})
 
+# The arms `--core` names, and the phases they reach — the per-pull-request
+# selection. Written here, independently of `CORE_ARMS` in
+# `tests/smokekit/constants.py`, for the same reason `CHEAP_EXCLUDES` is: a
+# suite that reads the value under test cannot disagree with it.
+#
+# `--core` is a *list* where `--cheap` is a complement, and that difference is
+# the point. A complement silently absorbs every new cheap arm, which is how
+# the per-push job reached 22 takes and 300 s without a decision being made.
+# Nothing joins this one without editing both this set and the costs written
+# beside `CORE_ARMS`.
+CORE_ARM_NAMES = frozenset(
+    {
+        "--lock-only",  # 0.2 s
+        "--stills-only",  # 2.1 s
+        "--strict-only",  # 11.6 s
+        "--coverage-only",  # 15.5 s
+        "--evidence-only",  # 7.3 s
+        "--failure-only",  # 46.8 s
+    }
+)
+
+# What a pull request therefore runs, named rather than counted — the same
+# reason `CHEAP_SKIPS` is named. Editing this set is a decision about what a
+# reviewer stops seeing on the branch, and it belongs in an issue.
+CORE_PHASES = frozenset(
+    {
+        "check_lock_refusal",
+        "run_stills_only",
+        "run_strict_web",
+        "run_strict_terminal",
+        "run_coverage",
+        "run_evidence",
+        "run_failure",
+    }
+)
+
 # Below this, `run_phases` was not read: an extraction that matched nothing
 # makes every "every phase …" below true over an empty set. 18 guards today.
 SMOKE_PHASE_FLOOR = 14
@@ -3339,7 +3375,7 @@ class CheapArm(unittest.TestCase):
         """
         named = {arm for arms, _ in self.guards for arm in arms}
         self.assertTrue(named, "no guard named any arm")
-        unknown = sorted(named - (self.flags - {"--cheap"}))
+        unknown = sorted(named - (self.flags - {"--cheap", "--core"}))
         self.assertEqual(
             unknown,
             [],
@@ -3360,6 +3396,100 @@ class CheapArm(unittest.TestCase):
                 self.smoke.selects("--no-such-arm", arms),
                 f"an arm no guard names still ran {phase}",
             )
+
+
+class CoreArm(unittest.TestCase):
+    """`--core`, the per-pull-request selection.
+
+    The four questions a narrowed job has to answer, and the reason each one is
+    here rather than left to the eye:
+
+    - it selects what its list says (the rule, per phase);
+    - the phases it selects are the named set (a decision, not a diff);
+    - every arm it names is a flag somebody can actually pass — a typo would
+      shrink the pull-request job toward nothing while every "every phase …"
+      claim below stayed true over the smaller set;
+    - it is a strict subset of `--cheap`, so narrowing the job never *added* a
+      take, and it never selects a phase a whole run does not.
+    """
+
+    def setUp(self):
+        self.guards, self.flags = _smoke_guards()
+        # The haystack, before anything is claimed about it — the same floor
+        # CheapArm sets, for the same reason.
+        self.assertGreaterEqual(
+            len(self.guards),
+            SMOKE_PHASE_FLOOR,
+            f"only {len(self.guards)} guard(s) were read out of run_phases — "
+            f"either the suite shrank or this extraction stopped extracting, "
+            f"and every claim below would hold over what it did not read",
+        )
+        self.smoke = _smoke_module()
+
+    def test_core_runs_every_phase_an_arm_it_names_reaches(self):
+        """The rule, applied per phase rather than as a count."""
+        wanted = {
+            phase: any(arm in CORE_ARM_NAMES for arm in arms)
+            for arms, phase in self.guards
+        }
+        got = {phase: self.smoke.selects("--core", arms) for arms, phase in self.guards}
+        self.assertEqual(
+            got,
+            wanted,
+            "--core disagrees with 'every phase an arm in "
+            f"{sorted(CORE_ARM_NAMES)} reaches' at: "
+            + ", ".join(sorted(k for k in wanted if got[k] != wanted[k])),
+        )
+
+    def test_the_phases_core_runs_are_the_ones_it_is_meant_to_run(self):
+        """Named, because this is the whole list a pull request still sees."""
+        ran = {
+            phase for arms, phase in self.guards if self.smoke.selects("--core", arms)
+        }
+        self.assertEqual(
+            ran,
+            set(CORE_PHASES),
+            f"--core runs {sorted(ran)}; the set this repo decided on is "
+            f"{sorted(CORE_PHASES)}. A phase joining or leaving the "
+            f"per-pull-request run is a decision, not a diff.",
+        )
+
+    def test_every_arm_core_names_is_a_flag_the_script_accepts(self):
+        """A typo'd entry selects nothing, silently, and shrinks the job.
+
+        `CORE_ARMS` is matched against guard arms by string. An entry nobody
+        can pass is not an error anywhere — it simply never matches, the job
+        gets smaller, and the two tests above still pass over what is left.
+        """
+        unknown = sorted(CORE_ARM_NAMES - self.flags)
+        self.assertEqual(
+            unknown,
+            [],
+            f"--core names {unknown}, which main() does not define as a flag; "
+            f"an arm nobody can pass selects no phase and shrinks the "
+            f"pull-request job without saying so",
+        )
+
+    def test_core_is_a_strict_subset_of_cheap_and_of_a_whole_run(self):
+        """Narrowing must never add a take, and never invent one."""
+        core = {
+            phase for arms, phase in self.guards if self.smoke.selects("--core", arms)
+        }
+        cheap = {
+            phase for arms, phase in self.guards if self.smoke.selects("--cheap", arms)
+        }
+        whole = {phase for arms, phase in self.guards if self.smoke.selects(None, arms)}
+        self.assertTrue(
+            core < cheap,
+            f"--core is not a strict subset of --cheap: it adds "
+            f"{sorted(core - cheap)} and is {'' if core != cheap else 'identical, '}"
+            f"so the split bought nothing",
+        )
+        self.assertEqual(
+            sorted(core - whole),
+            [],
+            f"--core selects {sorted(core - whole)}, which a whole run does not",
+        )
 
 
 # --------------------------------------------------------------------------
@@ -9674,8 +9804,18 @@ class NarrationMix(unittest.TestCase):
             core_module.subprocess.run = was
             core_module.media_duration = was_duration  # type: ignore[assignment]
             core_module.clip_gain_db = was_gain  # type: ignore[assignment]
-        self.assertEqual(len(seen), 1, f"expected one ffmpeg call, got {seen!r}")
-        cmd = seen[0]
+        # The *mix*, selected by what it writes rather than by being the only
+        # ffmpeg call. It stopped being the only one when #410 added the
+        # pull-request preview, and `seen[0]` then silently became a WebP
+        # encode that has no `adelay` in it — so the floor is kept, and made
+        # precise: exactly one command writes this take's mp4.
+        mixes = [c for c in seen if c[-1].endswith(".mp4")]
+        self.assertEqual(
+            len(mixes),
+            1,
+            f"expected exactly one ffmpeg call writing an mp4, got {seen!r}",
+        )
+        cmd = mixes[0]
         self.assertIn("-filter_complex", cmd, "the mix went in without a filter graph")
         graph = cmd[cmd.index("-filter_complex") + 1]
         # Kept for the tests that assert on the filter graph itself rather
@@ -12717,6 +12857,164 @@ class ExitStatus(_GradeCase):
         # written against.
         section = grade.__doc__.split("## Exit status")[1]
         self.assertEqual(set(re.findall(r"\b([0-9])\b", section)), {"0", "2"})
+
+
+class PreviewWebp(unittest.TestCase):
+    """The animated WebP a pull-request body embeds (issue #410).
+
+    GitHub has no public API for the attachment upload its drag-and-drop uses,
+    so a video cannot reach a reviewer as a player — only as an inline image.
+    This is that image, and every test here is about a way it could mislead:
+    naming a file this run did not write, losing the camera moves the mp4 has,
+    or being encoded from a source two h264 generations down.
+    """
+
+    def doc(self, **settings) -> dict:
+        rec = recorder(self, page=DrawingPage(), **settings)
+        rec.caption("A small dashboard.")
+        with contextlib.redirect_stderr(io.StringIO()):
+            return rec._timeline_doc()
+
+    def test_a_run_that_wrote_no_preview_names_none(self):
+        """The #20 rule, one field over.
+
+        `demo.preview.webp` from a previous take is very likely sitting in the
+        directory — `record.py` is committed so it can be re-run. Naming it
+        would point a pull-request body at a recording of something else and
+        invite a reviewer to tick acceptance boxes against it.
+        """
+        doc = self.doc()
+        self.assertIsNone(doc["preview"])
+
+    def test_a_run_that_wrote_one_names_it(self):
+        rec = recorder(self, page=DrawingPage())
+        rec.caption("A small dashboard.")
+        rec._preview_written = True
+        with contextlib.redirect_stderr(io.StringIO()):
+            doc = rec._timeline_doc()
+        self.assertEqual(doc["preview"], "demo.preview.webp")
+
+    def test_a_segment_names_its_own_preview_and_not_the_takes(self):
+        """Two segments in one directory would otherwise collide on one name,
+        and the second would overwrite the first's preview while both
+        timelines went on naming it."""
+        rec = recorder(self, page=DrawingPage(), segment="part2")
+        self.assertEqual(rec._preview_path().name, "part2.preview.webp")
+        plain = recorder(self, page=DrawingPage())
+        self.assertEqual(plain._preview_path().name, "demo.preview.webp")
+
+    def test_convert_hands_the_preview_the_webm_and_not_the_mp4(self):
+        """The call site, which is where this can actually go wrong.
+
+        The test below grades what `_write_preview` does with the path it is
+        handed. It cannot see `_convert` handing it the wrong one — and that
+        is the whole defect: two extra h264 generations, a preview that still
+        renders, and nobody the wiser. `--fault-inject` found this gap by
+        breaking the call site and watching the suite stay green.
+
+        Read off the source rather than by running `_convert`, which encodes
+        two files and needs a browser's output to do it.
+        """
+        tree = ast.parse(
+            textwrap.dedent(inspect.getsource(core_module._DemoBase._convert))
+        )
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_write_preview"
+        ]
+        self.assertEqual(len(calls), 1, "_convert does not call _write_preview once")
+        first = calls[0].args[0]
+        self.assertIsInstance(
+            first,
+            ast.Name,
+            f"_convert passes {ast.dump(first)[:60]} to _write_preview, not a bare name",
+        )
+        self.assertEqual(
+            first.id,
+            "webm",
+            f"_convert hands the preview `{first.id}`; it must be the webm, or the "
+            f"preview is encoded from a source two h264 generations down",
+        )
+
+    def test_the_encode_reads_the_webm_and_never_the_mp4(self):
+        """The whole reason #410 encodes where it does.
+
+        By the time `demo.mp4` exists the frames have been through h264 twice.
+        Measured on a 25 s take, encoding the preview from the mp4 instead is
+        both dirtier and larger — 2.95 MB against 2.67 MB at identical WebP
+        settings, because a noisier source costs the encoder bits. So this
+        asserts the *input path*, which is the thing that decides it.
+        """
+        rec = recorder(self, page=DrawingPage())
+        seen = []
+        with mock.patch.object(
+            core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        self.assertEqual(len(seen), 1, "the preview encode did not run")
+        cmd = [str(part) for part in seen[0]]
+        self.assertIn("/tmp/x/page@abc.webm", cmd)
+        self.assertFalse(
+            [part for part in cmd if part.endswith((".mp4", ".camera.mp4"))],
+            f"the preview was encoded from an mp4: {cmd}",
+        )
+
+    def test_the_camera_chain_reaches_the_preview(self):
+        """Encoding from the raw webm without it loses every push-in — which
+        is exactly what a first cut of this did, and what a reviewer caught by
+        eye. The chain is threaded in rather than re-derived so the preview
+        and the mp4 cannot disagree about where the camera went."""
+        rec = recorder(self, page=DrawingPage())
+        seen = []
+        with mock.patch.object(
+            core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), "zoompan=z='1.3'")
+        graph = [str(p) for p in seen[0]][
+            [str(p) for p in seen[0]].index("-filter_complex") + 1
+        ]
+        self.assertIn("zoompan", graph)
+        self.assertIn("scale=1280", graph)
+
+    def test_a_take_with_no_camera_still_gets_a_preview(self):
+        rec = recorder(self, page=DrawingPage())
+        seen = []
+        with mock.patch.object(
+            core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        graph = [str(p) for p in seen[0]][
+            [str(p) for p in seen[0]].index("-filter_complex") + 1
+        ]
+        self.assertNotIn("zoompan", graph)
+        self.assertIn("scale=1280", graph)
+
+    def test_a_failed_encode_warns_and_keeps_the_take(self):
+        """A reviewer losing a preview is an inconvenience; raising here would
+        throw away a recording that is already complete."""
+        rec = recorder(self, page=DrawingPage())
+        err = io.StringIO()
+        with (
+            mock.patch.object(
+                core_module.subprocess,
+                "run",
+                side_effect=subprocess.CalledProcessError(1, "ffmpeg"),
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        self.assertFalse(rec._preview_written)
+        self.assertIn("preview", err.getvalue().lower())
+
+    def test_it_can_be_turned_off(self):
+        rec = recorder(self, page=DrawingPage(), preview=False)
+        with mock.patch.object(core_module.subprocess, "run") as run:
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+        run.assert_not_called()
+        self.assertFalse(rec._preview_written)
 
 
 class StillsOnly(unittest.TestCase):
@@ -16354,6 +16652,139 @@ INJECTIONS = [
             "CheapArm.test_a_whole_run_still_takes_everything_and_a_named_arm_still_itself"
         ],
     ),
+    # -- the pull-request preview (issue #410) ------------------------------
+    #
+    # Five breaks, for the five ways this file can mislead a reviewer rather
+    # than merely be absent. Absence is visible — the block says the video was
+    # not recorded. Every one of these is *silent*: the preview renders, and
+    # shows the wrong thing.
+    (
+        # The #20 lie, one field over. `record.py` is committed so it can be
+        # re-run, so a previous take's preview is very likely sitting right
+        # there — and a pull-request body pointed at it invites a reviewer to
+        # tick acceptance boxes against a recording of something else.
+        "the timeline names a preview this run did not write",
+        "core.py",
+        '            "preview": self._preview_path().name if self._preview_written else None,',
+        '            "preview": self._preview_path().name,',
+        ["PreviewWebp.test_a_run_that_wrote_no_preview_names_none"],
+    ),
+    (
+        # Two segments in one directory collide on one name: the second
+        # overwrites the first's preview while both timelines go on naming it.
+        "every segment's preview is written to the same name",
+        "core.py",
+        '        stem = self.segment if self.segment else "demo"',
+        '        stem = "demo"',
+        ["PreviewWebp.test_a_segment_names_its_own_preview_and_not_the_takes"],
+    ),
+    (
+        # The whole reason #410 encodes where it does. Reading the mp4 costs
+        # two extra h264 generations and measured both dirtier and larger.
+        # Nothing raises — the preview still appears, just degraded.
+        "the preview is encoded from the mp4 instead of the browser's frames",
+        "core.py",
+        "        self._write_preview(webm, chain)",
+        "        self._write_preview(self._media_path(), chain)",
+        ["PreviewWebp.test_convert_hands_the_preview_the_webm_and_not_the_mp4"],
+    ),
+    (
+        # The defect a reviewer caught by eye on the first cut: encoding from
+        # the raw webm drops every camera push-in. The preview looks fine
+        # until somebody compares it with the mp4.
+        "the camera chain stops reaching the preview, so it loses every push-in",
+        "core.py",
+        'graph = f"[0:v]{chain},{scale}[v]" if chain else f"[0:v]{scale}[v]"',
+        'graph = f"[0:v]{scale}[v]"',
+        ["PreviewWebp.test_the_camera_chain_reaches_the_preview"],
+    ),
+    (
+        # A preview failure taking the take with it. The recording is already
+        # complete at this point; raising would discard it over a convenience.
+        "a failed preview encode throws away the finished take",
+        "core.py",
+        "        except (OSError, subprocess.CalledProcessError) as exc:",
+        "        except _NeverRaised as exc:",
+        ["PreviewWebp.test_a_failed_encode_warns_and_keeps_the_take"],
+    ),
+    # -- what `tests/smoke --core` selects ----------------------------------
+    #
+    # Four breaks, for the four ways a *named list* goes wrong, which are not
+    # the four ways a complement goes wrong above. A list shrinks silently: an
+    # arm dropped, an arm misspelled, or the predicate short-circuiting all
+    # leave a green suite that ran fewer takes, and a green suite that ran
+    # fewer takes is the exact failure this whole split risks.
+    (
+        # The predicate stops selecting and agrees with everything: `--core`
+        # becomes a whole run, and the pull-request job costs the seven
+        # minutes the narrowing exists to avoid.
+        "--core stops selecting and runs the whole suite on every push",
+        "tests/smoke",
+        '    if only == "--core":\n        return any(arm in CORE_ARMS for arm in arms)',
+        '    if only == "--core":\n        return True',
+        [
+            "CoreArm.test_core_runs_every_phase_an_arm_it_names_reaches",
+            "CoreArm.test_the_phases_core_runs_are_the_ones_it_is_meant_to_run",
+            "CoreArm.test_core_is_a_strict_subset_of_cheap_and_of_a_whole_run",
+        ],
+    ),
+    (
+        # The other direction, and the quiet one: the predicate inverts, so
+        # `--core` selects everything *except* what it names. The suite still
+        # passes, having recorded the takes nobody chose.
+        "--core selects everything except the arms it names",
+        "tests/smoke",
+        "        return any(arm in CORE_ARMS for arm in arms)",
+        "        return not any(arm in CORE_ARMS for arm in arms)",
+        [
+            "CoreArm.test_core_runs_every_phase_an_arm_it_names_reaches",
+            "CoreArm.test_the_phases_core_runs_are_the_ones_it_is_meant_to_run",
+        ],
+    ),
+    (
+        # One arm dropped from the list. The rule still holds — the predicate
+        # is consistent with the shorter list — so the check that catches this
+        # is the one naming the phases out loud, which is why that test exists
+        # in the shape it does.
+        "an arm is dropped from CORE_ARMS and its takes stop running per push",
+        "tests/smoke",
+        '    "--failure-only",\n)',
+        ")",
+        ["CoreArm.test_the_phases_core_runs_are_the_ones_it_is_meant_to_run"],
+    ),
+    (
+        # An arm misspelled *in the list* rather than dropped from it. Nothing
+        # raises: the string simply never matches a guard, `run_coverage` falls
+        # off the pull-request job, and the rule check still holds over the
+        # smaller set because the predicate agrees with the shorter list. The
+        # phase check is what has to catch this, which is why it names the
+        # phases out loud instead of counting them.
+        #
+        # The anchor pairs two entries in CORE_ARMS' own order. `--strict-only`
+        # and `--coverage-only` are adjacent here and in the opposite order in
+        # CLOCK_SAFE_ARMS, so this text exists once in the tree — a bare
+        # `    "--coverage-only",` is a substring of the argparse call in
+        # cli.py and of two entries in constants.py, and would land somewhere
+        # nobody intended.
+        "an arm in CORE_ARMS is misspelled, so its takes silently stop running",
+        "tests/smoke",
+        '    "--strict-only",\n    "--coverage-only",',
+        '    "--strict-only",\n    "--coverage-onyl",',
+        ["CoreArm.test_the_phases_core_runs_are_the_ones_it_is_meant_to_run"],
+    ),
+    (
+        # The same typo one file over: the flag itself, in argparse. Now
+        # `CORE_ARMS` names something nobody can pass — every phase it reached
+        # is still selected, because the guards name the arm too, but the
+        # *list* has become a claim about a flag that does not exist and the
+        # next person to run `tests/smoke --coverage-only` gets a parse error.
+        # Only the flag check sees this one; both phase claims stay true.
+        "an arm CORE_ARMS names stops being a flag the script defines",
+        "tests/smoke",
+        '        "--coverage-only",\n        action="store_true",',
+        '        "--coverage-onyl",\n        action="store_true",',
+        ["CoreArm.test_every_arm_core_names_is_a_flag_the_script_accepts"],
+    ),
     (
         # And the control. Every claim above is quantified over the guards this
         # file reads out of `run_phases`; an extraction that matches nothing
@@ -17802,9 +18233,7 @@ INJECTIONS = [
     (
         "DEMO_VIDEO_PACE in the environment is ignored",
         "core.py",
-        """            raw_pace: float | str = _env(
-                "PACE", str(preset_defaults.get("pace", 1.0))
-            )""",
+        '            raw_pace: float | str = _env("PACE", str(preset_defaults.get("pace", 1.0)))',
         '            raw_pace: float | str = "1.0"',
         ["Pace.test_the_environment_can_set_it"],
     ),
@@ -18204,108 +18633,196 @@ def inner_run(names: list[str]) -> int:
     return 0 if result.wasSuccessful() else 1
 
 
+def check_anchors() -> int:
+    """Every injection still resolves: its pattern matches once, its tests exist.
+
+    The cheap half of `--fault-inject`, split out so it can run on a pull
+    request while the expensive half runs on merge. It stages the tree **once**
+    and reads text — no inner runs — so 419 injections cost about a second
+    against the driver's minutes.
+
+    What it is and is not. It does **not** prove an assertion can fail; only
+    running it broken does, and that is `--fault-inject`. It proves the weaker
+    thing the driver spends its first millisecond on and then aborts over: that
+    every injection would still *land*. That is worth its own mode because a
+    stale anchor is the failure this manifest actually has — a rename or a
+    reflow moves the text an entry pinned, the entry silently stops describing
+    anything, and the driver that would have said so is on the far side of the
+    merge. Six entries went stale in one afternoon's refactor and CI reported
+    it once, at merge; this reports it in a second, on the branch.
+    """
+    stale: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = stage_tree(Path(tmp))
+        # Every `Class.method` the staged suite actually defines, so a
+        # `must_fail` naming a test that no longer exists is caught here
+        # rather than as the driver's second abort. Read off the copy for the
+        # same reason the driver patches the copy.
+        known: set[str] = set()
+        tree = ast.parse(staged["unit"].read_text(encoding="utf-8"))
+        for cls in tree.body:
+            if isinstance(cls, ast.ClassDef):
+                known |= {
+                    f"{cls.name}.{fn.name}"
+                    for fn in cls.body
+                    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+        for name, module, old, _new, must_fail in INJECTIONS:
+            target = injection_target(module, staged, old)
+            hits = target.read_text(encoding="utf-8").count(old)
+            if hits != 1:
+                stale.append(
+                    f"{name!r} matched {hits} times in {module}, expected "
+                    f"exactly 1 — the injection would not land, so nothing "
+                    f"it claims to prove is proven.\n       looked for: {old!r}"
+                )
+            gone = [t for t in must_fail if t not in known]
+            if gone:
+                stale.append(
+                    f"{name!r} names {', '.join(gone)}, which this suite does "
+                    f"not define — nothing it claims to prove is proven."
+                )
+    if stale:
+        print(
+            f"ABORT: {len(stale)} of {len(INJECTIONS)} injections no longer resolve.",
+            file=sys.stderr,
+        )
+        for line in stale:
+            print(f"  - {line}", file=sys.stderr)
+        return 3
+    print(f"All {len(INJECTIONS)} injections still resolve.")
+    return 0
+
+
+def stage_tree(tmp: Path) -> dict[str, Path]:
+    """Copy everything an injection may break into `tmp`, and name the copies.
+
+    Split out of `fault_inject` so `check_anchors` resolves targets through the
+    identical staging rather than a second implementation of it — two copies of
+    this would drift, and a target the cheap mode resolved differently from the
+    driver would grade a file the driver never patches.
+    """
+    # The whole skill, not just the package: several injections break a
+    # shipped document, and the documentation assertions are as much a
+    # check as the behavioural ones. `tests/smoke` is copied alongside
+    # it because one assertion reads that file rather than the package —
+    # residue in the *harness* is the defect it grades.
+    #
+    # This file is copied too, and the copy is what runs. One assertion
+    # — the doc-symbol sweep — has an *extraction step* of its own, and
+    # an extraction that quietly matches nothing is the vacuous sweep
+    # the floor exists to catch. Proving that floor fires means breaking
+    # code that lives here, so the inner run cannot be this file. It
+    # reads nothing from `REPO`: every path it uses comes from the three
+    # environment variables below, so a copy under /tmp behaves exactly
+    # as the original does.
+    skill = tmp / "demo-video"
+    shutil.copytree(REPO / "skills" / "demo-video", skill)
+    smoke = tmp / "smoke"
+    shutil.copy(REPO / "tests" / "smoke", smoke)
+    # The entry resolves its package from its own directory (#401),
+    # so a staged copy of the entry without `smokekit` beside it
+    # would die on import rather than on anything an injection did.
+    shutil.copytree(
+        REPO / "tests" / "smokekit",
+        tmp / "smokekit",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    # `tests/smoke` imports its pixel toolkit from the module beside
+    # it (#349), resolved off its own path — so the copy needs the
+    # module beside it too.
+    shutil.copy(REPO / "tests" / "_pixels.py", tmp / "_pixels.py")
+    # And the injection manifest, for the same reason as `smoke`: the
+    # baseline retry #258 added is a decision this suite grades, and a
+    # decision nobody has watched go the wrong way is a claim.
+    smoke_inject = tmp / "smoke-inject"
+    shutil.copy(REPO / "tests" / "smoke-inject", smoke_inject)
+    # ...and the pixel loop, whose cache arithmetic three injections
+    # above break. `PixelCache` resolves it through UNIT_PIXEL for the
+    # same reason everything else here is an environment variable.
+    pixel = tmp / "pixel"
+    shutil.copy(REPO / "tests" / "pixel", pixel)
+    # ...and this suite's own README, which used to be read straight
+    # out of the working tree. It carries prose that assertions here
+    # grade — a stated figure, and the explanation of a positive skew
+    # this repo shipped and retracted — and a document nothing can
+    # break is a document whose guard nobody has watched fire.
+    readme = tmp / "README.md"
+    shutil.copy(REPO / "tests" / "README.md", readme)
+    # ...and the proving ground, which `MaskProse` now sweeps. Copied
+    # for the same reason as everything above: an injection has to be
+    # able to break one of these storyboards, and a sweep reading the
+    # working tree would grade the pristine file instead.
+    examples = tmp / "examples"
+    shutil.copytree(REPO / "examples", examples)
+    unit = tmp / "unit"
+    shutil.copy(Path(__file__).resolve(), unit)
+    return {
+        "tmp": tmp,
+        "skill": skill,
+        "root": skill / "helpers",
+        "smoke": smoke,
+        "smoke_inject": smoke_inject,
+        "pixel": pixel,
+        "readme": readme,
+        "examples": examples,
+        "unit": unit,
+    }
+
+
+def injection_target(module: str, staged: dict[str, Path], old: str) -> Path:
+    """Which staged file an injection's `module` field names."""
+    tmp = staged["tmp"]
+    if module.startswith("examples/"):
+        # Before the `"/" in module` branch below, which would send it
+        # into the skill directory.
+        return staged["examples"] / module[len("examples/") :]
+    if module == "tests/smoke":
+        # The entry now shares its source with the smokekit package
+        # staged beside it (#401), so the injection aims at whichever
+        # single member holds the pattern exactly once. Anything else
+        # falls through to the entry itself, whose count of zero (or
+        # two) aborts in the caller with the reason.
+        members = [staged["smoke"], *sorted((tmp / "smokekit").glob("*.py"))]
+        holders = [
+            member
+            for member in members
+            if member.read_text(encoding="utf-8").count(old) == 1
+        ]
+        return holders[0] if len(holders) == 1 else staged["smoke"]
+    if module == "tests/smoke-inject":
+        # Before the `"/" in module` branch below, which would send it
+        # into the skill directory and fail on a file that is not there.
+        return staged["smoke_inject"]
+    if module == "tests/pixel":
+        # Same reason: a path with a "/" that is not under the skill.
+        return staged["pixel"]
+    if module == "tests/README.md":
+        # Before the `.md` branch below, which would look for it under
+        # the skill directory.
+        return staged["readme"]
+    if module == "tests/unit":
+        return staged["unit"]
+    if module == "__init__.py" or module.endswith(".py"):
+        return staged["root"] / "demo_recording" / module
+    if module.endswith(".md") or "/" in module:
+        # A path relative to the skill root: shipped documents, and the
+        # vendored-asset manifest under helpers/assets/ (#54).
+        return staged["skill"] / module
+    return staged["root"] / "demo_recording" / module
+
+
 def fault_inject() -> int:
     """Break one thing at a time and require the named tests to notice."""
     failures = 0
     for name, module, old, new, must_fail in INJECTIONS:
         with tempfile.TemporaryDirectory() as tmp:
-            # The whole skill, not just the package: several injections break a
-            # shipped document, and the documentation assertions are as much a
-            # check as the behavioural ones. `tests/smoke` is copied alongside
-            # it because one assertion reads that file rather than the package —
-            # residue in the *harness* is the defect it grades.
-            #
-            # This file is copied too, and the copy is what runs. One assertion
-            # — the doc-symbol sweep — has an *extraction step* of its own, and
-            # an extraction that quietly matches nothing is the vacuous sweep
-            # the floor exists to catch. Proving that floor fires means breaking
-            # code that lives here, so the inner run cannot be this file. It
-            # reads nothing from `REPO`: every path it uses comes from the three
-            # environment variables below, so a copy under /tmp behaves exactly
-            # as the original does.
-            skill = Path(tmp) / "demo-video"
-            shutil.copytree(REPO / "skills" / "demo-video", skill)
-            root = skill / "helpers"
-            smoke = Path(tmp) / "smoke"
-            shutil.copy(REPO / "tests" / "smoke", smoke)
-            # The entry resolves its package from its own directory (#401),
-            # so a staged copy of the entry without `smokekit` beside it
-            # would die on import rather than on anything an injection did.
-            shutil.copytree(
-                REPO / "tests" / "smokekit",
-                Path(tmp) / "smokekit",
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-            )
-            # `tests/smoke` imports its pixel toolkit from the module beside
-            # it (#349), resolved off its own path — so the copy needs the
-            # module beside it too.
-            shutil.copy(REPO / "tests" / "_pixels.py", Path(tmp) / "_pixels.py")
-            # And the injection manifest, for the same reason as `smoke`: the
-            # baseline retry #258 added is a decision this suite grades, and a
-            # decision nobody has watched go the wrong way is a claim.
-            smoke_inject = Path(tmp) / "smoke-inject"
-            shutil.copy(REPO / "tests" / "smoke-inject", smoke_inject)
-            # ...and the pixel loop, whose cache arithmetic three injections
-            # above break. `PixelCache` resolves it through UNIT_PIXEL for the
-            # same reason everything else here is an environment variable.
-            pixel = Path(tmp) / "pixel"
-            shutil.copy(REPO / "tests" / "pixel", pixel)
-            # ...and this suite's own README, which used to be read straight
-            # out of the working tree. It carries prose that assertions here
-            # grade — a stated figure, and the explanation of a positive skew
-            # this repo shipped and retracted — and a document nothing can
-            # break is a document whose guard nobody has watched fire.
-            readme = Path(tmp) / "README.md"
-            shutil.copy(REPO / "tests" / "README.md", readme)
-            # ...and the proving ground, which `MaskProse` now sweeps. Copied
-            # for the same reason as everything above: an injection has to be
-            # able to break one of these storyboards, and a sweep reading the
-            # working tree would grade the pristine file instead.
-            examples = Path(tmp) / "examples"
-            shutil.copytree(REPO / "examples", examples)
-            unit = Path(tmp) / "unit"
-            shutil.copy(Path(__file__).resolve(), unit)
-            if module.startswith("examples/"):
-                # Before the `"/" in module` branch below, which would send it
-                # into the skill directory.
-                target = examples / module[len("examples/") :]
-            elif module == "tests/smoke":
-                # The entry now shares its source with the smokekit package
-                # staged beside it (#401), so the injection aims at whichever
-                # single member holds the pattern exactly once. Anything else
-                # falls through to the entry itself, whose count of zero (or
-                # two) aborts below with the reason.
-                members = [
-                    smoke,
-                    *sorted((Path(tmp) / "smokekit").glob("*.py")),
-                ]
-                holders = [
-                    member
-                    for member in members
-                    if member.read_text(encoding="utf-8").count(old) == 1
-                ]
-                target = holders[0] if len(holders) == 1 else smoke
-            elif module == "tests/smoke-inject":
-                # Before the `"/" in module` branch below, which would send it
-                # into the skill directory and fail on a file that is not there.
-                target = smoke_inject
-            elif module == "tests/pixel":
-                # Same reason: a path with a "/" that is not under the skill.
-                target = pixel
-            elif module == "tests/README.md":
-                # Before the `.md` branch below, which would look for it under
-                # the skill directory.
-                target = readme
-            elif module == "tests/unit":
-                target = unit
-            elif module == "__init__.py" or module.endswith(".py"):
-                target = root / "demo_recording" / module
-            elif module.endswith(".md") or "/" in module:
-                # A path relative to the skill root: shipped documents, and the
-                # vendored-asset manifest under helpers/assets/ (#54).
-                target = skill / module
-            else:
-                target = root / "demo_recording" / module
+            staged = stage_tree(Path(tmp))
+            skill, root = staged["skill"], staged["root"]
+            smoke, smoke_inject = staged["smoke"], staged["smoke_inject"]
+            pixel, readme = staged["pixel"], staged["readme"]
+            examples, unit = staged["examples"], staged["unit"]
+            target = injection_target(module, staged, old)
             text = target.read_text(encoding="utf-8")
             hits = text.count(old)
             if hits != 1:
@@ -18492,6 +19009,13 @@ def main() -> int:
         help="break each assertion's subject and require it to fail",
     )
     parser.add_argument(
+        "--anchors",
+        action="store_true",
+        help="check every injection still resolves — its pattern matches its "
+        "file once and its tests exist — without running any of them (~1 s "
+        "against --fault-inject's minutes)",
+    )
+    parser.add_argument(
         "--budget",
         action="store_true",
         help="report SKILL.md's context cost (warns, does not gate)",
@@ -18500,6 +19024,8 @@ def main() -> int:
     args, rest = parser.parse_known_args()
     if args.budget:
         return budget_report()
+    if args.anchors:
+        return check_anchors()
     if args.fault_inject:
         return fault_inject()
     if args._inner:

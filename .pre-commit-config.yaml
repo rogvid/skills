@@ -12,10 +12,11 @@
 # the same binary locally as on the runner.
 #
 # **The budget is the whole point.** The always-on pre-commit hooks measure
-# ~6 s together warm — lint 0.9 s, its self-test 0.4 s, ci-unit 1.3 s, unit
-# 3.7 s. Anything that needs the network (`tests/lint --issues`) or a browser
-# (`tests/smoke`, `tests/pixel`) is pre-push or manual, never pre-commit: a
-# hook people disable is worse than no hook.
+# ~7 s together warm — lint 0.9 s, its self-test 0.4 s, ci-unit 1.3 s, unit
+# 3.7 s, and the two `--anchors` sweeps 0.9 s between them. Anything that needs
+# the network (`tests/lint --issues`) or a browser (`tests/smoke`,
+# `tests/pixel`) is pre-push or manual, never pre-commit: a hook people disable
+# is worse than no hook.
 
 default_install_hook_types: [pre-commit, pre-push]
 fail_fast: false
@@ -49,6 +50,26 @@ repos:
       - id: ci-unit
         name: tests/ci-unit — the CI helpers
         entry: tests/ci-unit
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # The injection manifests still resolve — every pattern matches its file
+      # exactly once, every test it names still exists. 0.7 s and 0.2 s, which
+      # is what buys them a place in a ~6 s budget: the failure they catch is a
+      # rename or a reflow orphaning an anchor, and that happens *while you are
+      # committing*. The drivers that prove the assertions can still fail cost
+      # 132 s and 298 s and run on merge, never here.
+      - id: unit-anchors
+        name: tests/unit --anchors — the injection manifest still resolves
+        entry: tests/unit --anchors
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: ci-unit-anchors
+        name: tests/ci-unit --anchors — the injection manifest still resolves
+        entry: tests/ci-unit --anchors
         language: system
         pass_filenames: false
         stages: [pre-commit]

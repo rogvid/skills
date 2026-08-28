@@ -919,6 +919,7 @@ class _DemoBase:
         # the reserved band below it (#403). Trades the "app never shares a
         # pixel with the caption" invariant for schoko-style framing.
         caption_overlay: bool | None = None,
+        preview: bool | None = None,
         # Quality preset (#403): "high" (the defaults) or "quick" — see
         # PRESETS. A preset replaces built-in defaults only; explicit
         # parameters and DEMO_VIDEO_* env vars still win.
@@ -1043,9 +1044,34 @@ class _DemoBase:
         # *default* depends on it.
         if caption_overlay is None:
             caption_overlay = _env_flag("CAPTION_OVERLAY")
-        self._caption_overlay = True if caption_overlay is None else bool(
-            caption_overlay
+        self._caption_overlay = (
+            True if caption_overlay is None else bool(caption_overlay)
         )
+        # The pull-request preview (see `_write_preview`). On by default,
+        # because the whole point is that a reviewer sees the change without
+        # asking for it — a preview somebody has to enable is a preview nobody
+        # has.
+        #
+        # The three numbers are measured, not chosen. A pull-request body's
+        # content column is about 830 px, and an image renders at its natural
+        # width, so 1280 fills it with the 1.5x density a HiDPI screen wants —
+        # 960 read small and 1600 cost 60% more for no visible gain. Quality 90
+        # is where `-preset text` stopped showing artefacts on the azure cursor
+        # and coloured text edges; 60 was visibly ringing and 95 was 45%
+        # larger for nothing anyone could see. 12 fps keeps an eased glide
+        # reading as motion — 8 fps looked stepped, and stepped motion is a lie
+        # about the thing this recorder exists to show.
+        #
+        # It costs one extra ffmpeg pass and about 3 MB on disk. The file is
+        # gitignored: CI uploads it as a release asset, which is not a git
+        # object, so none of that reaches the repository.
+        if preview is None:
+            preview = _env_flag("PREVIEW")
+        self._preview = True if preview is None else bool(preview)
+        self._preview_width = int(_env("PREVIEW_WIDTH", "1280"))
+        self._preview_quality = int(_env("PREVIEW_QUALITY", "90"))
+        self._preview_fps = int(_env("PREVIEW_FPS", "12"))
+        self._preview_written = False
         # Window scale override (issue #397). Allows consumers to request a
         # larger/smaller app rect within the wrapper window. Resolved from
         # explicit parameter > DEMO_VIDEO_WINDOW_SCALE env var > built-in default.
@@ -1092,9 +1118,7 @@ class _DemoBase:
         # stills_only zeroes pacing entirely, so rehearsal speed does not
         # depend on whatever a take sets here.
         if pace is None:
-            raw_pace: float | str = _env(
-                "PACE", str(preset_defaults.get("pace", 1.0))
-            )
+            raw_pace: float | str = _env("PACE", str(preset_defaults.get("pace", 1.0)))
         else:
             raw_pace = pace
         try:
@@ -2417,6 +2441,87 @@ class _DemoBase:
         name = f"{self.segment}.seg.mp4" if self.segment else "demo.mp4"
         return self.out_dir / name
 
+    def _preview_path(self) -> Path:
+        """The animated WebP a pull-request body embeds."""
+        stem = self.segment if self.segment else "demo"
+        return self.out_dir / f"{stem}.preview.webp"
+
+    def _write_preview(self, webm: Path, chain: str | None) -> None:
+        """An animated WebP for a pull-request body, off the browser's frames.
+
+        **Why this exists.** GitHub has no public API for the attachment upload
+        its drag-and-drop uses, so CI cannot hand a reviewer a video player. The
+        only thing that inlines in a pull-request body is an image — and an
+        animated WebP is an image. This is the file a reviewer actually sees
+        before deciding whether to open anything.
+
+        **Why it is encoded here and not from `demo.mp4`.** By the time the mp4
+        exists the frames have been through h264 twice — once at CRF 16 for the
+        camera pass, once at CRF 23 for the master. Encoding the preview from
+        the webm instead is *one* generation, and measured on a 25 s take it is
+        both cleaner and smaller: 2.67 MB against 2.95 MB at identical WebP
+        settings, because a noisier source costs the encoder bits.
+
+        `chain` is the camera filter the mp4 pass uses, threaded in so the
+        preview gets the same push-ins. Encoding from the raw webm without it
+        produced a preview with no zoom — the reason this takes the chain as an
+        argument rather than reading `self._camera` again.
+
+        **What it is not.** It carries no audio, and cannot: WebP has no audio
+        track. Narration, the 25 fps pin the beat log's frame arithmetic needs,
+        and every downstream reader — `media_duration`, `frames/`, the picture
+        check, `stitch()`'s concat — all belong to the mp4, which is unchanged.
+        This is a preview beside the master, never instead of it.
+
+        Failure here is a warning, never the take: a reviewer losing a preview
+        is an inconvenience, and raising would throw away a recording that is
+        already complete.
+        """
+        if not self._preview:
+            return
+        out = self._preview_path()
+        scale = f"fps={self._preview_fps},scale={self._preview_width}:-1:flags=lanczos"
+        graph = f"[0:v]{chain},{scale}[v]" if chain else f"[0:v]{scale}[v]"
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(webm),
+                    "-filter_complex",
+                    graph,
+                    "-map",
+                    "[v]",
+                    "-loop",
+                    "0",
+                    # `text` rather than the default `picture`: a screen
+                    # recording is flat colour and sharp edges, which is what
+                    # this preset tunes for. At the same quality the default
+                    # spends its bits smoothing gradients that are not there
+                    # and rings the edges that are.
+                    "-preset",
+                    "text",
+                    "-q:v",
+                    str(self._preview_quality),
+                    "-compression_level",
+                    "6",
+                    str(out),
+                ],
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            print(
+                f"demo-video: WARNING — the pull-request preview could not be "
+                f"encoded ({type(exc).__name__}). The take itself is fine; "
+                f"{out.name} was not written.",
+                file=sys.stderr,
+            )
+            return
+        self._preview_written = True
+
     def _media_name(self) -> str | None:
         """What an artifact should call this take's video — None on a stills
         run, where there is not one (issue #372).
@@ -2637,6 +2742,12 @@ class _DemoBase:
             # as it always did. Nothing here fetched or resolved it.
             **_ticket_field(self._ticket),
             "media": self._media_name(),
+            # The pull-request preview, named only when this run actually
+            # wrote one — the same rule `media` follows and for the same
+            # reason (#20): `demo.preview.webp` from a previous take is very
+            # likely sitting in this directory, and naming it would point a
+            # pull-request body at a recording of something else.
+            "preview": self._preview_path().name if self._preview_written else None,
             "duration": duration,
             # Which clock produced this take. Without it a still committed to a
             # repo carries no record of the conditions it was recorded under,
@@ -3148,7 +3259,9 @@ class _DemoBase:
             return
         event = dict(self._camera_open)
         self._camera_open = None
-        end = round(time.monotonic() - self._t0, 3) if t_end is None else round(t_end, 3)
+        end = (
+            round(time.monotonic() - self._t0, 3) if t_end is None else round(t_end, 3)
+        )
         if end > event["t_start"]:
             event["t_end"] = end
             self._camera.append(event)
@@ -3244,10 +3357,9 @@ class _DemoBase:
         # pre-pass is a single-output graph — the shape the mix always
         # used — and the mix then reads its frames like any other input.
         source = webm
+        chain: str | None = None
         if self._camera:
-            self._camera = self._camera_on_the_video_clock(
-                self._capture_clock.report()
-            )
+            self._camera = self._camera_on_the_video_clock(self._capture_clock.report())
         if self._camera:
             src_w, src_h = video_dimensions(webm)
             chain = camera_filter(
@@ -3260,12 +3372,24 @@ class _DemoBase:
             source = webm.with_suffix(".camera.mp4")
             subprocess.run(
                 [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-i", str(webm),
-                    "-filter_complex", f"[0:v]{chain}[v]",
-                    "-map", "[v]",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
-                    "-r", "25",
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(webm),
+                    "-filter_complex",
+                    f"[0:v]{chain}[v]",
+                    "-map",
+                    "[v]",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-crf",
+                    "16",
+                    "-r",
+                    "25",
                     str(source),
                 ],
                 check=True,
@@ -3368,5 +3492,23 @@ class _DemoBase:
         # `narration: null`, which is what a take that mixed nothing says too —
         # and neither of them has an mp4 for it to be about.
         self._narration = narration
+        # After the master is on disk, deliberately. The preview is a
+        # convenience and the mp4 is the deliverable, so nothing about the
+        # preview — an ffmpeg that is missing, out of disk, or simply slow —
+        # can happen before the take is safe. It still reads `webm` and not
+        # `mp4`: the browser's own frames are the point (#410), and they are
+        # still here because `__exit__` clears `.video/` well after this.
+        self._write_preview(webm, chain)
         spoken = f", {len(self._lines)} spoken lines" if self._speech else ""
         print(f"wrote {mp4} ({mp4.stat().st_size // 1024} kB{spoken})")
+        # Reported with its size, and said to be gitignored, because both are
+        # what a reader needs: it is ~3 MB, and it is **not** committed. CI
+        # uploads it as a release asset instead (`demo-preview-asset`), which is
+        # not a git object — so a clone never fetches one and the repository
+        # does not grow by a copy per demo per re-record.
+        if self._preview_written:
+            preview = self._preview_path()
+            print(
+                f"wrote {preview} ({preview.stat().st_size // 1024} kB, "
+                f"gitignored — CI uploads it as a release asset)"
+            )

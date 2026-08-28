@@ -158,7 +158,12 @@ jobs:
       STAGE_FAILURE: ${{ github.workspace }}/.demo-video-ci/failure
       CHANGED: ${{ github.workspace }}/.demo-video-ci/changed.txt
       STARTED_AT: ${{ github.workspace }}/.demo-video-ci/recording-started
-      COMMENT_BODY: ${{ github.workspace }}/.demo-video-ci/comment.md
+      # The block spliced into the pull-request *body*, and the classifier's
+      # verdict it is rendered from.
+      PR_BLOCK: ${{ github.workspace }}/.demo-video-ci/pr-block.md
+      CLASSIFY: ${{ github.workspace }}/.demo-video-ci/classification.json
+      PR_BODY: ${{ github.workspace }}/.demo-video-ci/pr-body.md
+      COMMITS: ${{ github.workspace }}/.demo-video-ci/commits.txt
       APP_LOG: ${{ github.workspace }}/.demo-video-ci/app.log
 
     steps:
@@ -199,7 +204,8 @@ jobs:
           dir="$root/.github/scripts"
           skill="$root/skills/demo-video"
           # Packaging and some checkout paths drop the executable bit.
-          chmod +x "$dir"/demo-storyboards "$dir"/demo-comment "$dir"/demo-ticket-check
+          chmod +x "$dir"/demo-storyboards "$dir"/demo-ticket-check
+          chmod +x "$dir"/demo-classify "$dir"/demo-pr-body "$dir"/demo-preview-asset
           chmod +x "$skill"/scripts/demo-target-guard "$skill"/scripts/demo-rehearse
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "skill=$skill" >> "$GITHUB_OUTPUT"
@@ -250,6 +256,51 @@ jobs:
           # even when the take never runs.
           sed 's|/[^/]*$||' "$CHANGED.selected" | sort -u > "$DEMO_DIRS"
           echo "Recording:"; sed 's/^/  /' "$DEMO_DIRS"
+
+      # What kind of change is this, and does a reviewer need to watch it?
+      # The first question somebody opening a pull request has, and answering
+      # it first is what lets everything else be short.
+      #
+      # The verdict is a *pair*: the branch's conventional-commit types say
+      # what kind of change it is, the touched paths say whether there is
+      # anything to see. That is the demoable/not-demoable table in this
+      # repository's own guide, applied — either half can veto a demo, and only
+      # both together ask for one. A `perf:` touching nothing but `tests/` gets
+      # no video.
+      #
+      # Never fatal, by construction: an unrecognised type or a path set it has
+      # no rule for resolves to "no demo, and here is why". A classifier that
+      # stopped a pull request would be worse than the wall of text it replaces.
+      - name: Classify the change
+        id: classify
+        if: steps.discover.outputs.count != '0'
+        env:
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BODY_TEXT: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_SHA" ]; then
+            git log --format=%s "$BASE_SHA..HEAD" > "$COMMITS"
+          else
+            git log --format=%s -1 > "$COMMITS"
+          fi
+          # The author's override lives in the body, so the body is an input.
+          printf '%s\n' "$PR_BODY_TEXT" > "$PR_BODY"
+          "$SCRIPTS/demo-classify" \
+            --commits "$COMMITS" --changed-file "$CHANGED" \
+            --pr-body "$PR_BODY" --json > "$CLASSIFY"
+          cat "$CLASSIFY"
+          demo=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['demo'])" "$CLASSIFY")
+          echo "demo=$demo" >> "$GITHUB_OUTPUT"
+          # `none` does not skip the take — it makes it a stills-only one.
+          # ~2 s against minutes, and it keeps *evidence*: a `refactor:` that
+          # changes what a viewer sees is exactly the case the commit type gets
+          # wrong, and pictures are what make that visible to anyone who looks.
+          if [ "$demo" = "none" ]; then
+            echo "DEMO_VIDEO_STILLS_ONLY=1" >> "$GITHUB_ENV"
+            echo "category says nothing to watch -> recording stills only"
+          fi
 
       - name: Nothing to record
         if: steps.discover.outputs.count == '0'
@@ -580,76 +631,99 @@ jobs:
           done < "$DEMO_DIRS"
           "$SCRIPTS/demo-ticket-check" "${args[@]}" --demo-root "$STAGE_DEMO"
 
-      - name: Render the comment
-        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped'
+      # The preview a pull-request body can actually show. GitHub has no public
+      # API for the attachment upload its drag-and-drop uses, so a video cannot
+      # reach a reviewer as a player — only as an inline image, and an animated
+      # WebP is one. It is uploaded as a **release asset**, which is not a git
+      # object: nothing is committed and the repository does not grow.
+      #
+      # Skipped on a stills-only take, which wrote no preview by construction.
+      - name: Upload the preview
+        id: preview
+        if: >-
+          always() && steps.discover.outputs.count != '0' &&
+          steps.record.conclusion != 'skipped' &&
+          steps.classify.outputs.demo != 'none' &&
+          github.event.pull_request.number
         working-directory: ${{ inputs.working-directory }}
         env:
-          SCRIPTS: ${{ steps.helpers.outputs.dir }}
-          ARTIFACT_URL: ${{ steps.upload-demo.outputs.artifact-url }}
-          FAILURE_URL: ${{ steps.upload-failure.outputs.artifact-url }}
-          ARTIFACT_BYTES: ${{ steps.stage.outputs.bytes }}
-          RETENTION: ${{ inputs.demo-retention-days }}
-          EVIDENCE_RETENTION: ${{ inputs.evidence-retention-days }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          # Where the --demo paths sit in the repository. They are relative to
-          # working-directory, so a still linked without this is a 404 that
-          # looks exactly like a working link.
-          WORKDIR: ${{ inputs.working-directory }}
-        run: |
-          set -euo pipefail
-          args=()
-          # Read the timelines out of the *staging* directory, not the working
-          # tree. Staging is where the freshness filter was applied, so the
-          # comment can only ever describe what was actually published. The
-          # working tree still holds the committed timeline.json of the
-          # previous recording, and on the recorder's refusal path (a take
-          # that cannot verify its mask writes nothing but the marker) that
-          # file is what a reader would have been shown as current.
-          while IFS= read -r dir; do
-            if [ -n "$dir" ]; then args+=(--demo "$dir"); fi
-          done < "$DEMO_DIRS"
-          if [ -n "$FAILURE_URL" ]; then args+=(--failure-artifact-url "$FAILURE_URL"); fi
-          "$SCRIPTS/demo-comment" "${args[@]}" \
-            --demo-root "$STAGE_DEMO" \
-            --artifact-url "$ARTIFACT_URL" \
-            --artifact-bytes "${ARTIFACT_BYTES:-0}" \
-            --retention-days "$RETENTION" \
-            --evidence-retention-days "$EVIDENCE_RETENTION" \
-            --run-url "$RUN_URL" --sha "$HEAD_SHA" \
-            --path-prefix "$WORKDIR" \
-            --out "$COMMENT_BODY"
-
-      # One comment, found by its marker and rewritten. A branch with ten
-      # pushes must not bury its pull request under ten identical comments.
-      - name: Post or update the pull-request comment
-        if: always() && steps.discover.outputs.count != '0' && steps.record.conclusion != 'skipped' && github.event.pull_request.number
-        env:
           GH_TOKEN: ${{ github.token }}
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          MARKER: "<!-- demo-video-ci:"
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-            --jq "[.[] | select(.body | startswith(\"$MARKER\")) | .id] | first // empty")
-          if [ -n "$existing" ]; then
-            url=$(gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
-              -F body=@"$COMMENT_BODY" --jq .html_url)
-            echo "updated comment $existing in place: $url"
-          else
-            url=$(gh api -X POST "repos/$REPO/issues/$PR/comments" \
-              -F body=@"$COMMENT_BODY" --jq .html_url)
-            echo "posted a new comment: $url"
-          fi
+          url=""
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            # Named by the **staged** timeline, not by a glob and not by the
+            # working tree's copy. Staging is where the freshness filter ran,
+            # so only a timeline this run wrote can name a preview — the same
+            # rule that stops a previous recording being published as this
+            # one's (#20). A take that wrote no preview names none.
+            name=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('preview') or '')" "$STAGE_DEMO/$dir/timeline.json" 2>/dev/null || true)
+            [ -n "$name" ] && [ -f "$dir/$name" ] || continue
+            url=$("$SCRIPTS/demo-preview-asset" upload \
+              --file "$dir/$name" --pr "$PR" --demo "$dir" \
+              --sha "$HEAD_SHA" --repo "$REPO")
+            echo "uploaded $dir/$name -> $url"
+          done < "$DEMO_DIRS"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      # Last, so a take that failed still publishes everything above.
+      # The block a reviewer reads first, rendered and spliced into the
+      # pull-request *body* in one step.
       #
-      # `silent != 0` is part of the condition because the check and the
-      # comment must never disagree. A demo that published no timeline is
-      # reported in the comment as a take that failed, and a green check beside
-      # that sentence teaches a reviewer to ignore the comment — worse than
-      # either signal alone.
+      # This replaces the comment this workflow used to post, which carried
+      # every caption, every acceptance message and every diagnostic below the
+      # fold of a conversation tab. Those artifacts still exist and are still
+      # uploaded; they belong behind the link at the foot of the block, for the
+      # reviewer who has a question, not in front of the one who does not.
+      #
+      # `--existing-body` splices between markers, so everything the author
+      # wrote is untouched and ten pushes rewrite one block rather than
+      # stacking ten comments. The body is re-read here rather than reused
+      # from the classify step: a human may have edited it since, and splicing
+      # into a stale copy would silently revert them.
+      - name: Update the pull-request body
+        if: >-
+          always() && steps.discover.outputs.count != '0' &&
+          steps.record.conclusion != 'skipped' &&
+          github.event.pull_request.number
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PREVIEW_URL: ${{ steps.preview.outputs.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SUMMARY: ${{ github.event.pull_request.title }}
+          # Where the --demo paths sit in the repository. They are relative to
+          # working-directory, so a still linked without this is a 404 that
+          # looks exactly like a working link (#274).
+          WORKDIR: ${{ inputs.working-directory }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/pulls/$PR" --jq '.body // ""' > "$PR_BODY"
+          # One block per pull request, from the first demo. A pull request
+          # recording several is rare and the block is deliberately short; the
+          # run link at its foot carries the rest.
+          demo=$(head -n 1 "$DEMO_DIRS")
+          args=(--classification "$CLASSIFY" --summary "$SUMMARY")
+          if [ -n "$demo" ]; then
+            args+=(--timeline "$STAGE_DEMO/$demo/timeline.json")
+            args+=(--ticket-check "$STAGE_DEMO/$demo/review/ticket-check.json")
+          fi
+          if [ -n "$PREVIEW_URL" ]; then args+=(--video-url "$PREVIEW_URL"); fi
+          "$SCRIPTS/demo-pr-body" "${args[@]}" \
+            --demo "$demo" --path-prefix "$WORKDIR" --repo-url "$REPO_URL" \
+            --sha "$HEAD_SHA" --details-url "$RUN_URL" \
+            --existing-body "$PR_BODY" --out "$PR_BLOCK"
+          gh api -X PATCH "repos/$REPO/pulls/$PR" -F body=@"$PR_BLOCK" --jq .html_url
+
       - name: Fail the check if the take failed
         if: >-
           always() && steps.discover.outputs.count != '0' &&

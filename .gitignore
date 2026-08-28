@@ -31,6 +31,13 @@ tests/eval/grader/takes/*/review/brief.md
 tests/eval/grader/takes/*/review/brief.json
 .tts/
 *.seg.mp4
+# The pull-request preview (#410). Never committed: CI uploads it as a
+# **release asset**, which is not a git object at all, so a clone never
+# fetches one and the repository does not grow by ~3 MB per demo per
+# re-record. The store is the `demo-assets` pre-release, which is not a
+# release of anything — its notes say so. `.github/scripts/demo-preview-asset`
+# uploads and prunes.
+*.preview.webp
 # Per-segment beat logs. The merged timeline.json/timeline.md next to
 # demo.mp4 is committed; these are the parts it is built from, and stitch()
 # deletes them with their .seg.mp4 unless it was passed keep_parts=True.

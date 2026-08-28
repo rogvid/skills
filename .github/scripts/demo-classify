@@ -1,0 +1,285 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Decide what a change *is*, and therefore whether a reviewer should watch it.
+
+    demo-classify --commits commits.txt --changed-file changed.txt
+    demo-classify --commits commits.txt --changed-file changed.txt \
+                  --pr-body body.md --json
+
+Prints the category, the demo decision and the reason for both. With `--json`
+it prints a single object for a workflow or a renderer to read.
+
+**Why this exists.** A pull request in this repository arrives as a wall of
+text: a long body, a CI comment carrying every caption and every acceptance
+message, and no answer to the first question a reviewer actually has — *what
+kind of change is this, and do I need to watch anything?* That question has a
+cheap answer, and answering it first is what lets everything else be short.
+
+**Where the category comes from.** The branch's own conventional-commit types,
+which `AGENTS.md` already mandates, so this needs no new ritual and works on
+every branch that already exists. A `Category:` line in the pull-request body
+overrides the derivation for the cases where the type is honest but unhelpful
+— a `feat:` that is really a design change, a `fix:` for something no eye can
+see.
+
+**Why the type alone is not enough.** `CLAUDE.md` already carries this repo's
+demoable / not-demoable table, and its rule is about *what the change touches*,
+not what its commit says: "how the recording looks" is demoable, "whether a
+mask holds" is not, because absence is not watchable. So the decision is the
+pair — the type says what kind of change it is, the touched paths say whether
+there is anything to see. A `fix:` under `tests/` is a fix nobody can watch.
+
+**What this deliberately does not do.** It does not decide *which* stills best
+show the change; it says stills-or-video-or-neither and leaves the choosing to
+the recorder. And it never blocks: an unrecognised type, an empty branch or a
+path set it has no rule for all resolve to "no demo, and here is why", because
+a classifier that stops a pull request is worse than one that says "I could not
+tell" out loud.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+# --------------------------------------------------------------------------
+# Categories
+# --------------------------------------------------------------------------
+#
+# The six the reviewer asked for, plus the honest seventh. `demo` is what the
+# category alone would decide, before the touched paths get a say:
+#
+#   "video"   motion, timing or a flow is the thing that changed
+#   "stills"  a picture answers it, and a video would be ceremony
+#   "none"    nothing a viewer can see, whatever the paths say
+#
+# `perf` maps to *enhancement* rather than to its own category because that is
+# what the word means to a reviewer here: the eased cursor glide was a `perf`
+# in spirit and "smoother mouse movement" in the request that asked for it.
+CATEGORIES = {
+    "new feature": {"demo": "video", "types": ("feat",)},
+    "bugfix": {"demo": "stills", "types": ("fix",)},
+    "enhancement": {"demo": "video", "types": ("perf",)},
+    "design change": {"demo": "stills", "types": ("style", "design")},
+    "refactor": {"demo": "none", "types": ("refactor",)},
+    "other": {"demo": "none", "types": ("chore", "build", "revert")},
+}
+
+# Types that are *definitionally* unwatchable, so they never reach a category
+# that could ask for a demo. Kept separate from `other` so the reason a change
+# got no demo can name the type rather than shrugging.
+QUIET_TYPES = {
+    "docs": "documentation",
+    "test": "tests",
+    "ci": "CI configuration",
+    "chore": "housekeeping",
+    "build": "build configuration",
+}
+
+# The precedence when a branch carries several types, most demo-worthy first.
+# A branch of `feat:` plus `test:` is a feature with tests, not a test change,
+# and a reviewer asked "what is this?" wants the former.
+TYPE_RANK = ("feat", "perf", "fix", "style", "design", "refactor", "revert")
+
+_COMMIT_RE = re.compile(r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!)?:\s")
+_OVERRIDE_RE = re.compile(r"^\s*Category:\s*(?P<value>.+?)\s*$", re.M | re.I)
+
+
+# --------------------------------------------------------------------------
+# What the touched paths say
+# --------------------------------------------------------------------------
+#
+# `CLAUDE.md`'s table, as globs. The order matters: WATCHABLE is checked first,
+# so a change touching both the chrome and a test is watchable, which is the
+# right answer — the test does not make the chrome invisible.
+WATCHABLE = (
+    # How the recording looks: chrome, captions, cursor, spotlight, framing.
+    "skills/demo-video/helpers/demo_recording/chrome.py",
+    "skills/demo-video/helpers/demo_recording/web.py",
+    "skills/demo-video/helpers/demo_recording/terminal.py",
+    "skills/demo-video/helpers/demo_recording/frames.py",
+    "skills/demo-video/helpers/demo_recording/core.py",
+    # The proving ground: anything a viewer sees the app do.
+    "examples/",
+)
+
+# Never watchable, whatever the type says — absence is not something a video
+# can show, and a passing sweep is not something a reviewer can watch.
+UNWATCHABLE = (
+    "tests/",
+    ".github/",
+    "docs/",
+    "mise.toml",
+    "ruff.toml",
+    "mypy.ini",
+    ".pre-commit-config.yaml",
+    ".gitignore",
+    ".gitleaks.toml",
+)
+
+
+def _is_doc(path: str) -> bool:
+    return path.endswith((".md", ".txt"))
+
+
+def touched_verdict(paths: list[str]) -> tuple[str, str]:
+    """`("watchable"|"unwatchable"|"unknown", reason)` for a set of paths."""
+    if not paths:
+        return "unknown", "no changed files were given"
+    hits = [p for p in paths if p.startswith(WATCHABLE) and not _is_doc(p)]
+    if hits:
+        shown = ", ".join(f"`{p}`" for p in sorted(hits)[:3])
+        more = f" and {len(hits) - 3} more" if len(hits) > 3 else ""
+        return "watchable", f"it changes {shown}{more}"
+    docs = [p for p in paths if _is_doc(p)]
+    if len(docs) == len(paths):
+        return "unwatchable", "every changed file is a document"
+    quiet = [p for p in paths if p.startswith(UNWATCHABLE) or _is_doc(p)]
+    if len(quiet) == len(paths):
+        where = sorted({p.split("/")[0] + "/" for p in quiet if "/" in p})
+        named = ", ".join(f"`{w}`" for w in where[:3]) or "configuration"
+        return "unwatchable", f"every changed file is under {named}"
+    return "unknown", "no rule covers the changed files"
+
+
+# --------------------------------------------------------------------------
+# What the commits say
+# --------------------------------------------------------------------------
+
+
+def parse_types(commits: list[str]) -> list[str]:
+    """The conventional-commit type of each subject line that has one."""
+    types = []
+    for line in commits:
+        m = _COMMIT_RE.match(line.strip())
+        if m:
+            types.append(m.group("type").lower())
+    return types
+
+
+def category_for_types(types: list[str]) -> tuple[str | None, str]:
+    """The winning category and the reason, or `(None, reason)`."""
+    if not types:
+        return None, "no commit on this branch names a conventional type"
+    for want in TYPE_RANK:
+        if want in types:
+            for name, spec in CATEGORIES.items():
+                if want in spec["types"]:
+                    others = sorted(set(types) - {want})
+                    also = f" (alongside {', '.join(others)})" if others else ""
+                    return name, f"`{want}:` on this branch{also}"
+    quiet = sorted({t for t in types if t in QUIET_TYPES})
+    if quiet:
+        named = ", ".join(QUIET_TYPES[t] for t in quiet)
+        return "other", f"this branch is {named} only (`{quiet[0]}:`)"
+    return (
+        None,
+        f"no rule for the types on this branch ({', '.join(sorted(set(types)))})",
+    )
+
+
+def read_override(body: str | None) -> tuple[str | None, str | None]:
+    """A `Category:` line in the pull-request body, and any complaint about it."""
+    if not body:
+        return None, None
+    m = _OVERRIDE_RE.search(body)
+    if not m:
+        return None, None
+    value = m.group("value").strip().strip("`*_").lower()
+    if value in CATEGORIES:
+        return value, None
+    known = ", ".join(sorted(CATEGORIES))
+    return None, f"the body says `Category: {value}`, which is not one of: {known}"
+
+
+# --------------------------------------------------------------------------
+# The decision
+# --------------------------------------------------------------------------
+
+
+def classify(commits: list[str], paths: list[str], body: str | None = None) -> dict:
+    """Category, demo decision, and the reason for each."""
+    derived, why_category = category_for_types(commits and parse_types(commits) or [])
+    override, complaint = read_override(body)
+
+    if override:
+        category = override
+        why_category = f"`Category: {override}` in the pull-request body"
+        overridden = derived if derived and derived != override else None
+        if overridden:
+            why_category += f" (the commits said {overridden})"
+    else:
+        category = derived
+
+    if category is None:
+        return {
+            "category": None,
+            "why_category": complaint or why_category,
+            "demo": "none",
+            "why_demo": "nothing was classified, so nothing is claimed about it",
+            "override_ignored": complaint,
+        }
+
+    wants = CATEGORIES[category]["demo"]
+    verdict, why_touched = touched_verdict(paths)
+
+    # The pair. The category says what kind of change it is; the paths say
+    # whether there is anything to see. Either one can veto a demo, and only
+    # both together can ask for one — which is `CLAUDE.md`'s rule, applied.
+    if wants == "none":
+        demo, why_demo = "none", f"a {category} is not something a viewer watches"
+    elif verdict == "unwatchable":
+        demo, why_demo = "none", f"{why_touched}, and absence is not watchable"
+    elif verdict == "unknown":
+        demo, why_demo = "stills", f"{why_touched}, so this falls back to stills"
+    else:
+        demo, why_demo = wants, why_touched
+
+    return {
+        "category": category,
+        "why_category": why_category,
+        "demo": demo,
+        "why_demo": why_demo,
+        "override_ignored": complaint,
+    }
+
+
+def _lines(path: str | None) -> list[str]:
+    if not path:
+        return []
+    text = Path(path).read_text(encoding="utf-8")
+    return [ln for ln in text.splitlines() if ln.strip()]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--commits", help="file of commit subject lines, one per line")
+    ap.add_argument("--changed-file", help="file of changed paths, one per line")
+    ap.add_argument("--pr-body", help="file holding the pull-request body")
+    ap.add_argument("--json", action="store_true", help="print one JSON object")
+    args = ap.parse_args()
+
+    body = Path(args.pr_body).read_text(encoding="utf-8") if args.pr_body else None
+    result = classify(_lines(args.commits), _lines(args.changed_file), body)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+
+    print(f"category: {result['category'] or 'unknown'}")
+    print(f"          {result['why_category']}")
+    print(f"demo:     {result['demo']}")
+    print(f"          {result['why_demo']}")
+    if result["override_ignored"]:
+        print(f"note:     {result['override_ignored']}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

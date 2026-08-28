@@ -1,0 +1,202 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Host a pull-request preview as a release asset, and prune the dead ones.
+
+    demo-preview-asset upload --file demo.preview.webp --pr 412 \
+                              --demo examples/ticket-queue/demos/2026-08-27-glide
+    demo-preview-asset prune --dry-run
+
+`upload` prints the URL to embed. `prune` deletes the assets belonging to pull
+requests that are closed.
+
+**Why a release asset and not a committed file.** A preview is ~3 MB and a demo
+gets re-recorded every time its app changes. Committed, that is ~3 MB per demo
+per re-record in git history, permanently, and every clone pays it. A release
+asset is **not a git object**: it lives in separate storage, `git clone` never
+fetches one, and it can be deleted individually through the API. The repository
+does not grow at all.
+
+The store is a pre-release tag that is not a release of anything — its notes
+say so. GitHub serves the download endpoint as `application/octet-stream` and
+renders it inline anyway, which was checked on a real pull request rather than
+assumed.
+
+**Names carry their own provenance**, because the store is flat and shared:
+
+    pr412-2026-08-27-glide-a1b2c3d.webp
+
+The pull request it belongs to, the demo it is of, and the commit it was
+recorded from. Two pushes to one pull request produce two assets, deliberately
+— an old pull-request body keeps pointing at the picture it was reviewed
+against rather than silently acquiring a newer one, which is the same rule
+`timeline["preview"]` follows (#20).
+
+**Pruning is by pull-request state, not by age.** An open pull request may be
+weeks old and still under review; a closed one cannot be reviewed again. So
+`prune` reads the number out of each asset's name, asks whether that pull
+request is still open, and deletes only what belongs to a closed one. An asset
+whose name it cannot parse is **left alone and reported** — a pruner that
+deleted what it did not understand would be the one bug here that loses data.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# Not a release of anything. `demo-preview-asset upload` creates it on first
+# use if it is missing, as a prerelease so it never shows as "Latest".
+ASSET_TAG = "demo-assets"
+
+# `pr<N>-<demo-slug>-<sha7>.webp`, and the groups are what `prune` reads back.
+ASSET_RE = re.compile(r"^pr(?P<pr>\d+)-(?P<slug>.+)-(?P<sha>[0-9a-f]{7})\.webp$")
+
+
+def _gh(*args: str, check: bool = True) -> str:
+    done = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+    if check and done.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args)} failed: {done.stderr.strip()}")
+    return done.stdout
+
+
+def asset_name(pr: int, demo: str, sha: str) -> str:
+    """The flat-store name for one preview.
+
+    The demo's directory name is the slug — `examples/ticket-queue/demos/` is
+    the same prefix on every storyboard in this repository, so keeping it would
+    make every name longer and none of them more distinct.
+    """
+    slug = Path(demo.rstrip("/")).name or "demo"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip("-") or "demo"
+    return f"pr{int(pr)}-{slug}-{sha[:7]}.webp"
+
+
+def ensure_release(repo: str | None = None) -> None:
+    """Create the asset store if it is not there. Idempotent."""
+    scope = ["--repo", repo] if repo else []
+    if _gh("release", "view", ASSET_TAG, *scope, check=False):
+        return
+    _gh(
+        "release",
+        "create",
+        ASSET_TAG,
+        *scope,
+        "--prerelease",
+        "--title",
+        "Demo previews (asset store, not a release)",
+        "--notes",
+        "Not a release. This tag exists only to host pull-request demo "
+        "previews, which are uploaded here instead of being committed — a "
+        "release asset is not a git object, so the repository does not grow. "
+        "Assets are pruned when their pull request closes; deleting one only "
+        "breaks the embedded image in an already-closed pull request.",
+    )
+
+
+def upload(file: Path, pr: int, demo: str, sha: str, repo: str | None) -> str:
+    """Upload one preview and return the URL to embed."""
+    ensure_release(repo)
+    name = asset_name(pr, demo, sha)
+    scope = ["--repo", repo] if repo else []
+    staged = file.parent / name
+    # Uploaded under its store name rather than `demo.preview.webp`: the store
+    # is flat and shared, and `gh release upload` names the asset after the
+    # file. Every take writes the same filename, so uploading them as-is would
+    # have each demo overwrite the last.
+    staged.write_bytes(file.read_bytes())
+    try:
+        _gh("release", "upload", ASSET_TAG, str(staged), *scope, "--clobber")
+    finally:
+        if staged != file:
+            staged.unlink(missing_ok=True)
+    owner = (
+        repo
+        or _gh(
+            "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"
+        ).strip()
+    )
+    return f"https://github.com/{owner}/releases/download/{ASSET_TAG}/{name}"
+
+
+def prune(repo: str | None, dry_run: bool = False) -> int:
+    """Delete assets whose pull request is closed. Returns how many went."""
+    scope = ["--repo", repo] if repo else []
+    raw = _gh("release", "view", ASSET_TAG, *scope, "--json", "assets", check=False)
+    if not raw.strip():
+        print(f"no {ASSET_TAG} release — nothing to prune")
+        return 0
+    assets = json.loads(raw).get("assets") or []
+    open_prs: dict[int, bool] = {}
+    gone = 0
+    for asset in assets:
+        name = asset.get("name") or ""
+        m = ASSET_RE.match(name)
+        if not m:
+            # Left alone, and said out loud. A pruner that deleted what it did
+            # not understand is the one bug here that loses data.
+            print(f"skipped {name!r}: not a preview asset name")
+            continue
+        number = int(m.group("pr"))
+        if number not in open_prs:
+            state = _gh(
+                "pr",
+                "view",
+                str(number),
+                *scope,
+                "--json",
+                "state",
+                "--jq",
+                ".state",
+                check=False,
+            ).strip()
+            # An unreadable state is treated as open. Deleting on a failed
+            # lookup would turn a network blip into data loss.
+            open_prs[number] = state != "CLOSED" and state != "MERGED"
+        if open_prs[number]:
+            continue
+        if dry_run:
+            print(f"would delete {name} (PR #{number} is closed)")
+        else:
+            _gh("release", "delete-asset", ASSET_TAG, name, *scope, "--yes")
+            print(f"deleted {name} (PR #{number} is closed)")
+        gone += 1
+    if not gone:
+        print(f"nothing to prune: {len(assets)} asset(s), none from a closed PR")
+    return gone
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    up = sub.add_parser("upload", help="upload one preview, print its URL")
+    up.add_argument("--file", required=True, type=Path)
+    up.add_argument("--pr", required=True, type=int)
+    up.add_argument("--demo", required=True, help="the demo directory")
+    up.add_argument("--sha", required=True)
+    up.add_argument("--repo", help="owner/name (default: the current one)")
+
+    pr = sub.add_parser("prune", help="delete assets from closed pull requests")
+    pr.add_argument("--repo")
+    pr.add_argument("--dry-run", action="store_true")
+
+    args = ap.parse_args()
+    if args.cmd == "upload":
+        if not args.file.is_file():
+            print(f"no such file: {args.file}", file=sys.stderr)
+            return 1
+        print(upload(args.file, args.pr, args.demo, args.sha, args.repo))
+        return 0
+    prune(args.repo, args.dry_run)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

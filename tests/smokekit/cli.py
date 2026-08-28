@@ -16,6 +16,7 @@ from .checks import (  # noqa: E402
     check_lock_refusal,
 )
 from .constants import (  # noqa: E402
+    CORE_ARMS,
     EXPENSIVE_ARMS,
     HELPERS_DIR,
 )
@@ -140,6 +141,14 @@ def main() -> int:
         "leaves behind, against one that started and failed (issue #105)",
     )
     parser.add_argument(
+        "--core",
+        action="store_true",
+        help="record only the arms in CORE_ARMS — the per-pull-request "
+        "selection (~84 s). Enumerated in tests/smokekit/constants.py with "
+        "the cost of each entry and the list of what a pull request "
+        "therefore no longer sees.",
+    )
+    parser.add_argument(
         "--cheap",
         action="store_true",
         help="record every phase that any arm other than --web-only, "
@@ -196,6 +205,7 @@ def main() -> int:
             ("--stills-only", args.stills_only),
             ("--issues-only", args.issues_only),
             ("--lock-only", args.lock_only),
+            ("--core", args.core),
             ("--cheap", args.cheap),
         )
         if on
@@ -283,12 +293,17 @@ def selects(only: str | None, arms: tuple[str, ...]) -> bool:
     `None` is a whole run and takes everything. `--cheap` takes a phase when
     *any* arm reaching it is not one of `EXPENSIVE_ARMS` — so a phase only the
     long takes reach is skipped, and one that a 26 s arm also reaches is not.
-    Every other flag is itself.
+    `--core` is the opposite shape and deliberately so: a phase is in it only
+    when an arm reaching it is *named* in `CORE_ARMS`, so adding a cheap arm
+    never silently enlarges the per-pull-request job the way it enlarges
+    `--cheap`. Every other flag is itself.
     """
     if only is None:
         return True
     if only == "--cheap":
         return any(arm not in EXPENSIVE_ARMS for arm in arms)
+    if only == "--core":
+        return any(arm in CORE_ARMS for arm in arms)
     return only in arms
 
 

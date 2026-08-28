@@ -25,6 +25,7 @@ file; read it before treating a green run as coverage of the workflow.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import importlib.util
 import io
@@ -68,6 +69,9 @@ _WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
 storyboards = load("demo-storyboards", _DIR)
 comment = load("demo-comment", _DIR)
 ticket_check = load("demo-ticket-check", _DIR)
+preview_asset = load("demo-preview-asset", _DIR)
+classify = load("demo-classify", _DIR)
+pr_body = load("demo-pr-body", _DIR)
 
 # **The classifier is the skill's, not the workflow's** — `demo-target-guard`
 # moved under `skills/demo-video/` so that `npx skills add` carries it, and the
@@ -450,7 +454,7 @@ GUARD_FACT_NOT_PASSED = {
 
 GUARD_STEP = "Refuse a target that could be production"
 RECORD_STEP = "Record"
-COMMENT_STEP = "Render the comment"
+COMMENT_STEP = "Update the pull-request body"
 _INPUT_RE = re.compile(r"^\$\{\{\s*inputs\.([a-z0-9-]+)\s*\}\}$")
 
 
@@ -4549,19 +4553,19 @@ INJECTIONS = [
         # The other half of the coupling, and the half no reading of
         # `demo-comment` can see: the argument is never passed, so every still
         # in a repository like this one is linked at the root and 404s.
-        "the comment step stops passing the working directory to the script",
+        "the block step stops passing the working directory to the script",
         "demo-video.yml",
-        '            --path-prefix "$WORKDIR" \\\n',
-        "",
+        '--demo "$demo" --path-prefix "$WORKDIR" --repo-url "$REPO_URL"',
+        '--demo "$demo" --repo-url "$REPO_URL"',
         ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
         # And the variable exported but not used, which is the shape
         # `WorkflowGates` exists for: it looks coupled.
-        "the comment step exports the working directory and drops it",
+        "the block step exports the working directory and drops it",
         "demo-video.yml",
-        '            --path-prefix "$WORKDIR"',
-        '            --path-prefix ""',
+        '--path-prefix "$WORKDIR" --repo-url',
+        '--path-prefix "" --repo-url',
         ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
@@ -5116,7 +5120,270 @@ INJECTIONS += [
             "TicketCheckRender.test_not_checked_is_printed_with_the_reason_not_omitted",
         ],
     ),
+    (
+        # A pruner that deletes what it cannot parse. Somebody's hand-uploaded
+        # file, or a name from a future format, gone — and this is the one bug
+        # in this script that loses data rather than merely misleading.
+        "prune deletes an asset whose name it does not recognise",
+        "demo-preview-asset",
+        """        if not m:
+            # Left alone, and said out loud. A pruner that deleted what it did
+            # not understand is the one bug here that loses data.
+            print(f"skipped {name!r}: not a preview asset name")
+            continue""",
+        """        if not m:
+            _gh("release", "delete-asset", ASSET_TAG, name, *scope, "--yes")
+            continue""",
+        ["PreviewAssetPrune.test_a_name_it_cannot_parse_is_kept_and_reported"],
+    ),
+    (
+        # A failed `gh pr view` becoming a deletion. One network blip empties
+        # the store, and every open pull request loses the picture it is being
+        # reviewed against.
+        "an unreadable pull-request state is read as closed, so prune deletes it",
+        "demo-preview-asset",
+        '            open_prs[number] = state != "CLOSED" and state != "MERGED"',
+        '            open_prs[number] = state == "OPEN"',
+        ["PreviewAssetPrune.test_an_unreadable_pr_state_is_treated_as_open"],
+    ),
+    (
+        # An open pull request's asset deleted out from under a review in
+        # progress. The body still embeds it, so the reviewer sees a broken
+        # image where the demo was.
+        "prune stops checking state and deletes every asset it can parse",
+        "demo-preview-asset",
+        "        if open_prs[number]:\n            continue",
+        "        if False:\n            continue",
+        ["PreviewAssetPrune.test_it_leaves_an_open_prs_asset_alone"],
+    ),
+    (
+        # The store is flat and every take writes the same `demo.preview.webp`,
+        # so a name without the demo in it has each demo overwrite the last —
+        # silently, and only on a pull request that recorded more than one.
+        "the asset name drops the demo, so two demos on one PR collide",
+        "demo-preview-asset",
+        'return f"pr{int(pr)}-{slug}-{sha[:7]}.webp"',
+        'return f"pr{int(pr)}-{sha[:7]}.webp"',
+        [
+            "PreviewAssetNames.test_two_demos_on_one_pr_do_not_collide",
+            "PreviewAssetNames.test_the_name_carries_the_pr_the_demo_and_the_commit",
+        ],
+    ),
+    (
+        # The round trip broken: `upload` writes names `prune` cannot read, so
+        # nothing is ever deleted and the store grows without bound. Nothing
+        # fails at upload time — this is only visible from the pruner's side.
+        "upload writes a name prune cannot parse, so nothing is ever pruned",
+        "demo-preview-asset",
+        'slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip("-") or "demo"',
+        'slug = slug or "demo"',
+        ["PreviewAssetNames.test_a_path_that_would_break_a_url_is_made_safe"],
+    ),
 ]
+
+
+def stage_tree(tmp: Path) -> dict[str, Path]:
+    """Copy everything an injection may break into `tmp`, and name the copies.
+
+    Split out of `fault_inject` so `check_anchors` resolves targets through the
+    identical staging rather than a second implementation of it.
+    """
+    root = tmp / "scripts"
+    shutil.copytree(SCRIPTS, root)
+    # The skill travels too: the target guard is bundled with it now,
+    # and both the module under `helpers/` and the CLI under `scripts/`
+    # have to be the broken copy or the inner run grades the tree.
+    skill = tmp / "demo-video"
+    shutil.copytree(SKILL, skill)
+    # And the workflow, because the two gates agreeing is a property
+    # of that file and of nothing else.
+    workflow = tmp / "demo-video.yml"
+    shutil.copy(WORKFLOW, workflow)
+    # And this file, so an injection can reach the suite's own
+    # allowlist. The copy is what runs; it reads every path it uses
+    # from the three variables below, so `REPO` resolving to /tmp
+    # changes nothing.
+    inner = tmp / "ci-unit"
+    shutil.copy(Path(__file__).resolve(), inner)
+    return {"root": root, "skill": skill, "workflow": workflow, "inner": inner}
+
+
+def injection_target(script: str, staged: dict[str, Path]) -> Path:
+    """Which staged file an injection's `script` field names."""
+    if script == "target.py":
+        return staged["skill"] / "helpers" / "demo_recording" / script
+    if script.startswith(("scripts/", "helpers/")):
+        # Anything shipped with the skill rather than under
+        # `.github/scripts/`: the three CLIs, and the package modules
+        # they import. `GuardExitCode` runs `demo-target-guard`;
+        # `grade` and `shots` at the top of this file import the other
+        # two, which is how an injection into either reddens the
+        # couplings the comment has with them and cannot import. A
+        # prefix rather than a list because the list was a second
+        # place to remember, and `demo_recording/links.py` (#373) is
+        # the first module either CLI's behaviour lives in.
+        return staged["skill"] / script
+    if script == "demo-video.yml":
+        return staged["workflow"]
+    if script == "tests/ci-unit":
+        return staged["inner"]
+    return staged["root"] / script
+
+
+def check_anchors() -> int:
+    """Every injection still resolves: its pattern matches once, its tests exist.
+
+    The cheap half of `--fault-inject`; see `tests/unit`'s twin for why the
+    weaker question is worth its own mode. One staging, no inner runs.
+    """
+    stale: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = stage_tree(Path(tmp))
+        known: set[str] = set()
+        tree = ast.parse(staged["inner"].read_text(encoding="utf-8"))
+        for cls in tree.body:
+            if isinstance(cls, ast.ClassDef):
+                known |= {
+                    f"{cls.name}.{fn.name}"
+                    for fn in cls.body
+                    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+        for name, script, old, _new, must_fail in INJECTIONS:
+            target = injection_target(script, staged)
+            hits = target.read_text(encoding="utf-8").count(old)
+            if hits != 1:
+                stale.append(
+                    f"{name!r} matched {hits} times in {script}, expected "
+                    f"exactly 1 — the injection would not land, so nothing "
+                    f"it claims to prove is proven.\n       looked for: {old!r}"
+                )
+            gone = [t for t in must_fail if t not in known]
+            if gone:
+                stale.append(
+                    f"{name!r} names {', '.join(gone)}, which this suite does "
+                    f"not define — nothing it claims to prove is proven."
+                )
+    if stale:
+        print(
+            f"ABORT: {len(stale)} of {len(INJECTIONS)} injections no longer resolve.",
+            file=sys.stderr,
+        )
+        for line in stale:
+            print(f"  - {line}", file=sys.stderr)
+        return 3
+    print(f"All {len(INJECTIONS)} injections still resolve.")
+    return 0
+
+
+class PreviewAssetNames(unittest.TestCase):
+    """The flat asset store's naming and pruning (#410).
+
+    A preview is not committed — CI uploads it as a release asset, which is not
+    a git object, so the repository does not grow. The store is flat and shared
+    across every pull request, which is what makes these two things load-bearing:
+    a name that does not identify its owner cannot be pruned, and a pruner that
+    guesses deletes somebody's evidence.
+    """
+
+    def test_the_name_carries_the_pr_the_demo_and_the_commit(self):
+        name = preview_asset.asset_name(
+            412, "examples/ticket-queue/demos/2026-08-27-glide", "a1b2c3d4e5f6"
+        )
+        self.assertEqual(name, "pr412-2026-08-27-glide-a1b2c3d.webp")
+
+    def test_two_demos_on_one_pr_do_not_collide(self):
+        """Every take writes the same `demo.preview.webp`, so a store keyed on
+        the filename would have each demo silently overwrite the last."""
+        one = preview_asset.asset_name(412, "demos/queue-search", "a1b2c3d")
+        two = preview_asset.asset_name(412, "demos/status-filter", "a1b2c3d")
+        self.assertNotEqual(one, two)
+
+    def test_two_pushes_keep_both_pictures(self):
+        """An already-reviewed pull-request body must keep pointing at the
+        picture it was reviewed against, not silently acquire a newer one —
+        the same rule `timeline["preview"]` follows (#20)."""
+        first = preview_asset.asset_name(412, "demos/glide", "aaaaaaa")
+        second = preview_asset.asset_name(412, "demos/glide", "bbbbbbb")
+        self.assertNotEqual(first, second)
+
+    def test_a_path_that_would_break_a_url_is_made_safe(self):
+        name = preview_asset.asset_name(7, "demos/a demo (v2)/", "abcdef0")
+        self.assertNotIn(" ", name)
+        self.assertNotIn("(", name)
+        self.assertTrue(preview_asset.ASSET_RE.match(name), name)
+
+    def test_every_name_it_writes_is_one_it_can_read_back(self):
+        """The round trip, which is the whole contract between the two halves:
+        a name `upload` writes that `prune` cannot parse is an asset nothing
+        will ever delete."""
+        for demo in ("demos/2026-08-27-glide", "demos/x", "demos/a b c"):
+            name = preview_asset.asset_name(412, demo, "a1b2c3d")
+            m = preview_asset.ASSET_RE.match(name)
+            self.assertIsNotNone(m, f"upload wrote a name prune cannot read: {name}")
+            self.assertEqual(int(m.group("pr")), 412)
+
+
+class PreviewAssetPrune(unittest.TestCase):
+    """What `prune` deletes, and — the part that matters — what it does not."""
+
+    def run_prune(self, assets, states, dry_run=False):
+        calls = []
+
+        def fake_gh(*args, check=True):
+            calls.append(list(args))
+            if args[:2] == ("release", "view"):
+                return json.dumps({"assets": [{"name": n} for n in assets]})
+            if args[:2] == ("pr", "view"):
+                return states.get(int(args[2]), "OPEN")
+            return ""
+
+        was = preview_asset._gh
+        preview_asset._gh = fake_gh
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                gone = preview_asset.prune(None, dry_run)
+        finally:
+            preview_asset._gh = was
+        deleted = [c[3] for c in calls if c[:2] == ["release", "delete-asset"]]
+        return gone, deleted, out.getvalue()
+
+    def test_it_deletes_a_closed_prs_asset(self):
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "CLOSED"})
+        self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
+
+    def test_it_leaves_an_open_prs_asset_alone(self):
+        """The reason pruning is by state and not by age: an open pull request
+        may be weeks old and still under review."""
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "OPEN"})
+        self.assertEqual(deleted, [])
+
+    def test_a_merged_pr_is_prunable(self):
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "MERGED"})
+        self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
+
+    def test_a_name_it_cannot_parse_is_kept_and_reported(self):
+        """The one bug here that loses data. Somebody's hand-uploaded file, or
+        a name from a future format, must survive a pruner that does not
+        recognise it — and the reader must be told it was skipped rather than
+        left to assume it was considered."""
+        _, deleted, said = self.run_prune(["hand-uploaded.txt"], {})
+        self.assertEqual(deleted, [])
+        self.assertIn("skipped", said)
+        self.assertIn("hand-uploaded.txt", said)
+
+    def test_an_unreadable_pr_state_is_treated_as_open(self):
+        """A failed lookup must not become a deletion: a network blip would
+        otherwise take out every asset in the store in one run."""
+        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ""})
+        self.assertEqual(deleted, [])
+
+    def test_dry_run_deletes_nothing_but_still_counts(self):
+        gone, deleted, said = self.run_prune(
+            ["pr9-glide-aaaaaaa.webp"], {9: "CLOSED"}, dry_run=True
+        )
+        self.assertEqual(deleted, [])
+        self.assertEqual(gone, 1)
+        self.assertIn("would delete", said)
 
 
 def fault_inject() -> int:
@@ -5124,42 +5391,10 @@ def fault_inject() -> int:
     failures = 0
     for name, script, old, new, must_fail in INJECTIONS:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "scripts"
-            shutil.copytree(SCRIPTS, root)
-            # The skill travels too: the target guard is bundled with it now,
-            # and both the module under `helpers/` and the CLI under `scripts/`
-            # have to be the broken copy or the inner run grades the tree.
-            skill = Path(tmp) / "demo-video"
-            shutil.copytree(SKILL, skill)
-            # And the workflow, because the two gates agreeing is a property
-            # of that file and of nothing else.
-            workflow = Path(tmp) / "demo-video.yml"
-            shutil.copy(WORKFLOW, workflow)
-            # And this file, so an injection can reach the suite's own
-            # allowlist. The copy is what runs; it reads every path it uses
-            # from the three variables below, so `REPO` resolving to /tmp
-            # changes nothing.
-            inner = Path(tmp) / "ci-unit"
-            shutil.copy(Path(__file__).resolve(), inner)
-            if script == "target.py":
-                target = skill / "helpers" / "demo_recording" / script
-            elif script.startswith(("scripts/", "helpers/")):
-                # Anything shipped with the skill rather than under
-                # `.github/scripts/`: the three CLIs, and the package modules
-                # they import. `GuardExitCode` runs `demo-target-guard`;
-                # `grade` and `shots` at the top of this file import the other
-                # two, which is how an injection into either reddens the
-                # couplings the comment has with them and cannot import. A
-                # prefix rather than a list because the list was a second
-                # place to remember, and `demo_recording/links.py` (#373) is
-                # the first module either CLI's behaviour lives in.
-                target = skill / script
-            elif script == "demo-video.yml":
-                target = workflow
-            elif script == "tests/ci-unit":
-                target = inner
-            else:
-                target = root / script
+            staged = stage_tree(Path(tmp))
+            root, skill = staged["root"], staged["skill"]
+            workflow, inner = staged["workflow"], staged["inner"]
+            target = injection_target(script, staged)
             text = target.read_text(encoding="utf-8")
             hits = text.count(old)
             if hits != 1:
@@ -5252,8 +5487,16 @@ def main() -> int:
         action="store_true",
         help="break each assertion's subject and require it to fail",
     )
+    ap.add_argument(
+        "--anchors",
+        action="store_true",
+        help="check every injection still resolves — its pattern matches its "
+        "file once and its tests exist — without running any of them",
+    )
     ap.add_argument("--_inner", action="store_true", help=argparse.SUPPRESS)
     args, rest = ap.parse_known_args()
+    if args.anchors:
+        return check_anchors()
     if args.fault_inject:
         return fault_inject()
     result = unittest.main(argv=[sys.argv[0], *rest], exit=False, verbosity=2).result

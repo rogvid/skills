@@ -492,6 +492,7 @@ class Recorder(_DemoBase):
         window_title: str | None = None,
         window_scale: float | tuple[float, float] | None = None,
         caption_overlay: bool | None = None,
+        preview: bool | None = None,
         preset: str | None = None,
         allow_private: bool | None = None,
     ) -> None:
@@ -522,6 +523,7 @@ class Recorder(_DemoBase):
             window_title=window_title,
             window_scale=window_scale,
             caption_overlay=caption_overlay,
+            preview=preview,
             preset=preset,
         )
         self.base_url = (base_url or _env("BASE_URL", "http://localhost:8000")).rstrip(
