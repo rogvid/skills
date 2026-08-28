@@ -233,6 +233,58 @@ jobs:
         with:
           enable-cache: true
 
+      # What this branch is measured against — resolved once, here, and read
+      # from `steps.base.outputs.sha` by everything downstream (#415).
+      #
+      # **The payload's `base.sha` is not always a commit this checkout has.**
+      # It is fixed when the event fires and never revised, so a pull request
+      # that was rebased and retargeted — the normal way to land the bottom of
+      # a stack, delete its branch, and move what sat on top to `main` — keeps
+      # naming the deleted branch's tip. Every consumer then dies on
+      # `fatal: bad object <sha>`, which names a hash and nothing else and
+      # looks exactly like a broken recorder. A re-run does not help: the
+      # payload is per-event, so the stale sha comes back. #414 reddened twice
+      # on this and was unblocked only by forcing a new event.
+      #
+      # So reachability is *tested* rather than assumed, and the fallback is
+      # the merge base with the base branch — which is what the sha was
+      # standing in for. Both give a two-dot diff equal to `base...HEAD`: the
+      # branch's own net change, with nothing landed on the base since it
+      # branched attributed to it.
+      #
+      # Resolved in one step because there is one question here, not two. The
+      # classifier below reads the same commit range, and a fallback wired
+      # into discovery alone would move the failure one step later rather than
+      # removing it — the job would discover correctly and then die in
+      # `git log`.
+      - name: Resolve the base commit this branch is measured against
+        id: base
+        run: |
+          set -euo pipefail
+          if [ -n "$PAYLOAD_SHA" ] && git cat-file -e "$PAYLOAD_SHA^{commit}" 2>/dev/null
+          then
+            sha="$PAYLOAD_SHA"
+            why="base.sha from the event payload"
+          elif [ -n "$BASE_REF" ] && sha=$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null)
+          then
+            why="base.sha ${PAYLOAD_SHA:-<unset>} is unreachable, so: merge-base with origin/$BASE_REF"
+          elif git rev-parse --verify --quiet 'HEAD^' >/dev/null; then
+            sha=$(git rev-parse 'HEAD^')
+            why="no usable base ref, so: HEAD^"
+          else
+            sha=""
+            why="no base commit at all — every path counts as changed"
+          fi
+          # Said out loud, always. A run that selected a different set than the
+          # payload asked for is the thing a reader of a red-then-green history
+          # needs to be able to see, and a silent fallback is indistinguishable
+          # from the bug it replaced.
+          echo "Base: ${sha:-<none>} ($why)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        env:
+          PAYLOAD_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
       - name: Work out which storyboards this branch made stale
         id: discover
         working-directory: ${{ inputs.working-directory }}
@@ -240,7 +292,7 @@ jobs:
           SCRIPTS: ${{ steps.helpers.outputs.dir }}
           EXPLICIT: ${{ inputs.storyboards }}
           GLOB: ${{ inputs.storyboard-glob }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           WORKDIR: ${{ inputs.working-directory }}
         run: |
           set -euo pipefail
@@ -248,8 +300,6 @@ jobs:
             # Two dots, not three: the checkout is the pull request's merge
             # commit, so its diff against the base is exactly the net change.
             git diff --name-only "$BASE_SHA" HEAD > "$CHANGED"
-          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
-            git diff --name-only HEAD^ HEAD > "$CHANGED"
           else
             : > "$CHANGED"
           fi
@@ -291,10 +341,14 @@ jobs:
         if: steps.discover.outputs.count != '0'
         env:
           SCRIPTS: ${{ steps.helpers.outputs.dir }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           PR_BODY_TEXT: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
+          # The resolved base, not the payload's: a classifier reading an
+          # unreachable sha exits 128 under `set -e` and takes the job with it,
+          # and one silently falling back to `-1` would categorise a stacked
+          # pull request by its most recent commit subject alone.
           if [ -n "$BASE_SHA" ]; then
             git log --format=%s "$BASE_SHA..HEAD" > "$COMMITS"
           else
