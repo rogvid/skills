@@ -623,6 +623,241 @@ class WorkflowGates(unittest.TestCase):
         )
 
 
+BASE_STEP = "Resolve the base commit this branch is measured against"
+DISCOVER_STEP = "Work out which storyboards this branch made stale"
+CLASSIFY_STEP = "Classify the change"
+
+#: The expression whose value cannot be trusted to name a commit this checkout
+#: has (#415). One step is allowed to read it; everything else reads what that
+#: step resolved.
+PAYLOAD_BASE = "github.event.pull_request.base.sha"
+
+
+def step_run(lines: list[str]) -> str:
+    """One step's `run: |` body, dedented to column zero.
+
+    The workflow is YAML that only GitHub executes, so most of what this file
+    can say about it is textual. This is the exception: a `run:` block is a
+    shell script, and a shell script can be *run*.
+    """
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if line.rstrip() in ("        run: |", "        run: |-"):
+            inside = True
+            continue
+        if inside:
+            if line.strip() and not line.startswith("          "):
+                break
+            out.append(line[10:] if line.startswith("          ") else "")
+    return "\n".join(out)
+
+
+class BaseCommit(unittest.TestCase):
+    """The commit this branch is measured against is resolved, not assumed.
+
+    `github.event.pull_request.base.sha` is fixed when the event fires and
+    never revised, so a pull request that was rebased and retargeted keeps
+    naming a commit that may since have been deleted — the ordinary outcome of
+    landing the bottom of a stack. Every consumer then dies on `fatal: bad
+    object <sha>`, and a re-run reuses the same payload, so the job stays red
+    until a *new* event fires. #414 hit this twice.
+
+    So this runs the resolver's own shell against a git fixture built to be the
+    failure: a merge ref whose base branch tip is real, and a payload sha that
+    is not in the repository at all.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = _WORKFLOW.read_text(encoding="utf-8")
+        cls.steps = workflow_steps(cls.text)
+        # The haystack, before anything is claimed about it: a renamed or
+        # reindented step would otherwise make every assertion below hold over
+        # an empty list.
+        for name in (BASE_STEP, DISCOVER_STEP, CLASSIFY_STEP):
+            assert name in cls.steps, f"no {name!r} step in {_WORKFLOW}"
+        cls.script = step_run(cls.steps[BASE_STEP])
+        # The control on `step_run`, and deliberately shape-agnostic: a
+        # parser that returned "" would make every execution below run an
+        # empty script and pass on whatever `git` happened to leave behind.
+        # Asserting the script's *contents* here instead would mean an
+        # injection into the resolver reddened this class through setUp
+        # rather than through the assertion it is filed under.
+        assert cls.script.strip(), f"step_run found no shell in {BASE_STEP!r}"
+
+    def fixture(self, tmp: Path) -> tuple[Path, str]:
+        """A checkout shaped like the one a `pull_request` run gets.
+
+        `HEAD` is a merge commit whose first parent is the base branch tip at
+        the moment the event fired, and the base branch has commits on it this
+        branch did not make: one from before the merge ref was computed, and
+        one landed *after* it. With `fetch-depth: 0` the run fetches
+        `origin/main` fresh, so those two are genuinely different commits — and
+        that is what separates the merge base from the branch tip. Resolving to
+        either produces a reachable sha; only one of them attributes this
+        branch's changes correctly.
+
+        Returns the repo and the commit the merge was computed against.
+        """
+        repo = tmp / "repo"
+        repo.mkdir()
+
+        def git(*args: str) -> str:
+            done = subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return done.stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.invalid")
+        git("config", "user.name", "t")
+        (repo / "root").write_text("root")
+        git("add", "-A")
+        git("commit", "-qm", "root")
+        git("switch", "-qc", "feature")
+        (repo / "this-branch").write_text("feature")
+        git("add", "-A")
+        git("commit", "-qm", "feat: the branch")
+        git("switch", "-q", "main")
+        (repo / "someone-else").write_text("meanwhile")
+        git("add", "-A")
+        git("commit", "-qm", "chore: landed on main meanwhile")
+        base_tip = git("rev-parse", "HEAD")
+        git("checkout", "-q", "-b", "pr-merge", base_tip)
+        git("merge", "-q", "--no-ff", "feature", "-m", "merge")
+        # main moves on after the merge ref was computed, and the run fetches
+        # it. `origin/main` is now ahead of the commit this pull request was
+        # merged against, which is why the merge base and the branch tip are
+        # not interchangeable.
+        git("switch", "-q", "main")
+        (repo / "someone-else-later").write_text("after the merge ref")
+        git("add", "-A")
+        git("commit", "-qm", "chore: landed after the merge ref")
+        git("update-ref", "refs/remotes/origin/main", git("rev-parse", "HEAD"))
+        git("switch", "-q", "pr-merge")
+        return repo, base_tip
+
+    def resolve(self, repo: Path, payload_sha: str, base_ref: str = "main"):
+        """Run the workflow's own resolver. Returns `(sha, log)`."""
+        out = repo.parent / "github-output"
+        out.write_text("")
+        done = subprocess.run(
+            ["bash", "-c", self.script],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "PAYLOAD_SHA": payload_sha,
+                "BASE_REF": base_ref,
+                "GITHUB_OUTPUT": str(out),
+            },
+        )
+        self.assertEqual(
+            done.returncode,
+            0,
+            f"the resolver exited {done.returncode}\n{done.stderr}",
+        )
+        written = [
+            line[len("sha=") :]
+            for line in out.read_text().splitlines()
+            if line.startswith("sha=")
+        ]
+        self.assertEqual(len(written), 1, f"wrote {written} to GITHUB_OUTPUT")
+        return written[0], done.stdout
+
+    def test_an_unreachable_base_sha_resolves_to_the_base_branch_tip(self):
+        # The #415 repro. The old code ran `git diff --name-only <sha> HEAD`
+        # straight from the payload and exited 128 on `fatal: bad object`.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, base_tip = self.fixture(Path(tmp))
+            sha, _ = self.resolve(repo, "8d651e2c339aecd732700a7483eb44a22348fef1")
+            self.assertEqual(sha, base_tip)
+
+    def test_the_fallback_attributes_only_this_branchs_own_changes(self):
+        # The half a hash comparison cannot see. `origin/main` itself would
+        # also be "a reachable commit", and diffing against it would blame this
+        # branch for every file landed on main since it forked.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = self.fixture(Path(tmp))
+            sha, _ = self.resolve(repo, "8d651e2c339aecd732700a7483eb44a22348fef1")
+            changed = subprocess.run(
+                ["git", "diff", "--name-only", sha, "HEAD"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.split()
+            self.assertEqual(changed, ["this-branch"])
+
+    def test_a_reachable_base_sha_is_used_exactly_as_given(self):
+        # The control on both tests above: a resolver that ignored the payload
+        # and always took the merge base would pass them, and would quietly
+        # stop honouring the event for every ordinary pull request.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = self.fixture(Path(tmp))
+            root = subprocess.run(
+                ["git", "rev-list", "--max-parents=0", "HEAD"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            sha, log = self.resolve(repo, root)
+            self.assertEqual(sha, root)
+            self.assertIn("payload", log)
+
+    def test_a_fallback_says_in_the_log_that_it_fell_back(self):
+        # A silent fallback is indistinguishable from the bug it replaced: the
+        # run goes green having measured a range nobody asked for, and the
+        # reader of a red-then-green history has nothing to read.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = self.fixture(Path(tmp))
+            _, log = self.resolve(repo, "8d651e2c339aecd732700a7483eb44a22348fef1")
+            self.assertIn("unreachable", log)
+            self.assertIn("merge-base", log)
+
+    def test_only_the_resolver_reads_the_payloads_base_sha(self):
+        # The regression that brings #415 back is not an edit to the resolver.
+        # It is a *fourth* consumer, added later, that reaches for the payload
+        # again because that is what the two steps beside it used to do.
+        elsewhere = [
+            line.strip()
+            for line in self.text.splitlines()
+            if PAYLOAD_BASE in line and line not in self.steps[BASE_STEP]
+        ]
+        self.assertEqual(
+            elsewhere,
+            [],
+            f"{PAYLOAD_BASE} is read outside {BASE_STEP!r}, where it is not "
+            f"known to name a commit this checkout has",
+        )
+
+    def test_the_resolver_does_read_it(self):
+        # The control on the sweep above, which an unused expression would
+        # satisfy vacuously.
+        self.assertTrue(
+            any(PAYLOAD_BASE in line for line in self.steps[BASE_STEP]),
+            f"nothing reads {PAYLOAD_BASE} at all",
+        )
+
+    def test_both_consumers_read_the_resolved_base(self):
+        resolved = "${{ steps.base.outputs.sha }}"
+        for name in (DISCOVER_STEP, CLASSIFY_STEP):
+            self.assertEqual(
+                step_env(self.steps[name]).get("BASE_SHA"),
+                resolved,
+                f"{name!r} does not read BASE_SHA from the resolver. Fixing "
+                f"discovery alone moves the failure to the next step rather "
+                f"than removing it.",
+            )
+
+
 REHEARSE_STEP = "Rehearse"
 
 
@@ -5305,6 +5540,68 @@ INJECTIONS += [
     ),
 ]
 
+# -- the base commit, and the four ways #415 comes back ---------------------
+INJECTIONS += [
+    (
+        # #415 itself, restored. The payload's sha is taken on faith, and a
+        # pull request whose base branch was deleted dies on `fatal: bad
+        # object` — with a message that names a hash and nothing else.
+        "the payload's base sha is used without checking the checkout has it",
+        "demo-video.yml",
+        '          if [ -n "$PAYLOAD_SHA" ] && '
+        'git cat-file -e "$PAYLOAD_SHA^{commit}" 2>/dev/null',
+        '          if [ -n "$PAYLOAD_SHA" ]',
+        [
+            "BaseCommit.test_an_unreachable_base_sha_resolves_to_the_base_branch_tip",
+            "BaseCommit.test_the_fallback_attributes_only_this_branchs_own_changes",
+            "BaseCommit.test_a_fallback_says_in_the_log_that_it_fell_back",
+        ],
+    ),
+    (
+        # The plausible wrong fallback, and the reason the fixture puts a
+        # commit on main *after* the merge ref was computed. `origin/main` is
+        # reachable, so the run goes green — and every file landed on the base
+        # since this branch forked is now attributed to this branch, which
+        # selects storyboards nobody here made stale.
+        "the fallback takes the base branch tip rather than the merge base",
+        "demo-video.yml",
+        'sha=$(git merge-base "origin/$BASE_REF" HEAD 2>/dev/null)',
+        'sha=$(git rev-parse "origin/$BASE_REF" 2>/dev/null)',
+        [
+            "BaseCommit.test_an_unreachable_base_sha_resolves_to_the_base_branch_tip",
+            "BaseCommit.test_the_fallback_attributes_only_this_branchs_own_changes",
+        ],
+    ),
+    (
+        # A silent fallback measures a range nobody asked for and says so
+        # nowhere. Indistinguishable, from the log, from the bug it replaced.
+        "the resolver stops saying which base it chose and why",
+        "demo-video.yml",
+        '          echo "Base: ${sha:-<none>} ($why)"',
+        "          :",
+        [
+            "BaseCommit.test_a_fallback_says_in_the_log_that_it_fell_back",
+            "BaseCommit.test_a_reachable_base_sha_is_used_exactly_as_given",
+        ],
+    ),
+    (
+        # Not an edit to the resolver at all: a consumer reaching back to the
+        # payload, which is what the two steps beside it used to do and what
+        # the next one added will copy. Fixing discovery alone would have left
+        # this exact line broken.
+        "the classifier goes back to reading the payload's base sha",
+        "demo-video.yml",
+        "          BASE_SHA: ${{ steps.base.outputs.sha }}\n"
+        "          PR_BODY_TEXT: ${{ github.event.pull_request.body }}",
+        "          BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"
+        "          PR_BODY_TEXT: ${{ github.event.pull_request.body }}",
+        [
+            "BaseCommit.test_only_the_resolver_reads_the_payloads_base_sha",
+            "BaseCommit.test_both_consumers_read_the_resolved_base",
+        ],
+    ),
+]
+
 
 def stage_tree(tmp: Path) -> dict[str, Path]:
     """Copy everything an injection may break into `tmp`, and name the copies.
@@ -5839,17 +6136,30 @@ def fault_inject() -> int:
 #   test of "updated in place", and it is done by hand on the reference pull
 #   request.
 #
-#   The **two** exceptions are `WorkflowGates` and `CommentStep` above, and
-#   both are deliberately narrow: that every fact the guard step classifies on
-#   is handed to the recorder that re-classifies it, from the same input, and
-#   that the working directory the `--demo` paths are relative to reaches the
-#   script that pastes them into a URL. Both are properties of the text. The
-#   first is what broke, and no run of the workflow on an in-repo pull request
-#   would have caught it either — the regression only appears for a caller who
-#   sets `allow-private-network-target`, and this repository has none. The
-#   second is the reverse: it appears for *this* repository, whose reference
-#   call roots its storyboards at `examples/ticket-queue`, and the artifact it
-#   would produce is a link that 404s while looking like one that works.
+#   The exceptions are `WorkflowGates`, `CommentStep` and `BaseCommit` above,
+#   and each is deliberately narrow.
+#
+#   The first two are properties of the *text*: that every fact the guard step
+#   classifies on is handed to the recorder that re-classifies it, from the
+#   same input, and that the working directory the `--demo` paths are relative
+#   to reaches the script that pastes them into a URL. The first is what broke,
+#   and no run of the workflow on an in-repo pull request would have caught it
+#   either — the regression only appears for a caller who sets
+#   `allow-private-network-target`, and this repository has none. The second is
+#   the reverse: it appears for *this* repository, whose reference call roots
+#   its storyboards at `examples/ticket-queue`, and the artifact it would
+#   produce is a link that 404s while looking like one that works.
+#
+#   `BaseCommit` is not a property of the text, and it is the one place the
+#   sentence above about YAML being GitHub's to execute does not hold: a
+#   `run:` block is a shell script, so `step_run` lifts it out and runs it
+#   against a git fixture built to be #415 — a merge ref, a base branch that
+#   moved after the merge ref was computed, and a payload sha that is not in
+#   the repository at all. That is a real execution of the shipped shell, and
+#   it is available to any other `run:` block worth the same treatment.
+#   What it still does not reach is everything *around* the block: that the
+#   step runs at all, that it runs before its consumers, and that
+#   `steps.base.outputs.sha` interpolates. Those remain GitHub's.
 # - **The recorder.** `tests/smoke` owns that.
 # - **Egress.** The target guard is a static check on configuration and source
 #   text. A storyboard that computes a URL at run time is invisible to it, and
