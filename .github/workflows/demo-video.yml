@@ -646,6 +646,42 @@ jobs:
           done < "$DEMO_DIRS"
           "$SCRIPTS/demo-ticket-check" "${args[@]}" --demo-root "$STAGE_DEMO"
 
+      # **Decided once, here.** The preview and the acceptance clauses must
+      # describe the same take, and on the second live run they did not: the
+      # upload loop kept whichever demo it processed last while the block chose
+      # by clause count, and with two demos tied at four clauses the block
+      # paired this change's video with another demo's checklist. A reviewer
+      # would have ticked search criteria while watching an assign video, which
+      # is the artifact lying to its reader.
+      #
+      # One decision, read by both steps below, is the only shape in which that
+      # cannot happen again.
+      - name: Choose the demo the block describes
+        id: pick
+        if: >-
+          always() && steps.discover.outputs.count != '0' &&
+          steps.record.conclusion != 'skipped'
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          # `$CHANGED` holds repository-relative paths and the demo names are
+          # relative to working-directory. Without this they never match and
+          # the "a storyboard this branch touched wins" rule silently never
+          # fires — #274's shape, one script over.
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          args=(--classification "$CLASSIFY" --pick-only)
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            args+=(--demo "$dir")
+          done < "$DEMO_DIRS"
+          demo=$("$SCRIPTS/demo-pr-body" "${args[@]}" \
+            --demo-root "$STAGE_DEMO" --changed-file "$CHANGED" \
+            --path-prefix "$WORKDIR")
+          echo "demo=$demo" >> "$GITHUB_OUTPUT"
+          echo "the block will describe: $demo"
+
       # The preview a pull-request body can actually show. GitHub has no public
       # API for the attachment upload its drag-and-drop uses, so a video cannot
       # reach a reviewer as a player — only as an inline image, and an animated
@@ -667,6 +703,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PICKED: ${{ steps.pick.outputs.demo }}
         # A preview is a convenience; the recording is the deliverable. An
         # upload that fails — a fork's read-only token, a transient 5xx —
         # leaves the block saying the video was not recorded, which is true
@@ -675,20 +712,27 @@ jobs:
         run: |
           set -uo pipefail
           url=""
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            # Named by the **staged** timeline, not by a glob and not by the
-            # working tree's copy. Staging is where the freshness filter ran,
-            # so only a timeline this run wrote can name a preview — the same
-            # rule that stops a previous recording being published as this
-            # one's (#20). A take that wrote no preview names none.
+          # **Only the demo the pick step chose.** Looping over every demo and
+          # keeping the last url is what paired one demo's video with another
+          # demo's checklist on the second live run.
+          dir="$PICKED"
+          # Named by the **staged** timeline, not by a glob and not by the
+          # working tree's copy. Staging is where the freshness filter ran, so
+          # only a timeline this run wrote can name a preview — the same rule
+          # that stops a previous recording being published as this one's
+          # (#20). A take that wrote no preview names none.
+          name=""
+          if [ -n "$dir" ]; then
             name=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('preview') or '')" "$STAGE_DEMO/$dir/timeline.json" 2>/dev/null || true)
-            [ -n "$name" ] && [ -f "$dir/$name" ] || continue
+          fi
+          if [ -n "$name" ] && [ -f "$dir/$name" ]; then
             url=$("$SCRIPTS/demo-preview-asset" upload \
               --file "$dir/$name" --pr "$PR" --demo "$dir" \
               --sha "$HEAD_SHA" --repo "$REPO")
             echo "uploaded $dir/$name -> $url"
-          done < "$DEMO_DIRS"
+          else
+            echo "no preview for ${dir:-<no demo chosen>}"
+          fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       # The block a reviewer reads first, rendered and spliced into the
@@ -720,6 +764,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SUMMARY: ${{ github.event.pull_request.title }}
+          PICKED: ${{ steps.pick.outputs.demo }}
           # Where the --demo paths sit in the repository. They are relative to
           # working-directory, so a still linked without this is a 404 that
           # looks exactly like a working link (#274).
@@ -737,10 +782,10 @@ jobs:
           # unmentioned. The choice is in Python because it is a rule worth a
           # test, not a line of shell.
           args=(--classification "$CLASSIFY" --summary "$SUMMARY")
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            args+=(--demo "$dir")
-          done < "$DEMO_DIRS"
+          # The one demo the pick step chose — not the list again. Re-deriving
+          # it here would be a second implementation of the same decision, and
+          # the two disagreeing is exactly the bug this replaced.
+          if [ -n "$PICKED" ]; then args+=(--demo "$PICKED"); fi
           if [ -n "$PREVIEW_URL" ]; then args+=(--video-url "$PREVIEW_URL"); fi
           "$SCRIPTS/demo-pr-body" "${args[@]}" \
             --demo-root "$STAGE_DEMO" \

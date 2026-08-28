@@ -343,22 +343,57 @@ def demo_file(demo: str, root: Path | None, rel: str) -> Path | None:
     return base / rel
 
 
-def pick_demo(demos: list[str], root: Path | None) -> str:
+def pick_demo(
+    demos: list[str],
+    root: Path | None,
+    changed: list[str] | None = None,
+    path_prefix: str = "",
+) -> str:
     """Which demo the block describes, when a run recorded several.
 
     **Not the first.** A change under an app root makes every storyboard of
     that app stale — the first live run of this recorded seven — so "first"
     meant "alphabetically first", and it picked a take with no acceptance
-    criteria while the take with four sat unmentioned. The block rendered an
-    empty checklist for a pull request that had plenty to check.
+    criteria while the take with four sat unmentioned.
 
-    So: the most declared clauses wins, because that is the take with the most
-    for a reviewer to tick, which is what this block is for. Ties go to the
-    earlier name so the choice is stable between runs of the same commit, and
-    an unreadable timeline counts as zero rather than raising — a block that
-    describes the wrong demo is a bad block, and no block at all is worse.
+    **And not the most clauses, on its own.** The second live run tied: the
+    storyboard this pull request added and an older one both declared four, the
+    tie went to the earlier name, and the block paired *this* change's video
+    with *another* demo's checklist. A reviewer would have ticked search
+    criteria while watching an assign video, which is the artifact lying to its
+    reader — the one failure this repository exists to prevent.
+
+    So the branch's own work decides first: **a storyboard this pull request
+    touched** is what the pull request is about, and nothing else comes close
+    as a signal. Clause count breaks ties among those, then the earlier name so
+    the choice is stable between runs of one commit.
+
+    An unreadable timeline counts as zero rather than raising — a block that
+    describes the wrong demo is bad, and no block at all is worse, and this
+    runs after a take that already succeeded.
     """
-    best, best_n = "", -1
+    # Changed paths come from `git diff` and are **repository**-relative;
+    # demo names are relative to the workflow's `working-directory`. Comparing
+    # them without re-rooting matches nothing, silently — the rule then never
+    # fires and the tie-break decides everything, which is the bug this was
+    # written to fix, still present and now invisible. #274's shape again.
+    prefix = (path_prefix or "").strip("/")
+    touched = set()
+    for raw in changed or []:
+        path = raw.strip().strip("/")
+        if not path:
+            continue
+        if prefix:
+            if path == prefix or not path.startswith(prefix + "/"):
+                continue
+            path = path[len(prefix) + 1 :]
+        touched.add(path)
+
+    def edited(name: str) -> bool:
+        """Whether this branch changed anything inside this demo's directory."""
+        return any(path == name or path.startswith(name + "/") for path in touched)
+
+    best, best_key = "", (-1, -1)
     for demo in demos:
         name = (demo or "").strip().rstrip("/")
         if not name:
@@ -369,8 +404,9 @@ def pick_demo(demos: list[str], root: Path | None) -> str:
             count = len((doc.get("coverage") or {}).get("criteria") or {})
         except (OSError, ValueError):
             count = 0
-        if count > best_n:
-            best, best_n = name, count
+        key = (1 if edited(name) else 0, count)
+        if key > best_key:
+            best, best_key = name, key
     return best
 
 
@@ -412,11 +448,34 @@ def main() -> int:
     ap.add_argument(
         "--existing-body", help="splice into this body instead of printing bare"
     )
+    ap.add_argument(
+        "--changed-file",
+        help="file of paths this branch changed, one per line. A storyboard "
+        "the branch touched is what the pull request is about, and wins.",
+    )
+    ap.add_argument(
+        "--pick-only",
+        action="store_true",
+        help="print the demo the block would describe, and stop. The upload "
+        "step uses this so the preview and the clauses cannot come from "
+        "different demos.",
+    )
     ap.add_argument("--out", help="write here instead of stdout")
     args = ap.parse_args()
 
     classification = json.loads(Path(args.classification).read_text(encoding="utf-8"))
-    demo = pick_demo(args.demo, Path(args.demo_root) if args.demo_root else None)
+    changed: list[str] = []
+    if args.changed_file and Path(args.changed_file).is_file():
+        changed = Path(args.changed_file).read_text(encoding="utf-8").splitlines()
+    demo = pick_demo(
+        args.demo,
+        Path(args.demo_root) if args.demo_root else None,
+        changed,
+        args.path_prefix,
+    )
+    if args.pick_only:
+        print(demo)
+        return 0
     # An explicit --timeline still wins, so a caller pointing at one file is
     # unaffected; otherwise it comes from whichever demo was picked.
     timeline_path = (

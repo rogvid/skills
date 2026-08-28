@@ -5188,8 +5188,8 @@ INJECTIONS += [
         # four clauses.
         "the block describes the first demo instead of the one with the most clauses",
         "demo-pr-body",
-        "        if count > best_n:\n            best, best_n = name, count",
-        "        if best_n < 0:\n            best, best_n = name, count",
+        "        if key > best_key:\n            best, best_key = name, key",
+        "        if best_key == (-1, -1):\n            best, best_key = name, key",
         [
             "BlockDemoChoice.test_the_demo_with_the_most_clauses_wins",
             "BlockDemoChoice.test_it_is_not_simply_the_first",
@@ -5248,6 +5248,46 @@ INJECTIONS += [
         [
             "CallerPermissions.test_the_caller_grants_at_least_what_the_workflow_declares"
         ],
+    ),
+    (
+        # The branch's own work stops deciding, so a tie on clause count sends
+        # the block to whichever demo sorts first — one demo's video beside
+        # another demo's checklist, which is the artifact lying to its reader.
+        "a storyboard the branch touched stops winning the block",
+        "demo-pr-body",
+        "        key = (1 if edited(name) else 0, count)",
+        "        key = (0, count)",
+        [
+            "BlockDemoChoice.test_a_storyboard_this_branch_touched_beats_a_richer_untouched_one",
+            "BlockDemoChoice.test_a_touched_demo_wins_even_with_fewer_clauses",
+        ],
+    ),
+    (
+        # The re-rooting is dropped, so repository-relative changed paths never
+        # match working-directory-relative demo names. Nothing raises: the rule
+        # simply never fires, and the defect it fixes is back and invisible.
+        "changed paths stop being re-rooted, so the touched rule never fires",
+        "demo-pr-body",
+        "            path = path[len(prefix) + 1 :]",
+        "            pass  # left repository-relative",
+        ["BlockDemoChoice.test_changed_paths_are_re_rooted_before_they_are_compared"],
+    ),
+    (
+        # And the other direction: re-rooting stops being about *this* prefix
+        # and just drops two leading components, so a change to another app's
+        # identically named demo claims this one's block.
+        #
+        # Written this way after the obvious break — deleting the guard —
+        # turned out not to reproduce it: the strip below still ran and left a
+        # path that matched nothing, so the suite stayed green against code
+        # that was not actually broken in the way the entry claimed.
+        "any app's demo of the same name counts as touched",
+        "demo-pr-body",
+        '            if path == prefix or not path.startswith(prefix + "/"):\n'
+        "                continue\n"
+        "            path = path[len(prefix) + 1 :]",
+        '            path = "/".join(path.split("/")[2:])',
+        ["BlockDemoChoice.test_a_path_outside_the_prefix_touches_nothing"],
     ),
 ]
 
@@ -5452,6 +5492,52 @@ class BlockDemoChoice(unittest.TestCase):
     def test_the_demo_with_the_most_clauses_wins(self):
         root = self.tree({"a-empty": 0, "z-rich": 4})
         self.assertEqual(pr_body.pick_demo(["a-empty", "z-rich"], root), "z-rich")
+
+    def test_a_storyboard_this_branch_touched_beats_a_richer_untouched_one(self):
+        """The second live run's defect. Two demos tied at four clauses, the tie
+        went to the earlier name, and the block paired *this* change's video
+        with *another* demo's checklist — a reviewer would have ticked search
+        criteria while watching an assign video."""
+        root = self.tree({"old-rich": 4, "new-mine": 4})
+        picked = pr_body.pick_demo(
+            ["old-rich", "new-mine"], root, ["new-mine/record.py"]
+        )
+        self.assertEqual(picked, "new-mine")
+
+    def test_a_touched_demo_wins_even_with_fewer_clauses(self):
+        """The branch's own work is the stronger signal: a pull request is
+        about the storyboard it changed, whatever anything else declares."""
+        root = self.tree({"old-rich": 9, "new-mine": 1})
+        picked = pr_body.pick_demo(
+            ["old-rich", "new-mine"], root, ["new-mine/images/01.png"]
+        )
+        self.assertEqual(picked, "new-mine")
+
+    def test_changed_paths_are_re_rooted_before_they_are_compared(self):
+        """`git diff` gives repository-relative paths; demo names are relative
+        to working-directory. Comparing them unrooted matches nothing —
+        silently — so the rule never fires and the tie-break decides
+        everything, which is the bug still present and now invisible."""
+        root = self.tree({"old-rich": 4, "new-mine": 4})
+        changed = ["examples/ticket-queue/new-mine/record.py"]
+        self.assertEqual(
+            pr_body.pick_demo(
+                ["old-rich", "new-mine"], root, changed, "examples/ticket-queue"
+            ),
+            "new-mine",
+        )
+
+    def test_a_path_outside_the_prefix_touches_nothing(self):
+        """The control on re-rooting: a change to another app's identically
+        named demo must not claim this one."""
+        root = self.tree({"old-rich": 4, "new-mine": 4})
+        changed = ["examples/other-app/new-mine/record.py"]
+        self.assertEqual(
+            pr_body.pick_demo(
+                ["old-rich", "new-mine"], root, changed, "examples/ticket-queue"
+            ),
+            "old-rich",
+        )
 
     def test_it_is_not_simply_the_first(self):
         """The regression this was written for, stated as its own assertion so
