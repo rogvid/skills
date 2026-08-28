@@ -3932,12 +3932,17 @@ INJECTIONS = [
         # and each one looks exactly like a working link.
         "the path prefix is joined without checking it stays inside the tree",
         "demo-comment",
+        #
+        # Filed against the shape test alone. It also named the *command*'s
+        # refusal for a while, and that was an over-claim: the fixture prefix
+        # is `../up`, which the separate `".." in parts` line still catches, so
+        # the command goes on refusing and that test stays green. #418's
+        # scoping fix is what made the difference visible. The command's
+        # refusal has its own injection two entries down, which is where the
+        # evidence for it belongs.
         '    if prefix.startswith("/") or "\\\\" in prefix:\n        return None',
         "    if False:\n        return None",
-        [
-            "StillLinks.test_a_path_prefix_that_is_not_a_plain_relative_path_is_refused",
-            "StillLinks.test_the_command_refuses_a_bad_prefix_instead_of_rendering_it",
-        ],
+        ["StillLinks.test_a_path_prefix_that_is_not_a_plain_relative_path_is_refused"],
     ),
     (
         # The other half of the same rule: a `..` in the middle. `up/../../out`
@@ -4034,20 +4039,30 @@ INJECTIONS = [
             "UnmetInTheBlock.test_the_order_sentence_matches_the_order",
         ],
     ),
+    # #356's whole reason to exist, broken in the one direction that is safe to
+    # break silently: a lint that reports every miss as matched still exits 0,
+    # still prints a tidy summary, and flags nothing.
+    #
+    # **Two entries, because the lint has two branches and they are separate
+    # code.** One reads numbers, one reads quoted strings, and each writes its
+    # own `NOT FOUND`. A single injection into the number branch was filed
+    # against both tests and only ever reddened one — caught the moment the
+    # driver started scoping `must_fail` to the runner's verdict lines (#418),
+    # and a worked example of why an injection is evidence only for the
+    # assertion it actually breaks.
     (
-        # #356's whole reason to exist, broken in the one direction that is
-        # safe to break silently: a lint that reports every miss as matched
-        # still exits 0, still prints a tidy summary, and flags nothing. The
-        # fixture holds a claim nothing on screen says, so both not-found
-        # assertions must go red for the break to count as noticed.
-        "the caption lint calls every miss a match",
+        "the caption lint calls a number nothing carries a match",
         "scripts/demo-caption-lint",
         '                        "NOT FOUND — no nearby evidence carries it",',
         '                        "matched",',
-        [
-            "CaptionLint.test_a_quoted_string_no_nearby_evidence_says_is_not_found",
-            "CaptionLint.test_a_number_nothing_nearby_carries_is_not_found",
-        ],
+        ["CaptionLint.test_a_number_nothing_nearby_carries_is_not_found"],
+    ),
+    (
+        "the caption lint calls a quoted string nothing says a match",
+        "scripts/demo-caption-lint",
+        '                        "NOT FOUND — no nearby evidence says it",',
+        '                        "matched",',
+        ["CaptionLint.test_a_quoted_string_no_nearby_evidence_says_is_not_found"],
     ),
     (
         # The order changes and the sentence describing it does not: the block
@@ -5540,6 +5555,143 @@ INJECTIONS += [
     ),
 ]
 
+# -- the block a reviewer actually reads (#412's transfer) ------------------
+#
+# `demo-pr-body` had two graded functions and a renderer nobody watched. These
+# break the renderer, and they are what makes the class above evidence rather
+# than a description.
+INJECTIONS += [
+    (
+        # The sweep's own wiring. Appended to the footer, which every branch
+        # writes, so no assertion about the block's *structure* can notice —
+        # only the sweep can, which is the point of filing it here.
+        "the block promotes the clauses to a verdict in its footer",
+        "demo-pr-body",
+        '    out.append("<sub>" + " · ".join(foot) + ".</sub>")',
+        '    out.append("<sub>" + " · ".join(foot) + ". All clauses passed.</sub>")',
+        [
+            "BlockVerdict.test_the_ordinary_block_makes_no_claim_of_its_own",
+            "BlockVerdict.test_a_block_with_nothing_to_watch_makes_no_claim_either",
+        ],
+    ),
+    (
+        # Lying by omission, which is the only way this block can mislead
+        # without writing a false sentence: the checklist reads as complete and
+        # the reviewer ticks every box believing they saw every clause.
+        "a clause no beat claimed is dropped from the checklist",
+        "demo-pr-body",
+        "        rows.append(Clause(str(cid), str(text).strip(), at, still, state))",
+        "        if not beats:\n"
+        "            continue\n"
+        "        rows.append(Clause(str(cid), str(text).strip(), at, still, state))",
+        [
+            "BlockClauses.test_a_clause_no_beat_claimed_keeps_its_row_and_is_marked",
+            "BlockClauses.test_every_declared_clause_reaches_the_block_with_its_own_text",
+        ],
+    ),
+    (
+        # The timestamp is a scrub target. First-listed rather than earliest
+        # sends a reviewer to a later mention of the clause in a video that is
+        # otherwise entirely correct — so the link is wrong and nothing about
+        # it looks wrong.
+        "the timestamp comes from the first listed beat, not the earliest",
+        "demo-pr-body",
+        '        beats = sorted(claimed.get(cid) or [], key=lambda b: b.get("t_start") or 0.0)',
+        "        beats = claimed.get(cid) or []",
+        [
+            "BlockClauses.test_the_earliest_claiming_beat_owns_the_timestamp_and_the_picture"
+        ],
+    ),
+    (
+        # #300 restored. `timeline.json` is committed and pull-request-editable,
+        # so this is reachable without touching any workflow: a still of
+        # `../../leaked.png` links a picture from elsewhere in the repository
+        # under a clause it has nothing to do with.
+        "a still may climb out of the demo directory again",
+        "demo-pr-body",
+        "    path = repo_path(path_prefix, demo, still)\n    if path is None:\n        return None",
+        '    path = "/".join(\n'
+        '        p.strip("/") for p in (path_prefix, demo, still) if p.strip("/")\n'
+        "    )",
+        [
+            "BlockStillLinks.test_a_still_that_climbs_out_of_the_demo_is_not_linked",
+            "BlockStillLinks.test_a_prefix_that_climbs_out_of_the_tree_is_not_linked",
+        ],
+    ),
+    (
+        # The plausible half-fix, and the one this actually shipped for an
+        # afternoon: judge the joined string. `demos/x` + `/etc/passwd` starts
+        # with `demos`, so the guard passes on a path neither input named.
+        "the path guard judges the joined string instead of each segment",
+        "demo-pr-body",
+        "    parts: list[str] = []\n"
+        "    for segment in segments:\n"
+        "        if not segment:\n"
+        "            continue\n"
+        '        if segment.startswith("/") or "\\\\" in segment:\n'
+        "            return None\n"
+        '        parts += [p for p in segment.split("/") if p not in ("", ".")]',
+        '    joined = "/".join(s for s in segments if s)\n'
+        '    if joined.startswith("/") or "\\\\" in joined:\n'
+        "        return None\n"
+        '    parts = [p for p in joined.split("/") if p not in ("", ".")]',
+        ["BlockStillLinks.test_a_still_that_climbs_out_of_the_demo_is_not_linked"],
+    ),
+    (
+        # A bad prefix is configuration, so every link in the body is wrong at
+        # once. Rendering it anyway is the failure that looks most like success.
+        "a bad path prefix is rendered rather than refused",
+        "demo-pr-body",
+        '    if args.path_prefix and repo_path(args.path_prefix, "probe") is None:',
+        "    if False:",
+        [
+            "BlockStillLinks.test_the_command_refuses_a_bad_prefix_instead_of_rendering_it"
+        ],
+    ),
+    (
+        # `quote` is the whole forgery guard: `[alt](x](evil).png)` is two
+        # links to a markdown parser and the second one is not this tool's.
+        "the still's name is pasted into the URL unescaped",
+        "demo-pr-body",
+        '    return f"{base}/raw/{quote(sha)}/" + "/".join(quote(p) for p in path.split("/"))',
+        '    return f"{base}/raw/{quote(sha)}/" + path',
+        ["BlockStillLinks.test_a_filename_that_could_forge_a_second_link_is_escaped"],
+    ),
+    (
+        # The tick this repository refuses to print: a mark beside `matched`
+        # says the tool checked the clause, when all it checked was that the
+        # ticket still contains the sentence.
+        "a matched clause gets a tick, which is the tool making the call",
+        "demo-pr-body",
+        '                mark = TICKET_MARKS.get(row.ticket_state, "")',
+        '                mark = TICKET_MARKS.get(row.ticket_state, "") or " ✅"',
+        [
+            "BlockClauses.test_a_clause_the_ticket_no_longer_holds_is_marked_and_a_matched_one_is_not",
+            "BlockVerdict.test_the_ordinary_block_makes_no_claim_of_its_own",
+        ],
+    ),
+    (
+        # The splice eats the author's text. Off by the marker's own length,
+        # which is the shape this bug takes in practice, and it runs again on
+        # every push — a pull-request body has no undo.
+        "the splice keeps the end marker and drops what follows it",
+        "demo-pr-body",
+        '        return body[:start] + block.rstrip("\\n") + body[end + len(END) :]',
+        '        return body[:start] + block.rstrip("\\n")',
+        ["BlockSplice.test_only_what_is_between_the_markers_is_replaced"],
+    ),
+    (
+        # A half-written marker pair is guessed at rather than left alone, so
+        # a body someone was mid-edit on loses everything after the start
+        # marker.
+        "an unclosed marker is treated as if it closed at the end",
+        "demo-pr-body",
+        "    if start != -1 and end != -1 and end > start:",
+        "    if start != -1:",
+        ["BlockSplice.test_an_unclosed_marker_is_left_alone_rather_than_guessed_at"],
+    ),
+]
+
 # -- the base commit, and the four ways #415 comes back ---------------------
 INJECTIONS += [
     (
@@ -5916,6 +6068,400 @@ class BlockSummary(unittest.TestCase):
         )
 
 
+# --------------------------------------------------------------------------
+# The block that is actually published
+# --------------------------------------------------------------------------
+#
+# Until now `demo-pr-body` was graded on `pick_demo` and `summarise` and
+# nothing else — while `demo-comment`, which the workflow stopped calling in
+# #408, kept ~70 injections. The renderer a reviewer reads was the untested
+# one. Everything below grades the block itself, and it is the transfer #412
+# requires **before** the dead script can go: the properties are `demo-comment`'s
+# and they have to hold somewhere that runs.
+
+BLOCK_CLASSIFY = {
+    "category": "feature",
+    "why_category": "the commit type `feat`",
+    "demo": "video",
+    # `demo-classify`'s own wording, not an invention: `why_demo` quotes the
+    # changed paths. Which is also the one false positive this sweep can
+    # produce — a repository with a directory called `verified/` would trip it.
+    # Loud and fixable beats a hole, so it is swept like any other sentence the
+    # tool writes.
+    "why_demo": "it changes `examples/ticket-queue/web/app.js`",
+}
+
+#: Three clauses, and each is a different row a reviewer must be able to tell
+#: apart: one claimed by two beats, one claimed by a beat with no still, and
+#: one nothing claimed at all.
+BLOCK_TIMELINE = {
+    "schema": 1,
+    "preview": "demo.preview.webp",
+    "beats": [],
+    "coverage": {
+        "criteria": {
+            "AC-1": "Confirming the dialog sets the assignee to the chosen team.",
+            "AC-2": "The detail pane shows an Assigned row for an assigned ticket.",
+            "AC-3": "Cancelling the dialog leaves the ticket unassigned.",
+        },
+        "claimed": {
+            # Deliberately out of order: the earliest beat owns the timestamp,
+            # because a reviewer scrubbing to a clause wants where it starts.
+            "AC-1": [
+                {"index": 4, "t_start": 12.5, "still": "images/04-assigned.png"},
+                {"index": 2, "t_start": 7.0, "still": "images/02-before.png"},
+            ],
+            "AC-2": [{"index": 3, "t_start": 9.0, "still": None}],
+        },
+    },
+}
+
+BLOCK_TICKET_CHECK = {
+    "clauses": {"AC-1": {"state": "matched"}, "AC-2": {"state": "not verbatim"}}
+}
+
+
+class BlockClauses(unittest.TestCase):
+    """Every declared clause reaches the reviewer, as its own row.
+
+    The checklist is the thing a reviewer ticks, so the failure that matters is
+    a clause that is *not in it*: a checklist missing its unanswered item reads
+    as complete, and the reviewer ticks four boxes believing they saw four
+    things. `GOAL.md` will not trade that for brevity.
+    """
+
+    def block(self, **kw) -> str:
+        opts = dict(
+            timeline=BLOCK_TIMELINE,
+            ticket_check=BLOCK_TICKET_CHECK,
+            sha="abcdef1234567890abcdef1234567890abcdef12",
+            demo_dir="demos/x",
+            repo_url="https://github.com/o/r",
+        )
+        opts.update(kw)
+        return pr_body.render_block(BLOCK_CLASSIFY, "Assign actually assigns", **opts)
+
+    def test_every_declared_clause_reaches_the_block_with_its_own_text(self):
+        body = self.block()
+        criteria = BLOCK_TIMELINE["coverage"]["criteria"]
+        # The control on the three below, which are each satisfied by a block
+        # that rendered no checklist at all.
+        self.assertIn("**Acceptance criteria**", body)
+        for cid, text in criteria.items():
+            self.assertIn(cid, body, f"{cid} is not in the block")
+            self.assertIn(text, body, f"{cid}'s own text is not in the block")
+
+    def test_a_clause_no_beat_claimed_keeps_its_row_and_is_marked(self):
+        # AC-3 is the row that must survive. Silently dropping it is the one
+        # way this block can lie without writing a false sentence.
+        body = self.block()
+        self.assertIn("**AC-3**", body)
+        self.assertIn("no beat claims this", body)
+
+    def test_the_earliest_claiming_beat_owns_the_timestamp_and_the_picture(self):
+        # AC-1 is claimed at 12.5 s and again at 7.0 s, listed in that order.
+        # A renderer taking the first entry rather than the earliest sends a
+        # reviewer to the wrong place in a video that is otherwise correct.
+        body = self.block()
+        row = next(line for line in body.splitlines() if "**AC-1**" in line)
+        self.assertIn("0:07", row)
+        self.assertNotIn("0:12", row)
+        self.assertIn("02-before.png", row)
+
+    def test_a_clause_the_ticket_no_longer_holds_is_marked_and_a_matched_one_is_not(
+        self,
+    ):
+        # #276's rule, and the reason the check has three states: `not checked`
+        # is not `matched`. Only the two a reviewer must act on are marked —
+        # a tick beside every healthy row trains people to stop reading marks.
+        body = self.block()
+        rows = {
+            cid: next(line for line in body.splitlines() if f"**{cid}**" in line)
+            for cid in ("AC-1", "AC-2", "AC-3")
+        }
+        # `matched` renders **nothing**, asserted as the row ending at its
+        # timestamp rather than as the absence of the two marks it is not:
+        # `assertNotIn("⚠️")` passes against a row marked `✅`, which is the
+        # tick this repository refuses to print and was the injection that
+        # caught this.
+        self.assertNotIn("⚠️", rows["AC-1"])
+        self.assertNotIn("ticket not re-read", rows["AC-1"])
+        self.assertTrue(rows["AC-1"].endswith(")"), rows["AC-1"])
+        self.assertIn("not in the ticket verbatim", rows["AC-2"])
+        self.assertIn("ticket not re-read", rows["AC-3"])
+
+    def test_a_block_with_nothing_to_watch_says_why_and_renders_no_checklist(self):
+        body = self.block(
+            timeline=None,
+            **{},
+        )
+        self.assertNotIn("**Acceptance criteria**", body)
+        # And the control that it is still the same block: markers and footer.
+        self.assertIn(pr_body.START, body)
+        self.assertIn(pr_body.END, body)
+
+
+class BlockStillLinks(unittest.TestCase):
+    """A link in the block resolves to the frame it claims, or is not a link.
+
+    #300, one script over. The five defects that issue catalogued were found by
+    fetching emitted URLs against real GitHub rather than reasoning about their
+    shape, and none of them looked wrong. `demo-pr-body` inherited the feature
+    and not the guards: measured before this class existed, a `still` of
+    `../../leaked.png` produced
+
+        https://github.com/o/r/raw/<sha>/demos/x/../../leaked.png
+
+    which a browser normalises to `leaked.png` — a committed picture from
+    somewhere else in the repository, rendered under a clause it has nothing to
+    do with.
+    """
+
+    SHA = "abcdef1234567890abcdef1234567890abcdef12"
+    REPO = "https://github.com/o/r"
+
+    def href(self, still: str, **kw):
+        opts = dict(demo="demos/x", path_prefix="", repo_url=self.REPO, sha=self.SHA)
+        opts.update(kw)
+        return pr_body.still_href(still, **opts)
+
+    def test_the_link_is_absolute_and_pinned_to_the_recorded_commit(self):
+        self.assertEqual(
+            self.href("images/01.png", path_prefix="examples/ticket-queue"),
+            f"{self.REPO}/raw/{self.SHA}/examples/ticket-queue/demos/x/images/01.png",
+        )
+
+    def test_a_still_that_climbs_out_of_the_demo_is_not_linked(self):
+        self.assertIsNone(self.href("../../leaked.png"))
+        self.assertIsNone(self.href("/etc/passwd"))
+        self.assertIsNone(self.href("images\\01.png"))
+
+    def test_a_prefix_that_climbs_out_of_the_tree_is_not_linked(self):
+        self.assertIsNone(self.href("images/01.png", path_prefix="../elsewhere"))
+        self.assertIsNone(self.href("images/01.png", path_prefix="/abs"))
+
+    def test_a_filename_that_could_forge_a_second_link_is_escaped(self):
+        # `[alt](x](evil).png)` is two links to a markdown parser, and the
+        # second one is the attacker's. A real filename can hold `]` and `(`.
+        href = self.href("images/x](evil).png")
+        self.assertIsNotNone(href)
+        self.assertNotIn("](", href)
+        self.assertNotIn(")", href)
+
+    def test_without_a_repository_or_a_commit_there_is_no_link_at_all(self):
+        # #274. A relative path does not resolve in a pull-request body, and
+        # the default that "works" locally is a link rooted at the repository —
+        # rendered exactly like one that goes somewhere.
+        self.assertIsNone(self.href("images/01.png", repo_url=None))
+        self.assertIsNone(self.href("images/01.png", sha=None))
+
+    def test_the_row_keeps_its_timestamp_when_the_still_cannot_be_linked(self):
+        # Saying less, not saying nothing: the clause is still claimed at a
+        # time a reviewer can scrub to.
+        timeline = json.loads(json.dumps(BLOCK_TIMELINE))
+        timeline["coverage"]["claimed"]["AC-1"][1]["still"] = "../../leaked.png"
+        timeline["coverage"]["claimed"]["AC-1"][0]["still"] = None
+        body = pr_body.render_block(
+            BLOCK_CLASSIFY,
+            "s",
+            timeline=timeline,
+            sha=self.SHA,
+            demo_dir="demos/x",
+            repo_url=self.REPO,
+        )
+        row = next(line for line in body.splitlines() if "**AC-1**" in line)
+        self.assertIn("0:07", row)
+        self.assertNotIn("leaked", row)
+        self.assertNotIn("](http", row)
+
+    def test_the_command_refuses_a_bad_prefix_instead_of_rendering_it(self):
+        # The split `demo-comment` drew and this keeps: a still is *data* and
+        # goes unlinked, a prefix is *configuration* and every link in the body
+        # would be wrong at once. That is worth a red step, not a quiet
+        # degradation.
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "c.json"
+            spec.write_text(json.dumps(BLOCK_CLASSIFY), encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = pr_body.main(
+                    ["--classification", str(spec), "--path-prefix", "../up"]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("path-prefix", err.getvalue())
+
+    def test_an_ordinary_prefix_is_not_refused(self):
+        # The control. A guard that refused everything would pass the test
+        # above and take the whole feature with it.
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "c.json"
+            spec.write_text(json.dumps(BLOCK_CLASSIFY), encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = pr_body.main(
+                    [
+                        "--classification",
+                        str(spec),
+                        "--path-prefix",
+                        "examples/ticket-queue",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertIn(pr_body.START, out.getvalue())
+
+
+class BlockVerdict(unittest.TestCase):
+    """No sentence the published block writes reads as a machine's verdict.
+
+    #283/#374's property, moved to the renderer that runs. `assert_no_verdict`
+    swept `demo-comment`; this block writes `⚠️ not in the ticket verbatim` and
+    `no beat claims this` and had never been swept at all.
+
+    What is subtracted before the sweep is what the block **quotes**: the
+    clause text belongs to whoever wrote the ticket, the summary to whoever
+    wrote the pull request, and a still's filename to whoever wrote the
+    storyboard. A ticket clause reading "every criterion the release has met"
+    is that author's sentence reaching a reader intact, not this tool promoting
+    a claim — and reddening CI on it would make the sweep a check on prose
+    nobody here controls.
+    """
+
+    #: Both halves are real English an author would write, which is why this is
+    #: a fixture and not a hypothetical: the clause, the summary and the still's
+    #: name each carry verdict words the others do not need.
+    QUOTED = {
+        "schema": 1,
+        "beats": [],
+        "coverage": {
+            "criteria": {
+                "AC-1": "The heading shows every criterion the release has met.",
+                "AC-2": "Escalated matches nothing, which the ticket calls proved.",
+            },
+            "claimed": {"AC-1": [{"index": 1, "t_start": 1.0, "still": None}]},
+        },
+    }
+
+    def block(self, **kw) -> str:
+        opts = dict(
+            timeline=BLOCK_TIMELINE,
+            ticket_check=BLOCK_TICKET_CHECK,
+            sha="abcdef1234567890abcdef1234567890abcdef12",
+            demo_dir="demos/x",
+            repo_url="https://github.com/o/r",
+        )
+        opts.update(kw)
+        summary = str(opts.pop("summary", "Assign actually assigns"))
+        return pr_body.render_block(BLOCK_CLASSIFY, summary, **opts)
+
+    def swept(self, body: str, timeline: dict | None, summary: str, stills=()) -> str:
+        """`body` with everything it quotes subtracted, and nothing else."""
+        spans = []
+        if timeline:
+            spans += [str(t) for t in (timeline["coverage"]["criteria"]).values()]
+        spans.append(summary)
+        spans += [Path(s).stem for s in stills]
+        out = body
+        for span in spans:
+            flat = " ".join(str(span).split())
+            if not flat:
+                continue
+            # A span that never reached the reader cannot be subtracted, and a
+            # subtraction that quietly matched nothing is how a sweep goes on
+            # passing over text it stopped seeing.
+            self.assertIn(flat, out, f"quoted span never reached the reader: {flat!r}")
+            out = out.replace(flat, " ")
+        return out
+
+    def assert_no_verdict(self, body, timeline, summary, stills=()):
+        swept = self.swept(body, timeline, summary, stills)
+        # The control, read off the *swept* text: without it every assertion
+        # here holds over a block that rendered no checklist, and a subtraction
+        # that ate the section would pass just as quietly. Re-chosen for this
+        # renderer rather than copied — `demo-comment`'s anchors were `AC-1`
+        # and `claimed at`, and this block has no such column.
+        self.assertIn("AC-1", swept)
+        self.assertIn("Acceptance criteria", swept)
+        hits = _verdict_hits(swept)
+        self.assertEqual(hits, [], f"{hits} read as a verdict in:\n{swept}")
+
+    def test_the_ordinary_block_makes_no_claim_of_its_own(self):
+        self.assert_no_verdict(self.block(), BLOCK_TIMELINE, "Assign actually assigns")
+
+    def test_a_ticket_and_a_summary_that_read_as_verdicts_are_quoted_not_refused(self):
+        summary = "Every clause is verified by the demo, the ticket says"
+        body = self.block(timeline=self.QUOTED, ticket_check=None, summary=summary)
+        # The control on the exemption: the sweep is only interesting if the
+        # unsubtracted text really does carry verdict words.
+        self.assertTrue(_verdict_hits(body), "the fixture carries no verdict words")
+        self.assert_no_verdict(body, self.QUOTED, summary)
+
+    def test_a_stills_filename_is_the_storyboards_word_and_not_this_tools(self):
+        stills = ["https://github.com/o/r/raw/abc/images/03-verified.png"]
+        body = self.block(stills=stills)
+        self.assert_no_verdict(
+            body, BLOCK_TIMELINE, "Assign actually assigns", stills=stills
+        )
+
+    def test_a_block_with_nothing_to_watch_makes_no_claim_either(self):
+        # The other branch of the renderer, which writes a sentence of its own
+        # about why there is nothing to see. Swept separately because no
+        # checklist is rendered there, so the class's usual control cannot run.
+        classification = dict(BLOCK_CLASSIFY, demo="none")
+        body = pr_body.render_block(classification, "A refactor", timeline=None)
+        self.assertIn("Nothing here changes what a viewer sees", body)  # control
+        self.assertEqual(_verdict_hits(body.replace("A refactor", " ")), [])
+
+
+class BlockSplice(unittest.TestCase):
+    """Everything outside the markers is the author's, on every push.
+
+    This is the one function here that can *destroy* text a person wrote. The
+    block is rewritten on every push to a pull request, so a splice that took
+    one character too many takes it repeatedly and there is no undo in a
+    pull-request body — which is why the boundary gets assertions of its own
+    rather than being covered incidentally by whatever renders through it.
+    """
+
+    BLOCK = f"{pr_body.START}\nnew\n{pr_body.END}\n"
+
+    def test_a_body_with_no_markers_keeps_all_of_itself(self):
+        out = pr_body.splice("Mine.\n\nStill mine.", self.BLOCK)
+        self.assertIn("Mine.", out)
+        self.assertIn("Still mine.", out)
+        self.assertIn("new", out)
+        self.assertLess(out.index("Still mine."), out.index(pr_body.START))
+
+    def test_only_what_is_between_the_markers_is_replaced(self):
+        body = f"Before.\n\n{pr_body.START}\nold\n{pr_body.END}\n\nAfter."
+        out = pr_body.splice(body, self.BLOCK)
+        self.assertIn("Before.", out)
+        self.assertIn("After.", out)
+        self.assertIn("new", out)
+        self.assertNotIn("old", out)
+        # And exactly one block, not two: a splice that appended instead of
+        # replacing would satisfy every assertion above.
+        self.assertEqual(out.count(pr_body.START), 1)
+
+    def test_an_unclosed_marker_is_left_alone_rather_than_guessed_at(self):
+        # Guessing where somebody's unclosed marker was meant to end is how a
+        # tool eats a paragraph. Appending is the recoverable mistake.
+        #
+        # Asserted as **the whole body surviving as a prefix**, not as two
+        # `assertIn`s. Measured: with the guard broken to `if start != -1`, the
+        # splice cut at `end + len(END)` with `end == -1` — chopping 24
+        # characters out of the middle — and `"Mine."` and `"half written"`
+        # both survived that. The two `assertIn`s passed against exactly the
+        # bug they were written for.
+        body = f"Mine.\n\n{pr_body.START}\nhalf written"
+        out = pr_body.splice(body, self.BLOCK)
+        self.assertTrue(out.startswith(body), f"the author's body was edited:\n{out!r}")
+        self.assertIn(self.BLOCK.strip(), out)
+
+    def test_an_empty_body_gets_the_block_and_no_leading_blank_lines(self):
+        self.assertEqual(pr_body.splice("", self.BLOCK), self.BLOCK)
+        self.assertEqual(pr_body.splice("   \n\n", self.BLOCK), self.BLOCK)
+
+
 class PreviewAssetNames(unittest.TestCase):
     """The flat asset store's naming and pruning (#410).
 
@@ -6092,7 +6638,26 @@ def fault_inject() -> int:
                     "CI_UNIT_CALLER": str(staged["caller"]),
                 },
             )
-            noticed = {t for t in must_fail if t in done.stderr}
+            # Scoped to the runner's **verdict lines**, which is the whole
+            # check. The inner run is `verbosity=2`, so it prints every test it
+            # executes — `test_x (__main__.C.test_x) ... ok` included. Reading
+            # all of stderr therefore found each `must_fail` name in the
+            # *passing* line that names it, `missed` was empty on every
+            # injection ever run here, and the only thing this driver actually
+            # required was that the suite went red **somewhere**.
+            #
+            # Which made every `must_fail` list in this file decorative: an
+            # injection that reddened one unrelated assertion counted as
+            # evidence for the assertion it was filed under. Found by an
+            # injection that broke `splice` and was reported caught by a class
+            # that never ran against it. `tests/unit` scopes this correctly and
+            # always has; this is the same three lines.
+            verdicts = [
+                ln
+                for ln in done.stderr.splitlines()
+                if ln.startswith(("FAIL:", "ERROR:"))
+            ]
+            noticed = {t for t in must_fail if any(t in ln for ln in verdicts)}
             missed = set(must_fail) - noticed
             ok = done.returncode != 0 and not missed
             print(f"{'PASS' if ok else 'FAIL'}  break: {name}")
