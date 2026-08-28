@@ -54,6 +54,11 @@ function renderList() {
             <span class="ticket-title">${t.title}</span>
             <span class="ticket-requester">${t.requester}</span>
           </span>
+          ${
+            t.assignee
+              ? `<span class="ticket-assignee">${t.assignee}</span>`
+              : ""
+          }
           ${statusPill(t.status)}
         </button>
       </li>`
@@ -73,6 +78,14 @@ function renderDetail() {
     ${statusPill(t.status)}
     <dl>
       <dt>Ticket</dt><dd>${t.id}</dd>
+      ${
+        // Rendered only when the ticket has one. A row reading "Assigned:
+        // nobody" is a different claim from no row at all, and the queue is
+        // read by people scanning for what still needs an owner.
+        t.assignee
+          ? `<dt>Assigned</dt><dd class="assignee">${t.assignee}</dd>`
+          : ""
+      }
       <dt>Requester</dt>
       <dd class="requester">
         <span class="requester-email">${t.requester}</span>
@@ -143,8 +156,20 @@ document.getElementById("assign-cancel").addEventListener("click", () => {
 });
 
 document.getElementById("assign-confirm").addEventListener("click", () => {
+  const ticket = tickets.find((x) => x.id === selectedId);
+  const team = document.getElementById("assignee").value;
   modalEl.hidden = true;
-  liveEl.textContent = "Ticket assigned.";
+  // Nothing to announce if there is nothing to assign. Saying "Ticket
+  // assigned." with no ticket selected is the defect this fixes, one branch
+  // over — the dialog cannot be opened without a selection, but the handler
+  // must not depend on that to be honest.
+  if (!ticket) return;
+  ticket.assignee = team;
+  // Naming the team is what makes the announcement checkable. "Ticket
+  // assigned." was true of every outcome including the one where nothing
+  // happened, which is why it survived so long.
+  liveEl.textContent = `Ticket assigned to ${team}.`;
+  render();
 });
 
 fetch("/api/tickets")

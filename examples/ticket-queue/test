@@ -257,7 +257,153 @@ class QueuePage(unittest.TestCase):
 # (name, file relative to the app root, exact string, replacement, tests that
 # must fail). The driver aborts unless the exact string matches once.
 
+
+class AssignFlow(unittest.TestCase):
+    """What confirming the assign dialog actually does (issue #413).
+
+    The defect this replaces announced "Ticket assigned." and changed nothing.
+    So every assertion here reads the *outcome* off the page — the detail row,
+    the queue chip, the announcement's text — and never asks the app what it
+    thinks it did. A check that trusted the live region alone would have passed
+    against the bug, which is the whole reason the bug survived.
+    """
+
+    def setUp(self) -> None:
+        self.page = _browser.new_page(viewport={"width": 1120, "height": 620})
+        self.page.goto(f"{BASE_URL}/")
+        self.page.wait_for_selector(".ticket")
+
+    def tearDown(self) -> None:
+        self.page.close()
+
+    def open_ticket(self, ticket_id: str) -> None:
+        self.page.click(f'.ticket[data-id="{ticket_id}"]')
+
+    def assign(self, ticket_id: str, team: str, confirm: bool = True) -> None:
+        self.open_ticket(ticket_id)
+        self.page.click("#open-assign")
+        self.page.select_option("#assignee", team)
+        self.page.click("#assign-confirm" if confirm else "#assign-cancel")
+
+    def detail_assignee(self) -> str:
+        cell = self.page.locator("#detail .assignee")
+        return cell.inner_text() if cell.count() else ""
+
+    def row_assignee(self, ticket_id: str) -> str:
+        chip = self.page.locator(f'.ticket[data-id="{ticket_id}"] .ticket-assignee')
+        return chip.inner_text() if chip.count() else ""
+
+    def test_confirming_sets_the_assignee_to_the_team_that_was_chosen(self):
+        """AC-1. `Platform` and not merely *some* team: the bug's replacement
+        would pass a test that only asked whether anything was assigned."""
+        self.assign("TQ-101", "Platform")
+        self.assertEqual(self.detail_assignee(), "Platform")
+
+    def test_a_different_choice_gives_a_different_assignee(self):
+        """The control on the test above. Without it, an implementation that
+        hardcoded one team would satisfy every other assertion here."""
+        self.assign("TQ-101", "Billing")
+        self.assertEqual(self.detail_assignee(), "Billing")
+
+    def test_the_detail_shows_no_assigned_row_until_there_is_one(self):
+        """AC-2's other half. "Assigned: nobody" is a different claim from no
+        row at all, and the queue is read by people scanning for what still
+        needs an owner."""
+        self.open_ticket("TQ-102")
+        self.assertEqual(self.detail_assignee(), "")
+        self.assertNotIn("Assigned", self.page.locator("#detail dl").inner_text())
+
+    def test_the_queue_row_shows_the_assignee(self):
+        """AC-3 — the queue is readable without opening every ticket."""
+        self.assign("TQ-101", "Billing")
+        self.assertEqual(self.row_assignee("TQ-101"), "Billing")
+
+    def test_only_the_assigned_ticket_gets_a_chip(self):
+        """The control on AC-3: a chip on every row would satisfy the test
+        above while telling a scanner nothing."""
+        self.assign("TQ-101", "Billing")
+        self.assertEqual(self.row_assignee("TQ-101"), "Billing")
+        self.assertEqual(self.row_assignee("TQ-103"), "")
+
+    def test_cancelling_leaves_the_ticket_unassigned(self):
+        """AC-4, and the assertion the original defect would fail: it assigned
+        on neither path, so only a *positive* test elsewhere distinguishes
+        cancel-does-nothing from nothing-ever-happens."""
+        self.assign("TQ-101", "Platform", confirm=False)
+        self.assertEqual(self.detail_assignee(), "")
+        self.assertEqual(self.row_assignee("TQ-101"), "")
+
+    def test_the_announcement_names_the_team(self):
+        """ "Ticket assigned." was true of every outcome including the one where
+        nothing happened, which is how the defect survived. Naming the team is
+        what makes the announcement checkable."""
+        self.assign("TQ-101", "Platform")
+        self.assertIn("Platform", self.page.locator("#live-status").inner_text())
+
+
 INJECTIONS = [
+    # -- the assign flow (issue #413) --------------------------------------
+    #
+    # The defect being fixed announced a change it never made, so each of these
+    # breaks the *outcome* rather than the announcement. A suite that watched
+    # only the live region would stay green through every one of them, which is
+    # precisely how the original bug survived.
+    (
+        "confirming assigns nobody again — the #413 defect, restored",
+        "web/app.js",
+        "  ticket.assignee = team;",
+        "  // the dialog closes and nothing is assigned",
+        [
+            "AssignFlow.test_confirming_sets_the_assignee_to_the_team_that_was_chosen",
+            "AssignFlow.test_the_queue_row_shows_the_assignee",
+        ],
+    ),
+    (
+        # The select is never read and one team is assumed. Every "is it
+        # assigned" assertion still passes; only comparing against the team
+        # that was *chosen* catches it.
+        "the chosen team is ignored and one is hardcoded",
+        "web/app.js",
+        '  const team = document.getElementById("assignee").value;',
+        '  const team = "Support rota";',
+        ["AssignFlow.test_a_different_choice_gives_a_different_assignee"],
+    ),
+    (
+        # Cancel starts assigning too. The positive tests all still pass —
+        # only the cancel path notices, which is why it has its own test.
+        "cancelling assigns as well, so the dialog has no way out",
+        "web/app.js",
+        'document.getElementById("assign-cancel").addEventListener("click", () => {\n  modalEl.hidden = true;\n});',
+        'document.getElementById("assign-cancel").addEventListener("click", () => {\n  modalEl.hidden = true;\n  const t = tickets.find((x) => x.id === selectedId);\n  if (t) { t.assignee = document.getElementById("assignee").value; render(); }\n});',
+        ["AssignFlow.test_cancelling_leaves_the_ticket_unassigned"],
+    ),
+    (
+        # The detail row renders unconditionally, so an unassigned ticket
+        # claims an owner it does not have.
+        "the detail pane shows an Assigned row for every ticket",
+        "web/app.js",
+        '        t.assignee\n          ? `<dt>Assigned</dt><dd class="assignee">${t.assignee}</dd>`\n          : ""',
+        '        `<dt>Assigned</dt><dd class="assignee">${t.assignee || "Support rota"}</dd>`',
+        ["AssignFlow.test_the_detail_shows_no_assigned_row_until_there_is_one"],
+    ),
+    (
+        # The chip renders on every row, so the queue stops distinguishing what
+        # has an owner from what does not — the one job AC-3 gives it.
+        "every queue row gets an assignee chip",
+        "web/app.js",
+        '            t.assignee\n              ? `<span class="ticket-assignee">${t.assignee}</span>`\n              : ""',
+        '            `<span class="ticket-assignee">${t.assignee || "Support rota"}</span>`',
+        ["AssignFlow.test_only_the_assigned_ticket_gets_a_chip"],
+    ),
+    (
+        # And the announcement itself, back to the sentence that was true of
+        # every outcome.
+        "the announcement stops naming the team",
+        "web/app.js",
+        "  liveEl.textContent = `Ticket assigned to ${team}.`;",
+        '  liveEl.textContent = "Ticket assigned.";',
+        ["AssignFlow.test_the_announcement_names_the_team"],
+    ),
     (
         "the search stops comparing the requester (the bug in #132)",
         "web/app.js",

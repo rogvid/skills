@@ -784,11 +784,16 @@ class TerminalRecorder(_DemoBase):
             return
         beat = self._pending_runs.popleft()
         beat["exit_code"] = code
-        if code != 0:
+        expected = beat.get("expect_exit", 0)
+        if code != expected:
             command = beat.get("selector")
+            # Named against what was *expected*, not against zero, so a
+            # storyboard that declared 2 and got 1 is told what it was
+            # promised rather than being handed the generic message.
+            wanted = "" if expected == 0 else f", expected {expected}"
             self._note_issue(
                 "nonzero_exit",
-                f"{command!r} exited {code}",
+                f"{command!r} exited {code}{wanted}",
                 beat=beat,
                 exit_code=code,
                 command=command,
@@ -842,15 +847,28 @@ class TerminalRecorder(_DemoBase):
             self._idle(self._type_delay)
 
     @_beat_verb("run")
-    def run(self, command: str) -> None:
+    def run(self, command: str, expect_exit: int = 0) -> None:
         """Type a shell command visibly and press Enter. Pair with
         wait_for_prompt() to wait for it to finish.
 
         The beat this records gains an `exit_code` once the shell's prompt
         comes back — usually during the following wait_for_prompt(), which is
-        why the pairing is not merely a suggestion. A command that exits
-        non-zero also logs a `nonzero_exit` issue, and fails the take under
-        strict=True.
+        why the pairing is not merely a suggestion. A command whose status is
+        not `expect_exit` logs a `nonzero_exit` issue, and fails the take
+        under strict=True.
+
+        **`expect_exit` is for a failure that is the demonstration** (#405).
+        A storyboard showing that a bad argument is refused has to run a
+        command that exits non-zero — that *is* the feature — and before this
+        existed such a take could not rehearse, because `demo-rehearse` pins
+        `strict=True` and strict read every non-zero exit as a defect. The
+        declaration is per call and it is a number rather than a flag: a
+        storyboard promising 2 and getting 1 has still found something, and
+        `run(cmd, expect_exit=True)` could not say so.
+
+        It is deliberately not a way to silence a failing command. Declaring
+        the wrong number still fails, and declaring 0 — the default — is the
+        behaviour every existing storyboard already has.
 
         Type example values. Nothing here hides what the PTY echoes — see
         "What this records, and what it does not defend against" in SKILL.md."""
@@ -858,6 +876,10 @@ class TerminalRecorder(_DemoBase):
         beat = self._beats[-1] if self._beats else None
         if beat is not None:
             beat["exit_code"] = None
+            # Recorded on the beat, so `timeline.json` carries the promise
+            # beside the result and a reader can see the take meant it.
+            if expect_exit:
+                beat["expect_exit"] = expect_exit
             # A queue, not a slot: two run()s with no wait between them are
             # legitimate (`run("sleep 5")` then `run("deploy")`), and a slot
             # would hand the first command's status to the second beat and

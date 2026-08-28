@@ -167,7 +167,12 @@ h1 {
   color: inherit;
   cursor: pointer;
   display: grid;
-  grid-template-columns: 74px 1fr 96px;
+  /* Four columns since the assignee chip (#413): id, text, owner, status.
+     The chip is rendered only when a ticket has one, so column 3 collapses to
+     nothing on an unassigned row — but the status pill is pinned to column 4
+     below, so it stays in line down the queue either way. Without the pin the
+     pill fell into column 3 on unassigned rows and every row jumped. */
+  grid-template-columns: 74px 1fr auto 96px;
   gap: 12px;
   align-items: center;
 }
@@ -208,6 +213,31 @@ h1 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The owner, on the row. Deliberately quieter than the status pill: status is
+   what the queue is filtered by, the assignee is what a scanner checks after
+   narrowing. Same ellipsis rule as the requester — a long team name must not
+   push the status pill off the row. */
+.ticket-assignee {
+  grid-column: 3;
+  align-self: center;
+  background: var(--chip-bg, #eef2f7);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Pinned, so an unassigned row's empty column 3 does not pull the status pill
+   left and make the queue's right edge ragged. */
+.ticket > .pill {
+  grid-column: 4;
+}
+
+.assignee {
+  font-variant-numeric: tabular-nums;
 }
 
 .pill {

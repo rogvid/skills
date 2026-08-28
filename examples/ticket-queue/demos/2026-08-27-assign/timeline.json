@@ -1,0 +1,583 @@
+{
+  "schema": 1,
+  "generated_by": "demo-video",
+  "recorder": "Recorder",
+  "segment": null,
+  "ticket": "rogvid/skills#413",
+  "media": "demo.mp4",
+  "preview": "demo.preview.webp",
+  "duration": 19.8,
+  "determinism": {
+    "deterministic": false,
+    "clock": null,
+    "timezone_id": "UTC",
+    "locale": "en-US"
+  },
+  "content": {
+    "measured": true,
+    "note": null,
+    "rect": [
+      48,
+      72,
+      1824,
+      777
+    ],
+    "sample_fps": 2,
+    "frames": 40,
+    "score": 12.15,
+    "floor": 1.0,
+    "static_for": 2.5,
+    "static_from": 1.0,
+    "static_beats": [
+      {
+        "index": 3,
+        "verb": "shot",
+        "acting": false
+      }
+    ],
+    "static_limit": 15.0,
+    "opening": {
+      "gap": 0.6,
+      "held": null,
+      "limit": 1.5,
+      "note": null,
+      "card": null
+    },
+    "warnings": []
+  },
+  "capture_clock": {
+    "measured": true,
+    "note": null,
+    "steps": [
+      {
+        "t": 7.777,
+        "delta": -1.7806
+      }
+    ],
+    "total": -1.7806,
+    "sample_interval": 0.02,
+    "min_step": 0.005,
+    "max_gap": 0.0306,
+    "max_gap_limit": 0.25
+  },
+  "narration": {
+    "lines": [
+      {
+        "t": 0.777,
+        "at": 0.777,
+        "gain_db": -2.6
+      },
+      {
+        "t": 3.655,
+        "at": 3.655,
+        "gain_db": -4.0
+      },
+      {
+        "t": 5.888,
+        "at": 5.888,
+        "gain_db": -1.2
+      },
+      {
+        "t": 9.568,
+        "at": 7.787,
+        "gain_db": -2.8
+      },
+      {
+        "t": 12.027,
+        "at": 10.247,
+        "gain_db": -2.6
+      },
+      {
+        "t": 14.487,
+        "at": 12.706,
+        "gain_db": -2.1
+      }
+    ],
+    "clock_correction": {
+      "applied": true,
+      "total": -1.7806,
+      "steps": 1,
+      "note": null
+    }
+  },
+  "coverage": {
+    "criteria": {
+      "AC-1": "Confirming the assign dialog sets the ticket's assignee to the team chosen in the dropdown.",
+      "AC-2": "The detail pane shows an Assigned row for a ticket that has an assignee, and no such row for one that does not.",
+      "AC-3": "The queue row shows the assignee, so the queue can be read without opening every ticket.",
+      "AC-4": "Cancelling the dialog leaves the ticket unassigned."
+    },
+    "claimed": {
+      "AC-1": [
+        {
+          "index": 13,
+          "segment": null,
+          "segment_index": 13,
+          "t_start": 9.565,
+          "still": null
+        },
+        {
+          "index": 16,
+          "segment": null,
+          "segment_index": 16,
+          "t_start": 11.317,
+          "still": "images/04-assigned.png"
+        }
+      ],
+      "AC-2": [
+        {
+          "index": 4,
+          "segment": null,
+          "segment_index": 4,
+          "t_start": 3.651,
+          "still": null
+        },
+        {
+          "index": 7,
+          "segment": null,
+          "segment_index": 7,
+          "t_start": 5.731,
+          "still": "images/02-before.png"
+        }
+      ],
+      "AC-3": [
+        {
+          "index": 17,
+          "segment": null,
+          "segment_index": 17,
+          "t_start": 12.024,
+          "still": null
+        },
+        {
+          "index": 20,
+          "segment": null,
+          "segment_index": 20,
+          "t_start": 12.892,
+          "still": "images/05-queue-chip.png"
+        }
+      ],
+      "AC-4": [
+        {
+          "index": 22,
+          "segment": null,
+          "segment_index": 22,
+          "t_start": 14.484,
+          "still": null
+        },
+        {
+          "index": 29,
+          "segment": null,
+          "segment_index": 29,
+          "t_start": 20.436,
+          "still": "images/06-cancelled.png"
+        }
+      ]
+    },
+    "unclaimed": [],
+    "unmet": [],
+    "tagged_beats": 8,
+    "untagged_beats": 22
+  },
+  "beats": [
+    {
+      "index": 0,
+      "t_start": 0.109,
+      "t_end": 0.701,
+      "caption": "",
+      "verb": "goto",
+      "selector": "/",
+      "still": null,
+      "segment": null,
+      "segment_index": 0,
+      "evidence": "evidence/beat-00.json",
+      "opening_hold_until": 0.655
+    },
+    {
+      "index": 1,
+      "t_start": 0.701,
+      "t_end": 0.764,
+      "caption": "",
+      "verb": "wait_for",
+      "selector": ".ticket",
+      "still": null,
+      "segment": null,
+      "segment_index": 1,
+      "evidence": "evidence/beat-01.json"
+    },
+    {
+      "index": 2,
+      "t_start": 0.764,
+      "t_end": 1.262,
+      "caption": "The support queue. Nothing here has an owner yet.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 2,
+      "evidence": "evidence/beat-02.json"
+    },
+    {
+      "index": 3,
+      "t_start": 1.262,
+      "t_end": 1.392,
+      "caption": "The support queue. Nothing here has an owner yet.",
+      "verb": "shot",
+      "selector": "01-queue",
+      "still": "images/01-queue.png",
+      "segment": null,
+      "segment_index": 3,
+      "evidence": "evidence/beat-03.json"
+    },
+    {
+      "index": 4,
+      "t_start": 3.651,
+      "t_end": 4.126,
+      "caption": "Open a ticket — no Assigned row.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 4,
+      "evidence": "evidence/beat-04.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 5,
+      "t_start": 4.126,
+      "t_end": 5.687,
+      "caption": "Open a ticket — no Assigned row.",
+      "verb": "click",
+      "selector": ".ticket[data-id='TQ-101']",
+      "still": null,
+      "segment": null,
+      "segment_index": 5,
+      "evidence": "evidence/beat-05.json"
+    },
+    {
+      "index": 6,
+      "t_start": 5.687,
+      "t_end": 5.731,
+      "caption": "Open a ticket — no Assigned row.",
+      "verb": "wait_for",
+      "selector": "#detail dl",
+      "still": null,
+      "segment": null,
+      "segment_index": 6,
+      "evidence": "evidence/beat-06.json"
+    },
+    {
+      "index": 7,
+      "t_start": 5.731,
+      "t_end": 5.885,
+      "caption": "Open a ticket — no Assigned row.",
+      "verb": "shot",
+      "selector": "02-before",
+      "still": "images/02-before.png",
+      "segment": null,
+      "segment_index": 7,
+      "evidence": "evidence/beat-07.json",
+      "ac": [
+        "AC-2"
+      ]
+    },
+    {
+      "index": 8,
+      "t_start": 5.885,
+      "t_end": 6.367,
+      "caption": "Assign it to Platform.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 8,
+      "evidence": "evidence/beat-08.json"
+    },
+    {
+      "index": 9,
+      "t_start": 6.367,
+      "t_end": 7.891,
+      "caption": "Assign it to Platform.",
+      "verb": "click",
+      "selector": "#open-assign",
+      "still": null,
+      "segment": null,
+      "segment_index": 9,
+      "evidence": "evidence/beat-09.json"
+    },
+    {
+      "index": 10,
+      "t_start": 7.891,
+      "t_end": 7.919,
+      "caption": "Assign it to Platform.",
+      "verb": "wait_for",
+      "selector": "#assign-modal .modal-card",
+      "still": null,
+      "segment": null,
+      "segment_index": 10,
+      "evidence": "evidence/beat-10.json"
+    },
+    {
+      "index": 11,
+      "t_start": 7.93,
+      "t_end": 9.443,
+      "caption": "Assign it to Platform.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 11,
+      "evidence": "evidence/beat-11.json"
+    },
+    {
+      "index": 12,
+      "t_start": 9.443,
+      "t_end": 9.564,
+      "caption": "Assign it to Platform.",
+      "verb": "shot",
+      "selector": "03-dialog",
+      "still": "images/03-dialog.png",
+      "segment": null,
+      "segment_index": 12,
+      "evidence": "evidence/beat-12.json"
+    },
+    {
+      "index": 13,
+      "t_start": 9.565,
+      "t_end": 10.067,
+      "caption": "Confirmed — the ticket now says who owns it.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 13,
+      "evidence": "evidence/beat-13.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 14,
+      "t_start": 10.067,
+      "t_end": 11.273,
+      "caption": "Confirmed — the ticket now says who owns it.",
+      "verb": "click",
+      "selector": "#assign-confirm",
+      "still": null,
+      "segment": null,
+      "segment_index": 14,
+      "evidence": "evidence/beat-14.json"
+    },
+    {
+      "index": 15,
+      "t_start": 11.273,
+      "t_end": 11.317,
+      "caption": "Confirmed — the ticket now says who owns it.",
+      "verb": "wait_for",
+      "selector": "#detail .assignee:has-text('Platform')",
+      "still": null,
+      "segment": null,
+      "segment_index": 15,
+      "evidence": "evidence/beat-15.json"
+    },
+    {
+      "index": 16,
+      "t_start": 11.317,
+      "t_end": 11.461,
+      "caption": "Confirmed — the ticket now says who owns it.",
+      "verb": "shot",
+      "selector": "04-assigned",
+      "still": "images/04-assigned.png",
+      "segment": null,
+      "segment_index": 16,
+      "evidence": "evidence/beat-16.json",
+      "ac": [
+        "AC-1"
+      ]
+    },
+    {
+      "index": 17,
+      "t_start": 12.024,
+      "t_end": 12.501,
+      "caption": "And the queue reads without opening anything.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 17,
+      "evidence": "evidence/beat-17.json",
+      "ac": [
+        "AC-3"
+      ]
+    },
+    {
+      "index": 18,
+      "t_start": 12.501,
+      "t_end": 12.855,
+      "caption": "And the queue reads without opening anything.",
+      "verb": "spotlight",
+      "selector": ".ticket[data-id='TQ-101'] .ticket-assignee",
+      "still": null,
+      "segment": null,
+      "segment_index": 18,
+      "evidence": "evidence/beat-18.json"
+    },
+    {
+      "index": 19,
+      "t_start": 12.855,
+      "t_end": 12.892,
+      "caption": "And the queue reads without opening anything.",
+      "verb": "wait_for",
+      "selector": ".ticket[data-id='TQ-101'] .ticket-assignee:has-text('Platform')",
+      "still": null,
+      "segment": null,
+      "segment_index": 19,
+      "evidence": "evidence/beat-19.json"
+    },
+    {
+      "index": 20,
+      "t_start": 12.892,
+      "t_end": 13.049,
+      "caption": "And the queue reads without opening anything.",
+      "verb": "shot",
+      "selector": "05-queue-chip",
+      "still": "images/05-queue-chip.png",
+      "segment": null,
+      "segment_index": 20,
+      "evidence": "evidence/beat-20.json",
+      "ac": [
+        "AC-3"
+      ]
+    },
+    {
+      "index": 21,
+      "t_start": 13.049,
+      "t_end": 13.629,
+      "caption": "And the queue reads without opening anything.",
+      "verb": "spotlight",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 21,
+      "evidence": "evidence/beat-21.json"
+    },
+    {
+      "index": 22,
+      "t_start": 14.484,
+      "t_end": 14.963,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "caption",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 22,
+      "evidence": "evidence/beat-22.json",
+      "ac": [
+        "AC-4"
+      ]
+    },
+    {
+      "index": 23,
+      "t_start": 14.963,
+      "t_end": 15.99,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "click",
+      "selector": ".ticket[data-id='TQ-102']",
+      "still": null,
+      "segment": null,
+      "segment_index": 23,
+      "evidence": "evidence/beat-23.json"
+    },
+    {
+      "index": 24,
+      "t_start": 15.99,
+      "t_end": 17.522,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "click",
+      "selector": "#open-assign",
+      "still": null,
+      "segment": null,
+      "segment_index": 24,
+      "evidence": "evidence/beat-24.json"
+    },
+    {
+      "index": 25,
+      "t_start": 17.522,
+      "t_end": 17.567,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "wait_for",
+      "selector": "#assign-modal .modal-card",
+      "still": null,
+      "segment": null,
+      "segment_index": 25,
+      "evidence": "evidence/beat-25.json"
+    },
+    {
+      "index": 26,
+      "t_start": 17.577,
+      "t_end": 19.1,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "hold",
+      "selector": null,
+      "still": null,
+      "segment": null,
+      "segment_index": 26,
+      "evidence": "evidence/beat-26.json"
+    },
+    {
+      "index": 27,
+      "t_start": 19.1,
+      "t_end": 20.39,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "click",
+      "selector": "#assign-cancel",
+      "still": null,
+      "segment": null,
+      "segment_index": 27,
+      "evidence": "evidence/beat-27.json"
+    },
+    {
+      "index": 28,
+      "t_start": 20.39,
+      "t_end": 20.436,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "wait_for",
+      "selector": ".ticket[data-id='TQ-102']",
+      "still": null,
+      "segment": null,
+      "segment_index": 28,
+      "evidence": "evidence/beat-28.json"
+    },
+    {
+      "index": 29,
+      "t_start": 20.436,
+      "t_end": 20.619,
+      "caption": "Cancelling leaves a ticket alone.",
+      "verb": "shot",
+      "selector": "06-cancelled",
+      "still": "images/06-cancelled.png",
+      "segment": null,
+      "segment_index": 29,
+      "evidence": "evidence/beat-29.json",
+      "ac": [
+        "AC-4"
+      ]
+    }
+  ],
+  "strict": false,
+  "issues": [],
+  "issue_count": 0,
+  "camera": [
+    {
+      "t_start": 10.736,
+      "rect": [
+        1322,
+        278,
+        61,
+        21
+      ],
+      "t_end": 11.27
+    }
+  ]
+}

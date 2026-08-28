@@ -47,6 +47,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / ".github" / "scripts"
 SKILL = REPO / "skills" / "demo-video"
 WORKFLOW = REPO / ".github" / "workflows" / "demo-video.yml"
+CALLER = REPO / ".github" / "workflows" / "ticket-queue-demo.yml"
 
 
 def load(name: str, directory: Path | None = None) -> ModuleType:
@@ -66,6 +67,7 @@ def load(name: str, directory: Path | None = None) -> ModuleType:
 _DIR = Path(os.environ.get("CI_UNIT_SCRIPTS", SCRIPTS))
 _SKILL = Path(os.environ.get("CI_UNIT_SKILL", SKILL))
 _WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
+_CALLER = Path(os.environ.get("CI_UNIT_CALLER", CALLER))
 storyboards = load("demo-storyboards", _DIR)
 comment = load("demo-comment", _DIR)
 ticket_check = load("demo-ticket-check", _DIR)
@@ -4555,8 +4557,8 @@ INJECTIONS = [
         # in a repository like this one is linked at the root and 404s.
         "the block step stops passing the working directory to the script",
         "demo-video.yml",
-        '--demo "$demo" --path-prefix "$WORKDIR" --repo-url "$REPO_URL"',
-        '--demo "$demo" --repo-url "$REPO_URL"',
+        '--path-prefix "$WORKDIR" --repo-url "$REPO_URL"',
+        '--repo-url "$REPO_URL"',
         ["CommentStep.test_the_working_directory_reaches_the_comment_as_a_path_prefix"],
     ),
     (
@@ -5142,19 +5144,24 @@ INJECTIONS += [
         # reviewed against.
         "an unreadable pull-request state is read as closed, so prune deletes it",
         "demo-preview-asset",
-        '            open_prs[number] = state != "CLOSED" and state != "MERGED"',
-        '            open_prs[number] = state == "OPEN"',
-        ["PreviewAssetPrune.test_an_unreadable_pr_state_is_treated_as_open"],
+        "        if not state:",
+        "        if False:",
+        ["PreviewAssetPrune.test_an_unreadable_pr_state_keeps_the_asset"],
     ),
     (
         # An open pull request's asset deleted out from under a review in
         # progress. The body still embeds it, so the reviewer sees a broken
         # image where the demo was.
-        "prune stops checking state and deletes every asset it can parse",
+        # The body stops being consulted, so an open pull request's *current*
+        # preview is deleted out from under a review in progress and the block
+        # renders a broken image where the demo was.
+        "prune stops asking what the pull request still shows",
         "demo-preview-asset",
-        "        if open_prs[number]:\n            continue",
-        "        if False:\n            continue",
-        ["PreviewAssetPrune.test_it_leaves_an_open_prs_asset_alone"],
+        "        elif name in body:\n            continue",
+        "        elif False:\n            continue",
+        [
+            "PreviewAssetPrune.test_it_leaves_an_open_prs_asset_alone_when_the_body_shows_it"
+        ],
     ),
     (
         # The store is flat and every take writes the same `demo.preview.webp`,
@@ -5179,6 +5186,123 @@ INJECTIONS += [
         'slug = slug or "demo"',
         ["PreviewAssetNames.test_a_path_that_would_break_a_url_is_made_safe"],
     ),
+    (
+        # Back to `demos[0]`: the block describes whichever demo sorts first
+        # rather than the one with something to check. This is the defect the
+        # first live run shipped — an empty checklist on a pull request with
+        # four clauses.
+        "the block describes the first demo instead of the one with the most clauses",
+        "demo-pr-body",
+        "        if key > best_key:\n            best, best_key = name, key",
+        "        if best_key == (-1, -1):\n            best, best_key = name, key",
+        [
+            "BlockDemoChoice.test_the_demo_with_the_most_clauses_wins",
+            "BlockDemoChoice.test_it_is_not_simply_the_first",
+        ],
+    ),
+    (
+        # A demo whose timeline cannot be read takes the block, and the
+        # reviewer gets a checklist for a take nothing could describe.
+        "an unreadable timeline wins the block instead of counting as zero",
+        "demo-pr-body",
+        "        except (OSError, ValueError):\n            count = 0",
+        "        except (OSError, ValueError):\n            count = 99",
+        [
+            "BlockDemoChoice.test_an_unreadable_timeline_counts_as_zero_rather_than_raising"
+        ],
+    ),
+    (
+        # The prefix rule goes greedy and eats the first clause of any title
+        # carrying a colon — which is a lot of them, and the loss is silent.
+        "the summary rule eats any title with a colon in it",
+        "demo-pr-body",
+        '_CC_PREFIX = re.compile(r"^[a-z]+(?:\\([^)]*\\))?!?:\\s+")',
+        '_CC_PREFIX = re.compile(r"^.*?:\\s+")',
+        ["BlockSummary.test_a_colon_that_is_not_a_prefix_survives"],
+    ),
+    (
+        # The prefix stops being stripped, so the sentence a reviewer reads
+        # opens with machinery the category line already said.
+        "the conventional-commit prefix is left in the summary",
+        "demo-pr-body",
+        '    cleaned = _CC_PREFIX.sub("", (text or "").strip())',
+        '    cleaned = (text or "").strip()',
+        ["BlockSummary.test_a_conventional_commit_prefix_is_stripped"],
+    ),
+    (
+        # The workflow drops back to `contents: read` and the preview upload
+        # 403s on every run — the exact failure the first live run hit, and
+        # one that leaves a passing-looking job with no preview in the block.
+        "the workflow stops asking for the write its preview upload needs",
+        "demo-video.yml",
+        "      contents: write\n      pull-requests: write",
+        "      contents: read\n      pull-requests: write",
+        [
+            "CallerPermissions.test_the_workflow_can_write_contents_for_the_preview_upload"
+        ],
+    ),
+    (
+        # The caller grants less than the callee declares. GitHub refuses the
+        # run **before it starts**, as `startup_failure`, with no job and no
+        # log — nothing points at the caller, and actionlint reads each file
+        # alone. This is the assertion that has to catch it.
+        "the caller grants less than the workflow declares",
+        "ticket-queue-demo.yml",
+        "      contents: write",
+        "      contents: read",
+        [
+            "CallerPermissions.test_the_caller_grants_at_least_what_the_workflow_declares"
+        ],
+    ),
+    (
+        # The branch's own work stops deciding, so a tie on clause count sends
+        # the block to whichever demo sorts first — one demo's video beside
+        # another demo's checklist, which is the artifact lying to its reader.
+        "a storyboard the branch touched stops winning the block",
+        "demo-pr-body",
+        "        key = (1 if edited(name) else 0, count)",
+        "        key = (0, count)",
+        [
+            "BlockDemoChoice.test_a_storyboard_this_branch_touched_beats_a_richer_untouched_one",
+            "BlockDemoChoice.test_a_touched_demo_wins_even_with_fewer_clauses",
+        ],
+    ),
+    (
+        # The re-rooting is dropped, so repository-relative changed paths never
+        # match working-directory-relative demo names. Nothing raises: the rule
+        # simply never fires, and the defect it fixes is back and invisible.
+        "changed paths stop being re-rooted, so the touched rule never fires",
+        "demo-pr-body",
+        "            path = path[len(prefix) + 1 :]",
+        "            pass  # left repository-relative",
+        ["BlockDemoChoice.test_changed_paths_are_re_rooted_before_they_are_compared"],
+    ),
+    (
+        # And the other direction: re-rooting stops being about *this* prefix
+        # and just drops two leading components, so a change to another app's
+        # identically named demo claims this one's block.
+        #
+        # Written this way after the obvious break — deleting the guard —
+        # turned out not to reproduce it: the strip below still ran and left a
+        # path that matched nothing, so the suite stayed green against code
+        # that was not actually broken in the way the entry claimed.
+        "any app's demo of the same name counts as touched",
+        "demo-pr-body",
+        '            if path == prefix or not path.startswith(prefix + "/"):\n'
+        "                continue\n"
+        "            path = path[len(prefix) + 1 :]",
+        '            path = "/".join(path.split("/")[2:])',
+        ["BlockDemoChoice.test_a_path_outside_the_prefix_touches_nothing"],
+    ),
+    (
+        # An empty body read as "this pull request shows nothing", so a failed
+        # read deletes every asset of a live review in one run.
+        "an unreadable body is read as a pull request that shows nothing",
+        "demo-preview-asset",
+        '        elif not body:\n            print(f"skipped {name}: PR #{number} is open and its body is empty")\n            continue',
+        '        elif not body:\n            why = f"PR #{number} shows nothing"',
+        ["PreviewAssetPrune.test_an_open_pr_with_an_unreadable_body_keeps_everything"],
+    ),
 ]
 
 
@@ -5199,13 +5323,24 @@ def stage_tree(tmp: Path) -> dict[str, Path]:
     # of that file and of nothing else.
     workflow = tmp / "demo-video.yml"
     shutil.copy(WORKFLOW, workflow)
+    # And the caller, because the two agreeing on permissions is a property of
+    # the *pair* — a called workflow cannot request more than its caller
+    # grants, and neither file alone shows the mismatch.
+    caller = tmp / "ticket-queue-demo.yml"
+    shutil.copy(CALLER, caller)
     # And this file, so an injection can reach the suite's own
     # allowlist. The copy is what runs; it reads every path it uses
     # from the three variables below, so `REPO` resolving to /tmp
     # changes nothing.
     inner = tmp / "ci-unit"
     shutil.copy(Path(__file__).resolve(), inner)
-    return {"root": root, "skill": skill, "workflow": workflow, "inner": inner}
+    return {
+        "root": root,
+        "skill": skill,
+        "workflow": workflow,
+        "caller": caller,
+        "inner": inner,
+    }
 
 
 def injection_target(script: str, staged: dict[str, Path]) -> Path:
@@ -5225,6 +5360,8 @@ def injection_target(script: str, staged: dict[str, Path]) -> Path:
         return staged["skill"] / script
     if script == "demo-video.yml":
         return staged["workflow"]
+    if script == "ticket-queue-demo.yml":
+        return staged["caller"]
     if script == "tests/ci-unit":
         return staged["inner"]
     return staged["root"] / script
@@ -5273,6 +5410,213 @@ def check_anchors() -> int:
         return 3
     print(f"All {len(INJECTIONS)} injections still resolve.")
     return 0
+
+
+class CallerPermissions(unittest.TestCase):
+    """The caller must grant at least what the reusable workflow declares.
+
+    A called workflow cannot request more permission than its caller grants,
+    and the failure mode is unusually bad: the run is refused **before it
+    starts**, as `startup_failure`, with no job and no log to read. Nothing
+    points at the caller, and `actionlint` does not check across the two files.
+
+    That is how #410's `contents: write` was found — by a run that produced
+    nothing at all, on a change that had passed every local check.
+    """
+
+    RANK = {"none": 0, "read": 1, "write": 2}
+
+    def perms(self, path: Path) -> dict:
+        """The job-level `permissions:` map, read without a YAML parser.
+
+        `tests/ci-unit` ships `dependencies = []` and the repo keeps it that
+        way, so this reads the block by indentation: `    permissions:` at job
+        level, then every `      scope: level` line under it, comments and
+        blank lines skipped. Both files are written that way and `actionlint`
+        already refuses malformed YAML, so the narrow reader is enough.
+        """
+        found: dict[str, str] = {}
+        inside = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if re.match(r"^ {4}permissions:\s*$", line):
+                inside = True
+                continue
+            if not inside:
+                continue
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            m = re.match(r"^ {6}([a-z-]+):\s*([a-z]+)\s*$", line)
+            if not m:
+                break
+            found[m.group(1)] = m.group(2)
+        return found
+
+    def test_the_caller_grants_at_least_what_the_workflow_declares(self):
+        callee = self.perms(_WORKFLOW)
+        caller = self.perms(_CALLER)
+        # The haystack, before anything is claimed over it: a file whose
+        # permissions this could not read would make every comparison below
+        # true over an empty dict.
+        self.assertTrue(callee, f"no permissions block found in {_WORKFLOW}")
+        self.assertTrue(caller, f"no permissions block found in {_CALLER}")
+        short = {
+            scope: (caller.get(scope, "none"), need)
+            for scope, need in callee.items()
+            if self.RANK.get(caller.get(scope, "none"), 0) < self.RANK.get(need, 0)
+        }
+        self.assertEqual(
+            short,
+            {},
+            f"{_CALLER.name} grants less than {_WORKFLOW.name} declares for "
+            f"{sorted(short)} — GitHub refuses such a run before it starts, as "
+            f"`startup_failure`, with no log to read",
+        )
+
+    def test_the_workflow_can_write_contents_for_the_preview_upload(self):
+        """Named out loud, so dropping it back to `read` has to delete a line
+        that says why it is not `read`. The preview is uploaded as a release
+        asset, which is a write even though no ref moves (#410)."""
+        self.assertEqual(self.perms(_WORKFLOW).get("contents"), "write")
+
+
+class BlockDemoChoice(unittest.TestCase):
+    """Which demo the pull-request block describes, when a run recorded several.
+
+    A change under an app root makes every storyboard of that app stale. The
+    first live run of this pipeline recorded **seven**, and taking the first
+    directory took the alphabetically first — a demo with no acceptance
+    criteria — so the block rendered an empty checklist for a pull request with
+    four clauses to tick, and the demo that had them went unmentioned.
+    """
+
+    def tree(self, spec: dict[str, int | None]):
+        """A staging root of demos, each with `n` declared criteria (None = no
+        readable timeline)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name, count in spec.items():
+            (root / name).mkdir(parents=True)
+            if count is None:
+                continue
+            doc = {"coverage": {"criteria": {f"AC-{i}": "x" for i in range(count)}}}
+            (root / name / "timeline.json").write_text(json.dumps(doc))
+        return root
+
+    def test_the_demo_with_the_most_clauses_wins(self):
+        root = self.tree({"a-empty": 0, "z-rich": 4})
+        self.assertEqual(pr_body.pick_demo(["a-empty", "z-rich"], root), "z-rich")
+
+    def test_a_storyboard_this_branch_touched_beats_a_richer_untouched_one(self):
+        """The second live run's defect. Two demos tied at four clauses, the tie
+        went to the earlier name, and the block paired *this* change's video
+        with *another* demo's checklist — a reviewer would have ticked search
+        criteria while watching an assign video."""
+        root = self.tree({"old-rich": 4, "new-mine": 4})
+        picked = pr_body.pick_demo(
+            ["old-rich", "new-mine"], root, ["new-mine/record.py"]
+        )
+        self.assertEqual(picked, "new-mine")
+
+    def test_a_touched_demo_wins_even_with_fewer_clauses(self):
+        """The branch's own work is the stronger signal: a pull request is
+        about the storyboard it changed, whatever anything else declares."""
+        root = self.tree({"old-rich": 9, "new-mine": 1})
+        picked = pr_body.pick_demo(
+            ["old-rich", "new-mine"], root, ["new-mine/images/01.png"]
+        )
+        self.assertEqual(picked, "new-mine")
+
+    def test_changed_paths_are_re_rooted_before_they_are_compared(self):
+        """`git diff` gives repository-relative paths; demo names are relative
+        to working-directory. Comparing them unrooted matches nothing —
+        silently — so the rule never fires and the tie-break decides
+        everything, which is the bug still present and now invisible."""
+        root = self.tree({"old-rich": 4, "new-mine": 4})
+        changed = ["examples/ticket-queue/new-mine/record.py"]
+        self.assertEqual(
+            pr_body.pick_demo(
+                ["old-rich", "new-mine"], root, changed, "examples/ticket-queue"
+            ),
+            "new-mine",
+        )
+
+    def test_a_path_outside_the_prefix_touches_nothing(self):
+        """The control on re-rooting: a change to another app's identically
+        named demo must not claim this one."""
+        root = self.tree({"old-rich": 4, "new-mine": 4})
+        changed = ["examples/other-app/new-mine/record.py"]
+        self.assertEqual(
+            pr_body.pick_demo(
+                ["old-rich", "new-mine"], root, changed, "examples/ticket-queue"
+            ),
+            "old-rich",
+        )
+
+    def test_it_is_not_simply_the_first(self):
+        """The regression this was written for, stated as its own assertion so
+        an edit back to `demos[0]` has to delete a line that says why."""
+        root = self.tree({"a-empty": 0, "b-rich": 3})
+        self.assertNotEqual(pr_body.pick_demo(["a-empty", "b-rich"], root), "a-empty")
+
+    def test_a_tie_takes_the_earlier_name_so_the_choice_is_stable(self):
+        root = self.tree({"a-one": 2, "b-two": 2})
+        self.assertEqual(pr_body.pick_demo(["a-one", "b-two"], root), "a-one")
+        self.assertEqual(pr_body.pick_demo(["b-two", "a-one"], root), "b-two")
+
+    def test_an_unreadable_timeline_counts_as_zero_rather_than_raising(self):
+        """A block describing the wrong demo is a bad block; no block at all is
+        worse, and this step runs after a take that already succeeded."""
+        root = self.tree({"broken": None, "good": 1})
+        self.assertEqual(pr_body.pick_demo(["broken", "good"], root), "good")
+
+    def test_one_demo_is_chosen_even_with_no_criteria_at_all(self):
+        root = self.tree({"only": 0})
+        self.assertEqual(pr_body.pick_demo(["only"], root), "only")
+
+    def test_no_demos_gives_no_demo(self):
+        self.assertEqual(pr_body.pick_demo([], None), "")
+
+
+class BlockSummary(unittest.TestCase):
+    """The one-sentence description, which defaults to the pull-request title."""
+
+    def test_a_conventional_commit_prefix_is_stripped(self):
+        """The title in this repository is a commit subject, and `feat(scope):`
+        is machinery in a sentence meant to read as English — the category line
+        directly above it already says what `feat:` said."""
+        self.assertEqual(
+            pr_body.summarise("feat(ticket-queue): assign actually assigns"),
+            "Assign actually assigns",
+        )
+
+    def test_a_breaking_marker_is_stripped_too(self):
+        self.assertEqual(
+            pr_body.summarise("feat!: drop the old flag"), "Drop the old flag"
+        )
+
+    def test_a_plain_sentence_is_left_alone(self):
+        self.assertEqual(
+            pr_body.summarise("Assign actually assigns"), "Assign actually assigns"
+        )
+
+    def test_a_colon_that_is_not_a_prefix_survives(self):
+        """The control. A greedy rule would eat the first clause of any title
+        with a colon in it, which is a lot of them."""
+        self.assertEqual(
+            pr_body.summarise("Search: it now reads the requester too"),
+            "Search: it now reads the requester too",
+        )
+
+    def test_only_the_first_character_is_capitalised(self):
+        """So `iOS` and `demo-video` survive a title that starts with them."""
+        self.assertEqual(
+            pr_body.summarise("fix: iOS Safari drops the pill"),
+            "IOS Safari drops the pill",
+        )
+        self.assertEqual(
+            pr_body.summarise("fix: demo-video loses a beat"), "Demo-video loses a beat"
+        )
 
 
 class PreviewAssetNames(unittest.TestCase):
@@ -5334,7 +5678,10 @@ class PreviewAssetPrune(unittest.TestCase):
             if args[:2] == ("release", "view"):
                 return json.dumps({"assets": [{"name": n} for n in assets]})
             if args[:2] == ("pr", "view"):
-                return states.get(int(args[2]), "OPEN")
+                spec = states.get(int(args[2]), "OPEN")
+                # A string is a bare state; a tuple is (state, body).
+                state, body = spec if isinstance(spec, tuple) else (spec, "")
+                return json.dumps({"state": state, "body": body})
             return ""
 
         was = preview_asset._gh
@@ -5351,11 +5698,34 @@ class PreviewAssetPrune(unittest.TestCase):
         _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "CLOSED"})
         self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
 
-    def test_it_leaves_an_open_prs_asset_alone(self):
-        """The reason pruning is by state and not by age: an open pull request
-        may be weeks old and still under review."""
-        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "OPEN"})
+    def test_it_leaves_an_open_prs_asset_alone_when_the_body_shows_it(self):
+        """The reason pruning is not by age: an open pull request may be weeks
+        old and still under review, and the picture it is being reviewed
+        against must survive."""
+        _, deleted, _ = self.run_prune(
+            ["pr9-glide-aaaaaaa.webp"],
+            {9: ("OPEN", "see ![demo](.../pr9-glide-aaaaaaa.webp)")},
+        )
         self.assertEqual(deleted, [])
+
+    def test_an_open_prs_superseded_asset_goes(self):
+        """A long-lived pull request accumulates one asset per push per demo,
+        and only what its body points at is what anybody is reviewing against.
+        The rest are invisible by construction — #414 held seven and showed
+        one."""
+        _, deleted, _ = self.run_prune(
+            ["pr9-glide-aaaaaaa.webp", "pr9-glide-bbbbbbb.webp"],
+            {9: ("OPEN", "see ![demo](.../pr9-glide-bbbbbbb.webp)")},
+        )
+        self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
+
+    def test_an_open_pr_with_an_unreadable_body_keeps_everything(self):
+        """Every uncertainty keeps the asset: an empty body is far more likely
+        to be a failed read than a pull request that really shows nothing, and
+        the cost of guessing wrong is a broken image in a live review."""
+        _, deleted, said = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ("OPEN", "")})
+        self.assertEqual(deleted, [])
+        self.assertIn("skipped", said)
 
     def test_a_merged_pr_is_prunable(self):
         _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "MERGED"})
@@ -5371,11 +5741,16 @@ class PreviewAssetPrune(unittest.TestCase):
         self.assertIn("skipped", said)
         self.assertIn("hand-uploaded.txt", said)
 
-    def test_an_unreadable_pr_state_is_treated_as_open(self):
+    def test_an_unreadable_pr_state_keeps_the_asset(self):
         """A failed lookup must not become a deletion: a network blip would
         otherwise take out every asset in the store in one run."""
-        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ""})
+        _, deleted, said = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ("", "")})
         self.assertEqual(deleted, [])
+        # The *reason* and not merely the outcome. With the state guard gone
+        # this still deletes nothing — it falls through to the empty-body guard
+        # — so an assertion that only checked `deleted == []` could not see the
+        # break at all. `--fault-inject` said so.
+        self.assertIn("could not read PR #9", said)
 
     def test_dry_run_deletes_nothing_but_still_counts(self):
         gone, deleted, said = self.run_prune(
@@ -5417,6 +5792,7 @@ def fault_inject() -> int:
                     "CI_UNIT_SCRIPTS": str(root),
                     "CI_UNIT_SKILL": str(skill),
                     "CI_UNIT_WORKFLOW": str(workflow),
+                    "CI_UNIT_CALLER": str(staged["caller"]),
                 },
             )
             noticed = {t for t in must_fail if t in done.stderr}
