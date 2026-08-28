@@ -125,15 +125,49 @@ def upload(file: Path, pr: int, demo: str, sha: str, repo: str | None) -> str:
     return f"https://github.com/{owner}/releases/download/{ASSET_TAG}/{name}"
 
 
+def pr_state(number: int, repo: str | None) -> tuple[str, str]:
+    """`(state, body)` for one pull request, or `("", "")` when unreadable."""
+    scope = ["--repo", repo] if repo else []
+    raw = _gh(
+        "pr", "view", str(number), *scope, "--json", "state,body", check=False
+    ).strip()
+    if not raw:
+        return "", ""
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return "", ""
+    return str(doc.get("state") or ""), str(doc.get("body") or "")
+
+
 def prune(repo: str | None, dry_run: bool = False) -> int:
-    """Delete assets whose pull request is closed. Returns how many went."""
+    """Delete assets no pull request is still showing. Returns how many went.
+
+    Two rules, because a pull request has two states worth distinguishing:
+
+    - **Closed**: every asset of that pull request goes. It cannot be reviewed
+      again, so nothing is showing them.
+    - **Open**: assets its body does **not** reference go. A long-lived pull
+      request accumulates one asset per push per demo, and only the ones its
+      body points at are what anybody is reviewing against — the rest are
+      invisible by construction. #414 held seven and showed one.
+
+    Pruning by *reference* rather than by age is what keeps the original
+    promise intact: a body that still points at an older picture keeps it, so
+    an already-reviewed pull request does not silently acquire a newer one.
+
+    Every uncertainty keeps the asset. An unreadable state, an unreadable body,
+    a name this cannot parse — all of them skip. Deleting on a failed lookup
+    would turn a network blip into the loss of what an open review is looking
+    at.
+    """
     scope = ["--repo", repo] if repo else []
     raw = _gh("release", "view", ASSET_TAG, *scope, "--json", "assets", check=False)
     if not raw.strip():
         print(f"no {ASSET_TAG} release — nothing to prune")
         return 0
     assets = json.loads(raw).get("assets") or []
-    open_prs: dict[int, bool] = {}
+    seen: dict[int, tuple[str, str]] = {}
     gone = 0
     for asset in assets:
         name = asset.get("name") or ""
@@ -144,31 +178,32 @@ def prune(repo: str | None, dry_run: bool = False) -> int:
             print(f"skipped {name!r}: not a preview asset name")
             continue
         number = int(m.group("pr"))
-        if number not in open_prs:
-            state = _gh(
-                "pr",
-                "view",
-                str(number),
-                *scope,
-                "--json",
-                "state",
-                "--jq",
-                ".state",
-                check=False,
-            ).strip()
-            # An unreadable state is treated as open. Deleting on a failed
-            # lookup would turn a network blip into data loss.
-            open_prs[number] = state != "CLOSED" and state != "MERGED"
-        if open_prs[number]:
+        if number not in seen:
+            seen[number] = pr_state(number, repo)
+        state, body = seen[number]
+        if not state:
+            # An unreadable state keeps the asset: a network blip must not
+            # become the loss of what an open review is looking at.
+            print(f"skipped {name}: could not read PR #{number}")
             continue
+        closed = state in ("CLOSED", "MERGED")
+        if closed:
+            why = f"PR #{number} is {state.lower()}"
+        elif not body:
+            print(f"skipped {name}: PR #{number} is open and its body is empty")
+            continue
+        elif name in body:
+            continue
+        else:
+            why = f"PR #{number} is open and no longer shows it"
         if dry_run:
-            print(f"would delete {name} (PR #{number} is closed)")
+            print(f"would delete {name} ({why})")
         else:
             _gh("release", "delete-asset", ASSET_TAG, name, *scope, "--yes")
-            print(f"deleted {name} (PR #{number} is closed)")
+            print(f"deleted {name} ({why})")
         gone += 1
     if not gone:
-        print(f"nothing to prune: {len(assets)} asset(s), none from a closed PR")
+        print(f"nothing to prune: {len(assets)} asset(s), all still shown")
     return gone
 
 

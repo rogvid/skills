@@ -5144,19 +5144,24 @@ INJECTIONS += [
         # reviewed against.
         "an unreadable pull-request state is read as closed, so prune deletes it",
         "demo-preview-asset",
-        '            open_prs[number] = state != "CLOSED" and state != "MERGED"',
-        '            open_prs[number] = state == "OPEN"',
-        ["PreviewAssetPrune.test_an_unreadable_pr_state_is_treated_as_open"],
+        "        if not state:",
+        "        if False:",
+        ["PreviewAssetPrune.test_an_unreadable_pr_state_keeps_the_asset"],
     ),
     (
         # An open pull request's asset deleted out from under a review in
         # progress. The body still embeds it, so the reviewer sees a broken
         # image where the demo was.
-        "prune stops checking state and deletes every asset it can parse",
+        # The body stops being consulted, so an open pull request's *current*
+        # preview is deleted out from under a review in progress and the block
+        # renders a broken image where the demo was.
+        "prune stops asking what the pull request still shows",
         "demo-preview-asset",
-        "        if open_prs[number]:\n            continue",
-        "        if False:\n            continue",
-        ["PreviewAssetPrune.test_it_leaves_an_open_prs_asset_alone"],
+        "        elif name in body:\n            continue",
+        "        elif False:\n            continue",
+        [
+            "PreviewAssetPrune.test_it_leaves_an_open_prs_asset_alone_when_the_body_shows_it"
+        ],
     ),
     (
         # The store is flat and every take writes the same `demo.preview.webp`,
@@ -5288,6 +5293,15 @@ INJECTIONS += [
         "            path = path[len(prefix) + 1 :]",
         '            path = "/".join(path.split("/")[2:])',
         ["BlockDemoChoice.test_a_path_outside_the_prefix_touches_nothing"],
+    ),
+    (
+        # An empty body read as "this pull request shows nothing", so a failed
+        # read deletes every asset of a live review in one run.
+        "an unreadable body is read as a pull request that shows nothing",
+        "demo-preview-asset",
+        '        elif not body:\n            print(f"skipped {name}: PR #{number} is open and its body is empty")\n            continue',
+        '        elif not body:\n            why = f"PR #{number} shows nothing"',
+        ["PreviewAssetPrune.test_an_open_pr_with_an_unreadable_body_keeps_everything"],
     ),
 ]
 
@@ -5664,7 +5678,10 @@ class PreviewAssetPrune(unittest.TestCase):
             if args[:2] == ("release", "view"):
                 return json.dumps({"assets": [{"name": n} for n in assets]})
             if args[:2] == ("pr", "view"):
-                return states.get(int(args[2]), "OPEN")
+                spec = states.get(int(args[2]), "OPEN")
+                # A string is a bare state; a tuple is (state, body).
+                state, body = spec if isinstance(spec, tuple) else (spec, "")
+                return json.dumps({"state": state, "body": body})
             return ""
 
         was = preview_asset._gh
@@ -5681,11 +5698,34 @@ class PreviewAssetPrune(unittest.TestCase):
         _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "CLOSED"})
         self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
 
-    def test_it_leaves_an_open_prs_asset_alone(self):
-        """The reason pruning is by state and not by age: an open pull request
-        may be weeks old and still under review."""
-        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "OPEN"})
+    def test_it_leaves_an_open_prs_asset_alone_when_the_body_shows_it(self):
+        """The reason pruning is not by age: an open pull request may be weeks
+        old and still under review, and the picture it is being reviewed
+        against must survive."""
+        _, deleted, _ = self.run_prune(
+            ["pr9-glide-aaaaaaa.webp"],
+            {9: ("OPEN", "see ![demo](.../pr9-glide-aaaaaaa.webp)")},
+        )
         self.assertEqual(deleted, [])
+
+    def test_an_open_prs_superseded_asset_goes(self):
+        """A long-lived pull request accumulates one asset per push per demo,
+        and only what its body points at is what anybody is reviewing against.
+        The rest are invisible by construction — #414 held seven and showed
+        one."""
+        _, deleted, _ = self.run_prune(
+            ["pr9-glide-aaaaaaa.webp", "pr9-glide-bbbbbbb.webp"],
+            {9: ("OPEN", "see ![demo](.../pr9-glide-bbbbbbb.webp)")},
+        )
+        self.assertEqual(deleted, ["pr9-glide-aaaaaaa.webp"])
+
+    def test_an_open_pr_with_an_unreadable_body_keeps_everything(self):
+        """Every uncertainty keeps the asset: an empty body is far more likely
+        to be a failed read than a pull request that really shows nothing, and
+        the cost of guessing wrong is a broken image in a live review."""
+        _, deleted, said = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ("OPEN", "")})
+        self.assertEqual(deleted, [])
+        self.assertIn("skipped", said)
 
     def test_a_merged_pr_is_prunable(self):
         _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: "MERGED"})
@@ -5701,11 +5741,16 @@ class PreviewAssetPrune(unittest.TestCase):
         self.assertIn("skipped", said)
         self.assertIn("hand-uploaded.txt", said)
 
-    def test_an_unreadable_pr_state_is_treated_as_open(self):
+    def test_an_unreadable_pr_state_keeps_the_asset(self):
         """A failed lookup must not become a deletion: a network blip would
         otherwise take out every asset in the store in one run."""
-        _, deleted, _ = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ""})
+        _, deleted, said = self.run_prune(["pr9-glide-aaaaaaa.webp"], {9: ("", "")})
         self.assertEqual(deleted, [])
+        # The *reason* and not merely the outcome. With the state guard gone
+        # this still deletes nothing — it falls through to the empty-body guard
+        # — so an assertion that only checked `deleted == []` could not see the
+        # break at all. `--fault-inject` said so.
+        self.assertIn("could not read PR #9", said)
 
     def test_dry_run_deletes_nothing_but_still_counts(self):
         gone, deleted, said = self.run_prune(

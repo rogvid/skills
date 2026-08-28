@@ -795,6 +795,26 @@ jobs:
           cat "$PR_BLOCK"
           gh api -X PATCH "repos/$REPO/pulls/$PR" -F body=@"$PR_BLOCK" --jq .html_url
 
+      # After the body is written, so "what this pull request shows" is already
+      # current when the store is compared against it. Every push supersedes
+      # the previous push's preview, and pruning here is what stops a
+      # long-lived pull request leaving one asset per push per demo behind.
+      #
+      # `continue-on-error` for the same reason the upload has it: housekeeping
+      # must never redden a job whose take succeeded, and a fork's read-only
+      # token can no more delete an asset than upload one.
+      - name: Prune previews nothing is showing any more
+        if: >-
+          always() && steps.discover.outputs.count != '0' &&
+          steps.record.conclusion != 'skipped' &&
+          github.event.pull_request.number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCRIPTS: ${{ steps.helpers.outputs.dir }}
+          REPO: ${{ github.repository }}
+        run: '"$SCRIPTS/demo-preview-asset" prune --repo "$REPO"'
+
       - name: Fail the check if the take failed
         if: >-
           always() && steps.discover.outputs.count != '0' &&
