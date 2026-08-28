@@ -736,13 +736,32 @@ chrome change through first.
 
 ### The injection drivers: `--anchors` on the branch, `--fault-inject` on merge
 
-Both drivers re-run their whole suite once per injection: 419 injections for
-`tests/unit` (132 s) and 135 for `tests/ci-unit` (298 s). They now run on merge.
+Both drivers re-run their whole suite once per injection: 433 injections for
+`tests/unit` and 165 for `tests/ci-unit`, minutes each. They now run on merge.
 
 What runs on the branch is `--anchors`, the cheap half: one staging, no inner
 runs, and for every injection it checks that the pattern still matches its file
-**exactly once** and that every test it names still exists. 419 injections in
-**0.7 s**, 135 in **0.2 s**.
+**exactly once** and that every test it names still exists. 433 injections in
+**0.7 s**, 165 in **0.3 s**.
+
+**What "caught" means, and what it meant until
+[#418](https://github.com/rogvid/skills/issues/418).** A driver decides an
+injection was caught by requiring every test in its `must_fail` list to appear
+among the runner's `FAIL:`/`ERROR:` lines. `tests/ci-unit` was matching the
+name against the whole of stderr, and its inner run is `verbosity=2` — so every
+name was found in the line reporting that it *passed*, `missed` was empty on
+every injection this file has ever run, and the only condition enforced was
+that the suite went red **somewhere**. Every `must_fail` list here was
+decorative for that whole period: an injection reddening one unrelated
+assertion counted as evidence for the assertion it was filed under.
+
+The first strict run over the 164 injections that existed found **two** hollow,
+both over-claims rather than empty assertions: an injection into
+`demo-caption-lint`'s number branch filed against the quoted-string test as
+well, and #300's prefix-shape injection filed against the command's refusal,
+which a separate guard keeps green. Two out of 164 is the measurement of what
+the loose match was hiding, and it is small because the discipline around
+*writing* these was doing the work the harness was not.
 
 The split is honest about what it gives up: `--anchors` does **not** prove an
 assertion can fail. It proves the weaker thing the driver spends its first
@@ -1927,6 +1946,33 @@ the comment, and nothing here objects. Only the words `demo-comment` itself
 writes are swept. Clause **ids** are not exempted either — they are too short
 to subtract safely, so a ticket with a clause called `verified` would redden
 this suite.
+
+**And the sweep now runs over the block that is published.** Everything above
+was written for `demo-comment`, which the workflow stopped calling in
+[#408](https://github.com/rogvid/skills/pull/408): a reviewer reads
+`demo-pr-body`'s block, and that renderer had two graded functions
+(`pick_demo`, `summarise`) and a checklist nobody watched — while writing
+`⚠️ not in the ticket verbatim` and `no beat claims this`, which are exactly
+the sentences the rule polices. `BlockVerdict` sweeps it, with its own
+exemptions (clause text, the pull-request summary, a still's filename) and its
+own control anchors, chosen for this renderer rather than copied: `AC-1` and
+`Acceptance criteria`, because the block has no `claimed at` column.
+
+Grading the block found a real one. `still_href` inherited the feature and not
+[#300](https://github.com/rogvid/skills/issues/300)'s guards, so a `still` of
+`../../leaked.png` — `timeline.json` is committed and pull-request-editable —
+produced a URL a browser normalises to `leaked.png`, rendering a committed
+picture from elsewhere in the repository under a clause it has nothing to do
+with. `quote()` was not that guard: it escapes `]` and `(`, so a filename
+cannot forge a second link, but `.` and `/` are unreserved and pass straight
+through. The split `demo-comment` drew is kept — a still is *data* and its row
+goes unlinked, a `--path-prefix` is *configuration* and the command exits 2
+rather than emit a body of uniformly plausible wrong links.
+
+One false positive this sweep can produce, since it is the price of sweeping
+the classifier's reasons: `why_demo` quotes the changed paths, so a repository
+with a directory called `verified/` would redden it. Loud and fixable, rather
+than a hole.
 
 **What the comment says about its own reach**
 ([#303](https://github.com/rogvid/skills/issues/303)). Everything above stops

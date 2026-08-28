@@ -253,6 +253,39 @@ def render_block(
     return "\n".join(out) + "\n"
 
 
+def repo_path(*segments: str) -> str | None:
+    """The segments joined as the *repository* sees them, or None.
+
+    **#300, one script over.** `quote()` alone is not this guard: it escapes
+    `]` and `(`, so a filename cannot forge a second link, but `.` and `/` are
+    unreserved and pass through untouched. `demos/x/../../leaked.png` reaches a
+    reader's browser, which normalises it to `leaked.png` and renders a
+    committed picture from somewhere else in the repository under a clause it
+    has nothing to do with. Measured before this existed; the URL is plausible
+    and wrong, which is worse for a reviewer than no URL at all.
+
+    A leading `/` is the same class in the other direction: joined naively it
+    silently loses its slash and links a path nobody named.
+
+    **Each segment is judged on its own**, before the join. Testing the joined
+    string instead lets an absolute *later* segment through — `demos/x` +
+    `/etc/passwd` joins to something that starts with `demos`, and the check
+    passes on a path neither input asked for. `demo-comment` avoided that by
+    having two functions with a guard each; this has one and checks per
+    segment.
+    """
+    parts: list[str] = []
+    for segment in segments:
+        if not segment:
+            continue
+        if segment.startswith("/") or "\\" in segment:
+            return None
+        parts += [p for p in segment.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
+    return "/".join(parts)
+
+
 def still_href(
     still: str, *, demo: str, path_prefix: str, repo_url: str | None, sha: str | None
 ) -> str | None:
@@ -265,12 +298,23 @@ def still_href(
     rendered exactly like one that works. So both are inputs, and without a
     repository or a commit this returns None and the row renders its timestamp
     unlinked — saying less rather than pointing somewhere wrong.
+
+    None for a path that climbs out of the tree, too. `timeline.json` is
+    committed and pull-request-editable, so `still` is *data* and the row
+    simply goes unlinked; `--path-prefix` is *configuration*, and `main`
+    refuses to render at all rather than emit a body of uniformly wrong links.
+    That split is `demo-comment`'s and is kept deliberately.
     """
     base = (repo_url or "").rstrip("/")
     if not base or not sha:
         return None
-    parts = [p.strip("/") for p in (path_prefix, demo, still) if p and p.strip("/")]
-    return f"{base}/raw/{quote(sha)}/" + "/".join(quote(p) for p in parts)
+    # Passed unstripped. Stripping a leading `/` first is exactly the bug
+    # `repo_path` exists to catch: `/etc/passwd` becomes `etc/passwd`, joins
+    # cleanly, and links a path nobody named.
+    path = repo_path(path_prefix, demo, still)
+    if path is None:
+        return None
+    return f"{base}/raw/{quote(sha)}/" + "/".join(quote(p) for p in path.split("/"))
 
 
 def preview_url(
@@ -410,7 +454,7 @@ def pick_demo(
     return best
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--classification", required=True, help="demo-classify --json output"
@@ -461,7 +505,20 @@ def main() -> int:
         "different demos.",
     )
     ap.add_argument("--out", help="write here instead of stdout")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    # Refused, not worked around. Unlike a `still`, the prefix is
+    # **configuration**: a bad one makes every link in the block wrong at once,
+    # and a body full of uniformly plausible wrong links is the artifact lying
+    # to its reader at scale. Checked against a probe rather than the real
+    # segments so the refusal does not depend on which demo was picked.
+    if args.path_prefix and repo_path(args.path_prefix, "probe") is None:
+        print(
+            f"--path-prefix {args.path_prefix!r} is not a plain relative path; "
+            f"every still link would be wrong",
+            file=sys.stderr,
+        )
+        return 2
 
     classification = json.loads(Path(args.classification).read_text(encoding="utf-8"))
     changed: list[str] = []
