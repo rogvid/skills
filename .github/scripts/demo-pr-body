@@ -84,6 +84,49 @@ HEADLINE = {
 INLINE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif")
 
 
+#: What this block is evidence of, and what it leaves to the diff (issue #303).
+#: Everything else here defends against the artifact *lying* — a still that does
+#: not exist, a claim promoted to a verdict. This defends against it implying
+#: more coverage than it has, which is the likelier harm: a demo can show a
+#: ticket's clauses; it cannot show the change does only that. The same pull
+#: request can delete a rate limiter, widen a permission or add a dependency,
+#: and the recording is silent about all three.
+#:
+#: `GOAL.md` names this sentence and says it must keep shipping. It stopped:
+#: it lived in `.github/scripts/demo-comment`, which #420 deleted, and this
+#: renderer — the one CI publishes — never carried it. `BlockDiffLimit` is
+#: what makes the next deletion of it red instead of silent.
+#:
+#: Fixed text rather than anything computed. A count of files changed against
+#: paths the take exercised would be a number standing in for content, and it
+#: would invite exactly the confidence this sentence exists to withhold.
+#:
+#: It carries no word from `tests/ci-unit`'s `VERDICT_WORDS`, and is not
+#: exempted from that sweep — it is a sentence this script writes, so the sweep
+#: reads it like every other.
+DIFF_LIMIT = (
+    "**Watching this answers one question: does the take show the clauses "
+    "below?** It answers nothing else. A widened permission, a deleted check "
+    "or a new dependency is invisible to a demo. The diff still answers those."
+)
+
+
+#: What the ticket re-read is and is not evidence of (issue #276). Printed
+#: whenever the check ran, and not only beside the rows it marked: `matched`
+#: renders no mark at all, and a clause the check passed is exactly where "so
+#: the demo is right" is tempting — the check compared two pieces of text,
+#: never a frame. Fixed text, hand-written here rather than read out of the
+#: sidecar: the sidecar is a generated file, and a sentence about this block's
+#: own reach is this script's to state. It carries no word from
+#: `tests/ci-unit`'s `VERDICT_WORDS` and is swept like every other sentence
+#: this script writes.
+TICKET_CHECK_LIMIT = (
+    "**This grades quotation, not meaning.** A storyboard that quotes a "
+    "clause word for word can still record something else entirely; whether "
+    "the frames show the clause is the reviewer's call, not this line's."
+)
+
+
 def _embed(url: str, alt: str) -> str:
     """An image if GitHub will inline it, a plain link if it will not.
 
@@ -216,6 +259,13 @@ def render_block(
 
         rows = clause_rows(timeline or {}, ticket_check)
         if rows:
+            # Before the list, because the sentence says "the clauses
+            # **below**" and that word has to be true. A take that declared no
+            # `criteria=` therefore does not get it: there is no clause list
+            # for it to bound, and rewording it to fit would edit a sentence
+            # `GOAL.md` pins. What such a block claims is a picture and a
+            # category, which is less than this sentence exists to withhold.
+            out += [DIFF_LIMIT, ""]
             out += ["**Acceptance criteria** — tick what the demo shows:", ""]
             for row in rows:
                 if row.at:
@@ -236,6 +286,12 @@ def render_block(
                 mark = TICKET_MARKS.get(row.ticket_state, "")
                 out.append(f"- [ ] **{row.id}** {row.text}{stamp}{mark}")
             out.append("")
+            # Whenever the check ran, not only where it marked a row. The
+            # state it renders nothing for is `matched`, and a clause the
+            # check passed is precisely where a reader is tempted to read
+            # "the ticket agrees" as "the demo is right".
+            if ticket_check:
+                out += [TICKET_CHECK_LIMIT, ""]
 
     foot = [f"Category from {classification.get('why_category', 'nothing')}"]
     foot.append("override with a `Category:` line in this body")

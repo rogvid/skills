@@ -47,6 +47,9 @@ SCRIPTS = REPO / ".github" / "scripts"
 SKILL = REPO / "skills" / "demo-video"
 WORKFLOW = REPO / ".github" / "workflows" / "demo-video.yml"
 CALLER = REPO / ".github" / "workflows" / "ticket-queue-demo.yml"
+#: `GOAL.md` is read, not just cited: the sentence it says must keep shipping
+#: is graded against the block that ships it (`BlockDiffLimit`).
+GOAL = REPO / "GOAL.md"
 
 
 def load(name: str, directory: Path | None = None) -> ModuleType:
@@ -67,6 +70,7 @@ _DIR = Path(os.environ.get("CI_UNIT_SCRIPTS", SCRIPTS))
 _SKILL = Path(os.environ.get("CI_UNIT_SKILL", SKILL))
 _WORKFLOW = Path(os.environ.get("CI_UNIT_WORKFLOW", WORKFLOW))
 _CALLER = Path(os.environ.get("CI_UNIT_CALLER", CALLER))
+_GOAL = Path(os.environ.get("CI_UNIT_GOAL", GOAL))
 storyboards = load("demo-storyboards", _DIR)
 ticket_check = load("demo-ticket-check", _DIR)
 preview_asset = load("demo-preview-asset", _DIR)
@@ -3000,6 +3004,82 @@ INJECTIONS += [
     for word, sentence in VERDICT_SENTENCES.items()
 ]
 
+# -- the block says what watching it does not answer (#303, GOAL.md) --------
+#
+# Not a defence against the artifact lying — a defence against it implying
+# more coverage than it has. All four breaks below leave a block that is
+# entirely truthful about everything it does say.
+
+_DIFF_LIMIT_ABOVE = '            out += [DIFF_LIMIT, ""]\n'
+_CHECKLIST_HEAD = (
+    '            out += ["**Acceptance criteria** — tick what the demo shows:", ""]\n'
+)
+_TICKET_LIMIT = "            if ticket_check:\n"
+
+INJECTIONS += [
+    (
+        # The break that actually happened, in one line rather than by
+        # deleting a script: the sentence simply stops being printed, and
+        # every other assertion over this renderer stays green.
+        "the block no longer says what watching it does not answer",
+        "demo-pr-body",
+        _DIFF_LIMIT_ABOVE,
+        "",
+        [
+            "BlockDiffLimit.test_the_block_names_every_thing_goal_md_says_a_demo_cannot_answer",
+            "BlockDiffLimit.test_the_limit_stands_above_the_checklist_so_that_below_is_true",
+        ],
+    ),
+    (
+        # Present, and false: the sentence says "the clauses **below**" while
+        # standing under them. A presence check passes over this.
+        "the limit is printed under the checklist it says is below it",
+        "demo-pr-body",
+        _DIFF_LIMIT_ABOVE + _CHECKLIST_HEAD,
+        _CHECKLIST_HEAD + _DIFF_LIMIT_ABOVE,
+        [
+            "BlockDiffLimit.test_the_limit_stands_above_the_checklist_so_that_below_is_true"
+        ],
+    ),
+    (
+        # One of the three things GOAL.md names goes missing from the shipped
+        # sentence. This is the injection that shows the assertion reads
+        # GOAL.md rather than a copy of the sentence kept in this file.
+        "the shipped sentence drops one of the things GOAL.md names",
+        "demo-pr-body",
+        '"below?** It answers nothing else. A widened permission, a deleted check "',
+        '"below?** It answers nothing else. A deleted check "',
+        [
+            "BlockDiffLimit.test_the_block_names_every_thing_goal_md_says_a_demo_cannot_answer"
+        ],
+    ),
+    (
+        # The other half of the pin, and the one that decides whether it is a
+        # pin at all: `GOAL.md` stops saying it. The assertion must refuse
+        # rather than grade an empty list of nouns — a silent pass here is how
+        # the rule would quietly cease to exist while every test stayed green.
+        "GOAL.md stops naming what a demo cannot answer",
+        "GOAL.md",
+        "Anything else the change touches — a widened permission, a deleted check, a new\ndependency — is invisible to a demo",
+        "Anything else is invisible to a demo",
+        [
+            "BlockDiffLimit.test_the_block_names_every_thing_goal_md_says_a_demo_cannot_answer"
+        ],
+    ),
+    (
+        # The plausible-looking economy: say it only where a row was marked.
+        # `matched` renders no mark, so the block the sentence is most needed
+        # on is the one that loses it.
+        "the ticket-check limit ships only beside a row it marked",
+        "demo-pr-body",
+        _TICKET_LIMIT,
+        "            if any(r.ticket_state in TICKET_MARKS for r in rows):\n",
+        [
+            "BlockDiffLimit.test_the_ticket_check_limit_ships_even_when_every_clause_matched"
+        ],
+    ),
+]
+
 # -- demo-ticket-check: does the ticket still say what was quoted (#276) -----
 
 INJECTIONS += [
@@ -3471,6 +3551,14 @@ def stage_tree(tmp: Path) -> dict[str, Path]:
     # grants, and neither file alone shows the mismatch.
     caller = tmp / "ticket-queue-demo.yml"
     shutil.copy(CALLER, caller)
+    # And `GOAL.md`, because one assertion here grades a shipped sentence
+    # against what that file says a demo cannot answer, and the two being one
+    # fact is the property. Staged rather than read from `REPO` for the reason
+    # the comment below gives: an inner run that reaches outside `tmp` grades
+    # the tree instead of the break, and would then report every injection as
+    # caught by the same unrelated error.
+    goal = tmp / "GOAL.md"
+    shutil.copy(GOAL, goal)
     # And this file, so an injection can reach the suite's own
     # allowlist. The copy is what runs; it reads every path it uses
     # from the three variables below, so `REPO` resolving to /tmp
@@ -3482,6 +3570,7 @@ def stage_tree(tmp: Path) -> dict[str, Path]:
         "skill": skill,
         "workflow": workflow,
         "caller": caller,
+        "goal": goal,
         "inner": inner,
     }
 
@@ -3507,6 +3596,8 @@ def injection_target(script: str, staged: dict[str, Path]) -> Path:
         return staged["caller"]
     if script == "tests/ci-unit":
         return staged["inner"]
+    if script == "GOAL.md":
+        return staged["goal"]
     return staged["root"] / script
 
 
@@ -3893,6 +3984,114 @@ class BlockClauses(unittest.TestCase):
         # And the control that it is still the same block: markers and footer.
         self.assertIn(pr_body.START, body)
         self.assertIn(pr_body.END, body)
+
+
+#: The list `GOAL.md` gives of what a demo cannot answer, read out of that file
+#: rather than retyped here. The whole point of the pin is that the goal
+#: document and the published artifact are **one fact**; a second copy in this
+#: file would let them drift in exactly the direction they already drifted once.
+GOAL_DIFF_LIMIT_RE = re.compile(
+    r"Anything else the change touches — (.+?) — is invisible to a demo",
+    re.S,
+)
+
+
+def goal_diff_limit_nouns() -> list[str]:
+    """What `GOAL.md` says a demo is silent about, one phrase per item.
+
+    Refuses rather than returning nothing when the sentence has moved: an
+    empty list would make every assertion below pass over a `GOAL.md` that no
+    longer says any of this, which is the vacuous-sweep shape this repository
+    keeps a catalogue of.
+    """
+    found = GOAL_DIFF_LIMIT_RE.findall(_GOAL.read_text(encoding="utf-8"))
+    if len(found) != 1:
+        raise AssertionError(
+            f"GOAL.md's 'anything else the change touches' sentence matched "
+            f"{len(found)} time(s), not once — nothing below grades anything "
+            f"until it matches. If the sentence was reworded, reword this "
+            f"pattern with it."
+        )
+    nouns = [" ".join(part.split()) for part in found[0].split(",")]
+    if len(nouns) < 3:
+        raise AssertionError(f"GOAL.md names {len(nouns)} thing(s), expected 3+")
+    return nouns
+
+
+class BlockDiffLimit(unittest.TestCase):
+    """The block says what watching it does **not** answer.
+
+    Every other assertion over this renderer defends against the artifact
+    *lying*. This one defends against it implying more coverage than it has,
+    which `GOAL.md` calls the likelier harm: a demo can show a ticket's
+    clauses; it cannot show the change does only that.
+
+    It is here because the sentence stopped shipping. It lived in
+    `.github/scripts/demo-comment`, #420 deleted that script, and this
+    renderer never carried it — for three commits the only copy in the tree
+    was `GOAL.md`'s own prose about it. `GOAL.md` had pinned it to a **commit
+    sha**, and a sha cannot go red.
+    """
+
+    def block(self, **kw) -> str:
+        opts = dict(
+            timeline=BLOCK_TIMELINE,
+            ticket_check=BLOCK_TICKET_CHECK,
+            sha="abcdef1234567890abcdef1234567890abcdef12",
+            demo_dir="demos/x",
+            repo_url="https://github.com/o/r",
+        )
+        opts.update(kw)
+        return pr_body.render_block(BLOCK_CLASSIFY, "Assign actually assigns", **opts)
+
+    def test_the_block_names_every_thing_goal_md_says_a_demo_cannot_answer(self):
+        body = self.block()
+        for noun in goal_diff_limit_nouns():
+            phrase = re.sub(r"^a\s+", "", noun, flags=re.I)
+            self.assertIn(
+                phrase.lower(),
+                body.lower(),
+                f"GOAL.md says a demo is silent about {noun!r}; the block a "
+                f"reviewer reads does not mention it",
+            )
+
+    def test_the_limit_stands_above_the_checklist_so_that_below_is_true(self):
+        # The sentence says "does the take show the clauses **below**". Printed
+        # under the list, that word is false, and a reviewer looking below it
+        # finds the footer. Position is the assertion, not presence.
+        body = self.block()
+        limit_at = body.index("It answers nothing else.")
+        list_at = body.index("**Acceptance criteria**")
+        self.assertLess(limit_at, list_at, "the limit is printed below the list")
+
+    def test_a_block_with_no_clauses_makes_no_claim_the_sentence_would_bound(self):
+        # The honest converse, and the reason this is not simply
+        # unconditional: with no checklist there are no "clauses below", and
+        # rewording the sentence to fit would edit text GOAL.md pins.
+        body = self.block(timeline=None)
+        self.assertNotIn("**Acceptance criteria**", body)
+        self.assertNotIn("It answers nothing else.", body)
+
+    def test_the_ticket_check_limit_ships_even_when_every_clause_matched(self):
+        # The state that renders no mark is `matched`, and a clause the check
+        # passed is exactly where "the ticket agrees" reads as "the demo is
+        # right". A limit printed only beside the rows it marked would be
+        # absent from the one block it is most needed on.
+        cids = tuple(BLOCK_TIMELINE["coverage"]["criteria"])
+        clean = {"clauses": {cid: {"state": "matched"} for cid in cids}}
+        body = self.block(ticket_check=clean)
+        # No *ticket* mark on any row — the ⚠️ AC-3 carries is about no beat
+        # claiming it, which is a different finding and stays either way.
+        for mark in pr_body.TICKET_MARKS.values():
+            self.assertNotIn(mark.strip(), body)
+        self.assertIn("grades quotation, not meaning", body)
+
+    def test_no_ticket_check_means_no_sentence_about_one(self):
+        # A block claiming a check that never ran is the same defect pointed
+        # the other way.
+        body = self.block(ticket_check=None)
+        self.assertIn("**AC-1**", body)
+        self.assertNotIn("grades quotation, not meaning", body)
 
 
 class BlockStillLinks(unittest.TestCase):
@@ -4330,6 +4529,7 @@ def fault_inject() -> int:
                     "CI_UNIT_SKILL": str(skill),
                     "CI_UNIT_WORKFLOW": str(workflow),
                     "CI_UNIT_CALLER": str(staged["caller"]),
+                    "CI_UNIT_GOAL": str(staged["goal"]),
                 },
             )
             # Scoped to the runner's **verdict lines**, which is the whole

@@ -1902,7 +1902,37 @@ _EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
 # leave `demo-shots` documented only in `scripts/` and in reference/, where an
 # agent deciding how to hand a reviewer the pictures would never meet it —
 # which is the failure the budget's own preamble says a budget must not cause.
-SKILL_LINE_BUDGET = 634
+# Raised 634 → 701 on 2026-08-29, and the raise is the smaller half of what
+# happened here. The file had drifted to 726 lines across #396, #403 and #404
+# — 92 lines with no raise and no argument, which is the failure this comment
+# block exists to prevent, and it went unnoticed because nothing in CI reads
+# this number.
+#
+# The streamlining pass that followed moved the Configuration table and the
+# verb table's caveats into `reference/configuration.md` and
+# `reference/verbs.md`, and turned step 6's reviewer prompt and step 8's
+# gitignore recipe into `scripts/demo-review` and `scripts/demo-gitignore`.
+# What that measured is the reason for `SKILL_TOKEN_BUDGET` below:
+#
+#     lines   726 → 701    -3.4%
+#     tokens  18,389 → 15,976   -13.1%
+#
+# **The two moved in different directions by a factor of four**, because a
+# table row here can be 400 characters and a prose line is 70. A line budget
+# is therefore a poor proxy for the thing it was always standing in for —
+# what the always-loaded file costs a caller — and it will read as green while
+# a table row triples. The token figure is the binding one from here.
+#
+# The line number is kept, at today's count rather than a round one, because
+# it still catches the shape a token count misses: a whole *section* arriving.
+SKILL_LINE_BUDGET = 701
+
+# What SKILL.md may cost a caller, in tokens, before `--budget` says so. Set at
+# the measurement above with no headroom on purpose: headroom in a budget
+# nothing gates is headroom nobody notices being spent, which is exactly how
+# the 92 lines happened. Raise it deliberately, here, with the argument — the
+# same discipline the line number has carried since it was 510.
+SKILL_TOKEN_BUDGET = 16_000
 
 # `reference/` holding fewer than this is `reference/` being emptied, which
 # would make both assertions below hold trivially. Not a count of the files
@@ -1919,21 +1949,31 @@ def budget_report() -> int:
     # measurement this budget was set from. Indicative, not exact — the point is
     # the order of magnitude a caller pays on every invocation.
     tokens = round(len(skill) / 2.763)
-    over = lines > SKILL_LINE_BUDGET
+    # Both, and the token one first: they were measured moving in different
+    # directions by a factor of four, so a report that named only lines would
+    # have called a 13% saving a 3% one.
+    over = [
+        (name, value, budget)
+        for name, value, budget in (
+            ("tokens", tokens, SKILL_TOKEN_BUDGET),
+            ("lines", lines, SKILL_LINE_BUDGET),
+        )
+        if value > budget
+    ]
     print(
-        f"SKILL.md: {lines} lines (~{tokens:,} tokens), budget "
-        f"{SKILL_LINE_BUDGET} lines"
+        f"SKILL.md: ~{tokens:,} tokens (budget {SKILL_TOKEN_BUDGET:,}), "
+        f"{lines} lines (budget {SKILL_LINE_BUDGET})"
     )
-    if over:
+    for name, value, budget in over:
         print(
-            f"\nWARNING: SKILL.md is {lines - SKILL_LINE_BUDGET} lines over "
-            f"budget.\n"
+            f"\nWARNING: SKILL.md is {value - budget:,} {name} over budget.\n"
             f"A skill's SKILL.md is loaded whole into the caller's context "
             f"every time the\nskill triggers; reference/ files are read on "
             f"demand. Consider moving the new\nmaterial into reference/ and "
-            f"linking it at the point of use.\n"
+            f"linking it at the point of use, or turning a\nblock a caller "
+            f"copies verbatim into a script under scripts/.\n"
             f"\nThis does not block anything. If the new material genuinely "
-            f"belongs in the\nalways-loaded file, raise SKILL_LINE_BUDGET in "
+            f"belongs in the\nalways-loaded file, raise the budget in "
             f"tests/unit and say why.",
             file=sys.stderr,
         )

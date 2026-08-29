@@ -44,7 +44,14 @@ A human is pulled in only on `cannot tell`, or on disagreement.
 Watching a demo replaces reading the diff **for that one question only**.
 Anything else the change touches — a widened permission, a deleted check, a new
 dependency — is invisible to a demo and is still the diff's to answer. That
-sentence ships in the pull-request comment (`8bcd52e`) and must keep shipping.
+sentence ships in the pull-request body, as `DIFF_LIMIT` in
+`.github/scripts/demo-pr-body`, and must keep shipping.
+
+It once did not. It lived in `.github/scripts/demo-comment`, which #420
+deleted, and for three commits nothing in the tree carried it — because this
+line named a commit rather than a live file, and a commit cannot go red. It is
+now pinned by `BlockDiffLimit` in `tests/ci-unit`. **Pin a rule here to
+something that fails**, not to a sha.
 
 It also grades whether the frames show the clause, **not** whether the clause was
 the right thing to build.

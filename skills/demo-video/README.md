@@ -160,6 +160,8 @@ demo-video/
 │   ├── failures.md                #   strict takes, and takes that do not finish
 │   ├── terminal.md                #   TerminalRecorder verbs, patterns, gotchas
 │   ├── narration.md               #   ElevenLabs speech
+│   ├── verbs.md                   #   every verb, with the caveats attached
+│   ├── configuration.md           #   every recorder parameter and env var
 │   └── ci.md                      #   recording on a pull request
 ├── README.md                      # this file — humans read this
 ├── ensure.sh                      # installs uv, restores exec bits — run once
@@ -168,10 +170,14 @@ demo-video/
 │   │                              #   strict, before anything is recorded
 │   ├── demo-caption-lint          # captions' numbers and quoted strings,
 │   │                              #   checked against evidence, for free
+│   ├── demo-review                # the sheet to hand a blind reader, and the
+│   │                              #   four questions in the words to ask them
 │   ├── demo-grade                 # the blind reader's brief, and the verdict
 │   │                              #   comparing it with the ac= tags (step 6b)
 │   ├── demo-shots                 # the take's stills as one pasteable block,
 │   │                              #   captions and ac= tags, grading nothing
+│   ├── demo-gitignore             # the working files a take writes, anchored
+│   │                              #   to the demo folder; --check asks git
 │   └── demo-target-guard          # the target classifier, on the command line
 └── helpers/
     ├── demo_recording/            # package: the recorders, and what reads their output
