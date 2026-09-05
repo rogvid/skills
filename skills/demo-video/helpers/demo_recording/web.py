@@ -294,6 +294,14 @@ window.__demoSpotlightClear = () => {
 # and "a reviewer holding only this file can state what the frame showed"
 # (#9) includes the narration line the frame showed. Visibility-gated the way
 # core's overlay probe is (#163): a cleared caption is opacity 0, not removed.
+#
+# The caption crossfade (#396) put the visible line on either of two stacked
+# layers, `__demo_caption` or `__demo_caption2`, alternating on every text
+# change - `window.__demoCaption` in chrome.py ping-pongs `__demoCapLayer`
+# between them. Reading only the first layer missed every odd-numbered
+# caption on the take, silently: the beat log, the aria snapshot and the take
+# itself were all fine, and only the evidence file was wrong. Caught here by
+# `tests/smoke --web-only`'s clean baseline going red on beats 4 and 16.
 _CHROME_TEXT_JS = """() => {
   const line = (id, name) => {
     const el = document.getElementById(id);
@@ -304,7 +312,7 @@ _CHROME_TEXT_JS = """() => {
     return name + ': ' + el.textContent;
   };
   return [
-    line('__demo_caption', 'caption'),
+    line('__demo_caption', 'caption') || line('__demo_caption2', 'caption'),
     line('__demo_interlude', 'card'),
     line('__demo_bridge_t', 'bridge'),
   ].filter(Boolean).join('\\n');
