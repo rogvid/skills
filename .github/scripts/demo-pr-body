@@ -84,6 +84,24 @@ HEADLINE = {
 INLINE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif")
 
 
+#: What watching the demo does not answer (#303). `GOAL.md` requires this
+#: sentence to ship. Fixed text, printed above the clause list it refers to.
+DIFF_LIMIT = (
+    "**Watching this answers one question: does the take show the clauses "
+    "below?** It answers nothing else. A widened permission, a deleted check "
+    "or a new dependency is invisible to a demo. The diff still answers those."
+)
+
+
+#: What the ticket re-read is not evidence of (#276): it compares text, never
+#: a frame. Printed whenever the check ran, including when every clause matched.
+TICKET_CHECK_LIMIT = (
+    "**This grades quotation, not meaning.** A storyboard that quotes a "
+    "clause word for word can still record something else entirely; whether "
+    "the frames show the clause is the reviewer's call, not this line's."
+)
+
+
 def _embed(url: str, alt: str) -> str:
     """An image if GitHub will inline it, a plain link if it will not.
 
@@ -216,6 +234,8 @@ def render_block(
 
         rows = clause_rows(timeline or {}, ticket_check)
         if rows:
+            # Above the list: the sentence says "the clauses below".
+            out += [DIFF_LIMIT, ""]
             out += ["**Acceptance criteria** — tick what the demo shows:", ""]
             for row in rows:
                 if row.at:
@@ -236,6 +256,8 @@ def render_block(
                 mark = TICKET_MARKS.get(row.ticket_state, "")
                 out.append(f"- [ ] **{row.id}** {row.text}{stamp}{mark}")
             out.append("")
+            if ticket_check:
+                out += [TICKET_CHECK_LIMIT, ""]
 
     foot = [f"Category from {classification.get('why_category', 'nothing')}"]
     foot.append("override with a `Category:` line in this body")

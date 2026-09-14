@@ -75,23 +75,28 @@ by name, and the dot is verb-driven — raw `rec.page.mouse` never moves it.
 
 Each demo gets one folder (suggested: `docs/guides/<YYYY-MM-DD>-<slug>/`):
 
-| File | What it is | In git? |
-|---|---|---|
-| `record.py` | The storyboard that produced the media (re-runnable) | yes |
-| `images/*.png` | Stills captured at key moments | yes |
-| `timeline.json` | The beat log — every verb, when it ran, what caption was up. For a segmented demo, the merged one `stitch()` writes | yes |
-| `timeline.md` | The same log rendered for humans, stills embedded | yes |
-| `guide.md` | Optional written guide embedding the stills | yes |
-| `demo.mp4` | The recording (mp4 only — gifs get too big) | **no** — regenerate it, or attach it to the PR |
-| `evidence/beat-NN.json` | **A working file, not an artifact.** What was on screen at each beat, in text — read by the reviewing agent in the same run that produced it, then thrown away. Greppable plaintext of a real app's DOM | **no** — gitignore it |
-| `frames/` | Review frames pulled out of `demo.mp4`, plus the sheet you hand a reviewer | **no** — a working file of a review; `beat_frames(out_dir)` regenerates it |
-| `failure/` | Only after a take that did not finish: the last frame, the console log, the page text, and the failing beat. See [reference/failures.md](reference/failures.md) | **no** — it describes one run and the next one rewrites it |
-| `demo-video-FAILED.md` | Only after a take that did not finish: what happened, when, and whether the `demo.mp4` beside it is this take's. Deleted by the next take that writes its own artifacts | **no** |
+**Committed** — small, diffable, and between them a full account of what the
+demo showed without anyone watching it:
 
-The storyboard is the durable artifact, not the video. The last four rows are
-inputs to a review that happens once, derived from a video that is itself not
-committed, and all four are gitignored
-([#50](https://github.com/rogvid/skills/issues/50)) — Process step 8.
+| File | What it is |
+|---|---|
+| `record.py` | The storyboard that produced the media (re-runnable) |
+| `images/*.png` | Stills captured at key moments |
+| `timeline.json` | The beat log — every verb, when it ran, what caption was up. For a segmented demo, the merged one `stitch()` writes |
+| `timeline.md` | The same log rendered for humans, stills embedded |
+| `guide.md` | Optional written guide embedding the stills |
+
+**Not committed** — every one of them describes a single run, and the next run
+rewrites it: `demo.mp4` (regenerate it, or attach it to the PR),
+`evidence/beat-NN.json` (what was on screen at each beat, in text — greppable
+plaintext of a real app's DOM), `frames/` (the review sheet;
+`beat_frames(out_dir)` regenerates it), and after a take that did not finish,
+`failure/` and `demo-video-FAILED.md`
+([reference/failures.md](reference/failures.md)).
+
+The storyboard is the durable artifact, not the video
+([#50](https://github.com/rogvid/skills/issues/50)).
+`scripts/demo-gitignore` writes the patterns — Process step 8.
 
 ## What this does not do
 
@@ -102,35 +107,25 @@ review. Each limit below is measured, and the measurements, with the issue
 behind every one, are in [reference/limits.md](reference/limits.md).
 
 - **It will not tell you a card was left up.** A held picture is reported only
-  when a verb that *acts on the app* ran while it was held, so a demo raising a
-  card (`interlude()`, `criterion()`) and then only captioning, holding and
-  taking stills behind it passes in silence for almost its whole length. Take
-  cards down explicitly.
-  A caption long enough to wrap can also silence the same warning on an app's
-  own modal, so keep captions to one line.
+  when a verb that *acts on the app* ran while it was held — so take cards down
+  explicitly, and keep captions to one line.
 - **A frame is aimed at a beat, not stamped with one.** Chromium stamps frames
-  with the host's **wall** clock, the beat log uses a monotonic one, so on a
-  host whose clock steps an event lands earlier in `demo.mp4` — by the step,
-  once per step, and no measured figure keeps. `timeline.json`'s
-  `capture_clock` records each: correct with it once its `measured` flag says
-  it watched.
-- **Sixty seconds buys about twenty screens.** At the pacing floors below, a
-  demo shows roughly one new screen every 3 s, and two thirds of a measured
-  61 s take was a picture already shown. A feature spanning two surfaces does
-  not fit the 30–60 s target, and the honest answers are a longer video or two
-  demos, not faster captions.
-- **A demo of an error path records a problem.** A non-zero exit is logged as
-  an issue and is fatal under `strict=True`, with no way to say it was the
-  point — so leave strict off for that demo, and say in the pull request which
-  recorded issue is the demo's subject.
+  with the host's wall clock and the beat log uses a monotonic one, so on a
+  stepping host an event lands earlier in `demo.mp4` than the log says.
+  `timeline.json`'s `capture_clock` records each step.
+- **Sixty seconds buys about twenty screens.** Roughly one new screen every 3 s
+  at the pacing floors below. A feature spanning two surfaces does not fit the
+  30–60 s target, and the honest answers are a longer video or two demos, not
+  faster captions.
+- **A demo of an error path records a problem.** A non-zero exit is logged as an
+  issue and is fatal under `strict=True`, with no way to say it was the point.
+  Leave strict off for that demo, and say in the pull request which recorded
+  issue is the demo's subject.
 - **A stitched demo's issue attribution is unproven.** An issue recorded in
-  segment two can name a beat of segment one — `stitch()` re-points every
-  issue's beat while merging, and no take exercises it. Check it against the
-  parts before handing them to a reviewer. A coverage row keeping its segment
-  *is* now graded ([#137](https://github.com/rogvid/skills/issues/137)).
-- **CI does less for a fork.** A pull request from a fork gets no demo comment;
-  its beat table and artifact link are on the workflow run's summary page
-  instead.
+  segment two can name a beat of segment one, and no take exercises the
+  re-pointing. Check it against the parts before handing them to a reviewer.
+- **A fork's pull request gets no block, and its demo job goes red** even when
+  the take succeeded. The block is printed to the job log; read it there.
 
 ## Reference — read these when you reach them, not before
 
@@ -141,6 +136,8 @@ read them all up front, and do not skip one the text tells you to open.
 
 | File | Read it when |
 |---|---|
+| [reference/verbs.md](reference/verbs.md) | When a verb's one line in the table below is not enough — the same list with every caveat attached, each one there because a take shipped wrong without it |
+| [reference/configuration.md](reference/configuration.md) | When a take needs a parameter the short Configuration table does not name — window size and title, the opening and closing cards, caption placement, colours, clock and locale, the terminal's shell and font, the narration voice |
 | [reference/limits.md](reference/limits.md) | Before planning a demo, when two of a take's artifacts seem to contradict each other, or before reading a green run as coverage — every limit above, with its measurement |
 | [reference/determinism.md](reference/determinism.md) | Before `deterministic=True`. A frozen clock changes what an app does, and usually does it silently |
 | [reference/timeline.md](reference/timeline.md) | When reading `timeline.json`/`timeline.md`, when a take warns about its `content`, or when consuming the beat log as a contract |
@@ -227,43 +224,34 @@ Every `Recorder` parameter resolves **explicit parameter → `DEMO_VIDEO_*`
 env var → built-in default**, so projects can put defaults in their
 `.env` (load with `set -a; source .env; set +a`) and storyboards stay
 clean. **The Sets column names the parameter behind each variable** — for
-three it is not the variable lowercased, so do not infer it:
+three it is not the variable lowercased, so do not infer it; all three are in
+the reference table below.
+
+These are the ones that decide what a take *is*:
 
 | Variable | Sets (parameter — what it does) | Default |
 |---|---|---|
 | `DEMO_VIDEO_OUT_DIR` | `out_dir` — where demo files land | — (required one way or the other) |
 | `DEMO_VIDEO_BASE_URL` | `base_url` — app under demo. Classified before the browser opens; a public host is refused | `http://localhost:8000` |
 | `DEMO_VIDEO_ALLOW_PRIVATE` | `allow_private` — permit a private/internal target (`1`/`0`). There is no equivalent for a public one | off |
-| `DEMO_VIDEO_ACCENT_RGB` | `accent_rgb` — cursor/spotlight color, `"0,127,255"` | azure |
-| `DEMO_VIDEO_PACE` | `pace` — multiplier over the holds the recorder computes (caption read time; the defaults of `hold()`, `interlude()`, `criterion()`). Durations the storyboard writes itself are never touched. See **Pacing and perception** | `1.0` |
-| `DEMO_VIDEO_WINDOW_TITLE` | `window_title` — the wrapper window's title bar. Web default: the app's host; terminal default: `terminal_title` | — |
-| `DEMO_VIDEO_INTRO` | `intro` — opt-in opening title card over the wrapper (web takes), taken down by the first `goto()`. Held ~2.8 s (scaled by `pace`), or the whole spoken line when narration is on. Terminal takes already have this as `TerminalRecorder(interlude=…)` | off |
-| `DEMO_VIDEO_TERMINAL_TITLE` | `terminal_title` — web `terminal()` card title | `terminal` |
-| `DEMO_VIDEO_TERMINAL_PROMPT` | `terminal_prompt` — prompt string: web card, and `TerminalRecorder`'s shell PS1 | `$ ` (web card); `❯ ` (`TerminalRecorder`) |
-| `DEMO_VIDEO_TERMINAL_SHELL` | `shell` — shell `TerminalRecorder` launches | `/bin/bash` |
-| `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `font_size` — `TerminalRecorder` font px | `15` |
-| `DEMO_VIDEO_VIEWPORT` | `viewport` — recording size, `"1920x1080"` | 1920×1080 (`quick` preset: 1280×720) |
-| `DEMO_VIDEO_WINDOW_SCALE` | `window_scale` — framed-window size relative to the viewport: a fraction of it for width/height, in `(0, 1]`. A single float or `"width,height"` | 0.95 width; 0.9 height (0.85 with the reserved band — the taller default plus the band cannot fit a viewport) |
-| `DEMO_VIDEO_CAPTION_OVERLAY` | `caption_overlay` — caption as a floating pill over the app's bottom edge (`1`), or a reserved band below the app rect (`0`). **Known limit of the overlay:** a camera push-in crops the frame around the spotlit element and can shave the pill — fade it (`caption("")`) before spotlighting, or turn the band back on | **on** |
 | `DEMO_VIDEO_PRESET` | `preset` — quality preset, `"high"` or `"quick"`; see **Quality presets** below | `high` |
-| `DEMO_VIDEO_DETERMINISTIC` | `deterministic` — freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
-| `DEMO_VIDEO_CLOCK` | `clock` — the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |
-| `DEMO_VIDEO_TIMEZONE` | `timezone_id` — browser timezone, always applied | `UTC` |
-| `DEMO_VIDEO_LOCALE` | `locale` — browser locale, always applied | `en-US` |
-| `DEMO_VIDEO_SPEECH` | `speech` — force narration on/off (`1`/`0`). **`speech=False` records silently even with a key set**; with no key it is off already, and forcing it *on* without one refuses the take | auto by API key |
-| `DEMO_VIDEO_STILLS_ONLY` | `stills_only` — run the storyboard for its `shot()` pictures and record no video (`1`/`0`). Pacing zeroed, narration off; writes no mp4 and no `frames/`, and `timeline.json` says `mode: "stills"` so nothing reads it as a take — [reference/stills.md](reference/stills.md) | off |
+| `DEMO_VIDEO_PACE` | `pace` — multiplier over the holds the recorder computes. Durations the storyboard writes itself are never touched. See **Pacing and perception** | `1.0` |
+| `DEMO_VIDEO_STILLS_ONLY` | `stills_only` — run the storyboard for its `shot()` pictures and record no video (`1`/`0`). Pacing zeroed, narration off; `timeline.json` says `mode: "stills"` so nothing reads it as a take — [reference/stills.md](reference/stills.md) | off |
 | `DEMO_VIDEO_STRICT` | `strict` — fail the take on console errors / non-zero exits (`1`/`0`) | off |
+| `DEMO_VIDEO_DETERMINISTIC` | `deterministic` — freeze the page clock and flatten motion (`1`/`0`) — **read [reference/determinism.md](reference/determinism.md) first** | **off** |
+| `DEMO_VIDEO_SPEECH` | `speech` — force narration on/off (`1`/`0`). **`speech=False` records silently even with a key set**; forcing it *on* without a key refuses the take | auto by API key |
 | `DEMO_VIDEO_EVIDENCE` | `evidence` — write `evidence/beat-NN.json` per beat (`1`/`0`) — see [reference/review.md](reference/review.md) | **on** |
-| `DEMO_VIDEO_VOICE_ID` | `voice_id` — ElevenLabs voice | Sarah (premade) |
-| `DEMO_VIDEO_SPEECH_MODEL` | `speech_model` — ElevenLabs model | `eleven_multilingual_v2` |
-| `DEMO_VIDEO_SPEECH_STABILITY` | `speech_stability` — voice stability pinned on every line, for one consistent speaking rate (without it: 2.1–3.3 words/s across one take) | `0.75` |
-| `DEMO_VIDEO_OUTRO` | `outro` — opt-in closing card, the intro's mirror: voiced with speech on, left up as the take's last frame. Web takes; `TerminalRecorder` refuses it | off |
 | `DEMO_VIDEO_SKILL_DIR` | *no parameter* — where storyboards find this skill | the constant baked into each storyboard |
 | `ELEVENLABS_API_KEY` | *no parameter* — enables speech narration | off |
 
-`DEMO_VIDEO_BASE_URL` applies to the web `Recorder` only; the terminal
-`*` variables to `TerminalRecorder`. All the rest apply to both. The
-parameters with **no** env var are per-storyboard by nature: `segment`,
+**The other seventeen are in
+[reference/configuration.md](reference/configuration.md)**, with this table
+repeated in full: window size and title, the opening and closing cards, caption
+placement, the accent colour, the frozen clock, timezone and locale, the
+terminal's shell, prompt, title and font size, and the narration voice, model
+and stability. Open it when a take needs one; the names are not guessable.
+
+The parameters with **no** env var are per-storyboard by nature: `segment`,
 `criteria` and `ticket` on both recorders, plus `TerminalRecorder`'s
 `interlude`, `interlude_hold` and `type_delay_ms`.
 
@@ -293,25 +281,32 @@ log. A storyboard that *raises* gets the same treatment plus a `failure/` dump.
 exception, or a non-zero exit. Both are
 [reference/failures.md](reference/failures.md).
 
+This table is the index — every verb, and enough to write an ordinary
+storyboard. **[reference/verbs.md](reference/verbs.md) is the same list with
+the caveats attached**, and every caveat in it is there because a take shipped
+wrong without it. Open it when a verb here needs more than its line, and
+before using `spotlight`, `interlude` or `rec.page`, which carry the three that
+bite hardest.
+
 | Verb | Use |
 |---|---|
-| `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll |
+| `goto(path)` | Navigate (relative to base_url); waits for networkidle, but gives up after 10 s for apps that poll. Classifies its own argument before navigating |
 | `pause(s)` / `shot(name)` | Hold the frame / capture `images/<name>.png` |
-| `caption(text)` | Narrator line in the caption pill over the app's bottom edge (a reserved band below the app with `caption_overlay=False`); `""` clears. Both media draw it in the recorder's own document — so the line survives full page loads and SPA routing alike, and `caption_lost` cannot fire at all any more. A line taller than the two-line zone is shaved at its edges and recorded as a `caption_clipped` issue: shorten it, or split it over two captions. With the overlay pill, fade the line (`caption("")`) before a `spotlight()` — the camera push-in crops the frame and can shave a pill riding the bottom edge |
-| `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it is there to demonstrate. Needs `Recorder(criteria={...})`; a tag naming an undeclared criterion is refused. Add `shows="unmet"` to point the claim the other way — this beat is evidence the clause is **not** met, which is the case worth the most to a reviewer. It needs an `ac=`, and it is still the author's assertion: nothing read the ticket. See [reference/review.md](reference/review.md). |
-| `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped — so the viewer meets the clause and then watches it happen. The beat claims AC-3 and nothing else; the beats after it are untagged. Held to reading speed, and cleared by `interlude("")` like any card. |
-| `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below. |
+| `caption(text)` | Narrator line in the caption pill over the app's bottom edge (a reserved band with `caption_overlay=False`); `""` clears. It survives navigation, which is a footgun as much as a feature — clear it before a click that navigates, and fade it before a `spotlight()` |
+| `caption(text, ac="AC-3")` / `shot(name, ac="AC-3")` | Tag this beat with the acceptance criterion it demonstrates. Needs `Recorder(criteria={...})`. `shows="unmet"` points the claim the other way — evidence the clause is **not** met. Still the author's assertion: nothing read the ticket |
+| `criterion("AC-3")` | Raise a card carrying **AC-3's own declared sentence**, read out of `criteria={...}` rather than retyped, so the viewer meets the clause and then watches it happen |
+| `hold(min_s=1.5)` | Keep the current frame up until the current caption's narration finishes (min `min_s`). Use after a spotlight/action so the emphasis rides the whole spoken line instead of flashing. See **Pacing and perception** below |
 | `move_to` / `click` / `click_fast` / `scroll_to` | Visible cursor motion; `click_fast` for elements that re-render continuously |
-| `type_into(selector, text)` | Click a field and type visibly, key by key — form demos (checkout, login, search). Types at the caret: it appends to what is already there, so `clear()` first to replace it |
-| `clear(selector)` | Empty a field, visibly — click, select what is in it, delete. Its own beat, because emptying a field is something the viewer watches happen |
-| `press(key, hold_s=0.5)` | Press one named key wherever the focus already is — `"Enter"` to submit, `"Escape"` to dismiss, `"Tab"` to move on, `"Control+A"`. Playwright's key names; an unknown one raises. Selector-free on purpose: `Tab` *is* the focus demo and `Escape` acts on whatever is up, and `type_into`/`clear` leave the caret where they put it. Holds `hold_s` so the change is on screen long enough to read |
-| `wait_for(selector)` | Wait for something the app does on its own |
-| `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. It eases in *and out* over 250 ms, and the verb waits out its own exit, so the element is back exactly as it was found before the next beat starts (~250 ms per clear on an ordinary take, ~0 under `deterministic=True`, which flattens the transition). An element that is itself positioned by a transform — React Flow nodes, dnd-kit items, anything carrying an inline or stylesheet `transform` — gets the ring but **not** the enlarge: setting `transform` would replace its own and teleport it for the beat (#398). Each spotlight interval also becomes a **camera push-in** (1.3×, eased 0.5 s each way, centred on the element) rendered after the take — see `helpers/demo_recording/camera.py`. The moves land in demo.mp4 automatically; `timeline.json`'s `camera` key publishes the geometry |
-| `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below). |
-| `interlude(text, hold=2.8, style=…)` | Bridge a jump; `hold` is how long the card stays before the storyboard moves on. `style="card"` (default) is a full-screen title card — dark on a terminal take, so a segment can open on it; the window's own body colour on a web one, so the content area becomes the window with the sentence on it (#291) — for real time-skips; `style="light"` is a centered label over a soft scrim with the scene still visible, for short transitions. **`interlude("")` fades out whatever is up, whichever style raised it** — the clear takes no `style` and ignores the one it is given. Leave one up and the take says so on stderr and in `content.warnings`; nothing else will notice (see [reference/limits.md](reference/limits.md)). |
-| `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it. `keep_parts=True` leaves each `.seg.mp4` and its `.seg.timeline.*` on disk for a re-stitch |
-| `act(label)` | Stamp one beat around raw `rec.page` work: `with rec.act("apply the filter"): rec.page.select_option(…)`. The block gets a frame, an evidence file and a named beat, like a verb. An exception inside still closes the beat and fails the take (#344) |
-| `rec.page` | The live Playwright page — the escape hatch for anything the verbs don't cover (iframes, drag, hover-only menus). **Bare `rec.page` work stamps no beat: no frame is aimed at it, no evidence is written, and the review cannot see it happened.** Wrap it in `rec.act(…)`, or follow it with a beat-stamping verb. Wait with `rec.wait_for`, not `rec.page.wait_for_selector` — the verb stamps the beat |
+| `type_into(selector, text)` | Click a field and type visibly, key by key — form demos. Types at the caret, so `clear()` first to replace rather than append |
+| `clear(selector)` | Empty a field, visibly. Its own beat, because emptying a field is something the viewer watches happen |
+| `press(key, hold_s=0.5)` | Press one named key wherever the focus already is — `"Enter"`, `"Escape"`, `"Tab"`, `"Control+A"`. Playwright's key names; an unknown one raises. Selector-free on purpose |
+| `wait_for(selector)` | Wait for something the app does on its own — and not `rec.page.wait_for_selector`, which stamps no beat |
+| `spotlight(selector)` | Ring + enlarge the element the caption discusses; `spotlight()` clears. Each interval also becomes a **camera push-in** rendered after the take. Two edges in [reference/verbs.md](reference/verbs.md): transform-positioned elements get the ring only (#398), and the push-in can shave an overlay caption |
+| `terminal(cmd)` / `terminal_output(text)` / `terminal_close()` | A *decorative* on-screen terminal card for off-browser actions **inside a web demo** — a prop, not a real shell. To record an actual CLI/TUI use `TerminalRecorder` (below) |
+| `interlude(text, hold=2.8, style=…)` | Bridge a jump. `style="card"` (default) is a full-screen title card for real time-skips; `style="light"` a centred label over the scene, for short transitions. **`interlude("")` fades out whatever is up, whichever style raised it.** Leave one up and only stderr and `content.warnings` will say so |
+| `stitch(out_dir, [segments])` | Lossless concat of segment recordings into demo.mp4, **and** merge their beat logs into one `timeline.json` / `timeline.md` beside it |
+| `act(label)` | Stamp one beat around raw `rec.page` work: `with rec.act("apply the filter"): rec.page.select_option(…)`. The block gets a frame, an evidence file and a named beat, like a verb (#344) |
+| `rec.page` | The live Playwright page — the escape hatch for what the verbs don't cover (iframes, drag, hover-only menus). **Bare `rec.page` work stamps no beat: no frame is aimed at it, no evidence is written, and the review cannot see it happened.** Wrap it in `rec.act(…)` |
 
 ## Pacing and perception
 
@@ -453,16 +448,12 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
     <skill dir>/scripts/demo-rehearse <demo folder>/record.py
     ```
 
-    The same storyboard driven end to end in seconds — pacing zeroed, no
-    video encoded ([reference/stills.md](reference/stills.md)) — under
-    `strict=True`, so a console error, a failed request or a non-zero exit
-    fails the run and names itself. **A demo of something that does not work
-    is not made**: until this exits 0, do not polish captions, do not set
-    spotlights, and do not record a take. Polish invested before this line is
-    polish thrown away when the app turns out to be broken, and the broken
-    app is discovered here for seconds instead of in fresh-agent review after
-    minutes of encoding (a rehearsal may rewrite `images/`; that is fine —
-    commit only after the real take).
+    The same storyboard end to end in seconds — pacing zeroed, no video
+    encoded — under `strict=True`, so a console error, a failed request or a
+    non-zero exit fails the run and names itself. **A demo of something that
+    does not work is not made**: until this exits 0, do not polish captions,
+    do not set spotlights, and do not record a take. A rehearsal may rewrite
+    `images/`; commit only after the real take.
 3. **Caption every beat.** A fresh caption before each thing the viewer
    should understand, `caption("")` to end clean. The caption lives in the
    recorder's own document and survives every navigation — full loads and SPA
@@ -517,17 +508,13 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    <skill dir>/scripts/demo-caption-lint <demo folder>
    ```
 
-   Each caption's numbers and quoted UI strings are checked against the
-   evidence text of its beat plus a window of neighbours (#356) — both of
-   the field run's round-1 caption contradictions were findable this way
-   without a model, before the blind round spent an agent run. Three states
-   per claim: **matched**; **NOT FOUND** (check the app first — a screen not
+   Each caption's numbers and quoted UI strings, checked against the evidence
+   text of its beat and its neighbours (#356) — both of the field run's
+   round-1 caption contradictions were findable this way, before the blind
+   round spent an agent run. It prints its three states and their meanings;
+   read them there. **NOT FOUND means check the app first**: a screen not
    doing what the caption says is a bug the demo caught, and softening the
-   caption launders it); **not checkable**, with the reason (prose-only
-   claims nothing token-shaped to carry; unreadable evidence). It grades
-   tokens, not meaning — a paraphrase sharing no token is a named limit,
-   not a pass — and it is advisory: exit 0 either way. Step 6 still runs;
-   this is the filter in front of it.
+   caption launders it. Advisory — exit 0 either way, and step 6 still runs.
 
 6. **Fresh-agent review (required).** You cannot watch the video, and you
    know too much anyway — have a context-free agent watch it for you. The
@@ -540,40 +527,26 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    reviewer's reading of one can carry.
 
    Give them the pictures and nothing else — no storyboard, no feature name,
-   no captions; `frames.md` is built that way on purpose. A tmpdir, or
-   `frames/` beside `demo.mp4` if the reviewer needs a stable path; either way
-   it is a working file, gitignored with the mp4 it came out of (step 8).
+   no captions; `frames.md` is built that way on purpose. It is a working
+   file, gitignored with the mp4 it came out of (step 8).
 
-   Dispatch a subagent told NOTHING about the feature (a fresh session or
-   process fed only `frames/` works too) and ask it, in these words:
+   ```sh
+   <skill dir>/scripts/demo-review <demo folder>
+   ```
 
-   > Read the frames in order and reply with:
-   > (1) NARRATION — the story as understood purely from the frames.
-   > (2) CONFUSIONS — anything unclear, unreadable, or that you could not follow.
-   > (3) CONTRADICTIONS — a caption whose claim a later frame shows the opposite
-   > of, or that no frame ever shows. Captions are written *before* the action
-   > they introduce, so a caption normally appears a frame or two ahead of the
-   > picture that evidences it — that lead is by design, and a caption still
-   > waiting for its evidence is not a contradiction. Report one only when its
-   > claim never arrives in any later frame, or when a later frame shows the
-   > opposite. Quote the caption and name the frames you checked.
-   > (4) VERDICT — CLEAR or UNCLEAR, on one question only: could you follow the
-   > story from the pictures? Anything you listed under (3) is reported there and
-   > judged elsewhere; it does not by itself make the verdict UNCLEAR. Say
-   > separately whether the demo is CONVINCING: did you see evidence of the
-   > claims on screen, or take the captions' word for it?
+   prints the sheet's path, the four questions **in the words they have to be
+   asked in**, and who owns which half of the reply. Dispatch a subagent told
+   NOTHING about the feature and paste them; do not retype the questions from
+   memory, because the clauses that read as redundant are the ones a review
+   round paid for.
 
-   **The verdict and the contradictions have different owners.** A narration
-   that misses the intended story, or UNCLEAR, is the storyboard's fault — fix
-   it and re-record, with a NEW subagent each round. A CONTRADICTIONS entry
-   may not be: check the app first. If the caption overstates the storyboard,
-   fix the caption; **if the app does not do what the caption says, the demo
-   has caught a bug** — that goes in the pull request, and into 6b when the
-   take declared `criteria=`. It is not a re-record, and deleting the beat or
-   softening the caption launders the finding the demo exists to deliver
-   ([reference/review.md](reference/review.md)). Ship on CLEAR. Reviewers
-   converge in ~2 rounds; cap at 3 and surface the rest to the user instead of
-   looping. Findings that need a different feature demoed are future demos.
+   Two things it says that decide what you do next. **A narration that misses
+   the story, or UNCLEAR, is the storyboard's fault** — re-record, with a NEW
+   subagent each round. **A CONTRADICTIONS entry may not be**: check the app,
+   and if the app does not do what the caption says, the demo has caught a bug
+   that goes in the pull request — softening the caption launders it
+   ([reference/review.md](reference/review.md)). Ship on CLEAR; cap at 3
+   rounds and surface the rest.
 
    **6b. Locate each clause in the frames (only when the take declared
    `criteria=`).** A *second* reader, run alongside the one above and never
@@ -624,20 +597,21 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
    prints a second block carrying the reader's findings. Both embed committed
    stills raw off GitHub at the head commit, and both name a file they cannot
    link rather than dropping it. Nothing under `review/` is committed.
-   **`demo.mp4` does not.** A video is
-   stale by the next change to the feature and bloats history permanently,
-   and anyone with the skill installed can regenerate it with
-   `uv run <demo folder>/record.py`. Gitignore `demo.mp4`, `*.seg.mp4`
-   segment parts, `*.seg.timeline.*`, `<demo folder>/frames/` (regenerated
-   from the two by `beat_frames(out_dir)` — anchor the pattern to the demo
-   folder rather than writing a bare `frames/`, which matches a directory
-   of that name anywhere in the repo), `.tts/` narration caches,
-   `<demo folder>/review/`, and
-   `<demo folder>/evidence/` — the last two are **working files**, inputs to
-   a review that happens once, and the file table at the top of this skill
-   says so in the same column that says the mp4 is not committed. `evidence/`
-   has the stronger reason of the two: it is greppable plaintext of a real
-   app's DOM, and `timeline.md` is what a reader six months from now gets
+   **`demo.mp4` does not**, and neither does anything else one run wrote. A
+   video is stale by the next change to the feature and bloats history
+   permanently, and anyone with the skill installed can regenerate it with
+   `uv run <demo folder>/record.py`.
+
+   ```sh
+   <skill dir>/scripts/demo-gitignore <demo folder>           # the lines
+   <skill dir>/scripts/demo-gitignore <demo folder> --check   # ask git
+   ```
+
+   `frames/`, `review/` and `evidence/` have to be anchored to the demo folder
+   — bare, they ignore every directory of that name in the repository — and
+   the command does that for you. `--check` asks git, and writes nothing.
+   `evidence/` has the strongest reason of the three: it is greppable
+   plaintext of a real app's DOM
    ([reference/review.md](reference/review.md)).
 
    To put the demo in front of a reviewer, drag `demo.mp4` into a PR
@@ -709,8 +683,9 @@ terminal demo takes, and the gotchas — pagers, echo, prompts that never return
 The skill is self-contained: this file, the `reference/` directory it links
 into, the `helpers/demo_recording/` package, `ensure.sh` at the skill root,
 `scripts/demo-rehearse` (the step-2.5 gate), `scripts/demo-caption-lint`
-(the step-5.5 caption check), `scripts/demo-grade` (step 6b),
-`scripts/demo-shots` (the stills block) and
+(the step-5.5 caption check), `scripts/demo-review` (step 6's questions),
+`scripts/demo-grade` (step 6b), `scripts/demo-shots` (the stills block),
+`scripts/demo-gitignore` (step 8) and
 `scripts/demo-target-guard` (the target classifier), the vendored `helpers/assets/xterm/` terminal assets, and
 `README.md`. Install it with the `skills` CLI — into the current project:
 

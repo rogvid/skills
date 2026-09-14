@@ -1,0 +1,120 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""The blind reader's questions for step 6, and the file to hand them.
+
+    <skill-dir>/scripts/demo-review <demo-dir>
+
+Prints two things: the path of the sheet a context-free reader is given, and
+the four questions to ask them, **in the words the questions have to be asked
+in**. Dispatch a subagent that has seen nothing about the feature, give it the
+sheet, and paste these questions.
+
+## Why this is a command and not a paragraph in SKILL.md
+
+The questions were an eighteen-line block quoted inside the always-loaded
+`SKILL.md`, which every caller of this skill paid for whether or not they ever
+reached step 6. They are also *exact*: each clause in them was added after a
+review round went wrong without it, and the caption-lead clause in question 3
+exists because readers kept filing a caption as a contradiction when it was
+simply one frame ahead of its evidence. Text an agent retypes from memory
+loses precisely those clauses, because they are the ones that read as
+redundant.
+
+Step 6b already had this shape — `demo-grade brief` writes the clause reader's
+brief — so the story reader gets it too.
+
+## What it checks before printing
+
+The sheet has to exist. A reviewer handed a path that is not there reports
+what they can see, which is nothing, and that reads like a finding about the
+demo. `frames/frames.md` is a working file: it is gitignored, and a fresh
+clone or a `stills_only=True` run does not have one. So this refuses rather
+than printing questions about a file nobody can open.
+
+## What it deliberately does not do
+
+It does not dispatch the reader, and it does not read the reply. Handing over
+the frames and *nothing else* is the property the whole pass rests on, and
+nothing in a script can enforce what an agent pastes alongside them — a
+command that appeared to manage the isolation would be claiming a guarantee it
+cannot make. It prints; the isolation is yours to keep.
+
+It also produces no verdict, and grades nothing.
+
+## Exit status
+
+`0` when the questions were printed. `2` when there is no sheet to hand over.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+#: The sheet a reader is given: one PNG per beat minus the repeats, embedded in
+#: order, with no caption text, no feature name and no storyboard.
+SHEET = Path("frames") / "frames.md"
+
+#: Asked in these words. The clauses that look redundant are the ones a review
+#: round paid for, so this is a fixed string and not a template.
+QUESTIONS = """\
+Read the frames in order and reply with:
+(1) NARRATION — the story as understood purely from the frames.
+(2) CONFUSIONS — anything unclear, unreadable, or that you could not follow.
+(3) CONTRADICTIONS — a caption whose claim a later frame shows the opposite
+of, or that no frame ever shows. Captions are written *before* the action
+they introduce, so a caption normally appears a frame or two ahead of the
+picture that evidences it — that lead is by design, and a caption still
+waiting for its evidence is not a contradiction. Report one only when its
+claim never arrives in any later frame, or when a later frame shows the
+opposite. Quote the caption and name the frames you checked.
+(4) VERDICT — CLEAR or UNCLEAR, on one question only: could you follow the
+story from the pictures? Anything you listed under (3) is reported there and
+judged elsewhere; it does not by itself make the verdict UNCLEAR. Say
+separately whether the demo is CONVINCING: did you see evidence of the
+claims on screen, or take the captions' word for it?"""
+
+#: Who owns which half of the reply. Printed with the questions because the
+#: mistake it prevents is made *after* the reader answers, by the agent reading
+#: the answer: a CONTRADICTIONS entry is not automatically the storyboard's to
+#: fix, and softening a caption the app disagrees with launders the finding the
+#: demo exists to deliver.
+OWNERS = """\
+Reading the reply: NARRATION missing the intended story, or UNCLEAR, is the
+storyboard's fault — fix it and re-record, with a NEW reader each round. A
+CONTRADICTIONS entry may not be: check the app first. If the caption overstates
+the storyboard, fix the caption; if the app does not do what the caption says,
+the demo has caught a bug — that goes in the pull request, not into a softened
+caption. Ship on CLEAR. Cap at 3 rounds and surface the rest."""
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("demo", help="the demo folder (the one holding record.py)")
+    args = ap.parse_args(argv)
+
+    sheet = Path(args.demo) / SHEET
+    if not sheet.is_file():
+        print(
+            f"no sheet to hand a reviewer: {sheet} does not exist. It is a "
+            f"working file — gitignored, and not written by a stills-only "
+            f"run. Record the take, or regenerate it with "
+            f"`beat_frames(Path({args.demo!r}))`.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Hand the reader this file, and nothing else:\n\n    {sheet}\n")
+    print("Ask, in these words:\n")
+    print(QUESTIONS)
+    print()
+    print(OWNERS)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
