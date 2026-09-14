@@ -1550,7 +1550,7 @@ def self_test() -> int:
     if bad:
         print(f"\n{bad} guard(s) did not hold: this command cannot be trusted.")
         return 1
-    print("\nOne pin, one file set, one command: tests/lint runs exactly what CI runs.")
+    print("\nOne pin, one file set, one command: ruff at the version ci.yml pins.")
     return 0
 
 

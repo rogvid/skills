@@ -146,16 +146,16 @@ Two rules:
   undo the break. Confirm the injection landed — make the harness refuse to
   proceed unless its pattern matched exactly once.
 
-  **This is now your job locally, not CI's on the branch.** `tests/unit
-  --fault-inject` (132 s) and `tests/ci-unit --fault-inject` (298 s) run on
-  merge to `main`, not on a pull request — they were 430 s of a 750 s job set
-  whose actual tests cost 9 s. What runs on the branch, and pre-commit, is
-  `--anchors`: every injection's pattern still matches its file exactly once
-  and still names tests that exist, in under a second. That catches a stale
-  anchor, which is the failure the manifest actually has. It does **not**
-  catch an assertion that stopped grading its subject. So when you add or
-  change an injection, run the driver yourself and put its output in the pull
-  request; a green branch no longer says you did.
+  **This is your job locally. Nothing runs it for you.** `mise run
+  fault-inject` is `tests/unit --fault-inject` (132 s) and `tests/ci-unit
+  --fault-inject` (298 s); `mise run anchors` is the second-long sweep that
+  every injection's pattern still matches its file exactly once and still
+  names tests that exist. Neither runs in CI and neither is a git hook - see
+  the section below for why. The cheap one catches a stale anchor, which is
+  the failure the manifest actually has; it does **not** catch an assertion
+  that stopped grading its subject. So when you add or change an injection,
+  run the driver yourself and put its output in the pull request. A green
+  branch says nothing about it, because a branch is green either way.
 - **Reviewing: answer only "does this meet its stated acceptance criterion, and
   does it regress anything."** Everything else genuine that you notice goes in
   the PR body as a stated limit, or into an issue with its measurement. It does
@@ -166,8 +166,8 @@ something, makes an artifact lie, or adds an assertion that cannot fail for the
 reason it claims. Merge when the blocking list clears; file the rest.
 
 The skill's catalogue of *measurements that grade nothing* is the reviewer's
-checklist. Every entry in it came from a change in this repo that had green CI
-and an honest author.
+checklist. Every entry in it came from a change in this repo that had green
+checks and an honest author.
 
 ### A change to a rendered frame runs `tests/pixel` first
 
@@ -178,8 +178,9 @@ spotlight, framing. Before such a change opens its pull request, run
 that changed on purpose, attach `--dump` frames from before and after.
 
 The loop takes no lock, and a warm run measures ~2 s, so not running it is
-the odd choice. It is the iteration loop, not the gate — `tests/smoke` in CI
-stays the gate.
+the odd choice. It is the iteration loop; `mise run smoke` is the slower,
+more complete reader of the same frames, and you run that one too before you
+call a chrome change done.
 
 ### Where an eval replaces the injections
 
@@ -224,31 +225,62 @@ with no expected misses is not a measurement, and the requirement is not met by
 editing an `expected.json` until it agrees with a result — a corpus that can
 only agree with itself measures nothing.
 
-## Setting up, and the checks that run before a commit
+## Setting up, and who decides when a check runs
 
 ```sh
-mise install        # uv, prek, gitleaks
-mise run setup      # installs the git hooks
+mise run bootstrap  # uv, prek, gitleaks, and the git hooks
 ```
 
-`prek` runs the hooks. **Every one of them shells out to the command CI runs**
-— `tests/lint`, `tests/typecheck`, `tests/unit`, `tests/ci-unit`, both
-`--anchors` sweeps, and the shellcheck / actionlint invocations `ci.yml` spells
-out. None re-implements a check and none names a tool version, because the repo
-has exactly one pin per tool and the scripts read it out of `ci.yml` as text
-(#189). A hook that called `ruff` or `mypy` itself would be the second pin;
-`tests/lint --self-test` and `tests/typecheck --self-test` refuse one.
+`mise run <task>` installs the `[tools]` block on its own, so `bootstrap` only
+does the two things mise cannot infer: it installs the git hooks, and it
+**reports** what it deliberately does not install - ffmpeg and a Chromium
+build. Neither is needed by `check`; both are needed by every recording task
+(`smoke`, `smoke-full`, `smoke-inject`, `pixel`, `ticket-queue`). It prints the
+install command for whichever is missing, because without that those tasks fail
+minutes into a recording with an error that never mentions a browser.
 
-The pre-commit set measures **~7 s** over the whole tree. What needs the
-network runs on pre-push instead (`tests/lint --issues`), and what needs a
-browser (`tests/smoke`, `tests/pixel`) is not a hook at all — a hook people
-disable is worse than no hook.
+The name is mise's own convention: `mise bootstrap`, the machine-level command,
+finishes by running a task called `bootstrap` if the config defines one.
 
-`mise run check` is the same set by hand. `mise tasks` lists the rest
-(`pixel`, `smoke`, `budget`).
+**If a `mise run` here dies naming a tool this repo never mentions**, the tool
+is in your *global* config and has no build for your platform - mise resolves
+the merged config and installs all of it. Fix it where it lives, by gating the
+tool to the platforms it actually ships for, rather than by disabling
+auto-install here:
 
-Bypassing a hook is `git commit --no-verify`; if you do, say so in the pull
-request, because CI will ask the same question a few minutes later.
+```toml
+# ~/.config/mise/config.toml
+age-plugin-yubikey = { version = "latest", os = ["macos", "windows"] }
+```
+
+**This repo is a set of skills, not a service, and it is deliberately not
+gated like one.** Two things run without being asked:
+
+- **GitHub runs one job**, `secrets` in `.github/workflows/ci.yml`: gitleaks
+  over the pushed range. A leaked credential is the one failure that cannot be
+  undone by running something later, which is the whole reason it is automatic.
+- **The git hooks run two things**, `tests/lint` and gitleaks over the staged
+  diff, together about a second. Bypass with `git commit --no-verify`; nothing
+  downstream will ask the same question, so say so in the pull request.
+
+Everything else is a `mise` task and runs when **you** decide the change is
+worth the time - `mise tasks` is the list. `mise run check` is the fast gate by
+hand (lint, typecheck, both unit suites, ~7 s); past that, `anchors`,
+`fault-inject`, `workflows`, `issues`, `pixel`, `smoke`, `smoke-full`,
+`smoke-inject`, `ticket-queue`, `budget`.
+
+The consequence, stated rather than implied: **a green branch here means the
+secret scan passed and nothing else.** Whatever else you claim about a change,
+you ran yourself, and the output belongs in the pull request. That is the
+trade - the author picks the evidence that fits the change instead of every
+change paying for every check.
+
+No task and no hook names a tool version. The repo has exactly one pin per
+tool, on the `RUFF_VERSION:` / `MYPY_VERSION:` lines of `ci.yml`, and
+`tests/lint` and `tests/typecheck` read that file as text (#189). Anything
+calling `ruff` or `mypy` directly would be the second pin; the two
+`--self-test` modes refuse one. Those two `env:` lines are why `ci.yml` still
+carries an `env:` block no job uses.
 
 ## Housekeeping
 

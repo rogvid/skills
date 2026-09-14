@@ -1,5 +1,19 @@
 # tests
 
+> **Nothing in this directory runs automatically.** GitHub runs one job for this
+> repository, gitleaks; the git hooks run `tests/lint` and gitleaks over the
+> staged diff. Every suite, driver and manifest described below is a `mise`
+> task you invoke when you decide the change is worth the time - `mise tasks`
+> is the list, `mise run check` is the fast gate.
+>
+> **This document still says "per push", "nightly" and "on merge" in many
+> places, and those sentences are history, not schedule.** They are kept
+> because the *measurements* they justify are still true and still the reason
+> each arm is split the way it is: what a take costs, why `--core` is a list
+> and `--cheap` was a complement, which assertion an injection is aimed at.
+> Read them as "this is what the split was sized for", never as "this is what
+> will run on your branch". What runs on your branch is gitleaks.
+
 Three suites. Two of them are fast and one is not, and which is which is the
 whole of how this directory is organised.
 
@@ -136,7 +150,7 @@ seen red under a planted recorder defect in #351's pull request.
 ```
 tests/
 ├── smoke              # the recorder, end to end (~10 min, needs Chromium + ffmpeg)
-├── smoke-inject       # proves smoke's assertions can still fail (~56 min, nightly)
+├── smoke-inject       # proves smoke's assertions can still fail (~56 min, on demand)
 ├── unit               # the browser-free half (~4 s, 568 tests, no dependencies)
 ├── ci-unit            # the .github/scripts helpers, and the two skill
 │                      #   CLIs whose output a person pastes (~2.5 s)
@@ -163,11 +177,11 @@ and 11 injections against `web/app.js`, its stylesheet and the seeded data. On a
 16-core developer box that is 3.6 s and 87 s; on a CI runner the whole job,
 Chromium install included, measured **2m08s**. It belongs beside the app rather
 than here because it grades *that application*, not the recorder.
-`.github/workflows/ticket-queue.yml` runs both halves on any push touching
-`examples/ticket-queue/**` and nightly
-([#182](https://github.com/rogvid/skills/issues/182)); before that workflow
-existed nothing ran either half, so its injections graded the change that
-introduced them and nothing after it.
+`mise run ticket-queue` runs the suite; `./test --fault-inject` inside the
+example runs the manifest. Neither runs in CI, so the caution
+[#182](https://github.com/rogvid/skills/issues/182) recorded applies again by
+choice rather than by oversight: run them when you change `web/app.js`, its
+stylesheet or the seeded data, because nothing else will.
 
 Takes: `web/` and `terminal/` (the two media), the determinism pair, the
 problem takes, `segments/` — one demo recorded in two parts and joined with
@@ -541,13 +555,17 @@ A whole run is **427 s** on this box and three arms are 74% of it:
 `--terminal-only` (186 s), `--content-only` (148 s) and `--web-only` (123 s).
 Since #61, CI does not record those three on every push.
 
-| when | what CI runs | job in `ci.yml` |
+| what | how to run it | cost |
 |---|---|---|
-| every pull-request commit, and every push to `main` | `tests/smoke --core` | `smoke (core arms, every push)` |
-| merge to `main`, or a pull request labelled `smoke-full` | `tests/smoke`, the whole suite | `smoke (everything the core arms leave out)` |
+| the core arms - the cheap, high-value list | `mise run smoke` | ~84 s on this box |
+| the whole suite | `mise run smoke-full` | 427 s on this box |
 
-**`--cheap` is no longer what CI runs**, and the rest of this section is kept as
-the record of why. The complement grew to 22 takes and a measured 300 s on a
+Neither runs in CI. `--core` is the list to reach for while iterating; the
+whole suite is what to run before you call a recorder change done. The split
+below is why the list contains what it does.
+
+**`--cheap` is no longer the list to reach for**, and the rest of this section
+is kept as the record of why. The complement grew to 22 takes and a measured 300 s on a
 runner, which is what a reviewer waits through before they can look at the
 change at all. `--core` replaced it: see *The second cut* below.
 
@@ -2484,11 +2502,11 @@ measured against a real run:
 **40.3 minutes** was `tests/smoke-inject` itself and about a minute was the
 checkout and the ffmpeg and Chromium installs. So a CI runner costs about
 **1.16x** the estimate above; the 25-entry manifest, measured the same way on
-2026-08-01, gives 1.09x. `.github/workflows/smoke-inject.yml` sets its
-`timeout-minutes` from that measurement and says so
-([#191](https://github.com/rogvid/skills/issues/191)) — the 45 it replaced came
-from a rule that assumed 2x and would have predicted ~71 minutes for a manifest
-that costs 41.
+2026-08-01, gives 1.09x. The nightly workflow that produced those numbers is
+gone - the manifest is `mise run smoke-inject` now, on a box you are sitting at
+- but the 1.16x is kept because it is what any future estimate off the local
+figures has to be multiplied by
+([#191](https://github.com/rogvid/skills/issues/191)).
 
 Every number in this section is read back out of this file and compared against
 the manifest by `tests/smoke-inject --self-test`, which runs on every push. It
@@ -2686,19 +2704,23 @@ paragraph whose job is to say what this manifest does not cover.
 
 ### When it runs
 
-- **Every push** — `tests/smoke-inject --self-test`, in ci.yml's `unit` job. It
-  records nothing and costs nothing, and it is what stops the harness itself
-  from reporting PASS on no evidence: each guard is handed the input it exists
-  to refuse and has to refuse it. It also reads the figures above back out of
-  this file and compares them with the manifest, so a stale count here is a red
-  run and not a discovery.
-- **Nightly, and on demand** — the whole manifest, in
-  `.github/workflows/smoke-inject.yml`. Not per-push: CI already pays ~10
-  minutes for `smoke` on every commit, and what rots here is an *assertion*,
-  which rots over weeks rather than commits.
-- **On a pull request labelled `fault-inject`** — for the diffs where an
-  assertion can quietly stop grading: `tests/smoke`, `content.py`,
-  `coverage.py`, or anything that changes what the recorder measures.
+Nothing runs it for you. Both halves are yours to invoke, and they are very
+differently priced:
+
+- **`tests/smoke-inject --self-test`** — free. It records nothing, and it is
+  what stops the harness itself from reporting PASS on no evidence: each guard
+  is handed the input it exists to refuse and has to refuse it. It also reads
+  the figures above back out of this file and compares them with the manifest,
+  so a stale count here fails instead of being discovered. Cheap enough that
+  there is no reason to skip it when you touch this file.
+- **`mise run smoke-inject`** — the whole manifest, ~40 minutes of real
+  recording. What it answers is "can these assertions still fail", and that
+  rots over weeks rather than commits, so run it when you have changed an
+  assertion, when the manifest has sat untouched for a while, or when the diff
+  is the kind where an assertion can quietly stop grading: `tests/smoke`,
+  `content.py`, `coverage.py`, or anything that changes what the recorder
+  measures. Nothing runs it for you on a pull request anymore - see "Setting
+  up, and who decides when a check runs" in `AGENTS.md`.
 
 ### Registering an entry
 

@@ -2496,7 +2496,7 @@ def readme_claims() -> list[tuple[str, str, tuple[str, ...]]]:
         (
             "the tree diagram's cost for smoke-inject",
             r"smoke-inject[ ]+# proves smoke's assertions can still fail "
-            r"\(~(\d+) min, nightly\)",
+            r"\(~(\d+) min, on demand\)",
             (f"{cost / 60:.0f}",),
         ),
         (

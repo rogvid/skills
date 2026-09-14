@@ -142,7 +142,7 @@ def self_test() -> int:
         else:
             print(f"ACCEPTED {name} — the pin guard is decorative")
             return 1
-    print("\nOne pin, one command: tests/typecheck runs exactly what CI runs.")
+    print("\nOne pin, one command: this is mypy at the version ci.yml names.")
     return 0
 
 

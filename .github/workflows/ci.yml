@@ -1,14 +1,20 @@
 name: CI
 
+# **One job.** This repository is a set of skills, not a service, and the
+# checks that used to live here - lint, typecheck, two unit suites, their
+# fault-injection drivers, actionlint, and the smoke recorder - all answer
+# questions their author can ask when they want the answer. They are still
+# here, in `tests/`, behind `mise run check` and the tasks `mise tasks` lists.
+# What changed is who decides when they run.
+#
+# A leaked credential is the exception: it is the one failure that cannot be
+# undone by running something later, so it is the one thing that still runs
+# without being asked.
+
 on:
   push:
     branches: [main]
-  # `labeled` is here for one job: `smoke-full` below runs the three expensive
-  # arms on a pull request that asks for them by label, and without this event
-  # the label would only take effect on the next commit. The cost is that
-  # labelling a pull request re-runs the cheap jobs too, which is seconds.
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -18,228 +24,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned so a tool release never turns a green branch red on its own.
+  # **Read as text, not used by any step here.** `tests/lint` and
+  # `tests/typecheck` parse these two lines out of this file so the repo has
+  # exactly one pin per tool and a local run is the pinned version - issue #189
+  # is what a second pin cost. Both scripts refuse a missing, duplicated or
+  # unpinned line, so deleting this block breaks them; change a version here.
   RUFF_VERSION: "0.16.1"
   MYPY_VERSION: "1.18.2"
 
 jobs:
-  lint:
-    name: lint (ruff, shellcheck)
-    runs-on: ubuntu-latest
-    # `tests/lint --issues` reads the tracker; the workflow-level default is
-    # `contents: read` alone, which would give it a token that cannot list one.
-    permissions:
-      contents: read
-      issues: read
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      # The guards on the pin: that RUFF_VERSION above is the only one, that
-      # tests/lint reads it rather than remembering a version, and that no
-      # workflow reaches ruff any other way.
-      #
-      # And the guards on the *file set*, which the pin says nothing about
-      # (#219): this plants a throwaway checkout where agent worktrees land,
-      # plus a control file where nothing is ignored, and requires the first to
-      # move nothing and the second to move exactly one file. It also requires
-      # every PEP 723 executable in the tree to be inside what ruff reads, which
-      # is what `examples/*/test` was not (#212). Four cached ruff runs, ~0.3 s.
-      - name: tests/lint --self-test
-        run: tests/lint --self-test
-
-      # ruff, at RUFF_VERSION above — which tests/lint parses out of this file,
-      # so `tests/lint` locally is this step, at this version. Running ruff
-      # here by hand instead would be a second pin; issue #189 is what that
-      # cost, and tests/lint --self-test above refuses it.
-      #
-      # This step also compiles every ```python fence in the tracked Markdown.
-      # ruff cannot: its checker does not read `.md` at any version, and its
-      # formatter reads a fence without validating it — `def f(:` comes back
-      # "1 file already formatted", exit 0 (#211).
-      #
-      # And it resolves every repo-shaped path the *shipped* documents name,
-      # which is a claim about the installed skill rather than about this
-      # checkout: `npx skills add` copies `skills/<name>/` and nothing else, so
-      # a reference document naming `tests/smoke` is telling its reader to open
-      # a file they do not have. Offline, hence this step and not the one below.
-      - name: ruff check + ruff format --check + doc fences + shipped pointers
-        run: tests/lint --github
-
-      # The other half of the same question, split off because it is the only
-      # thing in this job that needs the network: an issue reference presented
-      # as pending work must be an issue that is still open. Twelve "Tracked in
-      # #N" pointers in this repo all resolved to closed issues, a defect filed
-      # and fixed once already as #209 — a reader is told somebody is on it
-      # when nobody is. One `gh issue list` call and a regex sweep, ~2 s.
-      - name: tests/lint --issues
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: tests/lint --issues --github
-
-      # shellcheck comes from PyPI rather than apt so this is the same binary
-      # a contributor gets from the same command locally.
-      - name: shellcheck the skills' shell scripts
-        run: |
-          find skills -name '*.sh' -print0 |
-            xargs -0 -r uv run --with shellcheck-py shellcheck --severity=style
-
-  # The demo-video workflow is the one deliverable in this repo that CI cannot
-  # exercise by running it — GitHub is the only thing that executes a workflow.
-  # actionlint is what covers the gap: it type-checks every `${{ }}` expression
-  # against the contexts actually available and runs shellcheck over each
-  # `run:` block, which is where the two classes of bug that bit this workflow
-  # during development live (a `[ -f x ] && cp` that exits under `set -e`, and
-  # a step reading an output that a skipped step never wrote).
-  workflows:
-    name: workflows (actionlint)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      # From PyPI for the same reason shellcheck is above: one command, the
-      # same binary a contributor gets locally.
-      - name: actionlint
-        run: |
-          uv run --no-project --with actionlint-py --with shellcheck-py \
-            actionlint .github/workflows/*.yml
-
-  ci-unit:
-    name: unit (demo-video CI helpers)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: tests/ci-unit
-        run: tests/ci-unit
-
-      # The cheap half of the question below, and the half that has actually
-      # caught something: every injection still matches its file exactly once
-      # and still names tests this suite defines. A rename or a reflow is what
-      # goes stale, and it goes stale on a branch — so this runs on the branch,
-      # in a fifth of a second.
-      - name: tests/ci-unit --anchors
-        run: tests/ci-unit --anchors
-
-      # An assertion nobody has watched fail is a claim, not a check. This
-      # breaks each helper in a named way and requires the tests that watch it
-      # to go red; it aborts rather than passing if an injection fails to land.
-      #
-      # On merge, not on every push: it re-runs the suite once per injection,
-      # which measured **298 s** against the 2 s the suite itself costs. A
-      # pull request gets `--anchors` above instead. What that trades away is
-      # written down rather than implied: between a pull request opening and
-      # its merge, nothing proves these 135 assertions can still fail — only
-      # that they would still be *applied*. An assertion that stopped grading
-      # its subject reaches `main` and is caught there.
-      - name: tests/ci-unit --fault-inject
-        if: github.event_name != 'pull_request'
-        run: tests/ci-unit --fault-inject
-
-  # The recorder's own fast job. Everything it grades is a function of
-  # documents and values — the coverage report, the timeline's two renderings,
-  # the content and opening warnings, the merge a stitch performs — so it needs
-  # neither a browser nor ffmpeg and finishes in about a second.
-  #
-  # It exists because `smoke` is the recorder's only other check and costs ten
-  # minutes under an exclusive lock, which is why #136 found the injection
-  # manifest executed for the 720-line suite and written down as prose for the
-  # 12,369-line one. At 0.07s a run, the discipline is affordable here.
-  unit:
-    name: unit (demo-video recorder)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      # No `--with playwright`, deliberately: if this job ever needs it, the
-      # import boundary issue #139 restored has been broken again, and this
-      # step is what says so.
-      - name: tests/unit
-        run: tests/unit
-
-      # See the twin in `ci-unit` above for the reasoning. 419 injections,
-      # 0.7 s, and it is what catches the manifest going stale under a
-      # refactor — which is the failure this manifest actually has.
-      - name: tests/unit --anchors
-        run: tests/unit --anchors
-
-      # On merge, not on every push: **132 s**, against 7 s for the suite it
-      # is proving. The stated cost of that: a pull request is never told
-      # these 419 assertions can still fail, only that they still land.
-      - name: tests/unit --fault-inject
-        if: github.event_name != 'pull_request'
-        run: tests/unit --fault-inject
-
-      # `tests/smoke`'s injection manifest costs ~32 minutes of recording
-      # (`tests/smoke-inject --list`) and runs nightly
-      # (.github/workflows/smoke-inject.yml). Its *guards* cost nothing and
-      # belong on every push: this proves the harness still aborts on an
-      # injection that would not land, still refuses an expected failure no
-      # named assertion can print, and still reads a red suite that never
-      # named the assertion as a miss. A harness that reports PASS on no
-      # evidence would certify the whole smoke suite, so it is checked here
-      # rather than only where it runs.
-      #
-      # It also reads tests/README.md's figures about the manifest back out of
-      # the file and compares them with what the manifest computes (#184), so
-      # the next drift fails this step instead of waiting to be noticed.
-      - name: tests/smoke-inject --self-test
-        run: tests/smoke-inject --self-test
-
-      # A warning, not a gate — hence `continue-on-error`. SKILL.md's length is
-      # a cost every caller pays on every invocation, so it is worth saying out
-      # loud; but whether a paragraph earns its place in the always-loaded file
-      # is a judgement its author is allowed to make, and a line count should
-      # not turn a pull request red. It still exits non-zero when it is over,
-      # so the annotation appears and the number stays honest.
-      - name: SKILL.md context budget (advisory)
-        continue-on-error: true
-        run: tests/unit --budget
-
-  typecheck:
-    name: typecheck (mypy)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      # Through `tests/typecheck`, not by hand, for the reason the ruff step
-      # above gives: the script reads MYPY_VERSION out of this file as text,
-      # so a contributor's local run is this step at this version. A `run:`
-      # line invoking mypy directly would carry its own — `tests/typecheck
-      # --self-test` refuses one.
-      #
-      # Settings live in mypy.ini and are deliberately permissive — see the
-      # comments there for what to ratchet up and when.
-      - name: tests/typecheck --self-test
-        run: tests/typecheck --self-test
-
-      - name: mypy
-        run: tests/typecheck
-
   secrets:
     name: secrets (gitleaks)
     runs-on: ubuntu-latest
@@ -256,137 +49,6 @@ jobs:
 
       # Config is .gitleaks.toml at the repo root: the default ruleset plus one
       # narrow path allowlist for vendored xterm.js.
-      #
-      # This job stays after #138, deliberately. #138 removed demo-video's
-      # ability to hide a secret *in a recording*; this scan is about a real
-      # credential reaching *the repository*, which is a different thing and
-      # costs ten seconds. The fixture's fake keys are gone, so the regex
-      # allowlist that existed for them is gone too — see .gitleaks.toml.
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # The per-pull-request half of `tests/smoke`, and the second time this job
-  # has been narrowed. #61 split it into `--cheap`, a *complement* — every
-  # phase an arm outside the three expensive ones reaches. A complement has no
-  # ceiling: it grew to 22 takes and a measured 300 s without anybody choosing
-  # that, and 300 s on the critical path is what a reviewer waits through
-  # before they can even look at the change.
-  #
-  # `--core` is a *list*, enumerated in `tests/smokekit/constants.py` with the
-  # measured cost of each entry beside it, which is the only shape that can be
-  # scaled down. Six arms, 83.5 s on a 16-core box, ~97 s here. They buy the
-  # two ways a recording lies to its reader: a take that did not finish
-  # leaving something that reads as a success (`--failure-only`, six takes),
-  # and a take that should have been refused not being (`--strict-only`, both
-  # media). Plus the three artifacts a reviewer actually reads — coverage,
-  # evidence, stills.
-  #
-  # **What this job does not see** — written out rather than implied, because
-  # the last split's unstated half became #233. The wrapper pair and its
-  # geometry (#358), the console/exit-code reporting (#197), the polish takes
-  # (#110/#111), the light-interlude pair (#162/#163), the stitch (#7),
-  # narration (#157), determinism, and the eight check functions reachable
-  # only from `--web-only`, `--content-only` and `--terminal-only`. All of
-  # them run in `smoke-full` below, on merge to `main`. Rendered-frame
-  # geometry has a faster second reader in `tests/pixel` — 4.7 s warm, 60 s
-  # cold, which is why it is the local loop CLAUDE.md already sends a chrome
-  # change through and not a job here.
-  smoke:
-    name: smoke (core arms, every push)
-    runs-on: ubuntu-latest
-    # Measured one arm at a time on a 16-core developer box behind the machine
-    # lock: 0.2 + 2.1 + 11.6 + 15.5 + 7.3 + 46.8 = 83.5 s, and two
-    # back-to-back `--core` runs at **82.8 s and 82.2 s** confirm the sum. At
-    # the 1.16x a runner has measured against this box that is ~97 s, plus
-    # ~60 s of checkout, uv, ffmpeg and Chromium install.
-    #
-    # 6 is that with better than 2x headroom. The headroom is for runner
-    # variance, not for growth: `--core` is a named list, so nothing lands
-    # here without somebody adding it to `CORE_ARMS` and to the costs written
-    # beside it. If this job approaches the bar, re-measure the list.
-    timeout-minutes: 6
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-
-      - name: Install Chromium for Playwright
-        run: uv run --with playwright playwright install --with-deps chromium
-
-      # Writes outside the checkout, at a path the upload step below knows.
-      - name: Record the core arms
-        run: tests/smoke --core --out-dir "$RUNNER_TEMP/smoke-out"
-
-      # Only on failure: a green run's recordings are noise, a red run's are
-      # the only way to see what the recorder actually produced.
-      - name: Upload recordings for debugging
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-recordings
-          path: ${{ runner.temp }}/smoke-out
-          if-no-files-found: warn
-          retention-days: 7
-
-  # Everything `--core` above leaves out, on merge to `main` and on a pull
-  # request labelled `smoke-full`.
-  #
-  # **Why the whole suite and not the difference.** The arm flags are mutually
-  # exclusive, so "everything except the core" would be a dozen invocations
-  # that re-record each other's shared takes and cost more than one whole run.
-  # A whole run is cheaper *and* is the only invocation that grades the takes
-  # together, so this job runs `tests/smoke` with no flag. It re-records the
-  # core arms; that is the price of the cheaper option, and it is paid once
-  # per merge rather than on every push.
-  #
-  # **Why a label and not only a schedule.** A take that runs after the review
-  # is a take that fails after the review, which is the argument #61 was open
-  # against for months, and narrowing the push job to `--core` widens the
-  # window this label exists to close. Reach for it on any diff that touches
-  # the web or terminal recorder, the chrome, or `tests/smoke` itself.
-  smoke-full:
-    name: smoke (everything the core arms leave out)
-    # On a pull request only when it is labelled `smoke-full`. A push to `main`
-    # — which is what a merge is — always goes. Same shape as
-    # .github/workflows/smoke-inject.yml's `fault-inject` label.
-    if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'smoke-full')
-    runs-on: ubuntu-latest
-    # The 20 this job inherited from the undivided `smoke`, unchanged: it runs
-    # the same whole suite that number was set for (~7m30s on a runner).
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-
-      - name: Install Chromium for Playwright
-        run: uv run --with playwright playwright install --with-deps chromium
-
-      - name: Record every take, including the web and terminal demos
-        run: tests/smoke --out-dir "$RUNNER_TEMP/smoke-out"
-
-      - name: Upload recordings for debugging
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-full-recordings
-          path: ${{ runner.temp }}/smoke-out
-          if-no-files-found: warn
-          retention-days: 7
