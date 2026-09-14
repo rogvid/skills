@@ -108,7 +108,7 @@ def chrome_geometry(
     bar: int = CHROME_BAR_PX,
     band: int = CAPTION_BAND_PX,
     width_scale: float = 0.80,
-    height_scale: float = 2 / 3,
+    height_scale: float | None = 2 / 3,
     caption_overlay: bool = False,
 ) -> dict:
     """Where the window, the content slot and the caption band sit.
@@ -127,13 +127,27 @@ def chrome_geometry(
     inside the app rect — and "the app never shares a pixel with the caption"
     no longer holds.
 
+    `height_scale=None` sizes the slot so the window's margin to the frame is
+    the same on all four sides: the side margin `width_scale` leaves decides
+    the top and bottom ones too.
+
     The `app*`/`win*` keys deliberately match `Recorder._frame_geometry`'s,
     so `_content_rect` and every geometry consumer reads one shape.
     """
     appw = int(width * width_scale) & ~1
-    apph = int(height * height_scale) & ~1
     winw = appw + 2 * pad
-    winh = bar + pad + apph + (0 if caption_overlay else band) + pad
+    chrome_h = bar + 2 * pad + (0 if caption_overlay else band)
+    if height_scale is None:
+        margin = (width - winw) // 2
+        apph = (height - 2 * margin - chrome_h) & ~1
+        if apph <= 0:
+            raise ValueError(
+                f"a {width}x{height} viewport leaves no room for the app once "
+                f"the window keeps a {margin}px margin on every side"
+            )
+    else:
+        apph = int(height * height_scale) & ~1
+    winh = apph + chrome_h
     winx = (width - winw) // 2
     winy = (height - winh) // 2
     if winx < 0 or winy < 0:

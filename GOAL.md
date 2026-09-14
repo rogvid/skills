@@ -44,7 +44,8 @@ A human is pulled in only on `cannot tell`, or on disagreement.
 Watching a demo replaces reading the diff **for that one question only**.
 Anything else the change touches — a widened permission, a deleted check, a new
 dependency — is invisible to a demo and is still the diff's to answer. That
-sentence ships in the pull-request comment (`8bcd52e`) and must keep shipping.
+sentence ships in the pull-request body (`DIFF_LIMIT` in
+`.github/scripts/demo-pr-body`) and must keep shipping.
 
 It also grades whether the frames show the clause, **not** whether the clause was
 the right thing to build.

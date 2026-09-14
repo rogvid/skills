@@ -1084,14 +1084,13 @@ class _DemoBase:
             raw_scale = ",".join(str(part) for part in window_scale)
         else:
             raw_scale = str(window_scale)
+        height_scale: float | None
         if raw_scale is None:
             width_scale = 0.95
-            # The default height is coupled to the caption mode: 0.9 fills
-            # the frame when nothing else needs vertical room, but with the
-            # reserved band back on, bar + pads + a 0.9 slot + the band
-            # overflow any viewport (chrome_geometry would refuse the take).
-            # 0.85 is the largest even fit at 1920x1080 with the band.
-            height_scale = 0.9 if self._caption_overlay else 0.85
+            # None: chrome_geometry derives the height from the side margin,
+            # so the window sits with an equal margin on all four sides in
+            # either caption mode.
+            height_scale = None
         else:
             parts = [p.strip() for p in raw_scale.split(",")]
             if len(parts) == 1:
@@ -1103,7 +1102,7 @@ class _DemoBase:
                 raise RuntimeError(
                     f"DEMO_VIDEO_WINDOW_SCALE must be 'WIDTH_SCALE' or 'WIDTH_SCALE,HEIGHT_SCALE', got {raw_scale!r}"
                 )
-        if not (0 < width_scale <= 1 and 0 < height_scale <= 1):
+        if not (0 < width_scale <= 1 and (height_scale is None or 0 < height_scale <= 1)):
             raise RuntimeError(
                 f"DEMO_VIDEO_WINDOW_SCALE values must be in (0, 1], got {width_scale},{height_scale}"
             )

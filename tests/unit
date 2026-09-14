@@ -5814,6 +5814,36 @@ class WrapperChrome(unittest.TestCase):
             self.assertLessEqual(geom["winx"] + geom["winw"], width)
             self.assertLessEqual(geom["winy"] + geom["winh"], height)
 
+    def test_the_default_window_has_the_same_margin_on_all_four_sides(self):
+        # Read through each recorder's own defaults, not chrome_geometry's, so
+        # a medium that goes back to a fixed height fraction is red here. The
+        # terminal one keeps the reserved band, which is where the unequal
+        # default left a 1px top margin at 1920x1080.
+        for cls in (Recorder, TerminalRecorder):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            for width, height in ((1280, 720), (1920, 1080)):
+                with target_env(), contextlib.redirect_stderr(io.StringIO()):
+                    rec = cls(tmp.name, evidence=False, viewport=(width, height))
+                geom = chrome_geometry(
+                    width,
+                    height,
+                    width_scale=rec._window_scale[0],
+                    height_scale=rec._window_scale[1],
+                    caption_overlay=rec._caption_overlay,
+                )
+                margins = {
+                    "left": geom["winx"],
+                    "right": width - geom["winx"] - geom["winw"],
+                    "top": geom["winy"],
+                    "bottom": height - geom["winy"] - geom["winh"],
+                }
+                self.assertEqual(
+                    len(set(margins.values())),
+                    1,
+                    f"{cls.__name__} {width}x{height}: margins {margins}",
+                )
+
     def test_a_viewport_too_small_for_the_chrome_is_refused_with_the_floor(self):
         with self.assertRaises(ValueError) as caught:
             chrome_geometry(1280, 300)
@@ -7417,8 +7447,8 @@ class TerminalChrome(unittest.TestCase):
         # registered the near-full-bleed framing, and this test is about the
         # hold sitting on whatever rect the take actually uses. This medium
         # keeps the reserved band (a pill would ride the prompt line), and
-        # the band couples the height default down to 0.85.
-        geom = chrome_geometry(1920, 1080, width_scale=0.95, height_scale=0.85)
+        # the default height comes from the equal-margin rule.
+        geom = chrome_geometry(1920, 1080, width_scale=0.95, height_scale=None)
         hold = self.hold_scripts()[0]
         self.assertIn(TERM_WINDOW_BODY, hold)
         self.assertIn(f"left: {geom['appx']}px", hold)
