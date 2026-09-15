@@ -173,7 +173,8 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 import demo_recording.core as core_module  # noqa: E402
 import demo_recording.frames as frames_module  # noqa: E402
-from demo_recording.camera import camera_filter  # noqa: E402
+from demo_recording.camera import CAMERA_ZOOM, camera_filter  # noqa: E402
+from demo_recording.camera import _anchor as _camera_anchor  # noqa: E402
 from demo_recording.chrome import (  # noqa: E402
     chrome_geometry,
     chrome_html,
@@ -7321,12 +7322,49 @@ class CameraMove(unittest.TestCase):
         self.assertIn(f"{u}*{u}*(3-2*{u})", self.chain())
 
     def test_the_camera_centres_on_the_element_not_the_frame(self):
-        # rect x 500..780, y 250..310 in output px; at 2x source scale the
-        # centre is (1280.0, 560.0) in source pixels — not (iw/2, ih/2).
-        chain = self.chain()
-        self.assertIn("*clip(1280.0-iw/(2*zoom),0,iw-iw/zoom)", chain)
-        self.assertIn("*clip(560.0-ih/(2*zoom),0,ih-ih/zoom)", chain)
-        self.assertNotIn("iw/2-", chain)
+        # rect x 700..780, y 300..340 in output px; at 2x source scale the
+        # centre is (1480, 640) in source pixels. The held crop (2560/1.3 =
+        # 1969.2 wide) centred there starts at x 495.4, which it reaches by
+        # scaling about 495.4 / (2560 - 1969.2) * 2560 = 2146.7; y likewise
+        # 86.2 / 332.3 * 1440 = 373.3. A camera aimed at the frame's centre
+        # would scale about (1280.0, 720.0).
+        chain = self.chain([self.event(rect=[700, 300, 80, 40])])
+        self.assertIn("x='(between(time,1.000,3.000)*2146.7)*(1-1/zoom)'", chain)
+        self.assertIn("y='(between(time,1.000,3.000)*373.3)*(1-1/zoom)'", chain)
+
+    def test_the_push_holds_one_point_still_and_never_leaves_the_frame(self):
+        # The pan this replaced was the weight times the clamped centred
+        # offset: pan grew as weight squared and zoom as weight, so every push
+        # opened as a zoom into the top-left corner and swept across to the
+        # element, kinking where the clamp let go (measured: the fixed point
+        # slid 0 -> 714 px over a 0.5 s push). The chain's origin is
+        # `anchor*(1-1/zoom)`; graded here is that the anchor makes every
+        # zoom along the way a legal crop, and the held one the centred,
+        # clamped framing.
+        extent = 1280
+        for centre in (0.0, 40.0, 500.0, 640.0, 900.0, 1250.0, 1280.0):
+            anchor = _camera_anchor(centre, extent)
+            held = min(
+                max(centre - extent / (2 * CAMERA_ZOOM), 0.0),
+                extent - extent / CAMERA_ZOOM,
+            )
+            self.assertAlmostEqual(
+                anchor * (1 - 1 / CAMERA_ZOOM),
+                held,
+                places=6,
+                msg=f"centre {centre}: the held framing is not the element "
+                f"centred and clamped to the frame",
+            )
+            for step in range(101):
+                zoom = 1 + (CAMERA_ZOOM - 1) * step / 100
+                origin = anchor * (1 - 1 / zoom)
+                self.assertGreaterEqual(origin, -1e-9, f"centre {centre} z {zoom}")
+                self.assertLessEqual(
+                    origin,
+                    extent - extent / zoom + 1e-9,
+                    f"centre {centre} z {zoom}: the crop leaves the frame, "
+                    f"so zoompan clamps it and the move kinks",
+                )
 
     def test_overlapping_events_are_refused(self):
         with self.assertRaises(ValueError):
@@ -15733,12 +15771,13 @@ INJECTIONS = [
     (
         "a reference file stops being linked from SKILL.md",
         "SKILL.md",
-        # narration.md is the one file linked exactly once, so removing that
-        # link removes the only pointer to it. Targeting a file linked twice
-        # left the other link standing and the assertion stayed silent — which
-        # is what this manifest is for.
-        "| [reference/narration.md](reference/narration.md) | When",
-        "| reference/narration.md | When",
+        # limits.md is linked exactly once, so removing that link removes the
+        # only pointer to it. Targeting a file linked twice left the other
+        # link standing and the assertion stayed silent — which is what this
+        # manifest is for (narration.md was the target until SKILL.md gained
+        # its second link).
+        "| [reference/limits.md](reference/limits.md) | Before",
+        "| reference/limits.md | Before",
         ["SkillDocs.test_every_reference_file_is_linked_from_skill_md"],
     ),
     (
@@ -18735,8 +18774,22 @@ INJECTIONS = [
     (
         "the camera centres on the frame, not the element",
         "camera.py",
-        '        xs.append(f"{weight}*clip({cx:.1f}-iw/(2*zoom),0,iw-iw/zoom)")',
-        '        xs.append(f"{weight}*clip(iw/2-iw/(2*zoom),0,iw-iw/zoom)")',
+        '        ax.append(f"{during}*{_anchor(cx, src_w):.1f}")',
+        '        ax.append(f"{during}*{_anchor(src_w / 2, src_w):.1f}")',
+        ["CameraMove.test_the_camera_centres_on_the_element_not_the_frame"],
+    ),
+    (
+        "the push scales about the element's centre, and edge pushes clamp",
+        "camera.py",
+        "    return origin / reach * extent",
+        "    return centre",
+        ["CameraMove.test_the_push_holds_one_point_still_and_never_leaves_the_frame"],
+    ),
+    (
+        "the pan stops following the zoom, so the push slides",
+        "camera.py",
+        """    x = f"({'+'.join(ax)})*(1-1/zoom)\"""",
+        """    x = f"({'+'.join(ax)})*(zoom-1)\"""",
         ["CameraMove.test_the_camera_centres_on_the_element_not_the_frame"],
     ),
     (

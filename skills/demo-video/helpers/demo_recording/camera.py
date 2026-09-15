@@ -91,6 +91,30 @@ def _smoothstep(expr: str) -> str:
     return f"{u}*{u}*(3-2*{u})"
 
 
+def _anchor(centre: float, extent: int) -> float:
+    """The source point a push holds still, on one axis.
+
+    The held framing is the element centred, clamped so the crop stays in
+    the frame. A move towards it is smooth only if one point keeps its
+    place on screen for the whole push: crop origin `a*(1-1/zoom)` scales
+    about `a`, and every edge of the crop then travels monotonically from
+    the full frame to the held framing. Solving that for the held origin
+    gives `a`, which is always inside `0..extent`, so no zoom along the
+    way ever needs a clamp.
+
+    The pan this replaced was the weight times the clamped centred
+    offset: the pan grew as weight squared while the zoom grew as weight,
+    so every push opened as a zoom into the top-left corner and then swept
+    across to the element, with a kink where the clamp let go - measured
+    as the fixed point sliding from x=0 to x=714 px over a 0.5 s push.
+    """
+    reach = extent * (1 - 1 / CAMERA_ZOOM)
+    if reach <= 0:
+        return centre  # no push: zoom stays 1 and any anchor is the identity
+    origin = min(max(centre - extent / (2 * CAMERA_ZOOM), 0.0), reach)
+    return origin / reach * extent
+
+
 def camera_filter(
     events: list[dict],
     *,
@@ -113,11 +137,11 @@ def camera_filter(
     The chain is `fps` (PTS-normalize, see the module note) then one
     `zoompan` carrying every event: `z` is 1 plus the sum of each
     event's eased push — events do not overlap, so at most one term is
-    non-zero — and `x`/`y` are the same weights times each event's
-    clamped centred offset. A weight of 0 contributes a literal 0, so
-    between events the camera sits at z=1, x=0, y=0: the identity. The
-    offsets read `zoom`, zoompan's own per-frame value for this frame's
-    z, so the pan and the push stay one motion.
+    non-zero — and `x`/`y` scale about the open event's anchor (see
+    `_anchor`), picked by `between` over its interval. At z=1 the origin
+    is `a*0`, so between events the camera sits at x=0, y=0: the
+    identity. The origin reads `zoom`, zoompan's own per-frame value for
+    this frame's z, so the pan and the push stay one motion.
     """
     if not events:
         return None
@@ -147,22 +171,24 @@ def camera_filter(
     scale_y = src_h / out_h
     push = f"{CAMERA_ZOOM - 1:.2f}"
     zooms: list[str] = []
-    xs: list[str] = []
-    ys: list[str] = []
+    ax: list[str] = []
+    ay: list[str] = []
     for event in ordered:
         ease = (
             f"min((time-{event['t_start']:.3f})/{CAMERA_EASE_S},"
             f"({event['t_end']:.3f}-time)/{CAMERA_EASE_S})"
         )
-        weight = _smoothstep(ease)
+        zooms.append(_smoothstep(ease))
         cx = (event["rect"][0] + event["rect"][2] / 2) * scale_x
         cy = (event["rect"][1] + event["rect"][3] / 2) * scale_y
-        zooms.append(weight)
-        xs.append(f"{weight}*clip({cx:.1f}-iw/(2*zoom),0,iw-iw/zoom)")
-        ys.append(f"{weight}*clip({cy:.1f}-ih/(2*zoom),0,ih-ih/zoom)")
+        # Two events may share an instant at their boundary, where both
+        # `between`s are 1; the zoom is 1 there, so the sum multiplies 0.
+        during = f"between(time,{event['t_start']:.3f},{event['t_end']:.3f})"
+        ax.append(f"{during}*{_anchor(cx, src_w):.1f}")
+        ay.append(f"{during}*{_anchor(cy, src_h):.1f}")
     z = f"1+{push}*({'+'.join(zooms)})"
-    x = "+".join(xs)
-    y = "+".join(ys)
+    x = f"({'+'.join(ax)})*(1-1/zoom)"
+    y = f"({'+'.join(ay)})*(1-1/zoom)"
     return (
         f"fps={fps},"
         f"zoompan=z='{z}':x='{x}':y='{y}'"
