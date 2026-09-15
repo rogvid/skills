@@ -1902,7 +1902,12 @@ _EXAMPLES = Path(os.environ.get("UNIT_EXAMPLES", REPO / "examples"))
 # leave `demo-shots` documented only in `scripts/` and in reference/, where an
 # agent deciding how to hand a reviewer the pictures would never meet it —
 # which is the failure the budget's own preamble says a budget must not cause.
-SKILL_LINE_BUDGET = 634
+#
+# Reset 634 → 163 on 2026-09-15, when SKILL.md was rewritten demo-first
+# (~16,000 → ~4,650 tokens) and the ticket-verification workflow moved to
+# `demo-verify`. The file is now one sentence per line, so a line holds
+# more than it did; the budget is today's count, not a round number.
+SKILL_LINE_BUDGET = 163
 
 # `reference/` holding fewer than this is `reference/` being emptied, which
 # would make both assertions below hold trivially. Not a count of the files
@@ -1938,6 +1943,72 @@ def budget_report() -> int:
             file=sys.stderr,
         )
     return 1 if over else 0
+
+
+class DemoNew(unittest.TestCase):
+    """`scripts/demo-new` writes a storyboard that finds this skill.
+
+    The generated `_DEFAULT_SKILL_DIR` is evaluated, not string-matched: a
+    scaffold whose path merely looks right but resolves elsewhere is a first
+    run that dies with "skill not found".
+    """
+
+    CLI = SKILL_DIR / "scripts" / "demo-new"
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.CLI), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def scaffold(self, demo_dir: Path, *args: str) -> str:
+        done = self.run_cli(str(demo_dir), *args)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return (demo_dir / "record.py").read_text(encoding="utf-8")
+
+    def default_skill_dir(self, source: str, demo_dir: Path) -> Path:
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "_DEFAULT_SKILL_DIR"
+                for t in node.targets
+            ):
+                expr = ast.unparse(node.value)
+                return Path(eval(expr, {"HERE": demo_dir, "Path": Path})).resolve()
+        self.fail("record.py defines no _DEFAULT_SKILL_DIR")
+
+    def test_inside_this_repository_the_path_is_relative_and_resolves(self):
+        with tempfile.TemporaryDirectory(dir=REPO / "tests") as tmp:
+            demo = Path(tmp) / "demos" / "x"
+            source = self.scaffold(demo, "--url", "http://127.0.0.1:9")
+            self.assertIn('HERE / "', source)
+            self.assertEqual(self.default_skill_dir(source, demo), SKILL_DIR.resolve())
+            self.assertIn("from demo_recording import Recorder", source)
+            self.assertIn('base_url="http://127.0.0.1:9"', source)
+
+    def test_outside_any_repository_the_path_is_absolute_and_resolves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = Path(tmp) / "demo"
+            source = self.scaffold(demo, "--terminal")
+            self.assertNotIn('HERE / "', source)
+            self.assertEqual(self.default_skill_dir(source, demo), SKILL_DIR.resolve())
+            self.assertIn("from demo_recording import TerminalRecorder", source)
+
+    def test_an_existing_storyboard_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = Path(tmp) / "record.py"
+            record.write_text("keep me\n", encoding="utf-8")
+            done = self.run_cli(tmp)
+            self.assertEqual(done.returncode, 1)
+            self.assertEqual(record.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_a_terminal_demo_refuses_a_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            done = self.run_cli(tmp, "--terminal", "--url", "http://127.0.0.1:9")
+            self.assertEqual(done.returncode, 2)
+            self.assertFalse((Path(tmp) / "record.py").exists())
 
 
 class SkillDocs(unittest.TestCase):
@@ -4280,8 +4351,7 @@ MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
         "# heuristic that misses one. That argument once scoped a terminal verifier to",
     ),
     "SKILL.md": (
-        "- The tool has **no masking, no scrubbing and no redaction**. It does not hide",
-        "used to look like one was removed rather than improved. A masking system that",
+        "- The tool has **no masking, no scrubbing and no redaction**. Whatever reaches the screen is in the video, and a published video leaks forever.",
     ),
     "core.py": (
         "# The redaction verifier that used to run last was what this sequence",

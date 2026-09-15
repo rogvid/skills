@@ -166,6 +166,8 @@ demo-video/
 ├── README.md                      # this file — humans read this
 ├── ensure.sh                      # installs uv, restores exec bits — run once
 ├── scripts/
+│   ├── demo-new                   # writes a ready-to-run record.py into a
+│   │                              #   new demo folder; --terminal for a CLI
 │   ├── demo-rehearse              # the functional gate: storyboard, fast and
 │   │                              #   strict, before anything is recorded
 │   ├── demo-caption-lint          # captions' numbers and quoted strings,
@@ -173,7 +175,7 @@ demo-video/
 │   ├── demo-review                # the sheet to hand a blind reader, and the
 │   │                              #   four questions in the words to ask them
 │   ├── demo-grade                 # the blind reader's brief, and the verdict
-│   │                              #   comparing it with the ac= tags (step 6b)
+│   │                              #   comparing it with the ac= tags (demo-verify)
 │   ├── demo-shots                 # the take's stills as one pasteable block,
 │   │                              #   captions and ac= tags, grading nothing
 │   ├── demo-gitignore             # the working files a take writes, anchored

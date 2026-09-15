@@ -87,7 +87,7 @@ with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA) as rec:
 
     # The clause, in the ticket's own words. Taken down explicitly on the next
     # line — a card left up occludes everything after it and almost nothing
-    # notices (SKILL.md, "What this does not do").
+    # notices (reference/limits.md).
     rec.criterion("AC-1")
     rec.interlude("")
 

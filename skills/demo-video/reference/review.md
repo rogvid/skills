@@ -4,7 +4,7 @@
 
 # Reviewing a take: frames, evidence, and acceptance criteria
 
-> Read at step 6 of the Process — when handing a take to a reviewing agent, when reading `evidence/beat-NN.json`, or when recording against a ticket with `criteria=`.
+> Read when getting fresh eyes on a take — when handing a take to a reviewing agent, when reading `evidence/beat-NN.json`, or when recording against a ticket with `criteria=`.
 
 ## Review frames (`frames/`)
 
@@ -196,7 +196,7 @@ the note is worth reading before pasting.
 
 ## Why the comprehension review reports contradictions separately
 
-Step 6's reviewer answers four questions, not three, and the fourth — the
+The fresh-eyes reviewer (`scripts/demo-review`) answers four questions, not three, and the fourth — the
 CLEAR/UNCLEAR verdict — is deliberately narrowed to *could you follow the
 story*. Two failures made that necessary, and both are worth knowing about
 before you write the prompt differently.
@@ -351,7 +351,7 @@ every evidence file names its own `segment` and `index` internally anyway.
 ## Recording against a ticket (`coverage`)
 
 A demo can be perfectly clear and demonstrate the wrong thing. The fresh-agent
-review in step 6 answers *"is this story clear?"*; a review gate has to answer
+review (`scripts/demo-review`) answers *"is this story clear?"*; a review gate has to answer
 *"does this show what the ticket asked for?"*, which is a different question
 with a different answer.
 
@@ -569,7 +569,7 @@ text reached the page" is not "a human can read it" — a card that renders
 off-frame, clipped, or under an app overlay satisfies every assertion this
 skill's own suites make (they live in this repository, in `tests/`). That is a
 judgement about pixels, and it is answered the way this skill answers every
-such question: somebody watches the video (Process step 6).
+such question: somebody watches the video (the fresh-eyes review in SKILL.md's **Record, then look**).
 
 That is not a theoretical gap. This card was painted the same near-black on a
 web demo as on a terminal one from the day the recorder had two media until

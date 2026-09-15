@@ -32,7 +32,8 @@ Useful flags: `--list` (show without installing), `-g` (install globally to
 
 | Skill | What it does | Prerequisites | Install |
 |---|---|---|---|
-| [`demo-video`](skills/demo-video/) | Script, record, and verify a self-explanatory screen-recorded demo of a web app or a terminal program — CLI, REPL, or full-screen TUI (optionally with spoken narration and a written guide). | `uv`, `ffmpeg`; Chromium via Playwright (terminal demos are Unix-only) | `npx skills add rogvid/skills --skill demo-video` |
+| [`demo-video`](skills/demo-video/) | Record a polished, self-explanatory demo video of a web app or a terminal program — CLI, REPL, or full-screen TUI — from a short storyboard that re-records when the UI changes (optionally with spoken narration and a written guide). | `uv`, `ffmpeg`; Chromium via Playwright (terminal demos are Unix-only) | `npx skills add rogvid/skills --skill demo-video` |
+| [`demo-verify`](skills/demo-verify/) | Prove a change meets its ticket's acceptance criteria with a recorded demo, graded by a blind agent that never sees the diff. Built on `demo-video`'s recorder. | the `demo-video` skill | `npx skills add rogvid/skills --skill demo-verify` |
 | [`script-conventions`](skills/script-conventions/) | The house convention for shipping executable scripts inside a skill — PEP 723 `uv` scripts and the shared `ensure.sh` bootstrap. | none (Unix only) | `npx skills add rogvid/skills --skill script-conventions` |
 
 ## In development

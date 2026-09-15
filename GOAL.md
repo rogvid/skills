@@ -39,6 +39,9 @@ can never be.
 
 A human is pulled in only on `cannot tell`, or on disagreement.
 
+`demo-video` is the recorder, and stays usable for an ordinary demo on its own.
+The workflow that answers this question on top of it is `demo-verify`.
+
 ## What it explicitly does not own
 
 Watching a demo replaces reading the diff **for that one question only**.

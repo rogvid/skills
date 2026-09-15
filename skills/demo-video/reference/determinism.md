@@ -103,7 +103,7 @@ no matter what this section does:
 - **Server data.** Rows a backend returns, "5 minutes ago" rendered
   server-side, anything a background job wrote since the last take. Seed the
   state *before* recording and reset it between takes; storyboards are meant
-  to be idempotent (see the Process section of [SKILL.md](../SKILL.md), step 2).
+  to be idempotent (see **Writing the storyboard** in [SKILL.md](../SKILL.md)).
 - **Network timing.** Which of two requests lands first, whether a spinner is
   on screen long enough to be photographed, a chart that draws before or after
   its data arrives. `wait_for` a concrete element rather than a delay, and

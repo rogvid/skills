@@ -31,7 +31,7 @@ acceptance section.
 `strict=True` — console errors, failed requests and non-zero exits become a
 failing verdict instead of a note in the timeline — under one command that
 refuses an environment variable set to route around it. Nothing is polished
-and no take is recorded until it exits 0 (SKILL.md Process step 2.5); CI runs
+and no take is recorded until it exits 0 (SKILL.md, **Record, then look**); CI runs
 the same command before spending encoder minutes on a take.
 
 ## What it writes, and what it does not

@@ -7,7 +7,7 @@
 
     <skill-dir>/scripts/demo-caption-lint <demo folder>
 
-The cheap pre-filter over Process step 5 (#356): `evidence/beat-NN.json`
+The cheap pre-filter over reading a take's frames (#356): `evidence/beat-NN.json`
 holds the per-beat text of what was on screen and the timeline holds each
 beat's caption, so a caption claiming something no nearby screen ever said
 is findable without a model, for zero tokens, before the blind review round
@@ -36,7 +36,7 @@ Three states per claim, the `demo-ticket-check` shape:
 
 **Advisory by design**: exit 0 on every path a take can produce, however
 many findings — a lint that reddens on aria quirks trains people to delete
-it. Exit 2 is usage only. Findings are for the author to read before step 6,
+it. Exit 2 is usage only. Findings are for the author to read before the fresh-eyes review,
 not a gate behind them.
 
 Reads committed working files only (`timeline.json`, `evidence/`); it

@@ -96,7 +96,7 @@ with Recorder(HERE, base_url=BASE_URL, criteria=CRITERIA) as rec:
 
     # The picture #291 is about. Taken down explicitly on the line after the
     # still: a card left up occludes everything after it and almost nothing
-    # notices (SKILL.md, "What this does not do").
+    # notices (reference/limits.md).
     rec.criterion("AC-1")
     rec.shot("02-criterion-card", ac="AC-1")
     rec.interlude("")

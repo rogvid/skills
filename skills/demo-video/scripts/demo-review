@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""The blind reader's questions for step 6, and the file to hand them.
+"""The blind reader's questions for a fresh-eyes review, and the file to hand them.
 
     <skill-dir>/scripts/demo-review <demo-dir>
 
@@ -16,14 +16,14 @@ sheet, and paste these questions.
 
 The questions were an eighteen-line block quoted inside the always-loaded
 `SKILL.md`, which every caller of this skill paid for whether or not they ever
-reached step 6. They are also *exact*: each clause in them was added after a
+asked for a review. They are also *exact*: each clause in them was added after a
 review round went wrong without it, and the caption-lead clause in question 3
 exists because readers kept filing a caption as a contradiction when it was
 simply one frame ahead of its evidence. Text an agent retypes from memory
 loses precisely those clauses, because they are the ones that read as
 redundant.
 
-Step 6b already had this shape — `demo-grade brief` writes the clause reader's
+The clause reader already had this shape — `demo-grade brief` writes the clause reader's
 brief — so the story reader gets it too.
 
 ## What it checks before printing

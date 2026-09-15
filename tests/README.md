@@ -1033,7 +1033,7 @@ claims, and it deliberately claims very little:
 - **A re-run clears the previous run's frames**, and only those. `beat_frames()`
   is called a second time with a planted `beat-99.png` and a planted file it did
   not write: the first must be gone, the second must survive, and the frame list
-  must be identical. SKILL.md advertises the re-run and step 6 tells a reviewer
+  must be identical. SKILL.md advertises the re-run and the fresh-eyes review tells a reviewer
   to read the whole directory, so a storyboard that lost beats between runs
   must not leave plausible-looking frames from a demo that no longer exists.
 - **A single segment's timeline gets no frames — and only that.** Graded by
@@ -2117,8 +2117,8 @@ per clause and its beat numbers, and points every row at the wrong one.
   not "a human can read it": a card rendered off-frame, under an app overlay,
   or clipped by an over-long clause puts exactly the same text in exactly the
   same snapshot. That question is answered the way this skill answers every
-  question about how a recording looks — somebody watches the video (SKILL.md
-  Process step 6) — and the demo recorded for #280 is that answer for this
+  question about how a recording looks — somebody watches the video (the
+  fresh-eyes review, `scripts/demo-review`) — and the demo recorded for #280 is that answer for this
   verb.
 
   **Two pixel readings are taken** (issue #291), both across the card's own
@@ -3525,7 +3525,7 @@ knows is missing is worse than one that is openly absent.
   that must and must not be in each beat's capture. That is enough to catch an
   empty capture, a stale one, and a page that moved on — but whether an agent
   handed only `evidence/` could actually narrate the demo is the same
-  unautomatable question as `SKILL.md` step 6's fresh-agent review, and
+  unautomatable question as the fresh-eyes review (`scripts/demo-review`), and
   nothing here asks it.
 - **Nothing records with `evidence=False`.** The off switch, and the
   `DEMO_VIDEO_EVIDENCE=0` env var behind it, are exercised nowhere — every
@@ -3557,7 +3557,7 @@ knows is missing is worse than one that is openly absent.
   grades.
 - **Nothing checks that the demo is any *good*.** These are liveness checks.
   Pacing, caption wording, whether the story lands — that is what the
-  fresh-agent review in `SKILL.md` step 6 is for, and it is not automatable.
+  fresh-eyes review (`scripts/demo-review`) is for, and it is not automatable.
 - **The target guard classifies a configured host, and seven things about that
   are not graded anywhere.** `target.py` is applied by both recorders at
   construction and by `scripts/demo-target-guard` in CI. `tests/unit`'s

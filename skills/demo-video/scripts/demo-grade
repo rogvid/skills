@@ -591,7 +591,7 @@ def agreement_rule() -> dict:
     """The comparison rule, written into the artifact rather than implied.
 
     **Why a span and not a set.** A storyboard tags the beat where the caption
-    goes up, and SKILL.md's step 6 says captions are written before the action
+    goes up, and SKILL.md says captions are written before the action
     they introduce — so the screen catches up a beat or two later, and the
     reader, asked where the software visibly does the thing, names that later
     beat. Measured on a real take of the criterion-card demo: AC-1 was claimed
