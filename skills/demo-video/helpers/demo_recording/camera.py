@@ -45,6 +45,7 @@ take and the narration mix drifts off its captions.
 
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 
@@ -53,6 +54,23 @@ from pathlib import Path
 # zoom this replaces was 1.06 and measured as nothing (frames either
 # side of a spotlight differ mostly by the outline, not the zoom).
 CAMERA_ZOOM = 1.3
+
+# The room kept on screen around a spotlit element at the held zoom, per
+# side, in output-frame pixels. An element that does not fit with this
+# room gets a smaller push: pushing to 1.3x anyway cut a 1768 px heading's
+# text off at the frame's left edge on the ticket-queue empty-state take.
+# Measured from the rect, which is read before the spotlight's own 1.02x
+# enlarge and does not include its ring (3 px outline, 3 px offset): on
+# that take's 1428 px row those two take ~26 px a side at the held zoom,
+# and 24 px of room left the ring touching both frame edges. 48 leaves
+# about 22 px of clear space past the ring.
+CAMERA_FIT_MARGIN_PX = 48
+
+# The smallest push worth rendering. Under it the element is nearly as
+# wide as the frame, and a move that small reads as a wobble, not a
+# decision (the DOM zoom the camera replaced was 1.06 and measured as
+# nothing), so the camera holds still and the ring does the pointing.
+CAMERA_MIN_ZOOM = 1.1
 
 # How long the push-in and the pull-back each take, in seconds. Long
 # enough to read as one motion at 25 fps (12-13 frames), short next to
@@ -91,7 +109,22 @@ def _smoothstep(expr: str) -> str:
     return f"{u}*{u}*(3-2*{u})"
 
 
-def _anchor(centre: float, extent: int) -> float:
+def camera_zoom(rect: list[float], out_w: int, out_h: int) -> float:
+    """How far the camera pushes in over `rect` ([x, y, w, h] in
+    output-frame pixels): CAMERA_ZOOM, or less where the element, zoomed,
+    would not leave CAMERA_FIT_MARGIN_PX on screen either side, or 1.0 -
+    no push - where that leaves less than CAMERA_MIN_ZOOM. Floored to
+    three places, so the published zoom never exceeds the fit."""
+    _, _, w, h = rect
+    fit = min(
+        (out_w - 2 * CAMERA_FIT_MARGIN_PX) / w,
+        (out_h - 2 * CAMERA_FIT_MARGIN_PX) / h,
+    )
+    zoom = min(CAMERA_ZOOM, fit)
+    return math.floor(zoom * 1000) / 1000 if zoom >= CAMERA_MIN_ZOOM else 1.0
+
+
+def _anchor(centre: float, extent: int, zoom: float) -> float:
     """The source point a push holds still, on one axis.
 
     The held framing is the element centred, clamped so the crop stays in
@@ -108,10 +141,10 @@ def _anchor(centre: float, extent: int) -> float:
     across to the element, with a kink where the clamp let go - measured
     as the fixed point sliding from x=0 to x=714 px over a 0.5 s push.
     """
-    reach = extent * (1 - 1 / CAMERA_ZOOM)
+    reach = extent * (1 - 1 / zoom)
     if reach <= 0:
         return centre  # no push: zoom stays 1 and any anchor is the identity
-    origin = min(max(centre - extent / (2 * CAMERA_ZOOM), 0.0), reach)
+    origin = min(max(centre - extent / (2 * zoom), 0.0), reach)
     return origin / reach * extent
 
 
@@ -127,15 +160,16 @@ def camera_filter(
     """The video filter chain that renders this take's camera moves.
 
     `events` is the timeline's `camera` list: `{"t_start", "t_end",
-    "rect": [x, y, w, h]}`, times in seconds and the rect in
+    "rect": [x, y, w, h], "zoom"}`, times in seconds and the rect in
     **output-frame** pixels — the coordinates a reader maps onto
-    demo.mp4. Rects are scaled up to source pixels here, once, at the
-    only place that knows both sizes. Returns None for a take with no
-    events, and the caller encodes exactly as it did before the camera
-    existed.
+    demo.mp4 — and `zoom` the held push the recorder chose for that
+    element (`camera_zoom`). Rects are scaled up to source pixels here,
+    once, at the only place that knows both sizes. Returns None for a
+    take with no event that pushes, and the caller encodes exactly as it
+    did before the camera existed.
 
     The chain is `fps` (PTS-normalize, see the module note) then one
-    `zoompan` carrying every event: `z` is 1 plus the sum of each
+    `zoompan` carrying every pushing event: `z` is 1 plus the sum of each
     event's eased push — events do not overlap, so at most one term is
     non-zero — and `x`/`y` scale about the open event's anchor (see
     `_anchor`), picked by `between` over its interval. At z=1 the origin
@@ -143,8 +177,6 @@ def camera_filter(
     identity. The origin reads `zoom`, zoompan's own per-frame value for
     this frame's z, so the pan and the push stay one motion.
     """
-    if not events:
-        return None
     ordered = sorted(events, key=lambda e: e["t_start"])
     for i in range(len(ordered) - 1):
         earlier, later = ordered[i], ordered[i + 1]
@@ -167,26 +199,34 @@ def camera_filter(
                 f"camera event ends at {event['t_end']} at or before it "
                 f"starts ({event['t_start']})"
             )
+        if not 1 <= event["zoom"] <= CAMERA_ZOOM:
+            raise ValueError(
+                f"camera event [{event['t_start']}, {event['t_end']}] asks "
+                f"for zoom {event['zoom']}, outside 1..{CAMERA_ZOOM}"
+            )
+    pushing = [event for event in ordered if event["zoom"] > 1]
+    if not pushing:
+        return None
     scale_x = src_w / out_w
     scale_y = src_h / out_h
-    push = f"{CAMERA_ZOOM - 1:.2f}"
     zooms: list[str] = []
     ax: list[str] = []
     ay: list[str] = []
-    for event in ordered:
+    for event in pushing:
+        held = event["zoom"]
         ease = (
             f"min((time-{event['t_start']:.3f})/{CAMERA_EASE_S},"
             f"({event['t_end']:.3f}-time)/{CAMERA_EASE_S})"
         )
-        zooms.append(_smoothstep(ease))
+        zooms.append(f"{held - 1:.3f}*{_smoothstep(ease)}")
         cx = (event["rect"][0] + event["rect"][2] / 2) * scale_x
         cy = (event["rect"][1] + event["rect"][3] / 2) * scale_y
         # Two events may share an instant at their boundary, where both
         # `between`s are 1; the zoom is 1 there, so the sum multiplies 0.
         during = f"between(time,{event['t_start']:.3f},{event['t_end']:.3f})"
-        ax.append(f"{during}*{_anchor(cx, src_w):.1f}")
-        ay.append(f"{during}*{_anchor(cy, src_h):.1f}")
-    z = f"1+{push}*({'+'.join(zooms)})"
+        ax.append(f"{during}*{_anchor(cx, src_w, held):.1f}")
+        ay.append(f"{during}*{_anchor(cy, src_h, held):.1f}")
+    z = f"1+{'+'.join(zooms)}"
     x = f"({'+'.join(ax)})*(1-1/zoom)"
     y = f"({'+'.join(ay)})*(1-1/zoom)"
     return (

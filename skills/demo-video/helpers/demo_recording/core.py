@@ -39,7 +39,7 @@ from types import TracebackType
 
 from playwright.sync_api import Page, sync_playwright
 
-from .camera import camera_filter, video_dimensions
+from .camera import camera_filter, camera_zoom, video_dimensions
 from .content import (
     content_report,
     media_duration,
@@ -3242,10 +3242,14 @@ class _DemoBase:
     def _camera_raise(self, rect: dict) -> None:
         """Open a camera event over the element just spotlighted. `rect` is
         the spotlight's own measurement of where the element sits in the
-        recorded frame, in output-frame pixels."""
+        recorded frame, in output-frame pixels. The held zoom is chosen
+        here, so the timeline says how far each move went, including an
+        element too wide to push in on at all (`zoom` 1.0)."""
+        box = [rect["x"], rect["y"], rect["w"], rect["h"]]
         self._camera_open = {
             "t_start": round(time.monotonic() - self._t0, 3),
-            "rect": [rect["x"], rect["y"], rect["w"], rect["h"]],
+            "rect": box,
+            "zoom": camera_zoom(box, self._size["width"], self._size["height"]),
         }
 
     def _camera_close(self, t_end: float | None = None) -> None:
@@ -3368,6 +3372,9 @@ class _DemoBase:
                 out_w=self._size["width"],
                 out_h=self._size["height"],
             )
+        # None when every spotlight was too wide to push in on: no move, so
+        # no pass, and the mix reads the webm as it would with no camera.
+        if chain is not None:
             source = webm.with_suffix(".camera.mp4")
             subprocess.run(
                 [

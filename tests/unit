@@ -173,7 +173,12 @@ sys.modules["playwright.sync_api"] = _pw_sync
 
 import demo_recording.core as core_module  # noqa: E402
 import demo_recording.frames as frames_module  # noqa: E402
-from demo_recording.camera import CAMERA_ZOOM, camera_filter  # noqa: E402
+from demo_recording.camera import (  # noqa: E402
+    CAMERA_FIT_MARGIN_PX,
+    CAMERA_ZOOM,
+    camera_filter,
+    camera_zoom,
+)
 from demo_recording.camera import _anchor as _camera_anchor  # noqa: E402
 from demo_recording.chrome import (  # noqa: E402
     chrome_geometry,
@@ -7292,7 +7297,12 @@ class CameraMove(unittest.TestCase):
     """
 
     def event(self, **over: object) -> dict:
-        event: dict = {"t_start": 1.0, "t_end": 3.0, "rect": [500, 250, 280, 60]}
+        event: dict = {
+            "t_start": 1.0,
+            "t_end": 3.0,
+            "rect": [500, 250, 280, 60],
+            "zoom": 1.3,
+        }
         event.update(over)
         return event
 
@@ -7342,21 +7352,26 @@ class CameraMove(unittest.TestCase):
         # zoom along the way a legal crop, and the held one the centred,
         # clamped framing.
         extent = 1280
-        for centre in (0.0, 40.0, 500.0, 640.0, 900.0, 1250.0, 1280.0):
-            anchor = _camera_anchor(centre, extent)
+        cases = [
+            (centre, target)
+            for centre in (0.0, 40.0, 500.0, 640.0, 900.0, 1250.0, 1280.0)
+            for target in (1.1, 1.17, CAMERA_ZOOM)
+        ]
+        for centre, target in cases:
+            anchor = _camera_anchor(centre, extent, target)
             held = min(
-                max(centre - extent / (2 * CAMERA_ZOOM), 0.0),
-                extent - extent / CAMERA_ZOOM,
+                max(centre - extent / (2 * target), 0.0),
+                extent - extent / target,
             )
             self.assertAlmostEqual(
-                anchor * (1 - 1 / CAMERA_ZOOM),
+                anchor * (1 - 1 / target),
                 held,
                 places=6,
-                msg=f"centre {centre}: the held framing is not the element "
-                f"centred and clamped to the frame",
+                msg=f"centre {centre} at {target}x: the held framing is not "
+                f"the element centred and clamped to the frame",
             )
             for step in range(101):
-                zoom = 1 + (CAMERA_ZOOM - 1) * step / 100
+                zoom = 1 + (target - 1) * step / 100
                 origin = anchor * (1 - 1 / zoom)
                 self.assertGreaterEqual(origin, -1e-9, f"centre {centre} z {zoom}")
                 self.assertLessEqual(
@@ -7365,6 +7380,72 @@ class CameraMove(unittest.TestCase):
                     f"centre {centre} z {zoom}: the crop leaves the frame, "
                     f"so zoompan clamps it and the move kinks",
                 )
+
+    def test_a_wide_element_gets_a_push_it_still_fits_in(self):
+        # Pushing every element to 1.3x cut the ticket-queue empty-state
+        # heading (1768 px wide on a 1920 px frame) off at the frame's left
+        # edge. The rects below are that take's three spotlights, plus one
+        # wide and one tall element that fit only a smaller push.
+        margin = 2 * CAMERA_FIT_MARGIN_PX
+        self.assertEqual(camera_zoom([500, 250, 280, 60], 1920, 1080), CAMERA_ZOOM)
+        for rect in ([76, 277, 1428, 61], [0, 0, 1600, 40], [0, 0, 60, 800]):
+            zoom = camera_zoom(rect, 1920, 1080)
+            self.assertGreater(zoom, 1.0, f"{rect}: a push that fits was dropped")
+            self.assertLess(zoom, CAMERA_ZOOM, f"{rect}: pushed past what fits")
+            self.assertLessEqual(rect[2] * zoom + margin, 1920.5, f"{rect}")
+            self.assertLessEqual(rect[3] * zoom + margin, 1080.5, f"{rect}")
+        self.assertEqual(
+            camera_zoom([76, 104, 1768, 32], 1920, 1080),
+            1.0,
+            "the heading fits only a 1.06x push, which reads as a wobble; "
+            "the camera should hold still",
+        )
+
+    def test_the_push_goes_as_far_as_its_event_says(self):
+        chain = self.chain([self.event(zoom=1.15)])
+        self.assertIn("z='1+0.150*clip(", chain)
+        self.assertNotIn("0.300", chain)
+
+    def test_an_event_that_does_not_push_renders_nothing(self):
+        self.assertIsNone(self.chain([self.event(zoom=1.0)]))
+        chain = self.chain(
+            [self.event(zoom=1.0), self.event(t_start=4.0, t_end=6.0, zoom=1.2)]
+        )
+        self.assertNotIn("between(time,1.000", chain)
+        self.assertIn("between(time,4.000", chain)
+
+    def test_a_zoom_outside_the_camera_range_is_refused(self):
+        for zoom in (0.9, CAMERA_ZOOM + 0.1):
+            with self.assertRaises(ValueError):
+                self.chain([self.event(zoom=zoom)])
+
+    def test_a_take_whose_spotlights_all_hold_still_skips_the_camera_pass(self):
+        # `camera_filter` returns None when no event pushes; the pass used to
+        # run whenever the take had any event, so it would hand ffmpeg a
+        # graph of `[0:v]None[v]` and fail the take.
+        rec = recorder(self, page=DrawingPage())
+        rec._camera = [
+            {"t_start": 1.0, "t_end": 2.0, "rect": [76, 104, 1768, 32], "zoom": 1.0}
+        ]
+        seen: list[list[str]] = []
+
+        def run(cmd, **kwargs):
+            seen.append([str(part) for part in cmd])
+            Path(str(cmd[-1])).write_bytes(b"a stand-in for a recording")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with (
+            mock.patch.object(core_module.subprocess, "run", run),
+            mock.patch.object(core_module, "video_dimensions", lambda _: (1920, 1080)),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            rec._convert(Path(rec.out_dir) / "take.webm")
+        self.assertTrue(seen, "the take encoded nothing")
+        self.assertEqual(
+            [c for c in seen if c[-1].endswith(".camera.mp4")],
+            [],
+            "a camera pass ran for a take with no move in it",
+        )
 
     def test_overlapping_events_are_refused(self):
         with self.assertRaises(ValueError):
@@ -7419,9 +7500,17 @@ class CameraMove(unittest.TestCase):
     def test_camera_events_open_and_close_and_land_on_the_timeline(self):
         rec = recorder(self, page=DrawingPage())
         rec._t0 = time.monotonic() - 10.0
+        rec._size = {"width": 1920, "height": 1080}
+        rec._camera_raise({"x": 76, "y": 104, "w": 1768, "h": 32})
+        self.assertEqual(
+            rec._camera_open["zoom"],
+            1.0,
+            "an element too wide to push in on must say so on the timeline",
+        )
         rec._camera_raise({"x": 500, "y": 250, "w": 280, "h": 60})
         self.assertEqual(len(rec._camera), 0, "an open event is not yet a move")
         self.assertEqual(rec._camera_open["rect"], [500, 250, 280, 60])
+        self.assertEqual(rec._camera_open["zoom"], CAMERA_ZOOM)
         rec._camera_close(time.monotonic() - rec._t0 + 2.0)
         self.assertEqual(len(rec._camera), 1)
         self.assertGreater(rec._camera[0]["t_end"], rec._camera[0]["t_start"])
@@ -18774,8 +18863,8 @@ INJECTIONS = [
     (
         "the camera centres on the frame, not the element",
         "camera.py",
-        '        ax.append(f"{during}*{_anchor(cx, src_w):.1f}")',
-        '        ax.append(f"{during}*{_anchor(src_w / 2, src_w):.1f}")',
+        '        ax.append(f"{during}*{_anchor(cx, src_w, held):.1f}")',
+        '        ax.append(f"{during}*{_anchor(src_w / 2, src_w, held):.1f}")',
         ["CameraMove.test_the_camera_centres_on_the_element_not_the_frame"],
     ),
     (
@@ -18784,6 +18873,50 @@ INJECTIONS = [
         "    return origin / reach * extent",
         "    return centre",
         ["CameraMove.test_the_push_holds_one_point_still_and_never_leaves_the_frame"],
+    ),
+    (
+        "a wide element is pushed to full zoom and cropped",
+        "camera.py",
+        "    zoom = min(CAMERA_ZOOM, fit)",
+        "    zoom = CAMERA_ZOOM",
+        ["CameraMove.test_a_wide_element_gets_a_push_it_still_fits_in"],
+    ),
+    (
+        "a push too small to read is rendered anyway",
+        "camera.py",
+        "    return math.floor(zoom * 1000) / 1000 if zoom >= CAMERA_MIN_ZOOM else 1.0",
+        "    return math.floor(zoom * 1000) / 1000",
+        ["CameraMove.test_a_wide_element_gets_a_push_it_still_fits_in"],
+    ),
+    (
+        "the render ignores the zoom its event asks for",
+        "camera.py",
+        '        held = event["zoom"]',
+        "        held = CAMERA_ZOOM",
+        ["CameraMove.test_the_push_goes_as_far_as_its_event_says"],
+    ),
+    (
+        "an event that holds still is rendered as a push",
+        "camera.py",
+        '    pushing = [event for event in ordered if event["zoom"] > 1]',
+        "    pushing = ordered",
+        ["CameraMove.test_an_event_that_does_not_push_renders_nothing"],
+    ),
+    (
+        "the camera pass runs for a take with no move in it",
+        "core.py",
+        "        if chain is not None:\n            source = webm.with_suffix",
+        "        if self._camera:\n            source = webm.with_suffix",
+        [
+            "CameraMove.test_a_take_whose_spotlights_all_hold_still_skips_the_camera_pass"
+        ],
+    ),
+    (
+        "the recorder stops choosing a zoom per element",
+        "core.py",
+        '            "zoom": camera_zoom(box, self._size["width"], self._size["height"]),',
+        '            "zoom": 1.3,',
+        ["CameraMove.test_camera_events_open_and_close_and_land_on_the_timeline"],
     ),
     (
         "the pan stops following the zoom, so the push slides",
@@ -18802,7 +18935,7 @@ INJECTIONS = [
     (
         "the camera filter is never built",
         "camera.py",
-        "    if not events:\n        return None",
+        "    if not pushing:\n        return None",
         "    if False:\n        return None",
         ["CameraMove.test_no_events_build_no_chain"],
     ),

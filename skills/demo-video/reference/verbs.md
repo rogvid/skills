@@ -106,6 +106,9 @@ is up, and `type_into`/`clear` leave the caret where they put it. Holds
   each way, centred on the element) rendered after the take — see
   `helpers/demo_recording/camera.py`. The moves land in `demo.mp4`
   automatically, and `timeline.json`'s `camera` key publishes the geometry.
+  An element too wide or tall to keep 48 px of room on screen at 1.3× gets a
+  smaller push, and one that would get less than 1.1× gets none - the ring
+  alone points at it. Each event's `zoom` says which.
 
 ## Cards, props and structure
 
