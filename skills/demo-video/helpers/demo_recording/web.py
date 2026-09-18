@@ -895,11 +895,22 @@ class Recorder(_DemoBase):
             "aria": aria,
             "scope_aria": None,
             "html": None,
-            # The chrome's own on-screen text — the caption line, a card —
+            # The chrome's own on-screen text — a card, the bridge line —
             # read from the wrapper document, which is the other half of the
             # screen now that the app frame no longer carries the recorder's
-            # furniture (see _CHROME_TEXT_JS).
-            "chrome": self.page.evaluate(_CHROME_TEXT_JS),
+            # furniture (see _CHROME_TEXT_JS). The caption joins it from the
+            # pill document, because the line is composited over the frame
+            # rather than drawn in it (`_caption_on_screen`, captions.py).
+            "chrome": "\n".join(
+                part
+                for part in (
+                    (lambda line: f"caption: {line}" if line else None)(
+                        self._caption_on_screen()
+                    ),
+                    self.page.evaluate(_CHROME_TEXT_JS),
+                )
+                if part
+            ),
         }
         # What the snapshot above structurally could not carry (#353). The key
         # is written only when there is something to say, so a page with no

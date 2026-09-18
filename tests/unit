@@ -180,6 +180,11 @@ from demo_recording.camera import (  # noqa: E402
     camera_zoom,
 )
 from demo_recording.camera import _anchor as _camera_anchor  # noqa: E402
+from demo_recording.captions import (  # noqa: E402
+    CAPTION_FRAME_INSET_PX,
+    caption_filter,
+    png_dimensions,
+)
 from demo_recording.chrome import (  # noqa: E402
     chrome_geometry,
     chrome_html,
@@ -4397,14 +4402,17 @@ MASK_PROSE_WAIVED: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Everything the sweep is supposed to open: the thirteen package modules,
-# `SKILL.md`, `scripts/demo-target-guard`, and the three example storyboards.
-# Set to the whole set rather than to a comfortable floor — a module that stops
-# being read makes "no file says it is masked" hold over a file nobody opened,
-# and this is the only assertion that would notice. It was 14 before #281 added
-# the last four; a fourth demo directory raises the real count without needing
-# this number moved, which is why it is a floor and not an equality.
-MASK_SWEEP_FILE_FLOOR = 18
+# Everything the sweep is supposed to open: the seventeen package modules,
+# `SKILL.md`, the eight files under `scripts/`, and the seven example
+# storyboards. Set to the whole set rather than to a comfortable floor — a
+# module that stops being read makes "no file says it is masked" hold over a
+# file nobody opened, and this is the only assertion that would notice. It was
+# 14 before #281 added scripts and examples, and 18 until captions.py; at 18 it
+# had stopped biting, because SKILL.md plus the modules alone had grown to
+# exactly that, and the injection that drops scripts and examples went
+# unnoticed. Another demo directory raises the real count without needing this
+# number moved, which is why it is a floor and not an equality.
+MASK_SWEEP_FILE_FLOOR = 33
 
 
 #: What a committed storyboard may reach for through `rec.page` (#377).
@@ -5966,50 +5974,59 @@ class WrapperChrome(unittest.TestCase):
         rec._app_frame = "the app frame"
         self.assertEqual(rec.app, "the app frame")
 
-    class CaptionSurface(FakePage):
-        """A page whose `__demoCaption` reports what the band could not show.
+    @staticmethod
+    def pill(test: unittest.TestCase, height: int) -> Path:
+        """A stand-in for a rendered caption pill, `height` px tall.
 
-        The wrapper chrome's caption renderer (chrome.py) returns the pixels
-        the band's `overflow: hidden` shaved off the bubble; the in-page
-        overlay version returns nothing. Scripted here, because the recorder
-        half under test is what `caption()` does with the answer.
+        `_caption_overflow` reads the PNG's IHDR and nothing else, so the
+        24 bytes that carry the size are the whole fixture — and the check
+        stays browser-free, which is this file's point (issue #139).
         """
+        tmp = tempfile.TemporaryDirectory()
+        test.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / f"pill-{height}.png"
+        path.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + (13).to_bytes(4, "big")
+            + b"IHDR"
+            + (900).to_bytes(4, "big")
+            + height.to_bytes(4, "big")
+        )
+        return path
 
-        def __init__(self, clipped) -> None:
-            super().__init__()
-            self.clipped = clipped
-
-        def evaluate(self, script, *args):
-            if "__demoCaption" in script:
-                return self.clipped
-            return None
-
-    def test_a_caption_the_band_cannot_hold_is_recorded_with_its_overflow(self):
-        # The PR #366 review's blocking finding: a 174-char caption lost
-        # ~17 px off its first and last lines to the band's edges while
-        # timeline.json recorded the full sentence, warnings stayed empty and
-        # a strict take stayed green — the artifact claiming a line the
-        # pixels do not show. The text is deliberately not capped or
-        # reflowed; the record is the fix.
-        rec = recorder(self, page=self.CaptionSurface(34))
-        rec.caption("a caption far too tall for the band")
+    def test_a_caption_the_frame_cannot_hold_is_recorded_with_its_overflow(self):
+        # The PR #366 review's blocking finding, carried over to the
+        # composited pill: a caption the frame cannot show while
+        # timeline.json records the full sentence is the artifact claiming a
+        # line the pixels do not have. The band that shaved that 174-char
+        # caption is gone — the pill wraps — so what is left to catch is a
+        # pill taller than the frame, drawn from above its top edge. The text
+        # is deliberately not capped or reflowed; the record is the fix.
+        rec = recorder(self, page=DrawingPage())
+        rec._size = {"width": 1920, "height": 1080}
+        text = "a caption far too tall for the frame"
+        rec._pills[text] = self.pill(self, 1100)
+        rec.caption(text)
         clipped = [i for i in rec._issues if i["kind"] == "caption_clipped"]
         self.assertEqual(len(clipped), 1, rec._issues)
-        self.assertEqual(clipped[0]["clipped_px"], 34)
-        self.assertIn("a caption far too tall for the band", clipped[0]["message"])
+        # 1100 px of pill, 18 px of inset, on a 1080 px frame.
+        self.assertEqual(clipped[0]["clipped_px"], 38)
+        self.assertIn(text, clipped[0]["message"])
         # Attributed to the caption beat that painted it, not to null.
         self.assertEqual(clipped[0]["beat"], rec._beats[-1]["index"])
         self.assertEqual(clipped[0]["verb"], "caption")
         # The storyboard's mistake, not the app's: never fatal under strict.
         self.assertEqual(rec._fatal_count, 0)
 
-    def test_a_caption_that_fits_its_band_records_nothing(self):
-        # Both quiet answers: the band measuring zero overflow, and a caption
-        # surface that answers nothing at all (the terminal's in-page overlay
-        # grows with its text and returns no number).
-        fits = recorder(self, page=self.CaptionSurface(0))
+    def test_a_caption_the_frame_holds_records_nothing(self):
+        # Both quiet answers: a pill the frame holds, and a take with no pill
+        # at all — `tests/unit` drives the verbs with no browser, so nothing
+        # was rendered and there is nothing to measure.
+        fits = recorder(self, page=DrawingPage())
+        fits._size = {"width": 1920, "height": 1080}
+        fits._pills["short"] = self.pill(self, 96)
         fits.caption("short")
-        silent = recorder(self)  # FakePage.evaluate returns None
+        silent = recorder(self)  # no pill rendered: no browser in this suite
         silent.caption("short")
         self.assertEqual(
             [i for i in fits._issues if i["kind"] == "caption_clipped"], []
@@ -7572,6 +7589,179 @@ class CameraMove(unittest.TestCase):
         rec.spotlight(None)
         self.assertEqual(len(rec._camera), 1)
         self.assertGreater(rec._camera[0]["t_end"], rec._camera[0]["t_start"])
+
+
+# --------------------------------------------------------------------------
+# captions.py — the caption pill, composited over the finished frame
+# --------------------------------------------------------------------------
+
+
+class CaptionPill(unittest.TestCase):
+    """The caption as post-production: a pill the browser rendered, laid over
+    the frame *after* the camera pass.
+
+    Drawn in the page, the line was page pixels, and the camera scales the
+    composited frame — so a push-in over an element near the top of the app
+    cropped the caption out of the take for the whole spotlight that was
+    explaining it. What is graded here is the chain's shape (one bounded
+    input per line, the crossfade, the position), the refusals, and the
+    wiring: the interval, the clock correction, the timeline key, and the
+    pill the evidence file quotes.
+    """
+
+    def event(self, **over: object) -> dict:
+        event: dict = {"t_start": 1.0, "t_end": 3.0, "png": "/tmp/pill-000.png"}
+        event.update(over)
+        return event
+
+    def chain(self, events: list[dict] | None = None):
+        return caption_filter(
+            [self.event()] if events is None else events, base="cam", first_input=1
+        )
+
+    def test_no_lines_build_no_chain(self):
+        self.assertIsNone(caption_filter([], base="cam", first_input=1))
+
+    def test_each_line_is_an_input_bounded_to_its_own_interval(self):
+        # The bound is not a detail: six unbounded `-loop 1` inputs on a 26 s
+        # take ran the encode past 1.4 GB of output and were killed for
+        # memory before the file was closed.
+        inputs, _ = self.chain()
+        self.assertEqual(
+            inputs,
+            [
+                "-loop",
+                "1",
+                "-t",
+                "2.300",  # 1.0 -> 3.0 up, plus the 0.3 s fade out
+                "-itsoffset",
+                "1.000",
+                "-i",
+                "/tmp/pill-000.png",
+            ],
+        )
+
+    def test_the_line_crossfades_and_sits_at_the_foot_of_the_frame(self):
+        _, chain = self.chain()
+        self.assertIn("fade=t=in:st=1.000:d=0.3:alpha=1", chain)
+        self.assertIn("fade=t=out:st=3.000:d=0.3:alpha=1", chain)
+        self.assertIn(f"y=H-h-{CAPTION_FRAME_INSET_PX}", chain)
+        self.assertIn("x=(W-w)/2", chain)
+
+    def test_a_finished_line_does_not_stay_on_screen(self):
+        # `overlay` holds a finished secondary's last frame by default, which
+        # would leave the first caption up for the rest of the take.
+        _, chain = self.chain()
+        self.assertIn("eof_action=pass:repeatlast=0", chain)
+        self.assertIn("enable='between(t,1.000,3.300)'", chain)
+
+    def test_the_lines_stack_in_order_onto_the_cameras_output(self):
+        inputs, chain = self.chain(
+            [self.event(), self.event(t_start=4.0, t_end=6.0, png="/tmp/pill-001.png")]
+        )
+        self.assertEqual(inputs.count("-i"), 2)
+        self.assertIn("[cam][cap0]overlay", chain)
+        self.assertIn("[capped0][cap1]overlay", chain)
+        self.assertTrue(chain.endswith("[v]"), chain[-40:])
+
+    def test_a_line_with_no_length_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.chain([self.event(t_end=1.0)])
+
+    def test_a_pngs_size_is_read_off_its_header(self):
+        path = WrapperChrome.pill(self, 148)
+        self.assertEqual(png_dimensions(path), (900, 148))
+        not_a_png = path.parent / "not.png"
+        not_a_png.write_bytes(b"GIF89a" + bytes(40))
+        with self.assertRaises(ValueError):
+            png_dimensions(not_a_png)
+
+    def test_a_line_opens_an_interval_and_the_next_one_closes_it(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._t0 = time.monotonic() - 10.0
+        rec._pills["first"] = WrapperChrome.pill(self, 96)
+        rec._pills["second"] = WrapperChrome.pill(self, 96)
+        rec._caption_raise("first")
+        self.assertEqual(rec._captions, [], "an open line is not yet an interval")
+        time.sleep(0.005)
+        rec._caption_raise("second")
+        self.assertEqual(len(rec._captions), 1)
+        self.assertEqual(rec._captions[0]["text"], "first")
+        self.assertGreater(rec._captions[0]["t_end"], rec._captions[0]["t_start"])
+        # And the empty line closes without opening: `caption("")` clears.
+        time.sleep(0.005)
+        rec._caption_raise("")
+        self.assertEqual([c["text"] for c in rec._captions], ["first", "second"])
+        self.assertIsNone(rec._caption_open)
+
+    def test_the_verb_opens_the_interval_the_compositor_draws(self):
+        # Through `caption()` itself, not `_caption_raise`: the verb is where
+        # the two halves meet, and a verb that stopped opening intervals
+        # would leave every check below grading a pipeline nothing feeds.
+        rec = recorder(self, page=DrawingPage())
+        rec._pills["a line"] = WrapperChrome.pill(self, 96)
+        rec.caption("a line")
+        self.assertEqual((rec._caption_open or {}).get("text"), "a line")
+        self.assertEqual(rec._caption, "a line")
+
+    def test_the_lines_ride_the_same_clock_correction_as_the_moves(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._captions = [
+            {"t_start": 3.0, "t_end": 5.0, "text": "late", "png": "a.png"},
+            {"t_start": 0.5, "t_end": 1.5, "text": "early", "png": "b.png"},
+        ]
+        moved = rec._captions_on_the_video_clock(clock_record((2.0, -1.0)))
+        self.assertEqual((moved[0]["t_start"], moved[0]["t_end"]), (2.0, 4.0))
+        self.assertEqual(moved[1]["t_start"], 0.5)
+
+    def test_an_interval_a_step_swallowed_whole_is_dropped(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._captions = [{"t_start": 1.5, "t_end": 2.0, "text": "gone", "png": "a.png"}]
+        self.assertEqual(
+            rec._captions_on_the_video_clock(clock_record((1.0, -3.0))), []
+        )
+
+    def test_the_lines_land_on_the_timeline_with_the_pill_each_came_from(self):
+        rec = recorder(self, page=DrawingPage())
+        rec._t0 = time.monotonic() - 10.0
+        pill = WrapperChrome.pill(self, 96)
+        rec._pills["a line"] = pill
+        rec._caption_raise("a line")
+        time.sleep(0.005)
+        rec._caption_close()
+        self.assertEqual(rec._timeline_doc()["captions"], rec._captions)
+        self.assertEqual(rec._timeline_doc()["captions"][0]["png"], str(pill))
+
+    def test_a_line_left_up_closes_with_the_take(self):
+        # The same wiring the open camera event has, for the same reason: the
+        # timeline is written on the failure path too, and an interval it
+        # never closed would claim a pill the mp4 does not carry.
+        self.assertIn("self._caption_close()", inspect.getsource(_DemoBase.__exit__))
+
+    def test_a_take_with_no_caption_claims_none(self):
+        self.assertNotIn("captions", recorder(self, page=DrawingPage())._timeline_doc())
+
+    def test_the_evidence_quotes_the_pill_document_not_the_beat_log(self):
+        # #134's rule, kept as close as compositing allows: the line comes
+        # out of a rendered DOM — the pill document the image was made from —
+        # never out of `self._caption`, which would be the beat log quoting
+        # itself.
+        rec = recorder(self, page=DrawingPage())
+        rec._t0 = time.monotonic()
+        rec._pills["on screen"] = WrapperChrome.pill(self, 96)
+
+        class _PillPage:
+            def evaluate(self, script, *args):
+                return "on screen" if "__demo_caption" in script else None
+
+        rec._pill_page = _PillPage()
+        self.assertIsNone(rec._caption_on_screen(), "no line is up yet")
+        rec._caption_raise("on screen")
+        self.assertEqual(rec._caption_on_screen(), "on screen")
+        rec._caption = "something the beat log made up"
+        self.assertEqual(rec._caption_on_screen(), "on screen")
+        rec._caption_close()
+        self.assertIsNone(rec._caption_on_screen(), "the line is down again")
 
 
 # --------------------------------------------------------------------------
@@ -13313,7 +13503,7 @@ class PreviewWebp(unittest.TestCase):
         with mock.patch.object(
             core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
         ):
-            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), "", [])
         self.assertEqual(len(seen), 1, "the preview encode did not run")
         cmd = [str(part) for part in seen[0]]
         self.assertIn("/tmp/x/page@abc.webm", cmd)
@@ -13325,19 +13515,29 @@ class PreviewWebp(unittest.TestCase):
     def test_the_camera_chain_reaches_the_preview(self):
         """Encoding from the raw webm without it loses every push-in — which
         is exactly what a first cut of this did, and what a reviewer caught by
-        eye. The chain is threaded in rather than re-derived so the preview
-        and the mp4 cannot disagree about where the camera went."""
+        eye. The mp4 pass's whole graph is threaded in — its camera moves and
+        its caption pills both — so the preview and the mp4 cannot disagree
+        about what the frames carry."""
         rec = recorder(self, page=DrawingPage())
         seen = []
+        graph = (
+            "[0:v]zoompan=z='1.3'[cam];[1:v]format=rgba[cap0];"
+            "[cam][cap0]overlay=x=(W-w)/2:y=H-h-18[v]"
+        )
         with mock.patch.object(
             core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
         ):
-            rec._write_preview(Path("/tmp/x/page@abc.webm"), "zoompan=z='1.3'")
-        graph = [str(p) for p in seen[0]][
-            [str(p) for p in seen[0]].index("-filter_complex") + 1
-        ]
-        self.assertIn("zoompan", graph)
-        self.assertIn("scale=1280", graph)
+            rec._write_preview(
+                Path("/tmp/x/page@abc.webm"), graph, [Path("/tmp/x/pill-000.png")]
+            )
+        cmd = [str(p) for p in seen[0]]
+        rendered = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("zoompan", rendered)
+        self.assertIn("overlay", rendered, "the preview lost the caption pills")
+        self.assertIn("scale=1280", rendered)
+        self.assertIn(
+            "/tmp/x/pill-000.png", cmd, "the pill the graph reads is not an input"
+        )
 
     def test_a_take_with_no_camera_still_gets_a_preview(self):
         rec = recorder(self, page=DrawingPage())
@@ -13345,7 +13545,7 @@ class PreviewWebp(unittest.TestCase):
         with mock.patch.object(
             core_module.subprocess, "run", side_effect=lambda cmd, **k: seen.append(cmd)
         ):
-            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), "", [])
         graph = [str(p) for p in seen[0]][
             [str(p) for p in seen[0]].index("-filter_complex") + 1
         ]
@@ -13365,14 +13565,14 @@ class PreviewWebp(unittest.TestCase):
             ),
             contextlib.redirect_stderr(err),
         ):
-            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), "", [])
         self.assertFalse(rec._preview_written)
         self.assertIn("preview", err.getvalue().lower())
 
     def test_it_can_be_turned_off(self):
         rec = recorder(self, page=DrawingPage(), preview=False)
         with mock.patch.object(core_module.subprocess, "run") as run:
-            rec._write_preview(Path("/tmp/x/page@abc.webm"), None)
+            rec._write_preview(Path("/tmp/x/page@abc.webm"), "", [])
         run.assert_not_called()
         self.assertFalse(rec._preview_written)
 
@@ -17094,18 +17294,19 @@ INJECTIONS = [
         # Nothing raises — the preview still appears, just degraded.
         "the preview is encoded from the mp4 instead of the browser's frames",
         "core.py",
-        "        self._write_preview(webm, chain)",
-        "        self._write_preview(self._media_path(), chain)",
+        "        self._write_preview(webm, graph, pills)",
+        "        self._write_preview(self._media_path(), graph, pills)",
         ["PreviewWebp.test_convert_hands_the_preview_the_webm_and_not_the_mp4"],
     ),
     (
         # The defect a reviewer caught by eye on the first cut: encoding from
-        # the raw webm drops every camera push-in. The preview looks fine
-        # until somebody compares it with the mp4.
-        "the camera chain stops reaching the preview, so it loses every push-in",
+        # the raw webm drops every camera push-in — and, since the caption
+        # composites through the same graph, every line with it. The preview
+        # looks fine until somebody compares it with the mp4.
+        "the mp4's graph stops reaching the preview, so it loses every push-in",
         "core.py",
-        'graph = f"[0:v]{chain},{scale}[v]" if chain else f"[0:v]{scale}[v]"',
-        'graph = f"[0:v]{scale}[v]"',
+        'full = f"{graph};[v]{scale}[pv]" if graph else f"[0:v]{scale}[pv]"',
+        'full = f"[0:v]{scale}[pv]"',
         ["PreviewWebp.test_the_camera_chain_reaches_the_preview"],
     ),
     (
@@ -18411,29 +18612,30 @@ INJECTIONS = [
     ),
     (
         # The PR #366 review's blocking finding, restored: the band shaves a
-        # too-tall caption at both edges and no artifact says so — the beat
-        # log records the full sentence over pixels that do not show it.
-        "a caption the band cannot hold is recorded nowhere",
+        # too-tall caption off the frame's top edge and no artifact says so —
+        # the beat log records the full sentence over pixels that do not
+        # show it.
+        "a caption the frame cannot hold is recorded nowhere",
         "core.py",
         "        if not isinstance(clipped, (int, float)) or clipped <= 0:\n"
         "            return\n",
         "        if True:\n            return\n",
         [
             "WrapperChrome."
-            "test_a_caption_the_band_cannot_hold_is_recorded_with_its_overflow"
+            "test_a_caption_the_frame_cannot_hold_is_recorded_with_its_overflow"
         ],
     ),
     (
         # The over-reporting direction, which the entry above cannot see: a
         # zero-overflow reading treated as a clip files an issue on every
         # caption of every wrapper take, and the artifact cries wolf.
-        "a caption that exactly fits its band is recorded as clipped",
+        "a caption that exactly fits the frame is recorded as clipped",
         "core.py",
         "        if not isinstance(clipped, (int, float)) or clipped <= 0:\n"
         "            return\n",
         "        if not isinstance(clipped, (int, float)) or clipped < 0:\n"
         "            return\n",
-        ["WrapperChrome.test_a_caption_that_fits_its_band_records_nothing"],
+        ["WrapperChrome.test_a_caption_the_frame_holds_records_nothing"],
     ),
     # -- the wrapper take's cards and opening hold (issue #360) ---------------
     (
@@ -18852,6 +19054,86 @@ INJECTIONS = [
         '  <div id="__chrome_band"><div id="__demo_caption"></div></div>',
         ["CaptionCrossfade.test_two_stacked_layers_exist_and_share_the_caption_style"],
     ),
+    # -- the caption: a pill composited over the finished frame ---------------
+    (
+        # Unbounded, each `-loop 1` pill input runs forever: measured on a
+        # 26 s take with six lines, the encode passed 1.4 GB of output and
+        # was killed for memory before the file was closed.
+        "the caption pills stop being bounded to the interval they are up",
+        "captions.py",
+        '            "-t",\n            f"{up:.3f}",\n',
+        "",
+        ["CaptionPill.test_each_line_is_an_input_bounded_to_its_own_interval"],
+    ),
+    (
+        # `overlay` repeats a finished secondary's last frame by default, so
+        # without this the take's first line stays on screen to the end.
+        "a line that is over is left on the screen",
+        "captions.py",
+        'f":eof_action=pass:repeatlast=0"\n',
+        'f""\n',
+        ["CaptionPill.test_a_finished_line_does_not_stay_on_screen"],
+    ),
+    (
+        "the line pops instead of crossfading into the next one",
+        "captions.py",
+        "f\"fade=t=out:st={event['t_end']:.3f}:d={CAPTION_FADE_S}:alpha=1\"",
+        'f"null"',
+        ["CaptionPill.test_the_line_crossfades_and_sits_at_the_foot_of_the_frame"],
+    ),
+    (
+        "the pill is composited at the top of the frame",
+        "captions.py",
+        'f"[{label}][{pill}]overlay=x=(W-w)/2:y=H-h-{CAPTION_FRAME_INSET_PX}"',
+        'f"[{label}][{pill}]overlay=x=(W-w)/2:y=0"',
+        ["CaptionPill.test_the_line_crossfades_and_sits_at_the_foot_of_the_frame"],
+    ),
+    (
+        "a line with no length is composited anyway",
+        "captions.py",
+        '        if event["t_end"] <= event["t_start"]:',
+        "        if False:",
+        ["CaptionPill.test_a_line_with_no_length_is_refused"],
+    ),
+    (
+        "a file that is not a PNG is measured as one",
+        "captions.py",
+        '    if len(header) < 24 or header[:8] != b"\\x89PNG\\r\\n\\x1a\\n":',
+        "    if False:",
+        ["CaptionPill.test_a_pngs_size_is_read_off_its_header"],
+    ),
+    (
+        "the caption verb stops opening an interval, so nothing composites",
+        "core.py",
+        "            self._caption_raise(text)\n",
+        "",
+        ["CaptionPill.test_the_verb_opens_the_interval_the_compositor_draws"],
+    ),
+    (
+        "a line left up at the take's end is never closed",
+        "core.py",
+        "        # not carry.\n        self._caption_close()",
+        "        # not carry.\n        pass",
+        ["CaptionPill.test_a_line_left_up_closes_with_the_take"],
+    ),
+    (
+        "a take with captions never writes them to the timeline",
+        "core.py",
+        '        if self._captions:\n            doc["captions"] = [dict(event) for event in self._captions]',
+        "        if False:\n            pass",
+        [
+            "CaptionPill.test_the_lines_land_on_the_timeline_with_the_pill_each_came_from"
+        ],
+    ),
+    (
+        # #134's blind spot, reopened: the evidence file quoting the beat log
+        # back to itself instead of a rendered document.
+        "the evidence file quotes the beat log's caption",
+        "core.py",
+        "        text = self._pill_page.evaluate(\n            \"() => (document.getElementById('__demo_caption') || {}).textContent\"\n        )\n        return text or None",
+        "        return self._caption or None",
+        ["CaptionPill.test_the_evidence_quotes_the_pill_document_not_the_beat_log"],
+    ),
     # -- the camera: post-production push-ins ---------------------------------
     (
         "the push-in stops easing in, it snaps to full zoom",
@@ -18903,9 +19185,9 @@ INJECTIONS = [
         ["CameraMove.test_an_event_that_does_not_push_renders_nothing"],
     ),
     (
-        "the camera pass runs for a take with no move in it",
+        "the video pass runs for a take with nothing drawn over it",
         "core.py",
-        "        if chain is not None:\n            source = webm.with_suffix",
+        "        if graph:\n            source = webm.with_suffix",
         "        if self._camera:\n            source = webm.with_suffix",
         [
             "CameraMove.test_a_take_whose_spotlights_all_hold_still_skips_the_camera_pass"

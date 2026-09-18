@@ -93,7 +93,6 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from smokekit import (  # noqa: E402
-    _CAPTION_JS,
     _CURSOR_BOX_JS,
     _FOCUSED_JS,
     _HERE,

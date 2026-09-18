@@ -29,7 +29,6 @@ from _pixels import (
 )
 
 from .constants import (  # noqa: E402
-    _CAPTION_JS,
     _CURSOR_BOX_JS,
     _MD_ROW,
     _PAGE_STATE_JS,
@@ -157,11 +156,12 @@ from .constants import (  # noqa: E402
     WRAPPER_CARD_WINDOW_TOLERANCE,
     WRAPPER_FIRST_FRAME_S,
     WRAPPER_HOLD_MAX_LUMA,
-    WRAPPER_LONG_CAPTION,
+    WRAPPER_OVERSIZE_CAPTION,
     WRAPPER_SECOND_MAX_LUMA,
     WRAPPER_SECOND_MIN_FRAMES,
     WRAPPER_SECOND_MIN_LUMA,
     WRAPPER_SURVIVES,
+    WRAPPER_SURVIVES_RUNUP_S,
     WRAPPER_SURVIVES_SAMPLES_S,
     WRAPPER_UNREACHED,
 )
@@ -426,29 +426,49 @@ def check_capture_clock(
     return []
 
 
-def check_caption(b: Beats, page, expected: str) -> None:
-    """Assert the caption the storyboard just set actually reached the screen.
+def check_caption(b: Beats, rec, expected: str) -> None:
+    """Assert the caption the storyboard just set is the one this take will
+    composite over its frames.
 
     Captions are this skill's headline feature — the thing a viewer reads. A
     recorder that silently stops drawing them still produces a video that
     satisfies every pixel metric and explains nothing.
+
+    Three readings, because the line is now post-production (captions.py) and
+    each one can be true while the others are not: the interval the
+    compositor works from is open over this text, the pill it will draw is a
+    real image on disk, and the document that image was rendered from carries
+    the line — the last is the evidence file's own source, and reading it
+    here is what keeps `_caption_on_screen` from quietly answering with the
+    beat log. What none of the three can see is the composited frame itself;
+    that reading is `tests/pixel`'s.
     """
-    state = page.evaluate(_CAPTION_JS)
-    if state is None:
-        b.fail_if(True, "no #__demo_caption element exists — caption() drew nothing")
-        return
-    text, opacity = state
-    b.fail_if(text != expected, f"the caption reads {text!r}, expected {expected!r}")
-    # Numeric, not string equality: the bar fades over 0.3 s, so a check run
-    # right after the call legitimately catches it at 0.0017 rather than 0.
-    shown = float(opacity) > 0.5
+    from demo_recording.captions import png_dimensions
+
+    open_line = (rec._caption_open or {}).get("text")
     b.fail_if(
-        shown != bool(expected),
-        f"the caption's computed opacity is {opacity} but its text is "
-        f"{expected!r} — it is in the DOM and not on screen"
-        if expected
-        else f"the caption's computed opacity is {opacity}; it should have "
-        f"been cleared",
+        open_line != (expected or None),
+        f"the take's open caption interval is over {open_line!r}, expected "
+        f"{expected or None!r} — the compositor draws intervals, so a line "
+        f"that never opened one is a line the video never shows",
+    )
+    if expected:
+        pill = rec._pills.get(expected)
+        if pill is None or not Path(pill).exists():
+            b.fail_if(True, f"no pill was rendered for {expected!r} ({pill!r})")
+        else:
+            width, height = png_dimensions(Path(pill))
+            b.fail_if(
+                width < 50 or height < 20,
+                f"the pill for {expected!r} is {width}x{height}px — too small "
+                f"to be a rendered caption, so the overlay draws nothing "
+                f"anybody can read",
+            )
+    b.fail_if(
+        rec._caption_on_screen() != (expected or None),
+        f"the pill document reads {rec._caption_on_screen()!r}, expected "
+        f"{expected or None!r} — the image the compositor draws is not this "
+        f"line",
     )
 
 
@@ -4490,19 +4510,34 @@ def check_strict_failure(
 
 
 def check_wrapper_band(out_dir: Path, info: dict) -> list[str]:
-    """The caption lit its band and left the app rect's pixels alone (#358).
+    """The caption painted, and disturbed nothing else (#358).
 
-    The geometry half of "the band and the app share no pixels" is
-    `tests/unit`'s (`WrapperChrome`); this is the pixel half, read out of
-    demo.mp4 the way a viewer meets it. The band is located by sweeping its
-    own rect for contrast — the empty band is flat window body — rather than
-    by trusting a beat timestamp through a steppable wall clock (#245).
+    Read out of demo.mp4 the way a viewer meets it, in the zone the pill is
+    composited into (`caption_probe_band`), located by sweeping that zone for
+    contrast — it is flat when no line is up — rather than by trusting a beat
+    timestamp through a steppable wall clock (#245).
+
+    The band this used to read is gone: the line is composited over the
+    finished frame, so "the band and the app rect share no pixels" is no
+    longer a claim anybody makes. What replaces it is narrower and still
+    worth having: the app above the pill zone does not move when a line
+    appears.
     """
     failures = []
     mp4 = out_dir / "demo.mp4"
     geom = info["geom"]
-    band: Rect = (geom["bandx"], geom["bandy"], geom["bandw"], geom["bandh"])
-    app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
+    frame_size = (info["size"][0], info["size"][1])
+    band: Rect = caption_probe_band("wrapper", frame_size)
+    # The app rect **above** the pill zone: the pill composites over the
+    # frame now (captions.py), so the part of the app it covers is expected
+    # to change when a line appears. What must still hold is that nothing
+    # else in the app moves, and that is what the rest of the rect says.
+    app: Rect = (
+        geom["appx"],
+        geom["appy"],
+        geom["appw"],
+        max(1, min(geom["apph"], band[1] - geom["appy"])),
+    )
     sweep = gray_frames(mp4, rect=band, sample_fps=WRAPPER_BAND_SWEEP_FPS)
     if len(sweep) < WRAPPER_BAND_SWEEP_FPS * 3:
         return [
@@ -4513,29 +4548,36 @@ def check_wrapper_band(out_dir: Path, info: dict) -> list[str]:
     run = longest_true_run(lit)
     if run is None:
         return [
-            f"wrapper: no frame of the caption band {band} ever reaches "
+            f"wrapper: no frame of the caption zone {band} ever reaches "
             f"{WRAPPER_BAND_LIT} contrast across "
             f"{len(sweep) / WRAPPER_BAND_SWEEP_FPS:.1f}s — the caption "
             f"{WRAPPER_CAPTION!r} never painted in its band"
         ]
+    # The longest run says a line was up for a while; the **first** lit frame
+    # is where the app-stillness reading is taken, because that is the one
+    # caption this storyboard raises over a quiet app. The two were the same
+    # instant while the caption sat in a band of its own and the crossfades
+    # did not break the run; with the pill composited they are not, and
+    # sampling the longest run landed in the middle of `type_into`.
     start, length = run
+    first = lit.index(True)
     if length / WRAPPER_BAND_SWEEP_FPS < WRAPPER_BAND_MIN_S:
         failures.append(
-            f"wrapper: the band was lit for only "
+            f"wrapper: the caption zone was lit for only "
             f"{length / WRAPPER_BAND_SWEEP_FPS:.1f}s — a flicker, not the "
             f"caption beat the timeline logs"
         )
-    if start == 0:
+    if first == 0:
         failures.append(
-            "wrapper: the band is lit from frame 0, so there is no unlit "
-            "control — nothing separates a caption in its band from a band "
-            "that is simply always painted"
+            "wrapper: the caption zone is lit from frame 0, so there is no "
+            "unlit control — nothing separates a caption that painted from a "
+            "zone that is simply always painted"
         )
     else:
-        unlit_before = contrast(sweep[start - 1])
+        unlit_before = contrast(sweep[first - 1])
         # One frame back can be mid-fade; the claim is about the stretch
         # before the caption, so read the quietest frame in it.
-        quietest = min(contrast(f) for f in sweep[:start])
+        quietest = min(contrast(f) for f in sweep[:first])
         if quietest > WRAPPER_BAND_UNLIT:
             failures.append(
                 f"wrapper: before the caption the band never drops under "
@@ -4545,14 +4587,14 @@ def check_wrapper_band(out_dir: Path, info: dict) -> list[str]:
             )
     if lit[-1]:
         failures.append(
-            "wrapper: the band is still lit in the last sampled frame — "
-            "caption('') did not clear it"
+            "wrapper: the caption zone is still lit in the last sampled "
+            "frame — caption('') did not clear it"
         )
     # The app rect across the caption's appearance: the two instants bracket
     # the fade and nothing else, so any movement is the caption painting
     # where it must not.
-    control_at = max(0.0, start / WRAPPER_BAND_SWEEP_FPS - WRAPPER_APP_CONTROL_S)
-    sample_at = start / WRAPPER_BAND_SWEEP_FPS + WRAPPER_APP_SAMPLE_S
+    control_at = max(0.0, first / WRAPPER_BAND_SWEEP_FPS - WRAPPER_APP_CONTROL_S)
+    sample_at = first / WRAPPER_BAND_SWEEP_FPS + WRAPPER_APP_SAMPLE_S
     before = gray_frames(mp4, rect=app, start=control_at, duration=0.05)
     during = gray_frames(mp4, rect=app, start=sample_at, duration=0.05)
     if not before or not during:
@@ -4565,16 +4607,16 @@ def check_wrapper_band(out_dir: Path, info: dict) -> list[str]:
         moved = frame_difference(before[0], during[0])
         if moved > WRAPPER_APP_MAX_DELTA:
             failures.append(
-                f"wrapper: the app rect moved {moved:.2f} mean luma between "
-                f"{control_at:.2f}s and {sample_at:.2f}s, over the "
-                f"{WRAPPER_APP_MAX_DELTA} bar — the caption's appearance "
-                f"changed pixels inside the app rect, which is the overlap "
-                f"the band exists to remove (#355)"
+                f"wrapper: the app above the pill zone moved {moved:.2f} mean "
+                f"luma between {control_at:.2f}s and {sample_at:.2f}s, over "
+                f"the {WRAPPER_APP_MAX_DELTA} bar — a caption appearing must "
+                f"not repaint the app it is narrating"
             )
         else:
             print(
-                f"wrapper: band lit {length / WRAPPER_BAND_SWEEP_FPS:.1f}s "
-                f"from {start / WRAPPER_BAND_SWEEP_FPS:.1f}s, app rect moved "
+                f"wrapper: caption zone lit "
+                f"{length / WRAPPER_BAND_SWEEP_FPS:.1f}s from "
+                f"{start / WRAPPER_BAND_SWEEP_FPS:.1f}s, app rect moved "
                 f"{moved:.2f} (bar {WRAPPER_APP_MAX_DELTA}) across the "
                 f"caption's appearance"
             )
@@ -4788,7 +4830,9 @@ def check_wrapper_caption_survives(out_dir: Path, info: dict) -> list[str]:
     mp4 = out_dir / "demo.mp4"
     geom = info["geom"]
     app: Rect = (geom["appx"], geom["appy"], geom["appw"], geom["apph"])
-    band: Rect = (geom["bandx"], geom["bandy"], geom["bandw"], geom["bandh"])
+    band: Rect = caption_probe_band(
+        "wrapper-survives", (info["size"][0], info["size"][1])
+    )
     sweep = gray_frames(mp4, rect=app, sample_fps=WRAPPER_BAND_SWEEP_FPS)
     means = [sum(f) / len(f) for f in sweep]
     in_band = [
@@ -4808,17 +4852,24 @@ def check_wrapper_caption_survives(out_dir: Path, info: dict) -> list[str]:
             f"on screen, so nothing survived anything"
         ]
     arrived_s = arrival / WRAPPER_BAND_SWEEP_FPS
+    # The run-up, not one frame of it: the pill crossfades in over 0.3 s
+    # (captions.py), so a single sample 0.4 s before the load can legitimately
+    # catch it half drawn — measured at 9.5 contrast against the 12 bar on an
+    # otherwise healthy take. The claim is that a line was up going into the
+    # load, and the brightest frame of the run-up is what answers it.
     before = gray_frames(
         mp4,
         rect=band,
-        start=max(0.0, arrived_s - WRAPPER_APP_CONTROL_S),
-        duration=0.05,
+        start=max(0.0, arrived_s - WRAPPER_SURVIVES_RUNUP_S),
+        duration=WRAPPER_SURVIVES_RUNUP_S,
     )
-    if not before or contrast(before[0]) < WRAPPER_BAND_LIT:
+    lit_before = max((contrast(f) for f in before), default=0.0)
+    if not before or lit_before < WRAPPER_BAND_LIT:
         failures.append(
-            f"wrapper-survives: the caption band was not lit just before the "
-            f"second document arrived at {arrived_s:.1f}s (contrast "
-            f"{contrast(before[0]) if before else 'unreadable'} vs bar "
+            f"wrapper-survives: the caption was not up in the "
+            f"{WRAPPER_SURVIVES_RUNUP_S}s before the second document arrived "
+            f"at {arrived_s:.1f}s (best contrast "
+            f"{lit_before if before else 'unreadable'} vs bar "
             f"{WRAPPER_BAND_LIT}) — with no line up across the load, nothing "
             f"here can claim one survived it"
         )
@@ -4907,13 +4958,17 @@ def check_wrapper_evidence(out_dir: Path) -> list[str]:
 
 
 def check_wrapper_clipped(out_dir: Path) -> list[str]:
-    """The band says so when it cannot show a caption (#366's review).
+    """The take says so when the frame cannot show a caption (#366's review).
 
-    The take captions one line the band holds and one it cannot; the second
-    must leave a `caption_clipped` issue naming the line and the overflow,
-    and the first must leave none — over-reporting would file an issue on
-    every caption of every wrapper take. The text is deliberately not capped
-    or reflowed by the recorder; the record is the whole fix.
+    The take captions one line that wraps but fits and one the frame cannot
+    hold; the second must leave a `caption_clipped` issue naming the line and
+    the overflow, and the first must leave none — over-reporting would file
+    an issue on every caption of every wrapper take. The text is deliberately
+    not capped or reflowed by the recorder; the record is the whole fix.
+
+    The band that shaved a 174-character caption is gone: the pill grows with
+    its text and composites over the frame, so what is left to catch is a
+    pill taller than the frame, drawn from above its top edge.
     """
     doc = json.loads((out_dir / "timeline.json").read_text(encoding="utf-8"))
     issues = [
@@ -4922,13 +4977,14 @@ def check_wrapper_clipped(out_dir: Path) -> list[str]:
         if issue.get("kind") == "caption_clipped"
     ]
     failures = []
-    named = [i for i in issues if i.get("caption") == WRAPPER_LONG_CAPTION]
+    named = [i for i in issues if i.get("caption") == WRAPPER_OVERSIZE_CAPTION]
     if not named:
         failures.append(
-            f"wrapper: the {len(WRAPPER_LONG_CAPTION)}-char caption left no "
-            f"caption_clipped issue — the band shaved its first and last "
-            f"lines and no artifact says so, which is timeline.json claiming "
-            f"a line the pixels do not show"
+            f"wrapper: the {len(WRAPPER_OVERSIZE_CAPTION)}-char caption left "
+            f"no caption_clipped issue — its pill is taller than the frame, "
+            f"so the overlay draws its first lines above the top edge and no "
+            f"artifact says so, which is timeline.json claiming a line the "
+            f"pixels do not show"
         )
     else:
         clipped_px = named[0].get("clipped_px")
@@ -4936,14 +4992,14 @@ def check_wrapper_clipped(out_dir: Path) -> list[str]:
             failures.append(
                 f"wrapper: the caption_clipped issue carries clipped_px="
                 f"{clipped_px!r} — without a positive reading nobody can say "
-                f"how much of the line the band shaved"
+                f"how much of the line the frame cut off"
             )
-    fitting = [i for i in issues if i.get("caption") != WRAPPER_LONG_CAPTION]
+    fitting = [i for i in issues if i.get("caption") != WRAPPER_OVERSIZE_CAPTION]
     if fitting:
         failures.append(
             f"wrapper: caption_clipped was recorded for {len(fitting)} "
-            f"caption(s) that fit their band — an issue filed on every "
-            f"caption is the artifact crying wolf"
+            f"caption(s) the frame holds — an issue filed on every caption "
+            f"is the artifact crying wolf"
         )
     return failures
 

@@ -40,6 +40,8 @@ from types import TracebackType
 from playwright.sync_api import Page, sync_playwright
 
 from .camera import camera_filter, camera_zoom, video_dimensions
+from .captions import CAPTION_FRAME_INSET_PX, caption_filter, png_dimensions
+from .chrome import caption_pill_document
 from .content import (
     content_report,
     media_duration,
@@ -1221,6 +1223,16 @@ class _DemoBase:
         # clears it, or with the take.
         self._camera: list[dict] = []
         self._camera_open: dict | None = None
+        # The caption (see captions.py): each line as an interval, composited
+        # over the frame after the camera pass. The pill itself is a PNG the
+        # browser renders in a context of its own, cached by its text — the
+        # same line twice is one render — and the open interval is the line on
+        # screen right now, closed by the next `caption()` or with the take.
+        self._captions: list[dict] = []
+        self._caption_open: dict | None = None
+        self._pills: dict[str, Path] = {}
+        self._pill_page: Page | None = None
+        self._pill_dir = self.out_dir / ".captions"
         # ...and the one clock in here that is *not* monotonic, because the
         # video is on it and nothing else can reach it. See _CaptureClock.
         self._capture_clock = _CaptureClock()
@@ -1523,6 +1535,11 @@ class _DemoBase:
         # is written either way, and an open event it never mentions would
         # describe a push the mp4 does not contain.
         self._camera_close()
+        # The line on screen at the take's end closes with it, for the reason
+        # the open camera event does: the timeline is written either way, and
+        # an open interval it never mentions would claim a pill the mp4 does
+        # not carry.
+        self._caption_close()
         # The last thing asked of the live page, and it has to be here rather
         # than beside the rest of the picture check: `_measure_content` runs
         # after the browser is gone, off a file, and the one occlusion nothing
@@ -2445,7 +2462,7 @@ class _DemoBase:
         stem = self.segment if self.segment else "demo"
         return self.out_dir / f"{stem}.preview.webp"
 
-    def _write_preview(self, webm: Path, chain: str | None) -> None:
+    def _write_preview(self, webm: Path, graph: str, pills: list[str]) -> None:
         """An animated WebP for a pull-request body, off the browser's frames.
 
         **Why this exists.** GitHub has no public API for the attachment upload
@@ -2461,10 +2478,11 @@ class _DemoBase:
         both cleaner and smaller: 2.67 MB against 2.95 MB at identical WebP
         settings, because a noisier source costs the encoder bits.
 
-        `chain` is the camera filter the mp4 pass uses, threaded in so the
-        preview gets the same push-ins. Encoding from the raw webm without it
-        produced a preview with no zoom — the reason this takes the chain as an
-        argument rather than reading `self._camera` again.
+        `graph` is the mp4 pass's own filter graph and `pills` the caption
+        PNGs it reads, threaded in so the preview gets the same push-ins and
+        the same lines. Encoding from the raw webm without them produced a
+        preview with no zoom — the reason this takes them as arguments
+        rather than reading `self._camera` and `self._captions` again.
 
         **What it is not.** It carries no audio, and cannot: WebP has no audio
         track. Narration, the 25 fps pin the beat log's frame arithmetic needs,
@@ -2480,7 +2498,11 @@ class _DemoBase:
             return
         out = self._preview_path()
         scale = f"fps={self._preview_fps},scale={self._preview_width}:-1:flags=lanczos"
-        graph = f"[0:v]{chain},{scale}[v]" if chain else f"[0:v]{scale}[v]"
+        # The mp4's own graph, with the downscale hung off its output: the
+        # preview is the same frames the deliverable carries, camera moves
+        # and caption pills included, encoded once from the browser's own.
+        full = f"{graph};[v]{scale}[pv]" if graph else f"[0:v]{scale}[pv]"
+        inputs: list[str] = ["-i", str(webm), *pills]
         try:
             subprocess.run(
                 [
@@ -2488,12 +2510,11 @@ class _DemoBase:
                     "-y",
                     "-loglevel",
                     "error",
-                    "-i",
-                    str(webm),
+                    *inputs,
                     "-filter_complex",
-                    graph,
+                    full,
                     "-map",
-                    "[v]",
+                    "[pv]",
                     "-loop",
                     "0",
                     # `text` rather than the default `picture`: a screen
@@ -2818,6 +2839,12 @@ class _DemoBase:
         # moves can be re-rendered, audited, or graded without the take.
         if self._camera:
             doc["camera"] = [dict(event) for event in self._camera]
+        # The caption lines this take's mp4 carries, with the pill each one
+        # was drawn from (see captions.py). Same construction as `camera`,
+        # and the same use: a reader can check what was on screen when, and
+        # the compositor's own inputs are on disk beside the take.
+        if self._captions:
+            doc["captions"] = [dict(event) for event in self._captions]
         # Both of these are the `failure` construction below, for the same
         # reason: **presence is the signal** (issue #372).
         #
@@ -3008,28 +3035,51 @@ class _DemoBase:
         with self._beat(
             "caption", caption=text, **_ac_field(claims), **_shows_field(polarity)
         ):
-            clipped = self.page.evaluate("t => window.__demoCaption(t)", text)
-            self._note_caption_clipped(text, clipped)
+            # The line is composited over the finished frame (captions.py),
+            # not drawn in the page: the camera scales the page, and a
+            # push-in over an element near the top of the app cropped the
+            # caption out of the take. The beat opens first, so `t_start` is
+            # this beat's instant on the same clock every other beat is on.
+            self._caption_raise(text)
+            # The verb no longer touches the recorded page — the pill is
+            # composited (captions.py) — and Playwright's sync API delivers
+            # page events only while it is inside a call, so this is the
+            # round trip `__demoCaption` used to make implicitly. Without it
+            # a console error queued before this beat is attributed to
+            # whichever later beat happens to call the browser next.
+            self._pump_events(force=True)
+            self._note_caption_clipped(text, self._caption_overflow(text))
             self._caption = text
             self._start_line(clip)
             self.pause(self._caption_hold(text))
 
-    def _note_caption_clipped(self, text: str, clipped: object) -> None:
-        """A caption surface that measured itself clipped gets written down.
+    def _caption_overflow(self, text: str) -> float:
+        """How many pixels of this line's pill the frame cannot hold.
 
-        The chrome's `__demoCaption` (chrome.py, #358) returns the number:
-        its caption band has a fixed height and `overflow: hidden` — the
-        construction that keeps the app rect caption-free — so a caption
-        too tall for the band is shaved at the band's edges while the beat
+        The pill grows with its text (captions.py), so the band's shave is
+        gone — what is left is a pill taller than the frame it is drawn on,
+        which the overlay would push off the top edge. Measured off the PNG
+        the compositor will draw, so the number is the rendered pill's, not
+        an estimate from the sentence.
+        """
+        pill = self._pills.get(text)
+        if pill is None:
+            return 0.0
+        height = png_dimensions(pill)[1]
+        return max(0.0, height + CAPTION_FRAME_INSET_PX - self._size["height"])
+
+    def _note_caption_clipped(self, text: str, clipped: object) -> None:
+        """A caption the frame cannot hold gets written down.
+
+        `_caption_overflow` returns the number: the pill is composited at
+        the bottom of the frame, so one taller than the frame is drawn from
+        above its top edge and its first lines are off screen while the beat
         log records the full sentence. Without this, that is `timeline.json`
-        claiming a line the pixels do not show: measured on a 174-character
-        caption, the band's flex centring shaved ~17 px off the top of the
-        first line and the bottom of the third, `warnings` stayed empty and a
-        strict take stayed green. Both media share the band since #362, so
-        this fires on a terminal take exactly as on a web one. (The retired
-        in-page overlay grew with its text and returned nothing — the None
-        guard below is also what keeps a scripted page that answers nothing
-        from minting an issue.)
+        claiming a line the pixels do not show — the exposure measured on
+        the retired caption band, whose fixed height shaved ~17 px off a
+        174-character caption while `warnings` stayed empty and a strict
+        take stayed green. The pill wraps instead of shaving, so that line
+        now fits; what is caught here is the extreme that does not.
 
         The text is deliberately **not** capped or reflowed — the honest
         artifact is the point. An issue rather than a refusal, and not in
@@ -3043,8 +3093,8 @@ class _DemoBase:
         self._note_issue(
             "caption_clipped",
             f"the caption {text!r} is {round(clipped)}px taller than the "
-            f"caption band, so the band's edges shave its first and last "
-            f"lines and the frames do not show the sentence the beat log "
+            f"frame can hold, so its first lines are drawn off the top edge "
+            f"and the frames do not show the sentence the beat log "
             f"records — shorten the line, or split it over two captions",
             beat=beat,
             clipped_px=round(clipped),
@@ -3281,15 +3331,133 @@ class _DemoBase:
         than rendered as a push with no length. The list is replaced, so the
         timeline this take writes describes the moves demo.mp4 actually
         carries."""
+        return self._on_the_video_clock(self._camera, record)
+
+    def _on_the_video_clock(self, events: list[dict], record: object) -> list[dict]:
+        """`events` — intervals on the beat log's clock — moved onto the
+        video's. One implementation for both the camera's moves and the
+        caption's lines: they are the same shape, they ride the same
+        correction, and two copies of it would be two things to break."""
         place, _ = capture_clock_shift(record)
         corrected = []
-        for event in self._camera:
+        for event in events:
             moved = dict(event)
             moved["t_start"] = round(place(event["t_start"]).at, 3)
             moved["t_end"] = round(place(event["t_end"]).at, 3)
             if moved["t_end"] > moved["t_start"]:
                 corrected.append(moved)
         return corrected
+
+    # -- the caption pill (see captions.py) ----------------------------------
+
+    def _caption_pill(self, text: str) -> Path | None:
+        """The PNG of one caption line, rendered by the browser.
+
+        In a context of its own, which is the whole point: a page in the
+        recorded context would be a second video, and an element in the
+        recorded page would be pixels the camera zooms. Cached by text, so
+        a line repeated across a take is rendered once.
+
+        The screenshot is of `body`, not the pill: an element screenshot is
+        the element's own box and the pill's drop shadow falls outside it
+        (`chrome.CAPTION_PILL_PAD_PX` is the room the document keeps for
+        it). `omit_background` is what makes the PNG carry alpha, so the
+        overlay composites rather than pasting a black card.
+        """
+        if self._pill_page is None and getattr(self, "_browser", None) is not None:
+            context = self._browser.new_context(
+                viewport=self._size,
+                device_scale_factor=1,
+                reduced_motion="reduce",
+            )
+            self._pill_page = context.new_page()
+            self._pill_page.set_content(
+                caption_pill_document(self._size["width"], self._caption_font_px)
+            )
+        # Set before the cache is consulted, so the pill document's own DOM
+        # is always the line being composited right now — that is what
+        # `_caption_on_screen` reads for the evidence file, and a cached
+        # line that skipped this would leave it quoting the previous one.
+        if self._pill_page is not None:
+            self._pill_page.evaluate("t => window.__demoPill(t)", text)
+        cached = self._pills.get(text)
+        if cached is not None:
+            return cached
+        # No browser, no pill: `tests/unit` drives the verbs with no Chromium
+        # at all (issue #139), and a caption there composites nothing. A take
+        # always has one — this is the seam that suite runs through, and it
+        # is why `_caption_raise` treats a missing pill as no interval rather
+        # than raising.
+        if self._pill_page is None:
+            return None
+        self._pill_dir.mkdir(parents=True, exist_ok=True)
+        path = self._pill_dir / f"pill-{len(self._pills):03d}.png"
+        self._pill_page.locator("body").screenshot(
+            path=str(path), omit_background=True
+        )
+        self._pills[text] = path
+        return path
+
+    def _caption_on_screen(self) -> str | None:
+        """The caption the frame is carrying right now, for the evidence file.
+
+        Read out of the pill document's DOM — the document the composited
+        image was rendered from — rather than out of `self._caption`, which
+        would be the beat log quoting itself (#134's blind spot). It is one
+        document removed from the frame, which is the honest cost of
+        compositing the line instead of drawing it in the page; the pill in
+        it is the exact image `captions.py` lays over these frames.
+        """
+        if self._caption_open is None or self._pill_page is None:
+            return None
+        text = self._pill_page.evaluate(
+            "() => (document.getElementById('__demo_caption') || {}).textContent"
+        )
+        return text or None
+
+    def _caption_raise(self, text: str) -> None:
+        """Open a caption interval over `text` ("" only closes the open one).
+
+        The pill is rendered before the interval opens: the render costs a
+        screenshot, and a line whose interval started before its own image
+        existed would claim frames the compositor draws nothing on.
+        """
+        self._caption_close()
+        if not text:
+            return
+        png = self._caption_pill(text)
+        if png is None:
+            return
+        self._caption_open = {
+            "t_start": round(time.monotonic() - self._t0, 3),
+            "text": text,
+            "png": str(png),
+        }
+
+    def _caption_close(self, t_end: float | None = None) -> None:
+        """End the open caption interval, at `t_end` (now, unless given).
+
+        A degenerate interval is dropped for the reason `_camera_close`
+        drops one: the timeline carries what the mp4 will show, and a line
+        with no length is not on screen.
+        """
+        if self._caption_open is None:
+            return
+        event = dict(self._caption_open)
+        self._caption_open = None
+        end = (
+            round(time.monotonic() - self._t0, 3) if t_end is None else round(t_end, 3)
+        )
+        if end > event["t_start"]:
+            event["t_end"] = end
+            self._captions.append(event)
+
+    def _captions_on_the_video_clock(self, record: object) -> list[dict]:
+        """The caption intervals moved onto the clock the video is on — the
+        correction `_camera_on_the_video_clock` applies, for the same reason:
+        the compositor draws in video seconds, and a host that stepped puts
+        every interval after the step ahead of the frames it names."""
+        return self._on_the_video_clock(self._captions, record)
 
     # -- speech (ElevenLabs narration) --------------------------------------
 
@@ -3359,33 +3527,54 @@ class _DemoBase:
         # way, so it is the two-output shape, not zoompan. A video-only
         # pre-pass is a single-output graph — the shape the mix always
         # used — and the mix then reads its frames like any other input.
+        #
+        # The caption rides the same pass, after the camera (captions.py):
+        # the pill is laid over the zoomed frame, which is the whole reason
+        # it is composited at all — drawn in the page, a push-in over an
+        # element near the top of the app cropped it out of the take.
         source = webm
-        chain: str | None = None
+        camera: str | None = None
+        record = self._capture_clock.report()
         if self._camera:
-            self._camera = self._camera_on_the_video_clock(self._capture_clock.report())
+            self._camera = self._camera_on_the_video_clock(record)
         if self._camera:
             src_w, src_h = video_dimensions(webm)
-            chain = camera_filter(
+            camera = camera_filter(
                 self._camera,
                 src_w=src_w,
                 src_h=src_h,
                 out_w=self._size["width"],
                 out_h=self._size["height"],
             )
-        # None when every spotlight was too wide to push in on: no move, so
-        # no pass, and the mix reads the webm as it would with no camera.
-        if chain is not None:
+        if self._captions:
+            self._captions = self._captions_on_the_video_clock(record)
+        pills: list[str] = []
+        captions = caption_filter(self._captions, base="cam", first_input=1)
+        # `fps` when the camera is not there to do it: a screencast's webm is
+        # variable-rate, and the overlay's fades and `enable` are written in
+        # the take's own seconds (camera.py's module note has the long form).
+        graph = f"[0:v]{camera}" if camera else "[0:v]fps=25"
+        if captions is not None:
+            pills, caption_chain = captions
+            graph = f"{graph}[cam];{caption_chain}"
+        elif camera:
+            graph = f"{graph}[v]"
+        else:
+            graph = ""
+        # Empty when nothing draws over the frame: no spotlight pushed in and
+        # no line was captioned, so the mix reads the webm as it always did.
+        if graph:
             source = webm.with_suffix(".camera.mp4")
+            video_inputs: list[str] = ["-i", str(webm), *pills]
             subprocess.run(
                 [
                     "ffmpeg",
                     "-y",
                     "-loglevel",
                     "error",
-                    "-i",
-                    str(webm),
+                    *video_inputs,
                     "-filter_complex",
-                    f"[0:v]{chain}[v]",
+                    graph,
                     "-map",
                     "[v]",
                     "-c:v",
@@ -3504,7 +3693,7 @@ class _DemoBase:
         # can happen before the take is safe. It still reads `webm` and not
         # `mp4`: the browser's own frames are the point (#410), and they are
         # still here because `__exit__` clears `.video/` well after this.
-        self._write_preview(webm, chain)
+        self._write_preview(webm, graph, pills)
         spoken = f", {len(self._lines)} spoken lines" if self._speech else ""
         print(f"wrote {mp4} ({mp4.stat().st_size // 1024} kB{spoken})")
         # Reported with its size, and said to be gitignored, because both are

@@ -31,7 +31,7 @@ not the variable lowercased, so do not infer it.
 | `DEMO_VIDEO_TERMINAL_FONT_SIZE` | `font_size` — `TerminalRecorder` font px | `15` |
 | `DEMO_VIDEO_VIEWPORT` | `viewport` — recording size, `"1920x1080"` | 1920×1080 (`quick` preset: 1280×720) |
 | `DEMO_VIDEO_WINDOW_SCALE` | `window_scale` — framed-window size relative to the viewport: a fraction of it for width/height, in `(0, 1]`. A single float or `"width,height"` | 0.95 width; height fills the rest, so the window has the same margin on all four sides |
-| `DEMO_VIDEO_CAPTION_OVERLAY` | `caption_overlay` — caption as a floating pill over the app's bottom edge (`1`), or a reserved band below the app rect (`0`). **Known limit of the overlay:** a camera push-in crops the frame around the spotlit element and can shave the pill — fade it (`caption("")`) before spotlighting, or turn the band back on | **on** |
+| `DEMO_VIDEO_CAPTION_OVERLAY` | `caption_overlay` — how much room the window leaves below the app rect: none (`1`), or a band's worth (`0`). **It no longer decides where the line is drawn:** the caption is a pill composited over the finished frame at its foot, which is why a push-in can no longer crop it | **on** |
 | `DEMO_VIDEO_PRESET` | `preset` — quality preset, `"high"` or `"quick"`. What each one bundles is under **Configuration** in SKILL.md | `high` |
 | `DEMO_VIDEO_DETERMINISTIC` | `deterministic` — freeze the page clock and flatten motion (`1`/`0`) — **read [determinism.md](determinism.md) first** | **off** |
 | `DEMO_VIDEO_CLOCK` | `clock` — the instant the page's clock is frozen at, when it is (ISO 8601) | `2025-01-01T09:00:00Z` |

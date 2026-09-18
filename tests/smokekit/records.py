@@ -77,6 +77,7 @@ from .constants import (  # noqa: E402
     WRAPPER_CAPTION,
     WRAPPER_CLAUSE,
     WRAPPER_LONG_CAPTION,
+    WRAPPER_OVERSIZE_CAPTION,
     WRAPPER_SURVIVES,
 )
 from .support import (  # noqa: E402
@@ -172,7 +173,7 @@ def record_web(
         )
 
         rec.caption("A small dashboard.")
-        check_caption(b, rec.page, "A small dashboard.")
+        check_caption(b, rec, "A small dashboard.")
         rec.shot("01-dashboard")
 
         rec.spotlight("#kpi-rev")
@@ -190,7 +191,7 @@ def record_web(
         )
 
         rec.caption("Filter by city.")
-        check_caption(b, rec.page, "Filter by city.")
+        check_caption(b, rec, "Filter by city.")
         rec.type_into("#search", "seattle")
         rec.pause(0.8)
         b.expect(
@@ -206,7 +207,7 @@ def record_web(
         rec.shot("02-filtered")
 
         rec.caption("Refresh reloads it.")
-        check_caption(b, rec.page, "Refresh reloads it.")
+        check_caption(b, rec, "Refresh reloads it.")
 
         # move_to() is the sole source of the 30-step cursor glide. Asserting
         # only where the cursor ends up proves nothing, because Playwright's
@@ -248,7 +249,7 @@ def record_web(
         # is the half of the issue no post-condition can see, since
         # `rec.page.keyboard` would satisfy everything below and write nothing.
         rec.caption("Keys, not just clicks.")
-        check_caption(b, rec.page, "Keys, not just clicks.")
+        check_caption(b, rec, "Keys, not just clicks.")
 
         # The pre-condition is asserted, not assumed: "the field is empty" is
         # not news about a field that was already empty, which is the vacuous
@@ -341,11 +342,11 @@ def record_web(
         # second in the middle is what makes the same moment usable as the
         # timing probe — see caption_appearance_s().
         rec.caption("")
-        check_caption(b, rec.page, "")
+        check_caption(b, rec, "")
         rec.shot(CAPTION_PROBE[0])
         rec.pause(PROBE_QUIET_S)
         rec.caption(PROBE_CAPTION)
-        check_caption(b, rec.page, PROBE_CAPTION)
+        check_caption(b, rec, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
 
         # The clock has to still be frozen ~15 s later, not merely at load —
@@ -438,7 +439,7 @@ def record_terminal(
         # MAX_CAPTION_SKEW_S.
         rec.pause(PROBE_QUIET_S)
         rec.caption("A real shell, recorded.")
-        check_caption(b, rec.page, "A real shell, recorded.")
+        check_caption(b, rec, "A real shell, recorded.")
         rec.run("echo hello from demo-video")
         expect_prompt(rec, "run('echo …')")
         # Anchored to a whole screen line, and matching the command's *output*
@@ -448,7 +449,7 @@ def record_terminal(
         rec.shot("01-echo")
 
         rec.caption("Any command works.")
-        check_caption(b, rec.page, "Any command works.")
+        check_caption(b, rec, "Any command works.")
         rec.run("ls -1")
         expect_prompt(rec, "run('ls -1')")
         expect_screen(rec, "run('ls -1')", r"^skills$")
@@ -456,11 +457,11 @@ def record_terminal(
         rec.shot("02-listing")
 
         rec.caption("")
-        check_caption(b, rec.page, "")
+        check_caption(b, rec, "")
         rec.shot(CAPTION_PROBE[0])
         rec.pause(PROBE_QUIET_S)
         rec.caption(PROBE_CAPTION)
-        check_caption(b, rec.page, PROBE_CAPTION)
+        check_caption(b, rec, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
         rec.caption("")
 
@@ -529,7 +530,7 @@ def record_segments(
         # and nothing moves in the caption band until the caption does.
         rec.pause(PROBE_QUIET_S)
         rec.caption(SEGMENT_OPENING)
-        check_caption(b, rec.page, SEGMENT_OPENING)
+        check_caption(b, rec, SEGMENT_OPENING)
         rec.shot(SEGMENT_SHOTS[0])
         rec.caption("")
 
@@ -562,11 +563,11 @@ def record_segments(
         # timestamps are the ones the merge has to move, and this is where the
         # acceptance criterion of #7 is actually measured.
         rec.caption("")
-        check_caption(b, rec.page, "")
+        check_caption(b, rec, "")
         rec.shot(CAPTION_PROBE[0])
         rec.pause(PROBE_QUIET_S)
         rec.caption(PROBE_CAPTION)
-        check_caption(b, rec.page, PROBE_CAPTION)
+        check_caption(b, rec, PROBE_CAPTION)
         rec.shot(CAPTION_PROBE[1])
         rec.caption("")
     clocks.append(clock_two)
@@ -1208,11 +1209,12 @@ def record_wrapper(out_dir: Path, base_url: str) -> dict:
             )
         rec.scroll_to("#rows")
         rec.caption("")
-        # A caption the band cannot hold, then the clear again: the take
-        # must record caption_clipped for this line and only this line
-        # (check_wrapper_clipped), and the band must still end dark for the
-        # band sweep's last-frame claim.
+        # A caption that wraps but fits, then one no frame can hold, then the
+        # clear again: the take must record caption_clipped for the second
+        # line and only the second (check_wrapper_clipped), and the band must
+        # still end dark for the band sweep's last-frame claim.
         rec.caption(WRAPPER_LONG_CAPTION)
+        rec.caption(WRAPPER_OVERSIZE_CAPTION)
         rec.caption("")
         # The criterion card (#360): over the app rect only, the window
         # frame and the caption band still on screen while it is up, the

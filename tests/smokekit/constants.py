@@ -869,17 +869,6 @@ EVIDENCE_TAKE_FACTS = [
 ]
 
 
-_CAPTION_JS = """() => {
-  // Two stacked layers crossfade (chrome.py). The one the recorder just set
-  // is `__demoCapLayer`'s — reading the visible layer instead would grade
-  // the previous line for the ~0.3 s the fade is running.
-  const ids = ['__demo_caption', '__demo_caption2'];
-  const el = document.getElementById(ids[window.__demoCapLayer || 0]);
-  if (!el) return null;
-  return [el.textContent, getComputedStyle(el).opacity];
-}"""
-
-
 TICKER_JS = """() => {
   if (document.getElementById('__smoke_ticker')) return;
   const style = document.createElement('style');
@@ -1060,10 +1049,26 @@ WRAPPER_SURVIVES = "This line must outlive the document below it."
 
 
 WRAPPER_LONG_CAPTION = (
-    "This caption is deliberately far too long for the reserved caption "
-    "band below the app rect, so the band's edges shave its first and its "
-    "last line instead of covering the app."
+    "This caption is deliberately far too long for one line, so the pill "
+    "wraps it instead of shaving it — which is what the reserved caption "
+    "band below the app rect used to do to exactly this sentence."
 )
+
+
+# A caption no frame can hold. The pill grows with its text now (captions.py)
+# rather than being shaved by a fixed band, so the exposure left is a line so
+# long the pill is taller than the frame and the overlay draws its first
+# lines above the top edge. The arithmetic on a 1920x1080 take: the pill is
+# at most 72% of the frame wide, ~100 characters of 26px text a line at 35px
+# a line, so ~1100px of pill needs ~32 lines, ~3200 characters.
+WRAPPER_OVERSIZE_CAPTION = " ".join(["this line cannot possibly fit"] * 120)
+
+
+# How far back from the second document's arrival check_wrapper_caption_survives
+# looks for the line that has to be up going into the load. Longer than the
+# pill's 0.3 s crossfade, so a sample cannot land mid-fade and read a healthy
+# take as a dark one.
+WRAPPER_SURVIVES_RUNUP_S = 0.8
 
 
 WRAPPER_BAND_SWEEP_FPS = 10

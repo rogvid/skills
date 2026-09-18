@@ -31,20 +31,19 @@ not.
 
 ## Captions
 
-**`caption(text)`** — the narrator line, in the caption pill riding the app
-rect's bottom edge (a reserved band below the app with `caption_overlay=False`).
-`""` clears it.
+**`caption(text)`** — the narrator line, in a pill at the foot of the frame,
+the way a video player subtitles. `""` clears it.
 
-- Both media draw the caption **in the recorder's own document**, so the line
-  survives full page loads and SPA routing alike, and `caption_lost` cannot
-  fire at all any more. The corollary is a footgun: a line left up across a
-  navigation reads as narrating the next view too. `caption("")` before the
-  click that navigates, fresh caption after.
-- A line taller than the two-line zone is shaved at its edges and recorded as a
+- The line is **never in the recorded page**, so it survives full page loads
+  and SPA routing alike, and `caption_lost` cannot fire at all any more. The
+  corollary is a footgun: a line left up across a navigation reads as
+  narrating the next view too. `caption("")` before the click that navigates,
+  fresh caption after.
+- The line is a pill **composited over the finished frame**, at the foot of the
+  frame, after the camera pass - so a push-in cannot crop it and it no longer
+  has to be faded before a `spotlight()`. The pill wraps to as many lines as it
+  needs; only one taller than the frame is cut off, and that is recorded as a
   `caption_clipped` issue. Shorten it, or split it over two captions.
-- With the overlay pill, fade the line (`caption("")`) **before** a
-  `spotlight()`: the camera push-in crops the frame around the spotlit element
-  and can shave a pill riding the bottom edge.
 - A caption long enough to wrap can silence the held-picture warning on an
   app's own modal, so keep captions to one line.
 

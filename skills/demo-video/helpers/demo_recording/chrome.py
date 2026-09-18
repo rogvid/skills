@@ -5,12 +5,16 @@ page carrying the window chrome: the pastel background, the dark rounded
 window with its title bar and traffic lights, a **content slot** the medium
 fills (the web recorder mounts the app iframe in it; the terminal recorder
 mounts xterm.js in the same slot, #362), a **caption band** reserved BELOW
-the slot, and a **card
-layer** over the slot (#360). By construction the slot and the band share no
-pixels — `chrome_geometry` is the arithmetic behind that sentence. This
-repository's `tests/unit` (not shipped with the installed skill) grades it,
-and this repository's `tests/smoke --wrapper-only` reads the same claim out
-of a recorded take's frames.
+the slot, and a **card layer** over the slot (#360). By construction the slot
+and the band share no pixels — `chrome_geometry` is the arithmetic behind
+that sentence.
+
+**The band no longer carries anything.** The caption is a pill composited
+over the finished frame (captions.py), so what the band decides now is only
+how much room the window leaves below the app rect; the layers and
+`__demoCaption` below are unused, and they go when the band does. The pill's
+own declaration is `CAPTION_PILL_CSS`, which both this document and the pill
+document are built from, so the two cannot drift apart while both exist.
 
 **The card layer covers the app rect — not the chrome, not the caption
 band.** `interlude()`, `criterion()` and the `light` bridge scrim render in
@@ -70,6 +74,68 @@ CAPTION_BAND_PX = 96
 # to survive its ~0.8 downscale; web.py's history note has the story.)
 CAPTION_FONT_PX = 26
 
+# The pill itself — the one declaration both the in-page caption layers and
+# the composited pill (captions.py) are built from, so the two cannot drift
+# apart while both exist. `backdrop-filter` is deliberately NOT here: it is
+# the one property the composited pill cannot honour (a PNG rendered on
+# transparency has no backdrop to blur), and a look the page has and the
+# video does not is worse than neither having it.
+CAPTION_PILL_CSS = """    max-width: __CAPMAXW__px;
+    padding: 12px 30px; border-radius: 12px;
+    background: rgba(22,20,16,.72);
+    color: #f7f4ee; text-align: center;
+    font: 600 __CAPFONT__px/1.36 system-ui, sans-serif; letter-spacing: .01em;
+    pointer-events: none; box-shadow: 0 6px 24px rgba(0,0,0,.28);"""
+
+# How wide a composited pill may grow, as a share of the frame. Subtitle
+# width: wide enough for a long line to stay two lines, narrow enough that
+# the eye does not travel the whole frame to read it.
+CAPTION_MAX_WIDTH_FRAC = 0.72
+
+# The room the pill document keeps around the pill, so the PNG carries its
+# drop shadow: an element screenshot is the element's box, and `0 6px 24px`
+# falls outside it. `captions.py` places the PNG, shadow room and all, which
+# is why its inset is smaller than the gap a viewer measures.
+CAPTION_PILL_PAD_PX = 30
+
+# The pill document: one element, on transparency, with no transition of its
+# own — the fades belong to the video pass (captions.py), and a pill caught
+# mid-transition would be screenshotted at the wrong opacity.
+_CAPTION_PILL_HTML = """<!doctype html><meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; }
+  body { display: inline-block; padding: __CAPPAD__px; }
+  #__demo_caption { display: inline-block;
+__CAPTION_PILL_CSS__
+  }
+</style>
+<div id="__demo_caption"></div>
+<script>
+  window.__demoPill = (text) => {
+    const el = document.getElementById('__demo_caption');
+    el.textContent = text;
+    return { w: el.offsetWidth, h: el.offsetHeight };
+  };
+</script>"""
+
+
+def caption_pill_document(
+    frame_width: int, caption_font_px: int = CAPTION_FONT_PX
+) -> str:
+    """The document a caption pill is rendered and screenshotted in.
+
+    Rendered in a context of its own — never the recorded one — so the pill
+    reaches the take through `captions.py`'s overlay and not through the
+    page the camera zooms.
+    """
+    return (
+        _CAPTION_PILL_HTML.replace("__CAPTION_PILL_CSS__", CAPTION_PILL_CSS)
+        .replace("__CAPMAXW__", str(int(frame_width * CAPTION_MAX_WIDTH_FRAC)))
+        .replace("__CAPPAD__", str(CAPTION_PILL_PAD_PX))
+        .replace("__CAPFONT__", str(caption_font_px))
+    )
+
+
 # Element ids. The slot is what a medium fills; the band holds the caption
 # element; the card layer holds the interlude/criterion card and the bridge
 # scrim (#360). The caption element keeps the id the retired in-page overlay
@@ -120,12 +186,12 @@ def chrome_geometry(
     construction — the property `tests/unit` asserts on this function and
     `tests/smoke` asserts on the pixels.
 
-    `caption_overlay=True` trades that invariant away deliberately (#403
-    prototype): the band contributes nothing to the window's height and the
-    caption renders as a floating pill *over* the slot's bottom edge, the way
-    a video player subtitles. The band keys then describe the overlay zone —
-    inside the app rect — and "the app never shares a pixel with the caption"
-    no longer holds.
+    `caption_overlay=True` gives the band no height at all, which is what a
+    take wants now that the caption composites over the frame rather than
+    painting in here (captions.py): the band keys then describe a zone inside
+    the app rect that nothing draws in. With it False the window still
+    reserves the band's height below the app rect — an empty strip, kept
+    until the band itself is retired.
 
     `height_scale=None` sizes the slot so the window's margin to the frame is
     the same on all four sides: the side margin `width_scale` leaves decides
@@ -224,14 +290,15 @@ _CHROME_HTML = """<!doctype html><meta charset="utf-8"><title>__TITLE__</title>
   /* Two stacked caption layers crossfade: `__demoCaption` fades the old
      line out while the new one fades in, so a caption-to-caption change is
      a transition instead of a pop. The layers sit on top of each other in
-     the band's centre; only the visible one is measured for clipping. */
-  #__demo_caption, #__demo_caption2 { position: absolute; max-width: 90%;
-    padding: 12px 30px; border-radius: 12px;
-    background: rgba(22,20,16,.72); backdrop-filter: blur(3px);
-    color: #f7f4ee; text-align: center;
-    font: 600 __CAPFONT__px/1.36 system-ui, sans-serif; letter-spacing: .01em;
-    pointer-events: none; opacity: 0;
-    transition: opacity .3s ease; box-shadow: 0 6px 24px rgba(0,0,0,.28); }
+     the band's centre; only the visible one is measured for clipping.
+
+     Unused while captions composite (captions.py): `caption()` renders the
+     pill in its own document and the video pass lays it over the frame, so
+     nothing puts text in these. They stay until the band itself goes, with
+     the `caption_overlay` parameter that sizes it. */
+  #__demo_caption, #__demo_caption2 { position: absolute;
+__CAPTION_PILL_CSS__
+    opacity: 0; transition: opacity .3s ease; }
   /* The card layer sits exactly on the content slot — the app rect and
      nothing else. See the module docstring for why a card covers the app
      and never the chrome or the caption band. */
@@ -415,7 +482,9 @@ def chrome_html(
         "__ACCENT__": accent,
         "__CARDZ__": str(CARD_LAYER_Z),
     }
-    html = _CHROME_HTML
+    html = _CHROME_HTML.replace("__CAPTION_PILL_CSS__", CAPTION_PILL_CSS).replace(
+        "__CAPMAXW__", str(int(geom["bandw"] * 0.9))
+    )
     for token, value in replacements.items():
         html = html.replace(token, value)
     return html

@@ -1245,32 +1245,38 @@ def crop_png(src: Path, rect: Rect, out: Path) -> bytes | None:
 def caption_probe_band(
     label: str, frame_size: tuple[int, int], factor: float = 1.0
 ) -> Rect:
-    """Where this medium's caption paints, at `factor` times the frame size.
+    """Where the caption paints, at `factor` times the frame size.
 
-    Every medium's caption paints in the wrapper chrome's reserved band
-    below the app rect — web and segments since #358/#361, terminal since
-    #362 — and reading the legacy full-width bottom strip dilutes its
-    change with ~7x of static chrome: measured 2.68 mean luma over the
-    strip for a caption whose own band moves by an order of magnitude
-    more. The arithmetic is `chrome_geometry`'s, duplicated at native size
-    (the loop-vs-suite rule: policy is not imported), then scaled, because
-    the geometry's even-pixel rounding does not commute with scaling.
-    `label` no longer dispatches; it stays so a failure message's caller
-    reads the same as the checks it feeds.
+    The caption is a pill composited over the finished frame at its foot
+    (captions.py), not a band inside the window any more, so this is a strip
+    across the bottom of the frame: as wide as the widest pill the document
+    can produce plus its shadow room, and tall enough for a pill that wrapped
+    to two lines. The arithmetic is `chrome.CAPTION_*`'s and
+    `captions.CAPTION_FRAME_INSET_PX`'s, duplicated here at native size (the
+    loop-vs-suite rule: policy is not imported) and then scaled, because
+    rounding does not commute with scaling.
+
+    Reading a full-width bottom strip instead would dilute the pill's change
+    with static chrome — measured 2.68 mean luma over such a strip for a
+    caption whose own zone moves by an order of magnitude more. `label` no
+    longer dispatches; it stays so a failure message's caller reads the same
+    as the checks it feeds.
     """
     del label
     width, height = frame_size
-    appw = int(width * 0.80) & ~1
-    apph = int(height * 2 / 3) & ~1
-    winw = appw + 2 * 14
-    winh = 36 + 14 + apph + 96 + 14
-    winx = (width - winw) // 2
-    winy = (height - winh) // 2
+    # Inside the pill, not around it. The PNG is 30px of shadow room, a 60px
+    # one-line pill, and 30px more, with its foot 18px off the frame's: so
+    # the pill's own last line is centred 78px above the bottom edge, and a
+    # pill that wrapped grows upward from there. A zone any wider crosses the
+    # window's edge into the background, which is a contrast step that never
+    # goes away — measured, it read "lit" for all 37.3s of the wrapper take.
+    zone_w = int(width * 0.30)
+    zone_h = 40
     return (
-        round((winx + 14) * factor),
-        round((winy + 36 + 14 + apph) * factor),
-        round(appw * factor),
-        round(96 * factor),
+        round((width - zone_w) / 2 * factor),
+        round((height - 78 - zone_h / 2) * factor),
+        round(zone_w * factor),
+        round(zone_h * factor),
     )
 
 
