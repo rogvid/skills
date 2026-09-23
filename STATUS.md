@@ -82,7 +82,7 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 
 ### 4. Robustness
 
-- [ ] Popups and new tabs are not captured; only the first page is. Decide whether to follow them.
+- [x] New tabs and popups are followed: the old page holds until the new one paints, then crossfades, and closing it returns to the page before. A popup is resized to the recording viewport and shown like a tab. `rec.page` is always the page on screen.
 - [ ] Full-screen TUIs (`top`, `vim`, alternate screen) are untested in v2. Test one.
 - [x] Narration: a real ElevenLabs take of the ticket-queue demo works. Each line starts within 0.2s of its caption and ends before the next, peak -1.6dB. The key is in this repo's `.env` (`set -a; . ./.env; set +a`). Clips are cached in `~/.cache/demo-video/tts`.
 - [ ] Removed v1 constructor options are ignored with a warning. Decide whether to keep that shim once Koyr is ported.

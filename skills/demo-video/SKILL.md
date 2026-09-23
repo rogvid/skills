@@ -73,6 +73,7 @@ The recorder already handles:
 - **Long waits:** any wait on the app over about 1.5s is squeezed into 1.5-3s of video with a fast-forward badge. For a slow job, call `wait_for` on its result and let the recorder squeeze it. Never `pause()` in a loop.
 - **The cursor:** it fades out when idle, so there's no need to park it.
 - **Captions** sit in a band below the window, so they never cover the app.
+- **New tabs and popups** are followed: the video crossfades to them, `rec.page` is always the page on screen, and closing it (`rec.page.close()`) returns to the one before.
 
 **Terminal demos** use `TerminalRecorder(HERE, cwd=...)` with these verbs:
 - `run(cmd)` types a command and waits for the prompt; `run(cmd, wait=False)` is for programs that keep running.

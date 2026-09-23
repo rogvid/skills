@@ -180,16 +180,11 @@ class _Take:
         )
         self.context.add_init_script(_WATCH)
         self.page = self.context.new_page()
-        self.page.set_default_timeout(10_000)
-        self.page.on("pageerror", lambda e: self._problems.append(f"page error: {e}"))
-        self.page.on(
-            "console",
-            lambda m: m.type == "error" and self._problems.append(f"console error: {m.text}"),
-        )
-        self.page.on(
-            "requestfailed",
-            lambda r: self._problems.append(f"request failed: {r.method} {r.url} ({r.failure})"),
-        )
+        self._watch(self.page)
+        # Tabs and popups the app opens; the recorder follows them.
+        self._pages = [self.page]
+        self._opened: list = []
+        self.context.on("page", lambda page: self._opened.append(page))
         self.screencast = Screencast(self.context, self.page, self.take_dir / "frames", cw, ch)
         self.clock = Clock()
         with self._off_clock():
@@ -211,6 +206,18 @@ class _Take:
         if _env("TRACEBACK"):
             return False
         raise SystemExit(1)
+
+    def _watch(self, page) -> None:
+        page.set_default_timeout(10_000)
+        page.on("pageerror", lambda e: self._problems.append(f"page error: {e}"))
+        page.on(
+            "console",
+            lambda m: m.type == "error" and self._problems.append(f"console error: {m.text}"),
+        )
+        page.on(
+            "requestfailed",
+            lambda r: self._problems.append(f"request failed: {r.method} {r.url} ({r.failure})"),
+        )
 
     def _close(self) -> None:
         for step in (self._stop, self.browser.close, self._pw.stop):
@@ -621,7 +628,46 @@ class Recorder(_Take):
         s = self.geom["scale"]
         return [[round(v * s, 1) for v in box] for box in boxes]
 
+    def _mark(self, label: str) -> None:
+        self._follow_pages()
+        super()._mark(label)
+
+    def _follow_pages(self) -> None:
+        """Put a newly opened tab or popup on screen, or, when the page on
+        screen has closed, the one before it. Like a navigation, the old page
+        stays up until the new one has painted, then crossfades."""
+        while self._opened:
+            page = self._opened.pop(0)
+            self._watch(page)
+            self._pages.append(page)
+        self._pages = [p for p in self._pages if not p.is_closed()]
+        if not self._pages:
+            raise RuntimeError("every page is closed")
+        page = self._pages[-1]
+        if page is self.page or not self._capturing:
+            self.page = page
+            return
+        nav = {"start": self._now(), "real": time.time()}
+        with self._app_time():
+            try:
+                # A popup asks for its own size; it is shown like a tab.
+                vw, vh = self.viewport
+                if page.viewport_size != {"width": vw, "height": vh}:
+                    page.set_viewport_size({"width": vw, "height": vh})
+                page.wait_for_load_state("load")
+                page.evaluate(_PAINTED)
+            except Exception:  # noqa: BLE001 - it closed again at once
+                pass
+        self.page = page
+        page.bring_to_front()
+        with self._off_clock():
+            self.screencast.follow(page)
+        self._real(0.1)
+        self._navs.append(dict(nav, ready=self._now()))
+
     def _tick(self) -> None:
+        if self._opened or self.page.is_closed():
+            self._follow_pages()
         spot = self._spot
         if not spot:
             return

@@ -24,13 +24,27 @@ class Screencast:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.frames: list[tuple[float, str]] = []
         self.last_arrival = 0.0  # host time of the latest frame, for settling
-        self._cdp = context.new_cdp_session(page)
-        self._cdp.on("Page.screencastFrame", self._on_frame)
+        self._context = context
         self._size = (width, height)
-        self._page = page
+        self._connect(page)
         self._painted = 0  # screencast frames so far
         self._snapped = -1  # ... when the last snapshot was taken
         self._running = False
+
+    def _connect(self, page) -> None:
+        self._page = page
+        self._cdp = self._context.new_cdp_session(page)
+        self._cdp.on("Page.screencastFrame", self._on_frame)
+
+    def follow(self, page) -> None:
+        """Capture `page` from now on: a new tab, a popup, or the page left
+        behind when one closes."""
+        running = self._running
+        self.stop()
+        self._connect(page)
+        self._snapped = -1
+        if running:
+            self.start()
 
     def _on_frame(self, event: dict) -> None:
         stamp = event.get("metadata", {}).get("timestamp") or time.time()
