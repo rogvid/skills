@@ -77,7 +77,7 @@ The recorder already handles:
 
 **Terminal demos** use `TerminalRecorder(HERE, cwd=...)` with these verbs:
 - `run(cmd)` types a command and waits for the prompt; `run(cmd, wait=False)` is for programs that keep running.
-- `send(text)` types into a REPL or prompt.
+- `send(text)` types into a REPL or prompt and presses Enter; `send(text, enter=False)` only types (an editor, a TUI).
 - `key("Down", "Enter", "C-c")` presses keys.
 - `wait_for_text(regex)`, `wait_for_prompt()` and `wait_for_quiet()` wait on output.
 

@@ -83,14 +83,14 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 ### 4. Robustness
 
 - [x] New tabs and popups are followed: the old page holds until the new one paints, then crossfades, and closing it returns to the page before. A popup is resized to the recording viewport and shown like a tab. `rec.page` is always the page on screen.
-- [ ] Full-screen TUIs (`top`, `vim`, alternate screen) are untested in v2. Test one.
+- [x] Full-screen TUIs work: `top`, `less` and `vim` render full-screen, and quitting restores the shell (alternate screen). The one trap was `send()` pressing Enter by default; SKILL.md now says to use `enter=False` in an editor.
 - [x] Narration: a real ElevenLabs take of the ticket-queue demo works. Each line starts within 0.2s of its caption and ends before the next, peak -1.6dB. The key is in this repo's `.env` (`set -a; . ./.env; set +a`). Clips are cached in `~/.cache/demo-video/tts`.
 - [x] The v1 constructor options are pruned: each was either covered under another name (`title=`, `prompt=`, `browser_context=`, `interlude()`, `rec.page.clock`) or belonged to a removed v1 feature. An old option now raises `TypeError`.
 
 ### 5. Housekeeping
 
 - [x] `mise.toml` is trusted again and the git hooks run. `/graft/` and `/.ignore` (graft's local files) are gitignored.
-- [ ] `ensure.sh` and `skills/script-conventions` are unchanged from v1. Confirm `ensure.sh` still fits (it chmods `scripts/*`).
+- [x] `ensure.sh` still fits: byte-identical to the template, every script in `scripts/` has a shebang, and SKILL.md runs it before the first script.
 - [ ] When v2 is done, delete this file and move anything left into GitHub issues.
 
 ## How to check a change
