@@ -60,7 +60,7 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 - [x] Captions sit in a band below the window, with an even margin on all sides. The default viewport is 1440 wide, shaped to the window.
 - [x] `demo-new` failed on uv 0.11, which reads the template's embedded PEP 723 block as a second one (0.9 did not). The template's metadata now sits in a one-line string.
 - [x] Pages that never go still (Koyr's pinned lineage runs React Flow's infinite `dashdraw` animation at 59fps) made every `_settle()` run to its 2.5s cap. Settle now also asks the page: when the only things moving are infinite animations already running before the step, and the DOM and scroll have been quiet for 0.35s, it is settled. A spinner the step started is still waited for. Koyr: take 31s to 18s, video 51.5s to 35.7s, same content.
-- [ ] Render time grew with the full-resolution holds: Koyr is 66s for 51s of video. See Speed.
+- [x] Render time grew with the full-resolution holds (Koyr 66s for 51s of video); fixed under Speed.
 - [ ] An `act()` body that only changes the page (a JS scroll) is not settled afterwards, so the next frame can be stale. The hold snapshot now covers the common case.
 
 ### 2. Output polish (what a viewer sees)
@@ -77,11 +77,8 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 
 ### 3. Speed
 
-- [ ] Rendering runs at about 0.5x real time. The bottleneck is ffmpeg ingesting 6MB rgb24 frames, duplicates included. Options, in order:
-  - send yuv420p (half the bytes)
-  - draw unique frames in a process pool
-  - encode only unique frames with timestamps (PyAV, VFR)
-- [ ] `DEMO_VIDEO_DRAFT=1` still starts a full take. Check that it is fast enough to be the default iteration loop.
+- [x] Rendering is now faster than real time: Koyr 66s to 23s for 36s of video, ticket-queue 10s for 17s. Profiling showed two thirds in LANCZOS resizes and one third blocked on ffmpeg, in series. Snapshots (exactly 2x) downsample with `reduce(2)`, zoom and motion frames use bicubic (50.8dB PSNR against the old render), unique frames are drawn in a thread pool while ffmpeg takes the last one, and PNGs use default compression (`optimize` was 5x slower for 5% smaller files). If more is needed, the next step is encoding only unique frames (PyAV, VFR).
+- [x] `DEMO_VIDEO_DRAFT=1`: the render part is now about 2s. The take is the app's own time (Koyr 20s), which a draft cannot skip.
 
 ### 4. Robustness
 

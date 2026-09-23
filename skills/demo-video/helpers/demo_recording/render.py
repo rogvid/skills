@@ -14,6 +14,8 @@ import math
 import subprocess
 import sys
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache, lru_cache
 from pathlib import Path
 
@@ -211,8 +213,10 @@ class Take:
     @lru_cache(maxsize=4)  # noqa: B019 - one Take per process
     def at_rest(self, index: int) -> Image.Image:
         image = self.frame(index)
+        if image.size == (2 * self.cw, 2 * self.ch):
+            return image.reduce(2)  # a snapshot: a plain 2x2 average is exact
         if image.size != (self.cw, self.ch):
-            image = image.resize((self.cw, self.ch), Image.Resampling.LANCZOS)
+            image = image.resize((self.cw, self.ch), Image.Resampling.BICUBIC)
         return image
 
     # -- one frame ---------------------------------------------------------------
@@ -317,7 +321,7 @@ class Take:
                 hw, hh = self.cw / (2 * z), self.ch / (2 * z)
                 content = source.resize(
                     (self.cw, self.ch),
-                    Image.Resampling.LANCZOS,
+                    Image.Resampling.BICUBIC,
                     box=(
                         k * max(0, cx - hw),
                         k * max(0, cy - hh),
@@ -464,15 +468,33 @@ class Take:
             "+faststart",
             str(path),
         ]
+        # Runs of identical frames are drawn once. Frames are drawn a few ahead
+        # in threads (Pillow releases the GIL) while ffmpeg takes the last.
+        runs: list[list] = []
+        for i in range(count):
+            ops = self.ops(i / FPS)
+            if runs and runs[-1][0] == ops:
+                runs[-1][1] += 1
+            else:
+                runs.append([ops, 1])
         encoder = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         assert encoder.stdin is not None
-        last_ops, last_bytes = None, b""
         try:
-            for i in range(count):
-                ops = self.ops(i / FPS)
-                if ops != last_ops:
-                    last_ops, last_bytes = ops, self.draw(ops).tobytes()
-                encoder.stdin.write(last_bytes)
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                ahead: deque = deque()
+                pending = iter(runs)
+                for ops, n in pending:
+                    ahead.append((pool.submit(self.draw, ops), n))
+                    if len(ahead) >= 8:
+                        break
+                while ahead:
+                    future, n = ahead.popleft()
+                    data = future.result().tobytes()
+                    for ops, m in pending:
+                        ahead.append((pool.submit(self.draw, ops), m))
+                        break
+                    for _ in range(n):
+                        encoder.stdin.write(data)
         finally:
             encoder.stdin.close()
         if encoder.wait() != 0:
@@ -530,7 +552,7 @@ class Take:
             lines = _wrap(draw, text, font, tile_w - 4)[:2]
             for j, line in enumerate(lines):
                 draw.text((x + 2, y + tile_h + 4 + j * 19), line, fill=(30, 30, 40), font=font)
-        sheet.save(path, optimize=True)
+        sheet.save(path)
 
     def timeline(self, path: Path) -> None:
         lines = [f"# {self.duration:.1f}s", "", "| time | step |", "|---|---|"]
@@ -574,8 +596,14 @@ def main(argv: list[str]) -> int:
     for stale in images.glob("*.png"):
         if stale.stem not in names:
             stale.unlink()
-    for shot in m["shots"]:
-        take.at(shot["t"]).save(images / f"{shot['name']}.png", optimize=True)
+    # Default PNG compression: `optimize` is 5x slower for 5% smaller files.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        saves = [
+            pool.submit(take.at(shot["t"]).save, images / f"{shot['name']}.png")
+            for shot in m["shots"]
+        ]
+        for save in saves:
+            save.result()
     take.sheet(out / "sheet.png")
     take.timeline(out / "timeline.md")
     (out / "failure.png").unlink(missing_ok=True)
