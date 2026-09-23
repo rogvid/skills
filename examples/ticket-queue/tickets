@@ -31,8 +31,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     if args.status is not None:
         if args.status not in STATUSES:
             print(
-                f"unknown status: {args.status} "
-                f"(expected one of {', '.join(STATUSES)})",
+                f"unknown status: {args.status} (expected one of {', '.join(STATUSES)})",
                 file=sys.stderr,
             )
             return 2

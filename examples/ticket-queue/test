@@ -122,9 +122,7 @@ class QueuePage(unittest.TestCase):
 
     def row_text(self, ticket_id: str) -> str:
         """Everything a person can read on one row (hidden text excluded)."""
-        return self.page.locator(
-            f'#ticket-list .ticket[data-id="{ticket_id}"]'
-        ).inner_text()
+        return self.page.locator(f'#ticket-list .ticket[data-id="{ticket_id}"]').inner_text()
 
     def search(self, term: str) -> None:
         box = self.page.locator("#queue-search")
@@ -136,9 +134,7 @@ class QueuePage(unittest.TestCase):
 
     def tickets_json(self) -> list[dict]:
         return json.loads(
-            urllib.request.urlopen(f"{BASE_URL}/api/tickets", timeout=5)
-            .read()
-            .decode("utf-8")
+            urllib.request.urlopen(f"{BASE_URL}/api/tickets", timeout=5).read().decode("utf-8")
         )
 
     # -- controls ------------------------------------------------------------
@@ -525,9 +521,7 @@ def fault_inject() -> int:
             print(f"      in {rel}: {old.strip().splitlines()[0][:66]}…")
             if ok:
                 for line in [
-                    ln
-                    for ln in done.stderr.splitlines()
-                    if ln.startswith(("FAIL:", "ERROR:"))
+                    ln for ln in done.stderr.splitlines() if ln.startswith(("FAIL:", "ERROR:"))
                 ][:4]:
                     print(f"      {line}")
             else:
@@ -539,9 +533,7 @@ def fault_inject() -> int:
                 print(textwrap.indent(done.stderr[-1500:], "      | "))
             print()
     if failures:
-        print(
-            f"{failures} injection(s) went unnoticed — those assertions grade nothing."
-        )
+        print(f"{failures} injection(s) went unnoticed — those assertions grade nothing.")
         return 1
     print(f"All {len(INJECTIONS)} injections were caught.")
     return 0

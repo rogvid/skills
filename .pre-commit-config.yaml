@@ -1,19 +1,5 @@
-# Git hooks, run by prek. `mise run setup` installs them; `mise install` first
-# if this is a fresh clone.
-#
-# **Two hooks, and both catch something you would not otherwise notice in
-# time.** Everything else this file used to run - the two unit suites, their
-# `--anchors` sweeps, mypy, actionlint, shellcheck, the pre-push issue check -
-# is still in `tests/`, behind `mise run check` and the tasks `mise tasks`
-# lists. It runs when you decide it should, not on every commit.
-#
-# Neither hook names a tool version. `tests/lint` reads ruff's version out of
-# the `RUFF_VERSION:` line of `.github/workflows/ci.yml` as text so the repo
-# has exactly one pin - issue #189 is what a second one cost: a local
-# `uvx ruff` and CI's pinned ruff disagreed on 33 files, in the direction that
-# demands reformatting CI was happy with.
-#
-# Bypass with `git commit --no-verify`.
+# Git hooks, run by prek (`mise run bootstrap` installs them). Bypass with
+# `git commit --no-verify`.
 
 default_install_hook_types: [pre-commit]
 fail_fast: false
@@ -22,7 +8,7 @@ repos:
   - repo: local
     hooks:
       - id: lint
-        name: ruff check + format + doc fences + shipped pointers (the pin)
+        name: ruff check + format
         entry: tests/lint
         language: system
         pass_filenames: false

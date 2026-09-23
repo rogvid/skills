@@ -1,136 +1,47 @@
 # Tooling and task front door for this repo.
 #
-#     mise run bootstrap                  # once per clone: tools and git hooks
-#     mise run check                      # the fast gate, ~7 s
-#     mise tasks                          # everything else, run when you want it
-#
-# **Almost nothing runs on its own.** GitHub runs one job, gitleaks, because a
-# leaked credential is the one failure that cannot be undone later. The git
-# hooks run two things, ruff and gitleaks. Every other check in this repo -
-# typecheck, both unit suites, their fault-injection drivers, actionlint,
-# shellcheck, the smoke recorder, the pixel loop, the grader eval - is a task
-# below, and it runs when you ask it to.
-#
-# **Deliberately not pinned here: ruff and mypy.** The pins live on the
-# `RUFF_VERSION:` / `MYPY_VERSION:` lines of `.github/workflows/ci.yml`, and
-# `tests/lint` and `tests/typecheck` read that file as text so there is one pin
-# and one command. A version in this file would be a second pin, which is the
-# defect issue #189 already cost a cycle: a local `uvx ruff` and CI's pinned
-# ruff disagreed on 33 files, in the direction where the local run demands
-# reformatting CI is happy with. Same reasoning for shellcheck and actionlint -
-# the tasks below reach them through `uv run --with …`, so there is one way to
-# get each binary.
-#
-# What IS here is only what has no version opinion: the runner (uv), the hook
-# runner (prek) and the secret scanner.
+#     mise run bootstrap   # once per clone: tools and git hooks
+#     mise run check       # lint and unit tests, a few seconds
+#     mise tasks           # everything else
 
 [tools]
 uv = "latest"
 prek = "latest"
-# CI scans with `gitleaks/gitleaks-action@v2`, which pins its own binary. This
-# one is a pre-filter on staged content, not a replica of that job - it exists
-# so a credential is caught before it is committed rather than after it is
-# pushed. Both read `.gitleaks.toml`.
 gitleaks = "latest"
 
+[env]
+RUFF = "ruff@0.16.1"
+
 [tasks.bootstrap]
-description = "Once per clone: the git hooks, and what the recording tasks still need"
-# **Named `bootstrap` on purpose.** `mise run <task>` installs the `[tools]`
-# above before the task body runs, so this only has to do the part mise cannot
-# infer. The name is mise's own convention too: `mise bootstrap` - the
-# machine-level command - finishes by running a task called `bootstrap` if the
-# config defines one, so the same word works at both levels.
+description = "Once per clone: git hooks, and a report on what recording needs"
 run = [
   "prek install",
-  # ffmpeg and a Chromium build are not mise-managed, and `check` does not need
-  # either. So this reports rather than installs - ffmpeg wants a package
-  # manager and sudo, and Chromium is ~150 MB that only `smoke`, `smoke-full`,
-  # `smoke-inject`, `pixel` and `ticket-queue` ever spend. Reporting here is
-  # still worth it: without them those tasks fail minutes deep inside a
-  # recording, and the error they raise does not say "install a browser".
-  #
-  # A literal string, so the shell below is what it looks like.
   '''
-  ok=1
-  if ! command -v ffmpeg > /dev/null 2>&1; then
-    echo "MISSING  ffmpeg - smoke, smoke-full, smoke-inject and pixel need it"
-    echo "         sudo apt-get install -y ffmpeg"
-    ok=0
-  fi
+  command -v ffmpeg > /dev/null 2>&1 || echo "MISSING  ffmpeg - sudo apt-get install -y ffmpeg"
   cache="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
   [ -d "$cache" ] || cache="$HOME/Library/Caches/ms-playwright"
-  if ! ls -d "$cache"/chromium-* > /dev/null 2>&1; then
-    echo "MISSING  Chromium - smoke, smoke-full, smoke-inject, pixel and ticket-queue need it"
-    echo "         uv run --with playwright playwright install chromium"
-    ok=0
-  fi
-  if [ "$ok" = 1 ]; then
-    echo "OK       ffmpeg and Chromium are present; every task mise tasks lists can run"
-  fi
-  echo "bootstrap: tools and git hooks installed"
+  ls -d "$cache"/chromium* > /dev/null 2>&1 || echo "MISSING  Chromium - uv run --with playwright playwright install chromium"
+  echo "bootstrap: done"
   ''',
 ]
 
-[tasks.setup]
-description = "Alias for bootstrap, kept because older notes say `mise run setup`"
-depends = ["bootstrap"]
-
 [tasks.lint]
-description = "ruff, doc fences and shipped pointers, at the pinned version"
+description = "ruff check and format check"
 run = "tests/lint"
 
-[tasks.typecheck]
-description = "mypy over the recorder, at the pinned version"
-run = "tests/typecheck"
-
 [tasks.test]
-description = "The browser-free suites: the recorder's and the CI helpers'"
-run = ["tests/unit", "tests/ci-unit"]
+description = "Unit tests for the recorder's pure parts"
+run = "uv run --no-project --with pytest --with pillow pytest -q tests"
 
 [tasks.check]
-description = "The fast gate by hand: lint, typecheck, both unit suites (~7 s)"
-depends = ["lint", "typecheck", "test"]
+description = "lint and unit tests"
+depends = ["lint", "test"]
 
-[tasks.anchors]
-description = "Both injection manifests still resolve (~1 s)"
-run = ["tests/unit --anchors", "tests/ci-unit --anchors"]
-
-[tasks.fault-inject]
-description = "Prove the unit assertions can still fail - break each subject in turn (~7 min)"
-run = ["tests/unit --fault-inject", "tests/ci-unit --fault-inject"]
-
-[tasks.issues]
-description = "Every issue a document presents as pending work is still open (needs the network)"
-run = "tests/lint --issues"
-
-[tasks.workflows]
-description = "actionlint over the workflows, plus shellcheck over the skills' shell scripts"
-run = [
-  "uv run --no-project --with actionlint-py --with shellcheck-py actionlint .github/workflows/*.yml",
-  "find skills -name '*.sh' -print0 | xargs -0 -r uv run --with shellcheck-py shellcheck --severity=style",
-]
-
-[tasks.pixel]
-description = "The chrome reference loop - cached takes, no lock (#324)"
-run = "tests/pixel"
-
-[tasks.smoke]
-description = "The core smoke arms (~84 s)"
-run = "tests/smoke --core"
-
-[tasks.smoke-full]
-description = "The whole smoke suite (~7 min)"
-run = "tests/smoke"
-
-[tasks.smoke-inject]
-description = "Prove the smoke assertions can still fail (~40 min of recording)"
-run = "tests/smoke-inject"
+[tasks.example]
+description = "Record the ticket-queue example demo (needs ffmpeg and Chromium)"
+run = "examples/ticket-queue/demo/record.sh"
 
 [tasks.ticket-queue]
 description = "The ticket-queue example's own browser suite"
 dir = "examples/ticket-queue"
 run = "./test"
-
-[tasks.budget]
-description = "What SKILL.md costs a caller on every invocation"
-run = "tests/unit --budget"

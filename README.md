@@ -32,49 +32,13 @@ Useful flags: `--list` (show without installing), `-g` (install globally to
 
 | Skill | What it does | Prerequisites | Install |
 |---|---|---|---|
-| [`demo-video`](skills/demo-video/) | Record a polished, self-explanatory demo video of a web app or a terminal program — CLI, REPL, or full-screen TUI — from a short storyboard that re-records when the UI changes (optionally with spoken narration and a written guide). | `uv`, `ffmpeg`; Chromium via Playwright (terminal demos are Unix-only) | `npx skills add rogvid/skills --skill demo-video` |
-| [`demo-verify`](skills/demo-verify/) | Prove a change meets its ticket's acceptance criteria with a recorded demo, graded by a blind agent that never sees the diff. Built on `demo-video`'s recorder. | the `demo-video` skill | `npx skills add rogvid/skills --skill demo-verify` |
+| [`demo-video`](skills/demo-video/) | Make a short, polished demo video of a web app or a terminal program (CLI, REPL, TUI) from a small storyboard: framed window, captions, smooth cursor, spotlight zoom, automatic fast-forward over waits, optional narration. Works from a user story, PR description or a sentence in chat. | `uv`, `ffmpeg`; Chromium via Playwright (terminal demos are Unix-only) | `npx skills add rogvid/skills --skill demo-video` |
 | [`script-conventions`](skills/script-conventions/) | The house convention for shipping executable scripts inside a skill — PEP 723 `uv` scripts and the shared `ensure.sh` bootstrap. | none (Unix only) | `npx skills add rogvid/skills --skill script-conventions` |
 
 ## In development
 
-Skills under [`wip/`](wip/) are intentionally invisible to `npx skills add` — the
-installer only walks the repo root one level deep, so nothing there is discovered
-or installed. (You can still pull one directly by path if you want to try it.)
-
-| Skill | What it does |
-|---|---|
-| [`verified-review`](wip/verified-review/) | The two halves of a review loop that terminates — a bounded reviewer contract, and the fault-injection rule that stops a green suite meaning nothing. Includes a catalogue of measurements that look rigorous and grade nothing. |
-
-## Recording a demo on a pull request
-
-[`.github/workflows/demo-video.yml`](.github/workflows/demo-video.yml) is a
-reusable GitHub Actions workflow that records the demos a branch made stale and
-posts **one comment** on the pull request — rewritten on every push — carrying
-the beat table as text and a deep link to the mp4. A consuming repo calls it in
-a few lines:
-
-```yaml
-jobs:
-  demo:
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: rogvid/skills/.github/workflows/demo-video.yml@main
-    with:
-      working-directory: app
-      app-command: npm run dev -- --port 3000
-      base-url: http://127.0.0.1:3000
-```
-
-It records only storyboards whose application changed, sets an explicit
-artifact retention and says it in the comment, **refuses to record against
-a public host**, and **rehearses before it records**: each storyboard runs
-once, fast and strict (`scripts/demo-rehearse`), and one whose feature does
-not work fails the check in seconds — no take is made of something broken.
-See
-[`skills/demo-video/reference/ci.md`](skills/demo-video/reference/ci.md) for the
-trigger policy, what is published, and what the target guard does not cover.
+Skills under [`wip/`](wip/) are intentionally invisible to `npx skills add`: the
+installer only walks the repo root one level deep. There are none right now.
 
 ## Examples
 
@@ -84,7 +48,7 @@ so the installer's one-level-deep root walk never sees it.
 
 | Example | What it is |
 |---|---|
-| [`ticket-queue`](examples/ticket-queue/) | A deliberately boring support-ticket queue — a web front end and a CLI over one JSON file — recorded by the `demo-video` reference PR ([#64](https://github.com/rogvid/skills/issues/64)). |
+| [`ticket-queue`](examples/ticket-queue/) | A deliberately boring support-ticket queue: a web front end and a CLI over one JSON file. [`demo/record.py`](examples/ticket-queue/demo/record.py) is the reference `demo-video` storyboard (`mise run example`). |
 
 ## Issues
 

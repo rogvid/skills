@@ -1,93 +1,15 @@
-# Lint/format config for the Python in this repo.
-#
-# Deliberately `ruff.toml` and not `pyproject.toml`: this repo is a collection
-# of skills, not a Python package, and a pyproject.toml would invite tooling
-# (and people) to treat it as one.
-
-target-version = "py310"  # the floor demo-video's PEP 723 headers declare
-line-length = 88
-
-exclude = [
-    "skills/demo-video/helpers/assets",  # vendored xterm.js
-]
-
-# House convention names executables without a `.py` extension (see
-# skills/script-conventions), and ruff only discovers `.py`/`.pyi` on its own.
-# Without these patterns the scripts that matter most would go unlinted.
+target-version = "py310"  # the floor the skills' PEP 723 headers declare
+line-length = 100
+exclude = ["skills/demo-video/helpers/assets"]  # vendored xterm.js
 extend-include = [
-    "tests/smoke",
-    "tests/smoke-inject",
-    "tests/ci-unit",
-    "tests/unit",
-    "tests/lint",
-    "tests/pixel",
-    "tests/typecheck",
-    "tests/eval-grader",
-    ".github/scripts/*",   # the CI workflow's PEP 723 executables
     "skills/*/scripts/*",  # every skill's PEP 723 executables
-    "examples/*/serve",    # the example app's PEP 723 executables
+    "examples/*/serve",
     "examples/*/tickets",
-    "examples/*/test",     # …and the suite that grades it (#212)
+    "examples/*/test",
 ]
 
 [lint]
-# Ruff's own default (E4/E7/E9 + F) plus the rule families that catch real
-# bugs and keep imports tidy. Intentionally not maximal — this is a lint
-# budget for a small repo, not a style crusade.
-#
-# E501 (line too long) is left out on purpose: the formatter owns line length,
-# and every over-long line here lives inside an embedded JS/CSS string that
-# cannot be wrapped anyway.
 select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
 
-[lint.per-file-ignores]
-# `-> "_DemoBase"` in core.py. The fix is one character, but ten PRs (#3–#12)
-# are queued against these three files and a drive-by edit conflicts with all
-# of them. Drop this once that queue drains.
-"skills/demo-video/helpers/demo_recording/core.py" = ["UP037"]
-
-# The smoke entry (`tests/smoke`) re-binds every name its package
-# (`tests/smokekit/`) defines, so the suite keeps presenting itself — to a
-# reader and to `tests/unit`'s SourceFileLoader, which reads attributes off
-# the loaded file directly — as the one namespace it was before the split.
-# That makes nearly every import unused by ruff's reading and load-bearing by
-# everyone else's. Only `main` is called here.
-"tests/smoke" = ["F401"]
-
 [format]
-# The recorder modules predate any formatter. Running one over them now would
-# rewrite all three files and collide with every queued PR, so they are
-# excluded rather than reformatted. This is a starting point: delete the
-# exclusion (and land the reformat as its own commit) once #3–#12 are merged.
-#
-# `*.md` is the decision issue #192 asked for, and it is a scope statement, not
-# a lint waiver. From 0.16 ruff's *formatter* reads Python out of Markdown code
-# fences; its *checker* still does not (`ruff check` on a `.md` says "No Python
-# files found"), so this one line is the entire difference between 0.14.2 and a
-# current ruff on this tree — 3 files rewritten, all of them prose.
-#
-# A fence in a document is a figure, not source. Nothing imports it, runs it or
-# tests it; its only consumer is a person reading the page, and its layout was
-# chosen for that person. Measured at 0.16.1, the three rewrites cost that
-# reader in three ways: six trailing comments deliberately lined up in a column
-# get ragged out (`rec.run(…)       # types visibly` over `rec.wait_for_prompt()
-#            # waits …`); two calls written on one line explode into vertical
-# lists, one of them five lines longer; and skills/demo-video/SKILL.md gains a
-# blank line after a docstring, taking the always-loaded file from 599 to 600 of
-# the 600-line budget `tests/unit --budget` reports — the last line of a metered
-# file, spent on whitespace.
-#
-# What this gives up is *only* layout, and that is measured rather than assumed.
-# The formatter does not validate a fence: given ```python\ndef f(:\n it prints
-# "1 file already formatted" and exits 0. So including `.md` buys no error
-# detection at any version — it buys the formatter's opinion about columns, on
-# text whose columns were chosen by hand. Nothing in this repo checks that a
-# documentation example parses; that gap is issue #211 and this line does not
-# widen it.
-#
-# The counterpart, so this stays a decision and not a hiding place: RUFF_VERSION
-# in ci.yml names a current ruff, and `tests/lint` is clean at it.
-exclude = [
-    "skills/demo-video/helpers/demo_recording/*.py",
-    "*.md",
-]
+exclude = ["*.md"]

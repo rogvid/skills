@@ -1,0 +1,21 @@
+#!/usr/bin/env -S uv run --script
+# vim: set ft=python:
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["pillow>=10.1"]
+# ///
+"""Composite a recorded take into demo.mp4, images/ and sheet.png.
+
+    <skill-dir>/scripts/demo-render <demo-dir>/.take/take.json
+
+The recorder runs this itself at the end of a take. Run it by hand only to
+re-render a take kept with DEMO_VIDEO_KEEP_TAKE=1.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "helpers"))
+from demo_recording.render import main  # noqa: E402
+
+sys.exit(main(sys.argv))

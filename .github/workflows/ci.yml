@@ -1,15 +1,7 @@
 name: CI
 
-# **One job.** This repository is a set of skills, not a service, and the
-# checks that used to live here - lint, typecheck, two unit suites, their
-# fault-injection drivers, actionlint, and the smoke recorder - all answer
-# questions their author can ask when they want the answer. They are still
-# here, in `tests/`, behind `mise run check` and the tasks `mise tasks` lists.
-# What changed is who decides when they run.
-#
-# A leaked credential is the exception: it is the one failure that cannot be
-# undone by running something later, so it is the one thing that still runs
-# without being asked.
+# One job: gitleaks. A leaked credential is the one failure that cannot be
+# undone by running something later. Everything else is a `mise` task.
 
 on:
   push:
@@ -22,15 +14,6 @@ permissions:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  # **Read as text, not used by any step here.** `tests/lint` and
-  # `tests/typecheck` parse these two lines out of this file so the repo has
-  # exactly one pin per tool and a local run is the pinned version - issue #189
-  # is what a second pin cost. Both scripts refuse a missing, duplicated or
-  # unpinned line, so deleting this block breaks them; change a version here.
-  RUFF_VERSION: "0.16.1"
-  MYPY_VERSION: "1.18.2"
 
 jobs:
   secrets:

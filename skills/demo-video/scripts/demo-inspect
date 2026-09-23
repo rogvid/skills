@@ -1,0 +1,39 @@
+#!/usr/bin/env -S uv run --script
+# vim: set ft=python:
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright"]
+# ///
+"""Print what a page offers to point at, one line each with a selector.
+
+    <skill-dir>/scripts/demo-inspect http://localhost:3000/some/page [--viewport 1440x810]
+
+Use it instead of reading the app's source to find selectors. For a state
+deeper in the app, call `rec.inspect()` at that point in the storyboard.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "helpers"))
+from demo_recording.inspect_page import describe  # noqa: E402
+from playwright.sync_api import sync_playwright  # noqa: E402
+
+parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+parser.add_argument("url")
+parser.add_argument("--viewport", default="1440x810")
+args = parser.parse_args()
+w, h = (int(v) for v in args.viewport.split("x"))
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page(viewport={"width": w, "height": h})
+    page.goto(args.url, wait_until="load")
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:  # noqa: BLE001 - a page that polls never goes idle
+        pass
+    print(f"{page.title()!r} at {page.url}")
+    print(describe(page))
+    browser.close()
