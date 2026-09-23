@@ -41,6 +41,10 @@ depends = ["lint", "test"]
 description = "Record the ticket-queue example demo (needs ffmpeg and Chromium)"
 run = "examples/ticket-queue/demo/record.sh"
 
+[tasks.showcase]
+description = "Record the README's showcase video (narrated when .env has ELEVENLABS_API_KEY)"
+run = "examples/showcase/record.sh"
+
 [tasks.ticket-queue]
 description = "The ticket-queue example's own browser suite"
 dir = "examples/ticket-queue"

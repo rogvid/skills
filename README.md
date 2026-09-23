@@ -35,6 +35,15 @@ Useful flags: `--list` (show without installing), `-g` (install globally to
 | [`demo-video`](skills/demo-video/) | Make a short, polished demo video of a web app or a terminal program (CLI, REPL, TUI) from a small storyboard: framed window, captions, smooth cursor, spotlight zoom, automatic fast-forward over waits, optional narration. Works from a user story, PR description or a sentence in chat. | `uv`, `ffmpeg`; Chromium via Playwright (terminal demos are Unix-only) | `npx skills add rogvid/skills --skill demo-video` |
 | [`script-conventions`](skills/script-conventions/) | The house convention for shipping executable scripts inside a skill — PEP 723 `uv` scripts and the shared `ensure.sh` bootstrap. | none (Unix only) | `npx skills add rogvid/skills --skill script-conventions` |
 
+### demo-video showcase
+
+A demo of the example app below, recorded by `demo-video` with narration: a web
+app, then its command-line tool (34s, [`examples/showcase`](examples/showcase/)).
+
+<video src="https://github.com/rogvid/skills/raw/main/examples/showcase/showcase.mp4" controls width="100%"></video>
+
+<sub>If the player doesn't load, [open the mp4 directly](examples/showcase/showcase.mp4).</sub>
+
 ## In development
 
 Skills under [`wip/`](wip/) are intentionally invisible to `npx skills add`: the
@@ -49,6 +58,7 @@ so the installer's one-level-deep root walk never sees it.
 | Example | What it is |
 |---|---|
 | [`ticket-queue`](examples/ticket-queue/) | A deliberately boring support-ticket queue: a web front end and a CLI over one JSON file. [`demo/record.py`](examples/ticket-queue/demo/record.py) is the reference `demo-video` storyboard (`mise run example`). |
+| [`showcase`](examples/showcase/) | The README's showcase video: two `demo-video` storyboards against `ticket-queue`, a web take and a terminal take joined into `showcase.mp4` (`mise run showcase`). |
 
 ## Issues
 
