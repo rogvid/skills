@@ -10,6 +10,10 @@ demo video quickly and cheaply, with the person in the loop. It also says how
 success is measured (tokens, wall-clock, watchability). Plan work against it.
 Where a rule below and the goal disagree, the goal wins.
 
+While the demo-video v2 work is in progress, `STATUS.md` holds the session
+handoff and its prioritized next steps. Read it after `GOAL.md`. It is removed
+when v2 is done, and whatever is left moves to GitHub issues.
+
 ## Layout
 
 - `skills/`: **finished, shareable** skills. Everything here is discoverable

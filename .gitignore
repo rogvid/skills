@@ -25,3 +25,6 @@ failure.png
 
 # prek/pre-commit caches
 .prek-cache/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
