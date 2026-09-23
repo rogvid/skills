@@ -14,4 +14,7 @@ uv run -q "$here/terminal.py"
 printf "file '%s'\n" "$here/web/demo.mp4" "$here/terminal/demo.mp4" > "$here/parts.txt"
 ffmpeg -v error -y -f concat -safe 0 -i "$here/parts.txt" -c copy -movflags +faststart "$here/showcase.mp4"
 rm "$here/parts.txt"
+# GitHub will not play a committed mp4 inline, so the README shows this frame.
+ffmpeg -v error -y -i "$here/web/images/poster.png" -vf scale=1280:-1 -q:v 3 "$here/poster.jpg"
+rm -rf "$here/web/images"
 echo "showcase: $here/showcase.mp4"

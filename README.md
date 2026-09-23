@@ -40,9 +40,9 @@ Useful flags: `--list` (show without installing), `-g` (install globally to
 A demo of the example app below, recorded by `demo-video` with narration: a web
 app, then its command-line tool (34s, [`examples/showcase`](examples/showcase/)).
 
-<video src="https://github.com/rogvid/skills/raw/main/examples/showcase/showcase.mp4" controls width="100%"></video>
+[![The showcase: a support-ticket queue searched, opened and assigned, then its CLI. Play the 34s video.](examples/showcase/poster.jpg)](examples/showcase/showcase.mp4)
 
-<sub>If the player doesn't load, [open the mp4 directly](examples/showcase/showcase.mp4).</sub>
+<sub>▶ [Play the video](examples/showcase/showcase.mp4) (34s, with sound).</sub>
 
 ## In development
 

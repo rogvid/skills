@@ -73,7 +73,7 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 - [x] Title cards follow the window theme (light card on the web recorder, dark in the terminal).
 - [x] Long captions wrap to two balanced lines. Placement now compares how much of the spotlit rect each position covers.
 - [x] Contact sheet merges tiles that look the same (ticket-queue: 6 tiles to 5), and uses 5 columns at 384px past 12 tiles.
-- [x] New narrated showcase in the README (`examples/showcase`, `mise run showcase`): a web take and a terminal take joined. Found on the way: the audio track ended before the video, which put a joined part's narration about 1s early (now padded), and zooms under 1.25x cropped more than they helped (now skipped). Fixed a `ticket-queue` layout bug where the Copy button ran past the detail card.
+- [x] New narrated showcase in the README (`examples/showcase`, `mise run showcase`): a web take and a terminal take joined. GitHub strips `<video>` tags, so the README shows a poster still linked to the mp4; an inline player needs the mp4 uploaded once through the github.com editor (a `user-attachments` URL). Found on the way: the audio track ended before the video, which put a joined part's narration about 1s early (now padded), and zooms under 1.25x cropped more than they helped (now skipped). Fixed a `ticket-queue` layout bug where the Copy button ran past the detail card.
 
 ### 3. Speed
 

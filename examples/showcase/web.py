@@ -32,6 +32,7 @@ with Recorder(HERE / "web", base_url=BASE, title="Ticket queue") as rec:
     rec.click(".ticket")
     rec.spotlight("#detail")
     rec.hold()
+    rec.shot("poster")
     rec.spotlight()
 
     rec.caption("Hand it to a team in two clicks.")
