@@ -37,27 +37,6 @@ SPOT_MIN_S = 1.8
 # Stills are captured this much denser than the video, so a spotlight's zoom
 # has real pixels to show and the resting view is downsampled, never blown up.
 SUPERSAMPLE = 2
-LEGACY = {
-    "segment",
-    "strict",
-    "deterministic",
-    "evidence",
-    "criteria",
-    "ticket",
-    "preview",
-    "caption_overlay",
-    "window_scale",
-    "allow_private",
-    "stills_only",
-    "preset",
-    "clock",
-    "timezone_id",
-    "locale",
-    "intro",
-    "outro",
-    "terminal_title",
-    "terminal_prompt",
-}
 
 
 # Installed in every page: when the DOM last changed or anything scrolled.
@@ -117,16 +96,9 @@ class _Take:
         speech: bool | None = None,
         voice: str | None = None,
         accent: str | None = None,
-        **legacy: object,
     ) -> None:
         self.out = Path(out_dir) if out_dir else _script_dir()
-        self.title = title or legacy.pop("window_title", None)  # type: ignore[assignment]
-        ignored = sorted(k for k in legacy if k in LEGACY)
-        unknown = sorted(k for k in legacy if k not in LEGACY)
-        if unknown:
-            raise TypeError(f"unexpected argument(s): {', '.join(unknown)}")
-        if ignored:
-            print(f"demo-video: ignoring removed option(s): {', '.join(ignored)}", file=sys.stderr)
+        self.title = title
         self.size = size or _pair(_env("SIZE"), (1920, 1080))
         self.viewport = viewport or _pair(
             _env("VIEWPORT"), default_viewport(self.size, self.default_width)
