@@ -38,16 +38,31 @@ THEMES = {
 }
 
 
-def geometry(size: tuple[int, int], viewport: tuple[int, int]) -> dict:
-    """Where the window and the app's content sit in the output frame.
+def _frame(size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """The margin around the window (the same on every side, and deep enough
+    below it for a two-line caption), the title bar's height, and the room
+    left for the app."""
+    w, h = size
+    margin = round(0.1 * h)
+    bar = round(0.034 * h)
+    return margin, bar, w - 2 * margin, h - 2 * margin - bar
 
-    The app renders at `scale` device pixels per CSS pixel, so its frames
-    land in the window at exactly their own size."""
+
+def default_viewport(size: tuple[int, int], width: int) -> tuple[int, int]:
+    """A viewport `width` CSS pixels wide, shaped like the room for the app,
+    so the margin around the window comes out even."""
+    _, _, room_w, room_h = _frame(size)
+    return width, round(width * room_h / room_w)
+
+
+def geometry(size: tuple[int, int], viewport: tuple[int, int]) -> dict:
+    """Where the window, the app's content and the caption band sit in the
+    output frame. A viewport shaped differently from the room for the app
+    leaves a wider margin on one axis."""
     w, h = size
     vw, vh = viewport
-    margin = round(0.045 * h)
-    bar = round(0.034 * h)
-    scale = min((w - 2 * margin) / vw, (h - 2 * margin - bar) / vh)
+    margin, bar, room_w, room_h = _frame(size)
+    scale = min(room_w / vw, room_h / vh)
     cw, ch = round(vw * scale), round(vh * scale)
     x = (w - cw) // 2
     y = (h - ch - bar) // 2
@@ -57,6 +72,8 @@ def geometry(size: tuple[int, int], viewport: tuple[int, int]) -> dict:
         "window": [x, y, cw, ch + bar],
         "content": [x, y + bar, cw, ch],
         "bar": bar,
+        # Captions sit centred in the margin below the window, off the app.
+        "caption_y": round((y + ch + bar + h) / 2),
         "radius": round(0.011 * h),
         "unit": h / 1080,
     }
@@ -129,9 +146,9 @@ class Overlays:
     def caption(self, text: str) -> str:
         cw = self.geom["content"][2]
         css = f"""
-        #o {{ display:inline-block; max-width:{round(cw * 0.72)}px; box-sizing:border-box;
-          padding:{self._px(13)}px {self._px(26)}px; border-radius:{self._px(14)}px;
-          background:rgba(18,18,26,.88); color:#fff; font-size:{self._px(27)}px;
+        #o {{ display:inline-block; max-width:{round(cw * 0.8)}px; box-sizing:border-box;
+          padding:{self._px(11)}px {self._px(24)}px; border-radius:{self._px(14)}px;
+          background:rgba(18,18,26,.88); color:#fff; font-size:{self._px(26)}px;
           font-weight:600; line-height:1.35; text-align:center; text-wrap:balance;
           letter-spacing:-.005em; }}
         """

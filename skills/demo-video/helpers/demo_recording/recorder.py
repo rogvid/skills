@@ -26,7 +26,7 @@ from pathlib import Path
 from . import inspect_page, narration
 from .capture import Screencast
 from .clock import FF_REAL_MAX_S, Clock, ff_duration
-from .overlays import Overlays, geometry
+from .overlays import Overlays, default_viewport, geometry
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
 RENDERER = SKILL_DIR / "scripts" / "demo-render"
@@ -34,6 +34,9 @@ RENDERER = SKILL_DIR / "scripts" / "demo-render"
 TTS_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "demo-video" / "tts"
 
 SPOT_MIN_S = 1.8
+# Stills are captured this much denser than the video, so a spotlight's zoom
+# has real pixels to show and the resting view is downsampled, never blown up.
+SUPERSAMPLE = 2
 LEGACY = {
     "segment",
     "strict",
@@ -80,7 +83,7 @@ class _Take:
     hand-off to the renderer."""
 
     theme = "light"
-    default_viewport = (1440, 810)
+    default_width = 1440  # CSS pixels; the height follows the frame
 
     def __init__(
         self,
@@ -104,7 +107,9 @@ class _Take:
         if ignored:
             print(f"demo-video: ignoring removed option(s): {', '.join(ignored)}", file=sys.stderr)
         self.size = size or _pair(_env("SIZE"), (1920, 1080))
-        self.viewport = viewport or _pair(_env("VIEWPORT"), self.default_viewport)
+        self.viewport = viewport or _pair(
+            _env("VIEWPORT"), default_viewport(self.size, self.default_width)
+        )
         self.pace = pace if pace is not None else float(_env("PACE", "1.0") or 1.0)
         self.draft = _env("DRAFT") not in (None, "0")
         self.accent = accent or _env("ACCENT", "#6366f1")
@@ -149,7 +154,7 @@ class _Take:
         vw, vh = self.viewport
         self.context = self.browser.new_context(
             viewport={"width": vw, "height": vh},
-            device_scale_factor=self.geom["scale"],
+            device_scale_factor=self.geom["scale"] * SUPERSAMPLE,
             **self._context_options(),
         )
         self.page = self.context.new_page()
@@ -206,6 +211,9 @@ class _Take:
     def _tick(self) -> None:
         """Called while real time passes. The terminal pumps its PTY here."""
 
+    def _capturing_frames(self) -> bool:
+        return True
+
     def _failure_detail(self) -> str:
         return ""
 
@@ -242,8 +250,17 @@ class _Take:
             self.clock.retime(tail, 0.0)
 
     def _hold(self, seconds: float) -> None:
+        """Freeze the current frame for `seconds` of video. The frozen frame
+        is what a viewer reads and a spotlight zooms into, so it is replaced
+        by a full-resolution screenshot of the same moment."""
         assert self.clock is not None
+        if seconds <= 0:
+            return
+        start = time.time()
         self.clock.insert(seconds)
+        if self._capturing_frames():
+            with self._off_clock():
+                self.screencast.snapshot(start)
 
     @contextmanager
     def _app_time(self):
@@ -455,6 +472,23 @@ class _Take:
 
 
 _PAINTED = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+# The median size of the text inside an element as drawn, in CSS pixels: the
+# font size times any CSS transform scaling it, like a zoomed-out canvas.
+_TEXT_PX = """e => {
+  const drawn = p => {
+    const scale = p.offsetHeight ? p.getBoundingClientRect().height / p.offsetHeight : 1;
+    return parseFloat(getComputedStyle(p).fontSize) * (scale || 1);
+  };
+  const sizes = [];
+  const walk = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n && sizes.length < 200; n = walk.nextNode()) {
+    const p = n.parentElement;
+    if (n.textContent.trim() && p && p.getClientRects().length) sizes.push(drawn(p));
+  }
+  if (!sizes.length) sizes.push(drawn(e));
+  sizes.sort((a, b) => a - b);
+  return sizes[Math.floor(sizes.length / 2)];
+}"""
 _MEASURE = """e => {
   const box = n => { const r = n.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
   const own = box(e);
@@ -492,6 +526,9 @@ class Recorder(_Take):
 
     def _start(self) -> None:
         pass  # capture starts once the first page has loaded
+
+    def _capturing_frames(self) -> bool:
+        return self._capturing
 
     def _default_title(self) -> str:
         from urllib.parse import urlparse
@@ -658,9 +695,11 @@ class Recorder(_Take):
                     self.page.wait_for_timeout(250)
         self._settle()
 
-    def spotlight(self, target=None, ring: bool = True) -> None:
-        """Push the camera in on an element and ring it. `spotlight()` ends it.
-        `ring=False` zooms without the ring."""
+    def spotlight(self, target=None, ring: bool = True, zoom: bool | None = None) -> None:
+        """Ring an element and dim the rest. `spotlight()` ends it. The camera
+        pushes in only when the element's text is too small to read in the
+        video; `zoom=True` always pushes in, `zoom=False` never does.
+        `ring=False` leaves out the ring."""
         self._mark(f"spotlight {target!r}" if target is not None else "spotlight cleared")
         if self._spot:
             self._end_spot()
@@ -669,12 +708,15 @@ class Recorder(_Take):
             locator = self._locate(target)
             with self._off_clock():
                 measured = self._measure(locator)
+                text = locator.evaluate(_TEXT_PX, timeout=2000) * self.geom["scale"]
             if not measured:
                 raise RuntimeError(f"{target!r} has no box on screen")
             self._spot = {
                 "start": self._now(),
                 "track": [[self._now(), *measured]],
                 "ring": ring,
+                "zoom": zoom,
+                "text": round(text, 1),
                 "locator": locator,
                 "seen": self._now(),
             }

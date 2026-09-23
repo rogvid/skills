@@ -5,7 +5,7 @@ description: Handoff for the demo-video v2 work - where it stands, how it is bui
 
 # demo-video v2 - status
 
-Last updated: 2026-09-23 (output polish).
+Last updated: 2026-09-23 (after the first real-use test).
 
 ## Where it stands
 
@@ -25,13 +25,13 @@ Koyr's `part1-the-build-loop` video sat on a near-frozen screen for 15s and then
 ## How v2 works
 
 - `record.py` drives the app through Playwright as fast as the app allows.
-- `capture.py`: a CDP screencast writes every painted frame with its wall-clock time. No frames arrive while the screen is still.
+- `capture.py`: a CDP screencast writes every painted frame with its wall-clock time. No frames arrive while the screen is still. The frames are CSS-pixel size, so every hold also takes a full-resolution screenshot (`snapshot()`), which is what holds and zooms show.
 - `clock.py`: an edit list maps wall-clock time onto video time.
   - Holds, cursor glides and title cards are inserted as frozen frames, so they cost no wall-clock time.
   - Waits on the app over 1.5s are retimed to 1.5-3s and get a fast-forward badge.
   - Recorder overhead (overlay rendering, TTS) is retimed to zero.
 - `recorder.py` (`_Take` base plus the web `Recorder`) and `terminal.py` (`TerminalRecorder`, PTY plus xterm.js) hold the verbs. After each action, `_settle()` waits for about 350ms of screen stillness, then cuts that still tail.
-- `overlays.py` renders the window, caption pills, cards, badges and cursor as PNGs through Chromium. The app renders at a device scale factor that makes its frames exactly the content size, so the app pixels are never resampled at rest.
+- `overlays.py` renders the window, caption pills, cards, badges and cursor as PNGs through Chromium. The app renders at twice the content's density; the renderer downsamples it.
 - `render.py` runs in its own uv env (`scripts/demo-render`, Pillow) from `.take/take.json`. Each output frame is a pure function of its time, and identical consecutive frames are drawn once. It pipes rgb24 to ffmpeg with threaded colour conversion and x264 superfast. It writes `demo.mp4`, `images/`, `sheet.png` and `timeline.md`.
 - `inspect_page.py` powers `scripts/demo-inspect` and the failure report.
 - `DEMO_VIDEO_KEEP_TAKE=1` keeps `.take/` so the renderer can be re-run or profiled by itself.
@@ -47,11 +47,21 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 
 ## Next steps, in priority order
 
-### 1. Prove it on real use (blocks everything else)
+### 1. Prove it on real use
 
-- [ ] Use `examples/ticket-queue/demo` as the working example for everything below. Koyr part 1 does not need re-recording; ticket-queue can show a long wait by adding one (the recorder squeezed a simulated 12s wait into 1.8s).
-- [ ] Have the user make one new demo in a fresh session with the v2 skill installed. Record turns, peak context, and wall-clock to the accepted video. Compare with the baseline above; GOAL.md's target is well under 100k context.
-- [ ] Only after v2 is done: update Koyr's vendored `.claude/skills/demo-video` (an old single-file v1 from 2026-09-13) and port the eight `docs/guides/2026-09-22-*` storyboards. The user asked to wait for this.
+- [x] First real-use test, 2026-09-23: Koyr "row lineage" demo, session `e82da7c1` (`~/.claude-personal/projects/-home-kvist-personal-projects-koyr/`). 45 turns, 115k peak context (36k at session start), 3.3M cached tokens re-read, 9.5 min to an accepted 52s video, versus 709 turns and 632k before. No polling.
+- User's verdict: good flow and a big speed-up, but it zoomed too often, a caption jumped from bottom to top, and image quality was low. All three are fixed below.
+- [ ] Only after v2 is done: update Koyr's vendored `.claude/skills/demo-video` and port the eight `docs/guides/2026-09-22-*` storyboards. The user asked to wait for this. (Koyr now has the v2 skill installed through `skills-lock.json`.)
+
+### 1b. From the real-use test
+
+- [x] Quality: Chromium's screencast sends CSS-pixel frames whatever the device scale factor, so every frame was upscaled about 1.17x, with broken letter spacing. Each hold now starts with a Playwright screenshot at 2x the video's density, downsampled at rest and cropped from real pixels when zoomed. Raw CDP `captureScreenshot` with a clip must not be used: it resets the page's device scale factor, which changed how Koyr's canvas zoomed.
+- [x] Zoom only when the spotlit text is under 17px at 1080p (measured as drawn, transforms included), and only as far as needed. `spotlight(zoom=True/False)` overrides. The render summary notes when most spotlights zoom.
+- [x] Captions sit in a band below the window, with an even margin on all sides. The default viewport is 1440 wide, shaped to the window.
+- [ ] `demo-new` fails: uv reads the PEP 723 block of the template embedded in the script. Every new demo hits it.
+- [ ] Pages that never go still (Koyr's animated edges) make every `_settle()` run to its 2.5s cap, which costs take time and adds dead video after each action. Stillness should ignore small ambient animation.
+- [ ] Render time grew with the full-resolution holds: Koyr is 66s for 51s of video. See Speed.
+- [ ] An `act()` body that only changes the page (a JS scroll) is not settled afterwards, so the next frame can be stale. The hold snapshot now covers the common case.
 
 ### 2. Output polish (what a viewer sees)
 
@@ -78,7 +88,6 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 - [ ] Popups and new tabs are not captured; only the first page is. Decide whether to follow them.
 - [ ] Full-screen TUIs (`top`, `vim`, alternate screen) are untested in v2. Test one.
 - [x] Narration: a real ElevenLabs take of the ticket-queue demo works. Each line starts within 0.2s of its caption and ends before the next, peak -1.6dB. The key is in this repo's `.env` (`set -a; . ./.env; set +a`). Clips are cached in `~/.cache/demo-video/tts`.
-- [ ] `_settle()` caps at 2.5s for pages that never go still (spinners). Check that this reads well and doesn't stack up.
 - [ ] Removed v1 constructor options are ignored with a warning. Decide whether to keep that shim once Koyr is ported.
 
 ### 5. Housekeeping

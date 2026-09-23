@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/demo-video/helpers"))
 
 from demo_recording.clock import Clock, SourceMap, ff_duration  # noqa: E402
-from demo_recording.overlays import geometry  # noqa: E402
+from demo_recording.overlays import default_viewport, geometry  # noqa: E402
 
 
 def test_short_waits_play_at_normal_speed():
@@ -53,3 +53,13 @@ def test_geometry_keeps_the_app_aspect_and_fits_the_frame():
     assert abs(w / h - 1440 / 810) < 0.01
     assert x >= 0 and y >= 0 and x + w <= 1920 and y + h <= 1080
     assert abs(g["scale"] - w / 1440) < 0.01
+
+
+def test_default_viewport_leaves_an_even_margin_and_room_for_captions():
+    g = geometry((1920, 1080), default_viewport((1920, 1080), 1440))
+    x, y, w, h = g["window"]
+    margins = [x, y, 1920 - x - w, 1080 - y - h]
+    assert max(margins) - min(margins) <= 2
+    # The caption band below the window holds a two-line caption (~92px).
+    assert 1080 - (y + h) >= 92
+    assert y + h < g["caption_y"] < 1080

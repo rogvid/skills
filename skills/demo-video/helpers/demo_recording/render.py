@@ -31,6 +31,9 @@ PRESS_S = 0.26
 NAV_FADE_S = 0.3
 SCRIM = (12, 12, 22)
 SCRIM_ALPHA = 0.36
+# Text smaller than this, in pixels of a 1080p video, is hard to read; a
+# spotlight on it pushes in until it reaches this size.
+READABLE_PX = 17
 
 
 def smooth(x: float) -> float:
@@ -80,7 +83,8 @@ class Take:
         self.corners = self._corners()
         self.spots = m["spots"]
         self.navs = m.get("navs", [])
-        self.captions = [dict(c, top=self._caption_on_top(c)) for c in m["captions"]]
+        self.captions = m["captions"]
+        self.caption_y = g["caption_y"]
         self.activity = self._cursor_activity()
 
     # -- geometry --------------------------------------------------------------
@@ -111,12 +115,18 @@ class Take:
         p = smooth((t - t0) / max(t1 - t0, 1e-6))
         return lerp(r0, r1, p), lerp(c0, c1, p)
 
-    def _spot_camera(self, rect: list[float], context: list[float]) -> tuple[float, float, float]:
-        """Push in until the element is prominent, but keep its context -
-        the row or card around it - in view, so headings are not cropped."""
+    def _spot_camera(self, spot: dict, rect: list[float], context: list[float]) -> tuple:
+        """Push in only as far as the element's text needs to be readable -
+        not at all when it already is - and keep its context, the row or card
+        around it, in view so headings are not cropped."""
         x, y, w, h = rect
         _, _, kw, kh = context
+        text = spot.get("text") or READABLE_PX * self.unit
+        need = {True: 1.6, False: 1.0}.get(spot.get("zoom"), READABLE_PX * self.unit / text)
+        if need < 1.12:
+            return (1.0, self.cw / 2, self.ch / 2)
         zoom = min(
+            need,
             0.6 * self.cw / max(w, 1),
             0.6 * self.ch / max(h, 1),
             0.92 * self.cw / max(kw, 1),
@@ -140,7 +150,7 @@ class Take:
         for s in self.spots:
             w = smooth((t - s["start"]) / SPOT_IN_S) * (1 - smooth((t - s["end"]) / SPOT_OUT_S))
             if w > 0:
-                weights.append((w, self._spot_camera(*self.spot_at(s, t))))
+                weights.append((w, self._spot_camera(s, *self.spot_at(s, t))))
         total = sum(w for w, _ in weights)
         if total <= 0:
             return (1.0, self.cw / 2, self.ch / 2)
@@ -158,34 +168,6 @@ class Take:
     def to_view(self, cam, x: float, y: float) -> tuple[float, float]:
         z, cx, cy = cam
         return ((x - cx) * z + self.cw / 2, (y - cy) * z + self.ch / 2)
-
-    def _caption_box(self, png: str, top: bool) -> tuple[int, int, int, int]:
-        image = self.overlay(png)
-        margin = round(self.ch * 0.045)
-        x = (self.cw - image.width) // 2
-        y = margin if top else self.ch - image.height - margin
-        return (x, y, x + image.width, y + image.height)
-
-    def _caption_on_top(self, caption: dict) -> bool:
-        """Move a caption to the top when a spotlight sits under it at the
-        bottom and would be covered less at the top."""
-        cover = {True: 0.0, False: 0.0}
-        for s in self.spots:
-            if not (s["start"] < caption["end"] and s["end"] > caption["start"]):
-                continue
-            t = min(max(s["start"] + SPOT_IN_S, caption["start"]), caption["end"])
-            rect, context = self.spot_at(s, t)
-            cam = self._spot_camera(rect, context)
-            x, y, w, h = rect
-            pad = 12 * self.unit * cam[0]
-            x0, y0 = self.to_view(cam, x - pad, y - pad)
-            x1, y1 = self.to_view(cam, x + w + pad, y + h + pad)
-            for top in cover:
-                bx0, by0, bx1, by1 = self._caption_box(caption["png"], top)
-                ow = max(0.0, min(x1, bx1) - max(x0, bx0))
-                oh = max(0.0, min(y1, by1) - max(y0, by0))
-                cover[top] += ow * oh
-        return cover[False] > 0 and cover[True] < cover[False]
 
     def _cursor_activity(self) -> list[tuple[float, float]]:
         spans = [(g["t0"], g["t1"] + CURSOR_LINGER_S) for g in self.m["glides"]]
@@ -224,7 +206,11 @@ class Take:
 
     @lru_cache(maxsize=4)  # noqa: B019 - one Take per process
     def frame(self, index: int) -> Image.Image:
-        image = Image.open(self.dir / "frames" / self.frames[index][1]).convert("RGB")
+        return Image.open(self.dir / "frames" / self.frames[index][1]).convert("RGB")
+
+    @lru_cache(maxsize=4)  # noqa: B019 - one Take per process
+    def at_rest(self, index: int) -> Image.Image:
+        image = self.frame(index)
         if image.size != (self.cw, self.ch):
             image = image.resize((self.cw, self.ch), Image.Resampling.LANCZOS)
         return image
@@ -278,7 +264,7 @@ class Take:
             if c["start"] <= t <= c["end"]
         )
         caps = tuple(
-            (c["png"], c["top"], round(fade(t, c["start"], c["end"], FADE_S), 2))
+            (c["png"], round(fade(t, c["start"], c["end"], FADE_S), 2))
             for c in self.captions
             if c["start"] <= t <= c["end"]
         )
@@ -321,24 +307,31 @@ class Take:
         if index < 0:
             content = Image.new("RGB", (self.cw, self.ch), self.body)
         else:
-            source = self.frame(index)
-            if blend:
-                source = Image.blend(self.frame(blend[0]), source, blend[1])
             z, cx, cy = cam
             if z > 1.0:
+                # Zoom from the captured pixels, which may be denser than the view.
+                source = self.frame(index)
+                if blend:
+                    source = Image.blend(self.frame(blend[0]), source, blend[1])
+                k = source.width / self.cw
                 hw, hh = self.cw / (2 * z), self.ch / (2 * z)
                 content = source.resize(
                     (self.cw, self.ch),
-                    Image.Resampling.BICUBIC,
+                    Image.Resampling.LANCZOS,
                     box=(
-                        max(0, cx - hw),
-                        max(0, cy - hh),
-                        min(self.cw, cx + hw),
-                        min(self.ch, cy + hh),
+                        k * max(0, cx - hw),
+                        k * max(0, cy - hh),
+                        k * min(self.cw, cx + hw),
+                        k * min(self.ch, cy + hh),
                     ),
                 )
             else:
-                content = source.copy()
+                content = self.at_rest(index)
+                content = (
+                    Image.blend(self.at_rest(blend[0]), content, blend[1])
+                    if blend
+                    else content.copy()
+                )
         u = self.unit
         radius = round(10 * u)
         stroke = max(2, round(3 * u))
@@ -393,9 +386,6 @@ class Take:
             image = self.faded(png, alpha)
             content.paste(image, (0, 0), image)
         margin = round(self.ch * 0.045)
-        for png, top, alpha in caps:
-            image = self.faded(png, alpha)
-            content.paste(image, self._caption_box(png, top)[:2], image)
         for kind, png, alpha in badges:
             image = self.faded(png, alpha)
             edge = round(18 * u)
@@ -408,6 +398,10 @@ class Take:
         out.paste(content, (self.cx, self.cy))
         for position, patch, mask in self.corners:
             out.paste(patch, position, mask)
+        for png, alpha in caps:
+            image = self.faded(png, alpha)
+            xy = ((self.W - image.width) // 2, self.caption_y - image.height // 2)
+            out.paste(image, xy, image)
         return out
 
     def at(self, t: float) -> Image.Image:
@@ -598,6 +592,19 @@ def main(argv: list[str]) -> int:
         real = f["speed"] * (f["end"] - f["start"])
         print(
             f"  fast-forward at {f['start']:.1f}s: {real:.0f}s of waiting shown in {f['end'] - f['start']:.1f}s"
+        )
+    small = [
+        s["text"]
+        for s in take.spots
+        if s.get("zoom") is None
+        and take._spot_camera(s, *take.spot_at(s, s["start"] + SPOT_IN_S))[0] > 1
+    ]
+    if len(small) * 2 > len(take.spots):
+        # Zooming at every step reads as restless; bigger text in the app is better.
+        px = sorted(small)[len(small) // 2] / take.unit
+        print(
+            f"  note: {len(small)} of {len(take.spots)} spotlights zoom, their text is {px:.0f}px "
+            f"(readable: {READABLE_PX}px); show it bigger in the app itself if it can"
         )
     if take.duration > 90:
         print(f"  note: {take.duration:.0f}s is long for a demo; 30-90s holds attention")

@@ -58,7 +58,7 @@ with Recorder(HERE, base_url="http://localhost:3000") as rec:
 | `click(sel)` / `move_to(sel)` | Glide the cursor to an element and click it / just point at it |
 | `type_into(sel, text)` / `clear(sel)` / `press(key)` | Type into a field / empty it / press `"Enter"`, `"Control+K"` (shown as a key badge) |
 | `scroll_to(sel)` | Smooth-scroll an element to the middle of the view |
-| `spotlight(sel)` / `spotlight()` | Zoom in on an element and ring it / end it. `ring=False` zooms without the ring |
+| `spotlight(sel)` / `spotlight()` | Ring an element and dim the rest / end it. Zooms in only if its text is too small to read; `zoom=True`/`False` forces it, `ring=False` drops the ring |
 | `wait_for(sel)` / `wait_until(js_or_fn)` | Wait for something the app does on its own. Long waits become a fast-forward |
 | `interlude(text)` | A full-window title card, held long enough to read |
 | `shot(name)` | Save the current frame as `images/<name>.png` |
@@ -72,7 +72,7 @@ The recorder already handles:
 - **Waiting after actions:** after every action it waits until the screen has stopped changing, so debounced searches and transitions land before the next step. Don't add waits for that.
 - **Long waits:** any wait on the app over about 1.5s is squeezed into 1.5-3s of video with a fast-forward badge. For a slow job, call `wait_for` on its result and let the recorder squeeze it. Never `pause()` in a loop.
 - **The cursor:** it fades out when idle, so there's no need to park it.
-- **Caption placement:** a caption moves to the top when a spotlight sits where it would go.
+- **Captions** sit in a band below the window, so they never cover the app.
 
 **Terminal demos** use `TerminalRecorder(HERE, cwd=...)` with these verbs:
 - `run(cmd)` types a command and waits for the prompt; `run(cmd, wait=False)` is for programs that keep running.
@@ -91,7 +91,8 @@ A non-zero exit shows up as a warning in the summary.
 
 ## Options
 
-`Recorder(out_dir, base_url, title=..., viewport=(1440, 810), pace=1.0, speech=None, accent="#6366f1", browser_context={...})`.
+`Recorder(out_dir, base_url, title=..., viewport=None, pace=1.0, speech=None, accent="#6366f1", browser_context={...})`.
+The default viewport is 1440 CSS pixels wide, shaped to leave an even margin around the window; set `viewport` only if the app needs a particular size.
 `browser_context` passes Playwright context options, for example `storage_state` for a logged-in session.
 `pace` below 1 is faster.
 

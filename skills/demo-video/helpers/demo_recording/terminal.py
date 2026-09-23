@@ -99,7 +99,7 @@ class TerminalRecorder(_Take):
     """Records a CLI, REPL or full-screen TUI in a real terminal."""
 
     theme = "dark"
-    default_viewport = (1024, 576)
+    default_width = 1024
 
     def __init__(
         self,
