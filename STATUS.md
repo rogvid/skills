@@ -58,7 +58,7 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 - [x] Quality: Chromium's screencast sends CSS-pixel frames whatever the device scale factor, so every frame was upscaled about 1.17x, with broken letter spacing. Each hold now starts with a Playwright screenshot at 2x the video's density, downsampled at rest and cropped from real pixels when zoomed. Raw CDP `captureScreenshot` with a clip must not be used: it resets the page's device scale factor, which changed how Koyr's canvas zoomed.
 - [x] Zoom only when the spotlit text is under 17px at 1080p (measured as drawn, transforms included), and only as far as needed. `spotlight(zoom=True/False)` overrides. The render summary notes when most spotlights zoom.
 - [x] Captions sit in a band below the window, with an even margin on all sides. The default viewport is 1440 wide, shaped to the window.
-- [ ] `demo-new` fails: uv reads the PEP 723 block of the template embedded in the script. Every new demo hits it.
+- [x] `demo-new` failed on uv 0.11, which reads the template's embedded PEP 723 block as a second one (0.9 did not). The template's metadata now sits in a one-line string.
 - [ ] Pages that never go still (Koyr's animated edges) make every `_settle()` run to its 2.5s cap, which costs take time and adds dead video after each action. Stillness should ignore small ambient animation.
 - [ ] Render time grew with the full-resolution holds: Koyr is 66s for 51s of video. See Speed.
 - [ ] An `act()` body that only changes the page (a JS scroll) is not settled afterwards, so the next frame can be stale. The hold snapshot now covers the common case.

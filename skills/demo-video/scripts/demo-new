@@ -30,13 +30,12 @@ TERMINAL = """\
         rec.run("echo hello")
         rec.hold()
 """
+# Kept off the start of a line: uv reads any line-leading `# /// script` in
+# this file as metadata, and refuses a file with two blocks.
+METADATA = '# /// script\n# requires-python = ">=3.10"\n# dependencies = ["playwright"]\n# ///\n'
 TEMPLATE = """\
 #!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["playwright"]
-# ///
-\"\"\"Demo: <what this shows, in one line>.\"\"\"
+{metadata}\"\"\"Demo: <what this shows, in one line>.\"\"\"
 
 import os
 import sys
@@ -77,7 +76,9 @@ def main() -> int:
     cls = "TerminalRecorder" if args.terminal else "Recorder"
     # The `with` block sits at module level; strip the template's indent.
     body = "\n".join(line[4:] for line in body.splitlines()) + "\n"
-    target.write_text(TEMPLATE.format(skill=skill_expr(args.dir), cls=cls, body=body))
+    target.write_text(
+        TEMPLATE.format(metadata=METADATA, skill=skill_expr(args.dir), cls=cls, body=body)
+    )
     print(f"demo-new: wrote {target}")
     return 0
 
