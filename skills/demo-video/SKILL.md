@@ -100,7 +100,7 @@ A non-zero exit shows up as a warning in the summary.
 | `DEMO_VIDEO_DRAFT=1` | Stills and `sheet.png` only, no video, no narration |
 | `DEMO_VIDEO_SIZE=1280x720` | Output size (default 1920x1080) |
 | `DEMO_VIDEO_BASE_URL`, `DEMO_VIDEO_PACE` | Defaults for those arguments |
-| `ELEVENLABS_API_KEY` | Speak the captions. Clips are cached, so re-takes are free |
+| `ELEVENLABS_API_KEY` | Speak the captions. Clips are cached in `~/.cache/demo-video`, so re-takes are free |
 | `DEMO_VIDEO_TRACEBACK=1` | Show the full Python traceback on failure |
 
 ## Outputs

@@ -49,7 +49,7 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 
 ### 1. Prove it on real use (blocks everything else)
 
-- [ ] Re-record Koyr `part1-the-build-loop` with v2. It calls Koyr's AI, so ask the user first because it costs API money. This is the demo with the frozen minute; the fast-forward should turn about 68s of waiting into about 5s.
+- [ ] Use `examples/ticket-queue/demo` as the working example for everything below. Koyr part 1 does not need re-recording; ticket-queue can show a long wait by adding one (the recorder squeezed a simulated 12s wait into 1.8s).
 - [ ] Have the user make one new demo in a fresh session with the v2 skill installed. Record turns, peak context, and wall-clock to the accepted video. Compare with the baseline above; GOAL.md's target is well under 100k context.
 - [ ] Only after v2 is done: update Koyr's vendored `.claude/skills/demo-video` (an old single-file v1 from 2026-09-13) and port the eight `docs/guides/2026-09-22-*` storyboards. The user asked to wait for this.
 
@@ -77,13 +77,13 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 
 - [ ] Popups and new tabs are not captured; only the first page is. Decide whether to follow them.
 - [ ] Full-screen TUIs (`top`, `vim`, alternate screen) are untested in v2. Test one.
-- [ ] Narration was only tested with a stand-in tone clip. Run one real ElevenLabs take.
+- [x] Narration: a real ElevenLabs take of the ticket-queue demo works. Each line starts within 0.2s of its caption and ends before the next, peak -1.6dB. The key is in this repo's `.env` (`set -a; . ./.env; set +a`). Clips are cached in `~/.cache/demo-video/tts`.
 - [ ] `_settle()` caps at 2.5s for pages that never go still (spinners). Check that this reads well and doesn't stack up.
 - [ ] Removed v1 constructor options are ignored with a warning. Decide whether to keep that shim once Koyr is ported.
 
 ### 5. Housekeeping
 
-- [ ] `mise.toml` was edited, so run `mise trust` before `mise run ...` and before the gitleaks hook will work. The v2 commit used `--no-verify` after ruff and gitleaks were run by hand.
+- [x] `mise.toml` is trusted again and the git hooks run. `/graft/` and `/.ignore` (graft's local files) are gitignored.
 - [ ] `ensure.sh` and `skills/script-conventions` are unchanged from v1. Confirm `ensure.sh` still fits (it chmods `scripts/*`).
 - [ ] When v2 is done, delete this file and move anything left into GitHub issues.
 

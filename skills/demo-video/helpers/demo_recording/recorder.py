@@ -30,6 +30,8 @@ from .overlays import Overlays, geometry
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
 RENDERER = SKILL_DIR / "scripts" / "demo-render"
+# Spoken clips, keyed by text and voice, shared by every demo on the machine.
+TTS_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "demo-video" / "tts"
 
 SPOT_MIN_S = 1.8
 LEGACY = {
@@ -276,7 +278,7 @@ class _Take:
             return 0.0
         with self._off_clock():
             path = narration.clip(
-                text, SKILL_DIR / ".tts", self._api_key or "", self.voice, narration.DEFAULT_MODEL
+                text, TTS_CACHE, self._api_key or "", self.voice, narration.DEFAULT_MODEL
             )
             length = narration.duration(path)
         self._audio.append({"t": self._now(), "path": str(path)})
