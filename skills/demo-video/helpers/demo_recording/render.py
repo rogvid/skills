@@ -147,10 +147,13 @@ class Take:
         cy = min(max(cy, half_h), self.ch - half_h)
         return (zoom, cx, cy)
 
-    def camera(self, t: float) -> tuple[float, float, float]:
+    def camera(self, t: float, settled: bool = False) -> tuple[float, float, float]:
         weights = []
         for s in self.spots:
-            w = smooth((t - s["start"]) / SPOT_IN_S) * (1 - smooth((t - s["end"]) / SPOT_OUT_S))
+            if settled:
+                w = 1.0 if s["start"] <= t < s["end"] else 0.0
+            else:
+                w = smooth((t - s["start"]) / SPOT_IN_S) * (1 - smooth((t - s["end"]) / SPOT_OUT_S))
             if w > 0:
                 weights.append((w, self._spot_camera(s, *self.spot_at(s, t))))
         total = sum(w for w, _ in weights)
@@ -221,8 +224,20 @@ class Take:
 
     # -- one frame ---------------------------------------------------------------
 
-    def ops(self, t: float) -> tuple:
-        """Everything that decides the frame at video time `t`, as plain data."""
+    def ops(self, t: float, settled: bool = False) -> tuple:
+        """Everything that decides the frame at video time `t`, as plain data.
+
+        `settled` is for stills: everything on screen at `t` is shown fully
+        arrived - captions and rings faded in, the zoom pushed in - and
+        clicks leave no ripple. The recorder's clock rises between any two
+        events, so what started by `t` and ends after it is on screen."""
+
+        def shown(item: dict, ramp: float, tail: float = 0.0) -> float:
+            start, end = item["start"], item["end"]
+            if settled:
+                return 1.0 if start <= t < end else 0.0
+            return round(fade(t, start, end + tail, ramp), 2) if start <= t <= end + tail else 0.0
+
         real = self.source(t)
         index = bisect.bisect_right(self.times, real) - 1
         blend = None
@@ -234,20 +249,16 @@ class Take:
                     index = old
                 elif old >= 0 and old != index:
                     blend = (old, round(smooth((t - nav["ready"]) / NAV_FADE_S), 2))
-        cam = self.camera(t)
+        cam = self.camera(t, settled)
         spots = tuple(
-            (
-                tuple(round(v, 1) for v in self.spot_at(s, t)[0]),
-                s["ring"],
-                round(fade(t, s["start"], s["end"] + SPOT_OUT_S, 0.3), 2),
-            )
+            (tuple(round(v, 1) for v in self.spot_at(s, t)[0]), s["ring"], a)
             for s in self.spots
-            if s["start"] <= t <= s["end"] + SPOT_OUT_S
+            if (a := shown(s, 0.3, SPOT_OUT_S)) > 0
         )
         ripples = tuple(
             (c[1], c[2], round((t - c[0]) / RIPPLE_S, 2))
             for c in self.m["clicks"]
-            if 0 <= t - c[0] <= RIPPLE_S
+            if 0 <= t - c[0] <= RIPPLE_S and not settled
         )
         cursor = None
         pos = self._cursor_at(t)
@@ -259,29 +270,13 @@ class Take:
             if alpha > 0:
                 press = 1.0
                 for c in self.m["clicks"]:
-                    if 0 <= t - c[0] <= PRESS_S:
+                    if 0 <= t - c[0] <= PRESS_S and not settled:
                         press = 1 - 0.2 * math.sin(math.pi * (t - c[0]) / PRESS_S)
                 cursor = (round(pos[0], 1), round(pos[1], 1), round(alpha, 2), round(press, 2))
-        cards = tuple(
-            (c["png"], round(fade(t, c["start"], c["end"], CARD_FADE_S), 2))
-            for c in self.m["cards"]
-            if c["start"] <= t <= c["end"]
-        )
-        caps = tuple(
-            (c["png"], round(fade(t, c["start"], c["end"], FADE_S), 2))
-            for c in self.captions
-            if c["start"] <= t <= c["end"]
-        )
-        badges = tuple(
-            ("ff", f["png"], round(fade(t, f["start"], f["end"], 0.2), 2))
-            for f in self.m["ff"]
-            if f["start"] <= t <= f["end"]
-        )
-        badges += tuple(
-            ("key", k["png"], round(fade(t, k["start"], k["end"], 0.15), 2))
-            for k in self.m["keys"]
-            if k["start"] <= t <= k["end"]
-        )
+        cards = tuple((c["png"], a) for c in self.m["cards"] if (a := shown(c, CARD_FADE_S)) > 0)
+        caps = tuple((c["png"], a) for c in self.captions if (a := shown(c, FADE_S)) > 0)
+        badges = tuple(("ff", f["png"], a) for f in self.m["ff"] if (a := shown(f, 0.2)) > 0)
+        badges += tuple(("key", k["png"], a) for k in self.m["keys"] if (a := shown(k, 0.15)) > 0)
         return (index, blend, cam, spots, ripples, cursor, cards, caps, badges)
 
     def _cursor_at(self, t: float) -> tuple[float, float] | None:
@@ -408,8 +403,8 @@ class Take:
             out.paste(image, xy, image)
         return out
 
-    def at(self, t: float) -> Image.Image:
-        return self.draw(self.ops(t))
+    def at(self, t: float, settled: bool = False) -> Image.Image:
+        return self.draw(self.ops(t, settled))
 
     # -- outputs -------------------------------------------------------------------
 
@@ -520,7 +515,7 @@ class Take:
         out: list[tuple[float, str, Image.Image]] = []
         last = None
         for t, label in self.moments():
-            image = self.at(t)
+            image = self.at(t, settled=True)
             thumb = image.resize((96, 54), Image.Resampling.BOX).convert("L")
             if last is not None and _same(last, thumb):
                 t0, label0, image0 = out[-1]
@@ -599,7 +594,7 @@ def main(argv: list[str]) -> int:
     # Default PNG compression: `optimize` is 5x slower for 5% smaller files.
     with ThreadPoolExecutor(max_workers=4) as pool:
         saves = [
-            pool.submit(take.at(shot["t"]).save, images / f"{shot['name']}.png")
+            pool.submit(take.at(shot["t"], settled=True).save, images / f"{shot['name']}.png")
             for shot in m["shots"]
         ]
         for save in saves:

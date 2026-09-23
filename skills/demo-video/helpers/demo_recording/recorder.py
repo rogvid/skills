@@ -402,14 +402,19 @@ class _Take:
         """Save the current frame as `images/<name>.png`."""
         self._mark(f"shot {name}")
         self._shots.append({"t": self._now(), "name": name})
+        if self._capturing_frames():
+            with self._off_clock():
+                self.screencast.snapshot(time.time())
 
     @contextmanager
     def act(self, label: str):
         """Wrap raw work on `rec.page` that waits on the app, so a long wait
-        becomes a fast-forward instead of dead air."""
+        becomes a fast-forward instead of dead air. Like every verb, it
+        returns once the screen has settled."""
         self._mark(f"act {label!r}")
         with self._app_time():
             yield
+        self._settle()
 
     # -- finishing ----------------------------------------------------------------
 
