@@ -36,6 +36,8 @@ SCRIM_ALPHA = 0.36
 # Text smaller than this, in pixels of a 1080p video, is hard to read; a
 # spotlight on it pushes in until it reaches this size.
 READABLE_PX = 17
+# A smaller push-in helps legibility too little to be worth the lost context.
+MIN_ZOOM = 1.25
 
 
 def smooth(x: float) -> float:
@@ -125,7 +127,7 @@ class Take:
         _, _, kw, kh = context
         text = spot.get("text") or READABLE_PX * self.unit
         need = {True: 1.6, False: 1.0}.get(spot.get("zoom"), READABLE_PX * self.unit / text)
-        if need < 1.12:
+        if need < MIN_ZOOM:
             return (1.0, self.cw / 2, self.ch / 2)
         zoom = min(
             need,
@@ -135,7 +137,7 @@ class Take:
             0.92 * self.ch / max(kh, 1),
             1.6,
         )
-        if zoom < 1.12:
+        if zoom < MIN_ZOOM:
             return (1.0, self.cw / 2, self.ch / 2)
         half_w, half_h = self.cw / (2 * zoom), self.ch / (2 * zoom)
         cx, cy = x + w / 2, y + h / 2
@@ -437,7 +439,7 @@ class Take:
                 f"[{i + 1}:a]adelay={round(c['t'] * 1000)}:all=1[a{i}]" for i, c in enumerate(audio)
             ]
             mix = "".join(f"[a{i}]" for i in range(len(audio)))
-            chains.append(f"{mix}amix=inputs={len(audio)}:normalize=0:duration=longest[aout]")
+            chains.append(f"{mix}amix=inputs={len(audio)}:normalize=0:duration=longest,apad[aout]")
             maps += ["-map", "[aout]", "-c:a", "aac", "-b:a", "160k"]
         cmd += [
             "-filter_threads",
