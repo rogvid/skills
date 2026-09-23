@@ -21,8 +21,20 @@ BACKDROP = (
     "radial-gradient(at 15% 90%, #e6ddfb 0, transparent 50%), #eef0f7"
 )
 THEMES = {
-    "light": {"bar": "#ececf0", "bar_text": "#5d5d68", "body": "#ffffff"},
-    "dark": {"bar": "#232334", "bar_text": "#8e8ea6", "body": "#181825"},
+    "light": {
+        "bar": "#ececf0",
+        "bar_text": "#5d5d68",
+        "body": "#ffffff",
+        "card": "#f6f6f9",
+        "card_text": "#1b1b26",
+    },
+    "dark": {
+        "bar": "#232334",
+        "bar_text": "#8e8ea6",
+        "body": "#181825",
+        "card": "#15151f",
+        "card_text": "#ffffff",
+    },
 }
 
 
@@ -127,10 +139,11 @@ class Overlays:
 
     def card(self, text: str) -> str:
         _, _, cw, ch = self.geom["content"]
+        t = self.theme
         css = f"""
         #o {{ width:{cw}px; height:{ch}px; display:flex; align-items:center;
-          justify-content:center; background:#15151f; }}
-        #o div {{ max-width:70%; color:#fff; font-size:{self._px(46)}px; font-weight:650;
+          justify-content:center; background:{t["card"]}; }}
+        #o div {{ max-width:70%; color:{t["card_text"]}; font-size:{self._px(46)}px; font-weight:650;
           line-height:1.25; text-align:center; text-wrap:balance; letter-spacing:-.01em; }}
         """
         return self._element(

@@ -17,7 +17,7 @@ import time
 from functools import cache, lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from .clock import SourceMap
 
@@ -26,7 +26,9 @@ SPOT_IN_S, SPOT_OUT_S = 0.7, 0.6
 FADE_S = 0.18
 CARD_FADE_S = 0.3
 CURSOR_LINGER_S = 2.0
-RIPPLE_S = 0.45
+RIPPLE_S = 0.6
+PRESS_S = 0.26
+NAV_FADE_S = 0.3
 SCRIM = (12, 12, 22)
 SCRIM_ALPHA = 0.36
 
@@ -34,6 +36,16 @@ SCRIM_ALPHA = 0.36
 def smooth(x: float) -> float:
     x = min(1.0, max(0.0, x))
     return x * x * (3 - 2 * x)
+
+
+def ease(x: float) -> float:
+    """Minimum-jerk easing: how a hand starts and stops a movement."""
+    x = min(1.0, max(0.0, x))
+    return x * x * x * (x * (6 * x - 15) + 10)
+
+
+def lerp(a: list[float], b: list[float], p: float) -> list[float]:
+    return [u + (v - u) * p for u, v in zip(a, b, strict=True)]
 
 
 def fade(t: float, start: float, end: float, ramp: float) -> float:
@@ -66,7 +78,8 @@ class Take:
         self.cursor = Image.open(self.dir / m["assets"]["cursor"]).convert("RGBA")
         self.hotspot = m["assets"]["hotspot"]
         self.corners = self._corners()
-        self.spots = [dict(s, cam=self._spot_camera(s["rect"])) for s in m["spots"]]
+        self.spots = m["spots"]
+        self.navs = m.get("navs", [])
         self.captions = [dict(c, top=self._caption_on_top(c)) for c in m["captions"]]
         self.activity = self._cursor_activity()
 
@@ -85,14 +98,41 @@ class Take:
             out.append(((x, bottom), self.base.crop((x, bottom, x + r, bottom + r)), m))
         return out
 
-    def _spot_camera(self, rect: list[float]) -> tuple[float, float, float]:
+    def spot_at(self, spot: dict, t: float) -> tuple[list[float], list[float]]:
+        """The spotlit element's (rect, context) at `t`. The recorder
+        re-measures after each step; between two measurements it moves."""
+        track = spot["track"]
+        i = bisect.bisect_right([k[0] for k in track], t) - 1
+        if i < 0:
+            return track[0][1], track[0][2]
+        if i + 1 >= len(track):
+            return track[i][1], track[i][2]
+        (t0, r0, c0), (t1, r1, c1) = track[i], track[i + 1]
+        p = smooth((t - t0) / max(t1 - t0, 1e-6))
+        return lerp(r0, r1, p), lerp(c0, c1, p)
+
+    def _spot_camera(self, rect: list[float], context: list[float]) -> tuple[float, float, float]:
+        """Push in until the element is prominent, but keep its context -
+        the row or card around it - in view, so headings are not cropped."""
         x, y, w, h = rect
-        zoom = min(0.6 * self.cw / max(w, 1), 0.6 * self.ch / max(h, 1), 1.6)
+        _, _, kw, kh = context
+        zoom = min(
+            0.6 * self.cw / max(w, 1),
+            0.6 * self.ch / max(h, 1),
+            0.92 * self.cw / max(kw, 1),
+            0.92 * self.ch / max(kh, 1),
+            1.6,
+        )
         if zoom < 1.12:
             return (1.0, self.cw / 2, self.ch / 2)
         half_w, half_h = self.cw / (2 * zoom), self.ch / (2 * zoom)
-        cx = min(max(x + w / 2, half_w), self.cw - half_w)
-        cy = min(max(y + h / 2, half_h), self.ch - half_h)
+        cx, cy = x + w / 2, y + h / 2
+        # Slide toward the context until it fits, then clamp to the page.
+        kx, ky, _, _ = context
+        cx = min(max(cx, kx + kw - half_w), kx + half_w) if kw <= 2 * half_w else cx
+        cy = min(max(cy, ky + kh - half_h), ky + half_h) if kh <= 2 * half_h else cy
+        cx = min(max(cx, half_w), self.cw - half_w)
+        cy = min(max(cy, half_h), self.ch - half_h)
         return (zoom, cx, cy)
 
     def camera(self, t: float) -> tuple[float, float, float]:
@@ -100,7 +140,7 @@ class Take:
         for s in self.spots:
             w = smooth((t - s["start"]) / SPOT_IN_S) * (1 - smooth((t - s["end"]) / SPOT_OUT_S))
             if w > 0:
-                weights.append((w, s["cam"]))
+                weights.append((w, self._spot_camera(*self.spot_at(s, t))))
         total = sum(w for w, _ in weights)
         if total <= 0:
             return (1.0, self.cw / 2, self.ch / 2)
@@ -119,17 +159,33 @@ class Take:
         z, cx, cy = cam
         return ((x - cx) * z + self.cw / 2, (y - cy) * z + self.ch / 2)
 
+    def _caption_box(self, png: str, top: bool) -> tuple[int, int, int, int]:
+        image = self.overlay(png)
+        margin = round(self.ch * 0.045)
+        x = (self.cw - image.width) // 2
+        y = margin if top else self.ch - image.height - margin
+        return (x, y, x + image.width, y + image.height)
+
     def _caption_on_top(self, caption: dict) -> bool:
-        """Move a caption to the top when a spotlight sits where it would go."""
-        png = self.overlay(caption["png"])
-        band = self.ch - png.height - self.ch * 0.08
+        """Move a caption to the top when a spotlight sits under it at the
+        bottom and would be covered less at the top."""
+        cover = {True: 0.0, False: 0.0}
         for s in self.spots:
-            if s["start"] < caption["end"] and s["end"] > caption["start"]:
-                x, y, w, h = s["rect"]
-                _, y1 = self.to_view(s["cam"], x + w, y + h)
-                if y1 > band:
-                    return True
-        return False
+            if not (s["start"] < caption["end"] and s["end"] > caption["start"]):
+                continue
+            t = min(max(s["start"] + SPOT_IN_S, caption["start"]), caption["end"])
+            rect, context = self.spot_at(s, t)
+            cam = self._spot_camera(rect, context)
+            x, y, w, h = rect
+            pad = 12 * self.unit * cam[0]
+            x0, y0 = self.to_view(cam, x - pad, y - pad)
+            x1, y1 = self.to_view(cam, x + w + pad, y + h + pad)
+            for top in cover:
+                bx0, by0, bx1, by1 = self._caption_box(caption["png"], top)
+                ow = max(0.0, min(x1, bx1) - max(x0, bx0))
+                oh = max(0.0, min(y1, by1) - max(y0, by0))
+                cover[top] += ow * oh
+        return cover[False] > 0 and cover[True] < cover[False]
 
     def _cursor_activity(self) -> list[tuple[float, float]]:
         spans = [(g["t0"], g["t1"] + CURSOR_LINGER_S) for g in self.m["glides"]]
@@ -158,6 +214,14 @@ class Take:
         out.putalpha(image.getchannel("A").point(lambda v: round(v * alpha)))
         return out
 
+    @lru_cache(maxsize=16)  # noqa: B019 - one Take per process
+    def pointer(self, alpha: float, scale: float) -> Image.Image:
+        image = self.faded("cursor", alpha)
+        if scale >= 1:
+            return image
+        size = (round(image.width * scale), round(image.height * scale))
+        return image.resize(size, Image.Resampling.LANCZOS)
+
     @lru_cache(maxsize=4)  # noqa: B019 - one Take per process
     def frame(self, index: int) -> Image.Image:
         image = Image.open(self.dir / "frames" / self.frames[index][1]).convert("RGB")
@@ -171,13 +235,21 @@ class Take:
         """Everything that decides the frame at video time `t`, as plain data."""
         real = self.source(t)
         index = bisect.bisect_right(self.times, real) - 1
+        blend = None
+        for nav in self.navs:
+            # Keep the old page up while the new one loads, then crossfade.
+            if nav["start"] <= t < nav["ready"] + NAV_FADE_S:
+                old = bisect.bisect_right(self.times, nav["real"]) - 1
+                if t < nav["ready"]:
+                    index = old
+                elif old >= 0 and old != index:
+                    blend = (old, round(smooth((t - nav["ready"]) / NAV_FADE_S), 2))
         cam = self.camera(t)
         spots = tuple(
             (
-                tuple(s["rect"]),
+                tuple(round(v, 1) for v in self.spot_at(s, t)[0]),
                 s["ring"],
                 round(fade(t, s["start"], s["end"] + SPOT_OUT_S, 0.3), 2),
-                cam,
             )
             for s in self.spots
             if s["start"] <= t <= s["end"] + SPOT_OUT_S
@@ -195,7 +267,11 @@ class Take:
                 if a <= t <= b + 0.3:
                     alpha = max(alpha, min(1.0, (t - a) / 0.15, (b + 0.3 - t) / 0.3))
             if alpha > 0:
-                cursor = (round(pos[0], 1), round(pos[1], 1), round(alpha, 2))
+                press = 1.0
+                for c in self.m["clicks"]:
+                    if 0 <= t - c[0] <= PRESS_S:
+                        press = 1 - 0.2 * math.sin(math.pi * (t - c[0]) / PRESS_S)
+                cursor = (round(pos[0], 1), round(pos[1], 1), round(alpha, 2), round(press, 2))
         cards = tuple(
             (c["png"], round(fade(t, c["start"], c["end"], CARD_FADE_S), 2))
             for c in self.m["cards"]
@@ -216,7 +292,7 @@ class Take:
             for k in self.m["keys"]
             if k["start"] <= t <= k["end"]
         )
-        return (index, cam, spots, ripples, cursor, cards, caps, badges)
+        return (index, blend, cam, spots, ripples, cursor, cards, caps, badges)
 
     def _cursor_at(self, t: float) -> tuple[float, float] | None:
         last = None
@@ -228,17 +304,26 @@ class Take:
             return None
         if t >= last["t1"]:
             return tuple(last["to"])  # type: ignore[return-value]
-        p = smooth((t - last["t0"]) / max(last["t1"] - last["t0"], 1e-6))
+        # A hand moves in a slight arc, bowing upward, fast in the middle.
+        p = ease((t - last["t0"]) / max(last["t1"] - last["t0"], 1e-6))
         (x0, y0), (x1, y1) = last["from"], last["to"]
-        return (x0 + (x1 - x0) * p, y0 + (y1 - y0) * p)
+        dx, dy = x1 - x0, y1 - y0
+        nx, ny = -dy, dx
+        if ny > 0 or (ny == 0 and nx < 0):
+            nx, ny = -nx, -ny
+        reach = math.hypot(dx, dy)
+        bow = min(0.12, 90 * self.unit / max(reach, 1)) * math.sin(math.pi * p)
+        return (x0 + dx * p + nx * bow, y0 + dy * p + ny * bow)
 
     def draw(self, ops: tuple) -> Image.Image:
-        index, cam, spots, ripples, cursor, cards, caps, badges = ops
+        index, blend, cam, spots, ripples, cursor, cards, caps, badges = ops
         out = self.base.copy()
         if index < 0:
             content = Image.new("RGB", (self.cw, self.ch), self.body)
         else:
             source = self.frame(index)
+            if blend:
+                source = Image.blend(self.frame(blend[0]), source, blend[1])
             z, cx, cy = cam
             if z > 1.0:
                 hw, hh = self.cw / (2 * z), self.ch / (2 * z)
@@ -257,7 +342,7 @@ class Take:
         u = self.unit
         radius = round(10 * u)
         stroke = max(2, round(3 * u))
-        for rect, ring, alpha, _ in spots:
+        for rect, ring, alpha in spots:
             x, y, w, h = rect
             pad = 8 * u * cam[0]
             x0, y0 = self.to_view(cam, x, y)
@@ -282,34 +367,35 @@ class Take:
                 )
                 content.paste(self.accent, box, line)
         for x, y, p in ripples:
+            # A soft disc that swells and fades, edged by a crisp ring.
             vx, vy = self.to_view(cam, x, y)
-            r = round((8 + 26 * smooth(p)) * u)
-            ring_mask = Image.new("L", (2 * r + 1, 2 * r + 1), 0)
-            ImageDraw.Draw(ring_mask).ellipse(
-                (0, 0, 2 * r, 2 * r), outline=round(200 * (1 - p)), width=stroke
+            grow = 1 - (1 - min(p, 1.0)) ** 3
+            r = round((10 + 34 * grow) * u)
+            mask = Image.new("L", (2 * r + 1, 2 * r + 1), 0)
+            draw = ImageDraw.Draw(mask)
+            draw.ellipse((0, 0, 2 * r, 2 * r), fill=round(90 * (1 - p)))
+            draw.ellipse(
+                (0, 0, 2 * r, 2 * r), outline=round(255 * (1 - p) ** 1.5), width=stroke + 1
             )
             content.paste(
                 self.accent,
                 (round(vx) - r, round(vy) - r, round(vx) + r + 1, round(vy) + r + 1),
-                ring_mask,
+                mask,
             )
         if cursor:
-            x, y, alpha = cursor
+            x, y, alpha, press = cursor
             vx, vy = self.to_view(cam, x, y)
             if 0 <= vx <= self.cw and 0 <= vy <= self.ch:
-                image = self.faded("cursor", alpha)
-                content.paste(
-                    image, (round(vx - self.hotspot[0]), round(vy - self.hotspot[1])), image
-                )
+                image = self.pointer(alpha, press)
+                hx, hy = self.hotspot[0] * press, self.hotspot[1] * press
+                content.paste(image, (round(vx - hx), round(vy - hy)), image)
         for png, alpha in cards:
             image = self.faded(png, alpha)
             content.paste(image, (0, 0), image)
         margin = round(self.ch * 0.045)
         for png, top, alpha in caps:
             image = self.faded(png, alpha)
-            x = (self.cw - image.width) // 2
-            y = margin if top else self.ch - image.height - margin
-            content.paste(image, (x, y), image)
+            content.paste(image, self._caption_box(png, top)[:2], image)
         for kind, png, alpha in badges:
             image = self.faded(png, alpha)
             edge = round(18 * u)
@@ -412,13 +498,29 @@ class Take:
                 kept.append((max(0.0, t), label))
         return kept or [(self.duration / 2, "")]
 
+    def tiles(self) -> list[tuple[float, str, Image.Image]]:
+        """The review moments as full frames. A moment that looks the same as
+        the one before it (a still taken during a caption) shares its tile."""
+        out: list[tuple[float, str, Image.Image]] = []
+        last = None
+        for t, label in self.moments():
+            image = self.at(t)
+            thumb = image.resize((96, 54), Image.Resampling.BOX).convert("L")
+            if last is not None and _same(last, thumb):
+                t0, label0, image0 = out[-1]
+                out[-1] = (t0, f"{label0} / {label}", image0)
+                continue
+            out.append((t, label, image))
+            last = thumb
+        return out
+
     def sheet(self, path: Path) -> None:
-        moments = self.moments()
-        cols = 4 if len(moments) > 6 else 3
-        tile_w = 480
+        tiles = self.tiles()
+        # Long demos get smaller tiles, so the sheet costs fewer image tokens.
+        cols, tile_w = (5, 384) if len(tiles) > 12 else (4, 480) if len(tiles) > 6 else (3, 480)
         tile_h = round(tile_w * self.H / self.W)
         label_h = 50
-        rows = math.ceil(len(moments) / cols)
+        rows = math.ceil(len(tiles) / cols)
         sheet = Image.new(
             "RGB",
             (cols * tile_w + (cols + 1) * 8, rows * (tile_h + label_h) + (rows + 1) * 8),
@@ -426,10 +528,10 @@ class Take:
         )
         font = ImageFont.load_default(size=15)
         draw = ImageDraw.Draw(sheet)
-        for i, (t, label) in enumerate(moments):
+        for i, (t, label, image) in enumerate(tiles):
             x = 8 + (i % cols) * (tile_w + 8)
             y = 8 + (i // cols) * (tile_h + label_h + 8)
-            sheet.paste(self.at(t).resize((tile_w, tile_h), Image.Resampling.LANCZOS), (x, y))
+            sheet.paste(image.resize((tile_w, tile_h), Image.Resampling.LANCZOS), (x, y))
             text = f"{i + 1}. {t:5.1f}s  {label}"
             lines = _wrap(draw, text, font, tile_w - 4)[:2]
             for j, line in enumerate(lines):
@@ -441,6 +543,14 @@ class Take:
         for t, label in self.m["steps"]:
             lines.append(f"| {t:6.1f} | {label.replace('|', '/')} |")
         path.write_text("\n".join(lines) + "\n")
+
+
+def _same(a: Image.Image, b: Image.Image) -> bool:
+    """Two thumbnails a viewer would call the same frame."""
+    diff = ImageChops.difference(a, b)
+    return (
+        sum(diff.point(lambda v: 255 if v > 24 else 0).getdata()) / 255 < 0.01 * a.width * a.height
+    )
 
 
 def _wrap(draw, text: str, font, width: int) -> list[str]:

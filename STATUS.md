@@ -5,7 +5,7 @@ description: Handoff for the demo-video v2 work - where it stands, how it is bui
 
 # demo-video v2 - status
 
-Last updated: 2026-09-23.
+Last updated: 2026-09-23 (output polish).
 
 ## Where it stands
 
@@ -55,14 +55,14 @@ A simulated 12s wait became 1.8s of video, and a `sleep 8` in the terminal becam
 
 ### 2. Output polish (what a viewer sees)
 
-- [ ] The click ripple is faint. Make it clearly visible and add a small cursor press (scale down) on click.
-- [ ] Cursor glides are straight lines. A slight arc and ease reads more like a hand.
-- [ ] Page navigations cut hard, and a full navigation can flash white. Add a short crossfade on `goto`, and hold the last frame until the new page first paints.
-- [ ] A spotlight measures its element once. If the page scrolls or reflows during it, the ring drifts. Re-measure on each verb, or refuse to scroll while spotlit.
-- [ ] Zoom tuning: small elements hit the 1.6 zoom cap and crop headings (the requester spotlight in the example). Consider fitting a little context around the element, and an optional `rec.zoom(sel)` for typing into a field.
-- [ ] The title card is always dark (`#15151f`), which jars on a light app. Match the window theme or the app's background.
-- [ ] Check that long captions wrap to two balanced lines and never cover the spotlit element (caption placement only checks the bottom band).
-- [ ] Contact sheet: merge a still with its caption tile when they show the same frame (Koyr tiles 1 and 2 were duplicates). Consider 5 columns at 384px to cut image tokens on long demos.
+- [x] Click ripple is a swelling disc plus ring; the cursor dips to 80% on press.
+- [x] Cursor glides bow upward slightly (12% of the distance, capped) with minimum-jerk easing.
+- [x] `goto` holds the old page until the new one has painted (two rAFs), then crossfades 0.3s. Checked with a JSON page and back: no white flash.
+- [x] A spotlight re-measures its element on every recorder tick, so ring and camera follow scrolls and reflows.
+- [x] Zoom keeps the element's row (outermost box on the same line) in view. The requester spotlight now shows the whole row and the heading. `spotlight(sel, ring=False)` already is a plain zoom, so no `rec.zoom`.
+- [x] Title cards follow the window theme (light card on the web recorder, dark in the terminal).
+- [x] Long captions wrap to two balanced lines. Placement now compares how much of the spotlit rect each position covers.
+- [x] Contact sheet merges tiles that look the same (ticket-queue: 6 tiles to 5), and uses 5 columns at 384px past 12 tiles.
 - [ ] Record a new showcase video for the README (the v1 `examples/showcase.mp4` was removed).
 
 ### 3. Speed

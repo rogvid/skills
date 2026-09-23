@@ -126,6 +126,7 @@ class _Take:
         self._cards: list[dict] = []
         self._spots: list[dict] = []
         self._spot: dict | None = None
+        self._navs: list[dict] = []
         self._glides: list[dict] = []
         self._clicks: list[float | list] = []
         self._keys: list[dict] = []
@@ -382,7 +383,8 @@ class _Take:
                 if c["end"] - c["start"] > 0.05
             ],
             "cards": [dict(c, png=assets["cards"][c["text"]]) for c in self._cards],
-            "spots": self._spots,
+            "spots": [{k: v for k, v in s.items() if k != "locator"} for s in self._spots],
+            "navs": self._navs,
             "glides": self._glides,
             "clicks": self._clicks,
             "keys": [dict(k, png=assets["badges"][k["text"]]) for k in self._keys],
@@ -452,6 +454,23 @@ class _Take:
         shutil.rmtree(self.take_dir, ignore_errors=True)
 
 
+_PAINTED = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+_MEASURE = """e => {
+  const box = n => { const r = n.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
+  const own = box(e);
+  if (own[2] === 0 && own[3] === 0) return null;
+  // The outermost box on the same line as the element: its row, not the list.
+  const line = Math.max(own[3] * 2.5, own[3] + 48);
+  let n = e;
+  for (let p = n.parentElement; p && p !== document.body; p = p.parentElement) {
+    const r = p.getBoundingClientRect();
+    if (r.height > line || r.width >= innerWidth * 0.95) break;
+    n = p;
+  }
+  return [own, box(n)];
+}"""
+
+
 class Recorder(_Take):
     """Records a web app, driven through Playwright."""
 
@@ -501,6 +520,33 @@ class Recorder(_Take):
         s = self.geom["scale"]
         return {"x": box["x"] * s, "y": box["y"] * s, "w": box["width"] * s, "h": box["height"] * s}
 
+    def _measure(self, locator) -> list[list[float]] | None:
+        """The element's rect and its context's - the row it sits in - in
+        content pixels. None when it is not on screen."""
+        try:
+            boxes = locator.evaluate(_MEASURE, timeout=2000)
+        except Exception:  # noqa: BLE001 - detached or gone
+            return None
+        if not boxes:
+            return None
+        s = self.geom["scale"]
+        return [[round(v * s, 1) for v in box] for box in boxes]
+
+    def _tick(self) -> None:
+        spot = self._spot
+        if not spot:
+            return
+        # The page may scroll or reflow under the spotlight: follow it.
+        with self._off_clock():
+            measured = self._measure(spot["locator"])
+        now = self._now()
+        seen, rect, context = spot["track"][-1]
+        if measured and max(abs(a - b) for a, b in zip(rect, measured[0], strict=True)) > 1:
+            if spot["seen"] > seen:
+                spot["track"].append([spot["seen"], rect, context])
+            spot["track"].append([now, *measured])
+        spot["seen"] = now
+
     # -- verbs ------------------------------------------------------------------
 
     def goto(self, path: str = "") -> None:
@@ -508,17 +554,22 @@ class Recorder(_Take):
         self._mark(f"goto {path!r}")
         url = path if "://" in path else self.base_url + "/" + path.lstrip("/")
         first = not self._capturing
+        nav = {"start": self._now(), "real": time.time()}
         with self._off_clock() if first else self._app_time():
             self.page.goto(url, wait_until="load")
             try:
                 self.page.wait_for_load_state("networkidle", timeout=5000)
             except Exception:  # noqa: BLE001 - a page that polls never goes idle
                 pass
+            # Two animation frames: the new page has painted at least once.
+            self.page.evaluate(_PAINTED)
             if first:
                 self.screencast.start()
                 self._capturing = True
                 self.page.wait_for_timeout(150)
         if not first:
+            self._real(0.1)
+            self._navs.append(dict(nav, ready=self._now()))
             self._settle()
 
     def move_to(self, target) -> None:
@@ -614,11 +665,18 @@ class Recorder(_Take):
         if self._spot:
             self._end_spot()
         if target is not None:
-            box = self._box(target)
+            self._box(target)
+            locator = self._locate(target)
+            with self._off_clock():
+                measured = self._measure(locator)
+            if not measured:
+                raise RuntimeError(f"{target!r} has no box on screen")
             self._spot = {
                 "start": self._now(),
-                "rect": [box["x"], box["y"], box["w"], box["h"]],
+                "track": [[self._now(), *measured]],
                 "ring": ring,
+                "locator": locator,
+                "seen": self._now(),
             }
             self._spots.append(self._spot)
 
