@@ -60,6 +60,27 @@ LEGACY = {
 }
 
 
+# Installed in every page: when the DOM last changed or anything scrolled.
+_WATCH = """
+window.__demoChanged = performance.now();
+const __demoTouch = () => { window.__demoChanged = performance.now(); };
+new MutationObserver(__demoTouch).observe(document, {
+  subtree: true, childList: true, attributes: true, characterData: true });
+addEventListener("scroll", __demoTouch, true);
+"""
+# Milliseconds since the page last changed, when only ambient animations -
+# infinite, and already running at `since` - are moving; otherwise null.
+_AMBIENT = """since => {
+  const running = document.getAnimations().filter(a => a.playState === "running");
+  if (!running.length) return null;
+  for (const a of running) {
+    if (a.effect.getTiming().iterations !== Infinity) return null;
+    if (a.startTime === null || a.startTime > since) return null;
+  }
+  return performance.now() - window.__demoChanged;
+}"""
+
+
 def _env(name: str, default: str | None = None) -> str | None:
     value = os.environ.get("DEMO_VIDEO_" + name)
     return value if value not in (None, "") else default
@@ -157,6 +178,7 @@ class _Take:
             device_scale_factor=self.geom["scale"] * SUPERSAMPLE,
             **self._context_options(),
         )
+        self.context.add_init_script(_WATCH)
         self.page = self.context.new_page()
         self.page.set_default_timeout(10_000)
         self.page.on("pageerror", lambda e: self._problems.append(f"page error: {e}"))
@@ -244,10 +266,30 @@ class _Take:
             now = time.time()
             if now - last >= quiet or now - start >= cap:
                 break
-        tail = max(self.screencast.last_arrival, start) + 0.12
+            if now - start >= quiet:
+                # Frames keep coming: is it only an ambient animation?
+                changed = self._ambient_since()
+                if changed is not None and now - changed >= quiet:
+                    last = max(changed, start)
+                    break
+        tail = last + 0.12
         if time.time() > tail:
             assert self.clock is not None
             self.clock.retime(tail, 0.0)
+
+    def _ambient_since(self) -> float | None:
+        """When the page last changed, in host time, if everything still
+        moving on it is an infinite animation that was running before this
+        step began (marching dashes, a pulsing dot). None otherwise: a
+        transition, a spinner the step started, or a canvas redrawing."""
+        since = getattr(self, "_step_page_t", None)
+        if since is None:
+            return None
+        try:
+            quiet_ms = self.page.evaluate(_AMBIENT, since)
+        except Exception:  # noqa: BLE001 - navigating
+            return None
+        return None if quiet_ms is None else time.time() - quiet_ms / 1000
 
     def _hold(self, seconds: float) -> None:
         """Freeze the current frame for `seconds` of video. The frozen frame
@@ -286,6 +328,11 @@ class _Take:
     def _mark(self, label: str) -> None:
         self._step = label
         self._steps.append((self._now(), label))
+        # Infinite animations already running now are ambient to this step.
+        try:
+            self._step_page_t = self.page.evaluate("performance.now()")
+        except Exception:  # noqa: BLE001 - not started, or navigating
+            self._step_page_t = None
 
     def _reading(self, text: str) -> float:
         return max(1.4, 0.6 + 0.3 * len(text.split())) * self.pace
