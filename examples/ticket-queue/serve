@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -28,7 +30,12 @@ class Handler(SimpleHTTPRequestHandler):
     """Static files out of web/, plus one JSON endpoint."""
 
     def do_GET(self) -> None:  # noqa: N802  (stdlib naming)
-        if self.path.split("?")[0] == "/api/tickets":
+        path, _, query = self.path.partition("?")
+        if path == "/api/tickets":
+            # `?delay=8` answers after 8 seconds: a slow backend, for demos of
+            # waiting (the demo-video showcase records its fast-forward).
+            delay = parse_qs(query).get("delay", ["0"])[0]
+            time.sleep(min(float(delay), 60))
             body = DATA.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

@@ -20,6 +20,8 @@ holds no `SKILL.md`, so the CLI's one-level-deep root walk does not see it.
 ./tickets show TQ-104
 ```
 
+`GET /api/tickets?delay=8` answers after 8 seconds, to demo a slow backend.
+
 ## Checking it
 
 ```sh

@@ -289,7 +289,9 @@ h1 {
 .detail dl {
   margin: 10px 0 0;
   display: grid;
-  grid-template-columns: 84px 1fr;
+  /* minmax(0, ...): a bare 1fr cannot shrink below its content, and the
+     requester row pushed the Copy button past the card's edge. */
+  grid-template-columns: 84px minmax(0, 1fr);
   gap: 4px 10px;
   font-size: 13px;
 }
