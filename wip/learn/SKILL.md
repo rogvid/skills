@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Manually invoked — use when the user runs /learn, or explicitly asks to learn a topic properly, find the gaps in their understanding, be quizzed on something, or be taught rather than just handed an answer. Not for ordinary questions where the user just wants the answer — answering directly is the right move there. Diagnoses the edge of what the user knows with calibration questions, maps what is solid, shaky, and missing, teaches one gap at a time with retrieval practice, and closes by distilling the session into whatever the user's own system reuses — a resumable topic note, a PKM/TIL note, retrieval-shaped flashcards, or a blog seed — built from what the user actually got wrong.
+description: Manually invoked — use when the user runs /learn, or explicitly asks to learn a topic properly, find the gaps in their understanding, be quizzed on something, or be taught rather than just handed an answer. Not for ordinary questions where the user just wants the answer — answering directly is the right move there. Diagnoses the edge of what the user knows, sorts each gap into a misconception, a missing mental model, or missing information, secures fundamentals before building on them, teaches with diagrams, runnable checks, and verified sources, and distills the session into reusable notes, flashcards, and blog seeds built from what the user actually got wrong.
 disable-model-invocation: true
 ---
 
@@ -13,11 +13,14 @@ because that is the part they have words for, and never ask about the part
 they are missing, because they do not know it exists. A tutor who answers the
 question as asked reinforces exactly this. So this skill does not start by
 explaining. It starts by finding the edge: the boundary where the user's
-correct answers stop.
+correct answers stop — and then works out *what kind* of gap sits there,
+because different gaps need different teaching.
 
 Everything below is a conversation protocol, not a document to produce. Run it
 across turns, and let the user pull it off course whenever they want — they
-are the one learning.
+are the one learning. Their questions mid-session are often the best
+diagnosis you will get: a learner asking "where is that stored, then?" has
+just pointed at their own gap.
 
 ## 1. Pick the target
 
@@ -28,7 +31,9 @@ from the current session: things they delegated to you without reading the
 result, terms they used in a way that almost fits, a fix they accepted with
 "if you say so", an error they routed around instead of understanding. Offer
 two or three, each with one line on why you picked it, and let them choose or
-override.
+override. If they want something outside their own work, prefer mature,
+well-documented topics they use daily — those have the most hidden gaps and
+the best sources.
 
 Keep the target narrow enough to make progress in one sitting. "Rust" is a
 curriculum; "why the borrow checker rejects this function" is a session.
@@ -53,6 +58,8 @@ is placement, not examination, and the questions should be built for that:
 
 Say up front that wrong answers are the productive outcome here — the probe
 exists to find them. A user performing knowledge at you defeats the diagnosis.
+When the topic is executable, also say that predictions will be settled by
+running them; it turns the probe into an experiment rather than a test.
 
 ## 3. Draw the map
 
@@ -68,15 +75,40 @@ groups:
   user never mentioned but that anyone working in this area eventually needs.
   This group is the skill's whole reason to exist; never skip it.
 
-Then ask the user to correct the map. They know things the probe cannot see —
-which "solid" was a lucky guess, which "missing" they simply misread. The map
-is a shared artifact, not a verdict.
+Tag every shaky and missing item with **what kind of gap** it is, because each
+kind needs different teaching (step 5):
 
-## 4. Teach one gap at a time
+- **Missing information** — they simply don't know the fact, and nothing wrong
+  sits in its place. Cheapest to fix.
+- **Missing or weak model** — they have pieces but no structure connecting
+  them. The signature: answers that are right in isolation but fail when
+  composed or used to predict, and errors that keep coming back in new forms.
+- **Misconception** — they confidently believe something false. The signature:
+  a confident, specific, wrong answer ("git stores diffs"). Telling them the
+  truth is not enough; the old belief survives right next to the new one.
+
+Then ask the user to correct the map. They know things the probe cannot see —
+which "solid" was a lucky guess, which "missing" they simply misread, which
+wording you took too literally. The map is a shared artifact, not a verdict.
+
+## 4. Fundamentals first
 
 Order by leverage: prerequisites before the things built on them, and shaky
 foundations before missing advanced material — a wobbly fundamental corrupts
-everything downstream of it. For each gap:
+everything downstream of it.
+
+When an answer about advanced material fails, **look one layer down before
+re-teaching the advanced thing.** Several wrong answers about the same
+advanced topic usually share one missing fundamental: in one git session,
+three wrong answers about rebase all traced back to not knowing that a
+commit's parent ID lives inside the commit. An error that recurs in new forms
+is a model gap, not a string of separate fact gaps — go down a layer and fix
+the model. Do not move up while a fundamental is shaky; confirm it holds with
+a retrieval question that cannot be answered without it.
+
+## 5. Teach one gap at a time
+
+For each gap:
 
 1. **Intuition first** — what problem this thing exists to solve, in one or
    two sentences, before any mechanism.
@@ -89,51 +121,88 @@ everything downstream of it. For each gap:
    output, or apply it to something of theirs. "Makes sense" is not retrieval;
    recognition feels identical to understanding from the inside, and retrieval
    is the only cheap way to tell them apart. If the retrieval fails, that is
-   the protocol working — re-explain from a different angle and try a
-   different retrieval, don't repeat the same one.
+   the protocol working — re-explain **from a different angle**, and use a
+   **different retrieval shape** (prediction, sorting, fill-in-the-diagram,
+   explain-back), not the same question again.
+
+Match the teaching to the kind of gap:
+
+- **Missing information:** say it plainly, connect it to something they
+  already hold, cite where it comes from. Don't dress a fact up as a lesson.
+- **Missing model:** give them a picture — a diagram, an analogy, a physical
+  handle ("a branch is a 41-byte file: room for one ID") — then make them use
+  the model to predict something they haven't seen.
+- **Misconception:** make the wrong belief predict something concrete, show
+  the prediction fail with evidence, then install the replacement and explain
+  why the wrong version felt right (where "git stores diffs" comes from).
+  Re-test it later in the session; misconceptions come back.
+
+Four habits run through all of it:
+
+- **Draw it.** Anything with structure — pointers, layers, flows, before and
+  after — gets a diagram (Mermaid or ASCII in chat). Many learners think in
+  pictures, and a recurring error is often a missing picture.
+- **Check it by running it.** When the topic is executable, settle predictions
+  — the user's and your own — by running real commands in a scratch space and
+  showing the output. That includes your own scripts: output that surprises
+  you (a count of zero, an impossible value) is a bug to fix before you rely
+  on it, not a result.
+- **Ground it in sources.** Back each load-bearing claim with an authoritative
+  source, primary first: official documentation at the version in use, the
+  original text, the standard. Verify against the source text where you can
+  (a blocked website often has its source on a reachable mirror or
+  repository), and label anything you could not verify. When a source
+  contradicts something you said earlier, correct it out loud.
+- **Watch your own wording.** A misconception that appears right after one of
+  your explanations may have been caused by it. Own it, then rephrase the
+  explanation; don't treat it as the user's error.
 
 One gap per exchange. The urge to dump the full tutorial after the first
 question is strong and always wrong: a lecture transfers text, not knowledge,
 and it destroys the diagnostic signal that makes the next question good.
 
-## 5. Close the loop
+## 6. Close the loop
 
-End the session deliberately rather than letting it trail off:
+End the session deliberately rather than letting it trail off — and end it
+when answers start getting vaguer, not only when the map is finished; a tired
+learner's answers stop being diagnostic.
 
 - Restate the map's delta — what moved from missing or shaky toward solid
   today, and what is still open.
 - Leave **three to five recall questions** targeting exactly what was taught.
   Not for answering now — they are the warm-up for next time, because
   retrieval a day later is worth more than retrieval a minute later.
-- Then offer to distill (step 6). Do it at close, not "later": chat sessions
+- Then offer to distill (step 7). Do it at close, not "later": chat sessions
   are fragile — messages get lost, windows end — and the session's diagnostic
   detail is the raw material, so condense it while it still exists.
 
-## 6. Distill into the user's own systems
+## 7. Distill into the user's own systems
 
 A session leaves behind material worth more than a transcript, because it is
 *calibrated*: it records not just what is true about the topic but what this
-user specifically got wrong, which metaphor finally made a thing click, and
-which phrasings were theirs. Offer to condense that into the formats the
-user's own systems reuse — ask which they want rather than dumping all of
-them:
+user specifically got wrong, what kind of gap each error was, which picture
+finally made a thing click, and which phrasings were theirs. Offer to condense
+that into the formats the user's own systems reuse — ask which they want
+rather than dumping all of them:
 
 - **Resumable topic note** — for a later `/learn` of the same topic: the map,
   the open gaps, the recall questions. On a later invocation, find this note
   first and open with its recall questions — how those go is the new probe.
-- **PKM / TIL note** — the mechanisms in their corrected form, the handles
-  and metaphors that landed, a *misconceptions I had* section stated as
-  plainly as the map was, and source pointers. Where the user produced a good
-  final phrasing of an idea, keep their wording — their words are their
-  retrieval hooks, not yours.
+- **PKM / TIL note** — the mechanisms in their corrected form, with the
+  diagrams that landed (Mermaid renders in most note tools); a table of
+  *what I believed / kind of gap / what's true*, stated as plainly as the map
+  was; the handles and metaphors; try-it-yourself commands for executable
+  topics; and a sources table saying which claims were verified against which
+  source. Where the user produced a good final phrasing of an idea, keep their
+  wording — their words are their retrieval hooks, not yours.
 - **Flashcards** — write fronts retrieval-shaped: predict, apply,
   explain-why. Never recognition — "What is X?" is a weak card; "Why does X
   go in this column when it seems to belong in that one?" is a strong one.
   Prioritize cards from the session's **documented errors**: a card
   re-testing a mistake the user actually made outranks ten generic facts,
   because it re-probes the exact edge the diagnosis found — and it is the one
-  card no pre-made deck can contain. Emit a format their tool imports (TSV
-  for Anki) alongside the readable version.
+  card no pre-made deck can contain. Tag cards by gap kind. Emit a format
+  their tool imports (TSV for Anki) alongside the readable version.
 - **Blog / essay seed** — the session's own arc is the outline: what I
   thought I knew, the question that broke it, the mechanism, the payoff.
   Sessions where the learner was wrong in an *interesting* way make the best
@@ -157,6 +226,14 @@ being asked.
 - **Teaching to your own depth.** The edge you found is the spec. An expert
   answer to a beginner gap overshoots exactly like a beginner answer to an
   expert gap undershoots.
+- **Building on a shaky fundamental.** Re-teaching the advanced topic a third
+  time when the real gap is one layer down. If the same kind of error keeps
+  coming back, stop and look underneath it.
+- **Correcting a misconception by assertion.** Stating the right answer and
+  moving on. The wrong belief was evidence-shaped; it needs evidence to
+  dislodge it, or it resurfaces next session.
+- **Unverified authority.** Presenting facts from memory as settled. Check
+  what you can, cite what you checked, and say what you didn't.
 - **A session with no retrieval.** If the user never produced anything —
   never explained back, predicted, or applied — nothing was verified to have
   landed, however good the explanations felt to both sides.

@@ -51,7 +51,7 @@ installer only walks the repo root one level deep.
 
 | Skill | What it does |
 |---|---|
-| [`learn`](wip/learn/) | Manually invoked (`/learn`) tutor protocol: probes for the edge of what you know with calibration questions, maps solid/shaky/missing gaps, teaches one gap at a time with retrieval practice, and distills the session into resumable notes, PKM/TIL notes, flashcards, or a blog seed — built from what you actually got wrong. |
+| [`learn`](wip/learn/) | Manually invoked (`/learn`) tutor protocol: probes for the edge of what you know, sorts each gap into a misconception, a missing mental model, or missing information, secures fundamentals first, teaches with diagrams, runnable checks, and verified sources, and distills the session into notes, flashcards, or a blog seed — built from what you actually got wrong. |
 
 ## Examples
 
