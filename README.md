@@ -47,7 +47,11 @@ app, then its command-line tool (34s, [`examples/showcase`](examples/showcase/))
 ## In development
 
 Skills under [`wip/`](wip/) are intentionally invisible to `npx skills add`: the
-installer only walks the repo root one level deep. There are none right now.
+installer only walks the repo root one level deep.
+
+| Skill | What it does |
+|---|---|
+| [`learn`](wip/learn/) | Manually invoked (`/learn`) tutor protocol: probes for the edge of what you know, sorts each gap into a misconception, a missing mental model, or missing information, secures fundamentals first, teaches with diagrams, runnable checks, and verified sources, and distills the session into notes, flashcards, or a blog seed — built from what you actually got wrong. |
 
 ## Examples
 
